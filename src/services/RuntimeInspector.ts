@@ -7,6 +7,8 @@
  * qué valores tienen las variables, qué operaciones se están ejecutando, etc.
  */
 
+import { useMemo } from 'react';
+
 export interface VariableSnapshot {
   id: string;
   timestamp: Date;
@@ -392,7 +394,7 @@ export const runtimeInspector = RuntimeInspector.getInstance();
  * Hook de React para instrumentar componentes
  */
 export function useRuntimeInspector(section: string) {
-  return {
+  const inspector = useMemo(() => ({
     captureVariable: (name: string, value: any, metadata?: VariableSnapshot['metadata']) => {
       runtimeInspector.captureVariable(section, 'component', name, value, metadata);
     },
@@ -408,5 +410,7 @@ export function useRuntimeInspector(section: string) {
     updateContext: (contextId: string, status: ExecutionContext['status'], data?: any) => {
       runtimeInspector.updateContext(contextId, status, data);
     },
-  };
+  }), [section]);
+
+  return inspector;
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { MaestroMaterialesBrutosSection } from '@/components/MaestroMaterialesBrutosSection';
+import { MaestroMaterialesBrutosSection } from '@/components';
 
 export default function MaestroMaterialesBrutosPage() {
   return (

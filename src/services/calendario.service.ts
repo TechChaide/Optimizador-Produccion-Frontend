@@ -3,14 +3,21 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Calendario } from "../types/interfaces";
 
-const API_URL = `${environment.apiURL}/api/calendario`;
+const API_URL = `${environment.apiURL}/calendario`;
 
 export const calendarioService = {
   async getAll(): Promise<BodyListResponse<Calendario>> {
     const response = await fetch(API_URL);
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al obtener los Calendarios');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al obtener los Calendarios');
     }
     return response.json();
   },
@@ -18,8 +25,7 @@ export const calendarioService = {
   async getById(codigo_calendario: number): Promise<BodyResponse<Calendario>> {
     const response = await fetch(`${API_URL}/${codigo_calendario}`);
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Calendario no encontrado');
+      throw new Error(`Error ${response.status}: Calendario no encontrado`);
     }
     return response.json();
   },
@@ -31,8 +37,7 @@ export const calendarioService = {
       body: JSON.stringify(calendario),
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al guardar el calendario');
+      throw new Error(`Error ${response.status}: No se pudo guardar el calendario`);
     }
     return response.json();
   },
@@ -43,8 +48,7 @@ export const calendarioService = {
       headers: { 'Content-Type': 'application/json' },
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al eliminar el calendario');
+      throw new Error(`Error ${response.status}: No se pudo eliminar el calendario`);
     }
     return response.json();
   },

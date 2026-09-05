@@ -3,14 +3,21 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Operador } from "../types/interfaces";
 
-const API_URL = `${environment.apiURL}/api/operador`;
+const API_URL = `${environment.apiURL}/operador`;
 
 export const operadorService = {
   async getAll(): Promise<BodyListResponse<Operador>> {
     const response = await fetch(API_URL);
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al obtener los Operadores');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al obtener los Operadores');
     }
     return response.json();
   },
@@ -18,8 +25,15 @@ export const operadorService = {
   async getById(codigo_operador: number): Promise<BodyResponse<Operador>> {
     const response = await fetch(`${API_URL}/${codigo_operador}`);
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Operador no encontrado');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Operador no encontrado');
     }
     return response.json();
   },
@@ -31,8 +45,15 @@ export const operadorService = {
       body: JSON.stringify(operador),
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al guardar el operador');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al guardar el operador');
     }
     return response.json();
   },
@@ -43,8 +64,15 @@ export const operadorService = {
       headers: { 'Content-Type': 'application/json' },
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al eliminar el operador');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al eliminar el operador');
     }
     return response.json();
   },

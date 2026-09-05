@@ -1,6 +1,6 @@
 'use client';
 
-import { VersionesFabricacionSection } from '@/components/VersionesFabricacionSection';
+import { VersionesFabricacionSection } from '@/components';
 
 export default function VersionesFabricacionPage() {
   return (

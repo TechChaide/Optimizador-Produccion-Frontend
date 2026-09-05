@@ -6,6 +6,8 @@ import GrupoForm from './components/form';
 import GrupoTable from './components/table';
 import RestriccionesModal from './components/restricciones-modal';
 import RelacionesModal from './components/relaciones-modal';
+import MaterialesBalanceoModal from './components/materiales-balanceo-modal';
+import MaterialesBalanceoCargaMasivaModal from './components/materiales-balanceo-carga-masiva-modal';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Grupo } from '@/types/interfaces';
 import { grupoService } from '@/services/grupo.service';
@@ -15,10 +17,14 @@ export default function GruposPage() {
   const [selectedRecord, setSelectedRecord] = useState<Grupo | null>(null);
   const [selectedGrupoParaRestricciones, setSelectedGrupoParaRestricciones] = useState<Grupo | null>(null);
   const [selectedGrupoParaRelaciones, setSelectedGrupoParaRelaciones] = useState<Grupo | null>(null);
+  const [selectedGrupoParaMaterialesBalanceo, setSelectedGrupoParaMaterialesBalanceo] = useState<Grupo | null>(null);
+  const [selectedGrupoParaCargaMasiva, setSelectedGrupoParaCargaMasiva] = useState<Grupo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isRestriccionesModalOpen, setIsRestriccionesModalOpen] = useState(false);
   const [isRelacionesModalOpen, setIsRelacionesModalOpen] = useState(false);
+  const [isMaterialesBalanceoModalOpen, setIsMaterialesBalanceoModalOpen] = useState(false);
+  const [isCargaMasivaModalOpen, setIsCargaMasivaModalOpen] = useState(false);
   const [hasFetched, setHasFetched] = useState(false);
   const { toast } = useToast();
 
@@ -49,6 +55,14 @@ export default function GruposPage() {
   const handleManageRelaciones = (record: Grupo) => {
     setSelectedGrupoParaRelaciones(record);
     setIsRelacionesModalOpen(true);
+  };
+  const handleManageMaterialesBalanceo = (record: Grupo) => {
+    setSelectedGrupoParaMaterialesBalanceo(record);
+    setIsMaterialesBalanceoModalOpen(true);
+  };
+  const handleCargaMasivaMaterialesBalanceo = (record: Grupo) => {
+    setSelectedGrupoParaCargaMasiva(record);
+    setIsCargaMasivaModalOpen(true);
   };
 
   // handle deletion triggered from table
@@ -88,6 +102,8 @@ export default function GruposPage() {
           onAddNew={handleAddNew}
           onManageRestricciones={handleManageRestricciones}
           onManageRelaciones={handleManageRelaciones}
+          onManageMaterialesBalanceo={handleManageMaterialesBalanceo}
+          onCargaMasivaMaterialesBalanceo={handleCargaMasivaMaterialesBalanceo}
         />
       )}
 
@@ -106,6 +122,28 @@ export default function GruposPage() {
         onClose={() => {
           setIsRelacionesModalOpen(false);
           setSelectedGrupoParaRelaciones(null);
+        }}
+      />
+
+      <MaterialesBalanceoModal
+        grupo={selectedGrupoParaMaterialesBalanceo}
+        isOpen={isMaterialesBalanceoModalOpen}
+        onClose={() => {
+          setIsMaterialesBalanceoModalOpen(false);
+          setSelectedGrupoParaMaterialesBalanceo(null);
+        }}
+      />
+
+      <MaterialesBalanceoCargaMasivaModal
+        grupo={selectedGrupoParaCargaMasiva}
+        isOpen={isCargaMasivaModalOpen}
+        onClose={() => {
+          setIsCargaMasivaModalOpen(false);
+          setSelectedGrupoParaCargaMasiva(null);
+        }}
+        onImported={() => {
+          setIsCargaMasivaModalOpen(false);
+          setSelectedGrupoParaCargaMasiva(null);
         }}
       />
     </div>

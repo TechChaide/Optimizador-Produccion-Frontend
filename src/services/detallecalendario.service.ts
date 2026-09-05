@@ -3,7 +3,7 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { DetalleCalendario } from "../types/interfaces";
 
-const API_URL = `${environment.apiURL}/api/detalle_calendario`;
+const API_URL = `${environment.apiURL}/detalle_calendario`;
 
 export const detalleCalendarioService = {
   async getAll(): Promise<BodyListResponse<DetalleCalendario>> {
@@ -38,7 +38,7 @@ export const detalleCalendarioService = {
   },
 
   async saveBatch(detalles: DetalleCalendario[]): Promise<BodyListResponse<DetalleCalendario>> {
-    const response = await fetch(`${API_URL}/batch`, {
+    const response = await fetch(`${API_URL}/Batch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detalles),
@@ -62,4 +62,3 @@ export const detalleCalendarioService = {
     return response.json();
   },
 };
-

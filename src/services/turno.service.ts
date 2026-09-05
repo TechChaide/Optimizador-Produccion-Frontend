@@ -3,23 +3,43 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Turno } from "../types/interfaces";
 
-const API_URL = `${environment.apiURL}/api/turno`;
+const API_URL = `${environment.apiURL}/turno`;
 
 export const turnoService = {
   async getAll(): Promise<BodyListResponse<Turno>> {
-    const response = await fetch(API_URL);
+    const response = await fetch(API_URL, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al obtener los Turnos');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al obtener los Turnos');
     }
     return response.json();
   },
 
   async getById(codigo_turno: number): Promise<BodyResponse<Turno>> {
-    const response = await fetch(`${API_URL}/${codigo_turno}`);
+    const response = await fetch(`${API_URL}/${codigo_turno}`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Turno no encontrado');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Turno no encontrado');
     }
     return response.json();
   },
@@ -31,8 +51,15 @@ export const turnoService = {
       body: JSON.stringify(turno),
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al guardar el turno');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al guardar el turno');
     }
     return response.json();
   },
@@ -43,8 +70,15 @@ export const turnoService = {
       headers: { 'Content-Type': 'application/json' },
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al eliminar el turno');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al eliminar el turno');
     }
     return response.json();
   },

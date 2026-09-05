@@ -1,6 +1,6 @@
 'use client';
 
-import { CalificacionTecnicaSection } from '@/components/CalificacionTecnicaSection';
+import { CalificacionTecnicaSection } from '@/components';
 
 export default function CalificacionTecnicaPage() {
   return (

@@ -1,6 +1,6 @@
 'use client';
 
-import { MantenimientoProgramadoSection } from '@/components/MantenimientoProgramadoSection';
+import { MantenimientoProgramadoSection } from '@/components';
 
 export default function MantenimientoPage() {
   return (

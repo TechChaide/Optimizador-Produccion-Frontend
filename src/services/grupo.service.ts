@@ -3,23 +3,43 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Grupo } from "../types/interfaces";
 
-const API_URL = `${environment.apiURL}/api/grupo`;
+const API_URL = `${environment.apiURL}/grupo`;
 
 export const grupoService = {
   async getAll(): Promise<BodyListResponse<Grupo>> {
-    const response = await fetch(API_URL);
+    const response = await fetch(API_URL, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al obtener los Grupos');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al obtener los Grupos');
     }
     return response.json();
   },
 
   async getById(codigo_grupo: number): Promise<BodyResponse<Grupo>> {
-    const response = await fetch(`${API_URL}/${codigo_grupo}`);
+    const response = await fetch(`${API_URL}/${codigo_grupo}`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Grupo no encontrado');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Grupo no encontrado');
     }
     return response.json();
   },
@@ -31,8 +51,15 @@ export const grupoService = {
       body: JSON.stringify(grupo),
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al guardar el grupo');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al guardar el grupo');
     }
     return response.json();
   },
@@ -43,8 +70,15 @@ export const grupoService = {
       headers: { 'Content-Type': 'application/json' },
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al eliminar el grupo');
+      const errorText = await response.text().catch(() => 'No body');
+      let errorMessage = `Error ${response.status}: ${response.statusText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorMessage;
+      } catch (e) {
+        if (errorText.length < 100) errorMessage = errorText;
+      }
+      throw new Error(errorMessage || 'Error al eliminar el grupo');
     }
     return response.json();
   },

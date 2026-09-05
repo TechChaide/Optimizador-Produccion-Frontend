@@ -1,16 +1,17 @@
+
 import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { DetalleTactico } from "../types/interfaces";
 
-const API_URL = `${environment.apiURL}/api/detalle_tactico`;
+const API_URL = `${environment.apiURL}/detalle_tactico`;
 
 export const detalleTacticoService = {
   async getAll(): Promise<BodyListResponse<DetalleTactico>> {
     const response = await fetch(API_URL);
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al obtener los Detalles Tácticos');
+      const errorText = await response.text().catch(() => 'No body');
+      throw new Error(`Error ${response.status}: Error al obtener los Detalles Tácticos. ${errorText}`);
     }
     return response.json();
   },
@@ -18,8 +19,7 @@ export const detalleTacticoService = {
   async getById(codigo_detalle_tactico: number): Promise<BodyResponse<DetalleTactico>> {
     const response = await fetch(`${API_URL}/${codigo_detalle_tactico}`);
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Detalle Táctico no encontrado');
+      throw new Error(`Error ${response.status}: Detalle Táctico no encontrado`);
     }
     return response.json();
   },
@@ -31,8 +31,8 @@ export const detalleTacticoService = {
       body: JSON.stringify(detalle),
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al guardar el detalle táctico');
+      const errorText = await response.text().catch(() => 'No body');
+      throw new Error(`Error ${response.status}: Error al guardar el detalle táctico. ${errorText}`);
     }
     return response.json();
   },
@@ -43,8 +43,7 @@ export const detalleTacticoService = {
       headers: { 'Content-Type': 'application/json' },
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
-      throw new Error(errorBody.message || 'Error al eliminar el detalle táctico');
+      throw new Error(`Error ${response.status}: Error al eliminar el detalle táctico`);
     }
     return response.json();
   },

@@ -16,7 +16,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { MoreHorizontal, Edit, Plus, Trash, MountainSnow, TreePalm, Lock, GitBranch } from 'lucide-react';
+import { MoreHorizontal, Edit, Plus, Trash, MountainSnow, TreePalm, Lock, GitBranch, Boxes, Upload } from 'lucide-react';
 import { grupoService } from '@/services/grupo.service';
 import type { Grupo } from '@/types/interfaces';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -30,11 +30,13 @@ interface GrupoTableProps {
   onAddNew: () => void;
   onManageRestricciones: (record: Grupo) => void;
   onManageRelaciones: (record: Grupo) => void;
+  onManageMaterialesBalanceo: (record: Grupo) => void;
+  onCargaMasivaMaterialesBalanceo: (record: Grupo) => void;
 }
 
 const PAGE_SIZE_OPTIONS = [10, 15, 20];
 
-export default function GrupoTable({ records, isLoading, onEdit, onAddNew, onManageRestricciones, onManageRelaciones }: Readonly<GrupoTableProps>) {
+export default function GrupoTable({ records, isLoading, onEdit, onAddNew, onManageRestricciones, onManageRelaciones, onManageMaterialesBalanceo, onCargaMasivaMaterialesBalanceo }: Readonly<GrupoTableProps>) {
   const [page, setPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(PAGE_SIZE_OPTIONS[0]);
   const [filter, setFilter] = useState('');
@@ -148,6 +150,12 @@ export default function GrupoTable({ records, isLoading, onEdit, onAddNew, onMan
                           </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => onManageRelaciones(record)}>
                             <GitBranch className="mr-2 h-4 w-4" />Relaciones (Linea|Estaciones)
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => onManageMaterialesBalanceo(record)}>
+                            <Boxes className="mr-2 h-4 w-4" />Materiales de Balanceo
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => onCargaMasivaMaterialesBalanceo(record)}>
+                            <Upload className="mr-2 h-4 w-4" />Carga Masiva Materiales Balanceo
                           </DropdownMenuItem>
                           <DropdownMenuItem onClick={async () => {
                             if (!confirm('¿Confirma eliminar este grupo?')) return;

@@ -196,14 +196,15 @@ export interface DetalleTactico {
     codigo_detalle_tactico: number;
     codigo_plan_grupo: number;
     codigo_material: number;
+    linea_produccion: string;
     cantidad_produccion_neta: string;
     resp_ctrl_prod: string;
     clase_aprovisionamiento: string;
-    cantidad_aprovisionamiento: string;
+    cantidad_aprovisionamiento: number;
     estado: string;
     fecha_modificacion: Date;
     usuario_modificacion: string;
-    plan_grupo?: PlanGrupo;
+    codigo_plan_grupo_padre?: number;
 }
 
 export interface Detalles {
@@ -352,6 +353,28 @@ export interface TipoDetalle {
 export interface Turno {
     codigo_turno: number;
     nombre_turno: string;
+    estado: string;
+    fecha_modificacion: Date;
+    usuario_modificacion: string;
+}
+
+export interface MaterialesBalanceo {
+    codigo_material_balanceo: number;
+    codigo_material: number;
+    porc_maximo_balanceo: number;
+    porc_minimo_balanceo: number;
+    prioridad: number;
+    estado: string;
+    fecha_modificacion: Date;
+    usuario_modificacion: string;
+}
+
+export interface MaterialesBalanceoGrupo extends Grupo {
+    codigo_material_balanceo: number;
+    codigo_material: number;
+    porc_maximo_balanceo: number;
+    porc_minimo_balanceo: number;
+    prioridad: number;
     estado: string;
     fecha_modificacion: Date;
     usuario_modificacion: string;

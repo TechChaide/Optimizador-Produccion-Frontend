@@ -3,7 +3,7 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { PlanGlobal } from "../types/interfaces";
 
-const API_URL = `${environment.apiURL}/api/plan_global`;
+const API_URL = `${environment.apiURL}/plan_global`;
 
 export const planGlobalService = {
   async getAll(): Promise<BodyListResponse<PlanGlobal>> {
