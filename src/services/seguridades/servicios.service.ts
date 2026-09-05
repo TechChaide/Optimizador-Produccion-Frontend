@@ -5,7 +5,7 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { fetchWithAuth } from "@/lib/http-client";
 
-const API_URL = `${environment.apiURL}/api/servicios`;
+const API_URL = `${environment.apiURLSeguridades}/api/servicios`;
 
 export const serviciosService = {
 

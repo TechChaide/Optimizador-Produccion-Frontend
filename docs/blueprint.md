@@ -1,6 +1,9 @@
-# **App Name**: MenuGuard
+# **App Name**: Chaide - Optimizador de Producción (con Módulo de Seguridad MenuGuard)
 
-## Core Features:
+Este proyecto unifica dos blueprints originales: el módulo de seguridad/menús (MenuGuard) y el
+optimizador de producción (Production Optimizer Next).
+
+## Core Features — Seguridad / Menús (MenuGuard):
 
 - Menu Designer: Design menu structure with drag and drop interface.
 - Role-Based Access: Define user roles and permissions.
@@ -9,6 +12,16 @@
 - Menu Preview: Preview the menu as it will appear to different user roles.
 - Configuration Management: Export/import menu configurations.
 - Audit Trail: Audit log tracking menu design changes and permission assignments.
+
+## Core Features — Producción (Production Optimizer Next):
+
+- Dashboard: Dashboard section for visualizing production metrics.
+- Data Import: Section to manage and import data for production optimization.
+- Optimization Logic: Optimization service for parsing data and generating production plans.
+- Absenteeism Management: Display and manage absenteeism data.
+- Constraint Configuration: Configure and manage constraints affecting the production plan.
+- Production Plan: Create and visualize the production plan based on imported data and configured constraints.
+- Personnel Management: Manage personnel information and scheduling related to production.
 
 ## Style Guidelines:
 

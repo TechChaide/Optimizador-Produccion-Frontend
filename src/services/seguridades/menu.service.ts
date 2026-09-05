@@ -5,7 +5,7 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { fetchWithAuth } from "@/lib/http-client";
 
-const API_URL = `${environment.apiURL}/api/menus`;
+const API_URL = `${environment.apiURLSeguridades}/api/menus`;
 
 export const menuService = {
   async getAll(): Promise<BodyListResponse<Menu>> {

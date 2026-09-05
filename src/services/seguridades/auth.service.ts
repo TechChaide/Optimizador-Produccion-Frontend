@@ -4,8 +4,8 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { fetchWithAuth } from "@/lib/http-client";
 
-const API_URL = `${environment.apiURL}/api/auths/login`;
-const API_URL_CENTRAL = `${environment.apiURL}/api/auths/loginCentral`;
+const API_URL = `${environment.apiURLSeguridades}/api/auths/login`;
+const API_URL_CENTRAL = `${environment.apiURLSeguridades}/api/auths/loginCentral`;
 
 // Define a type for the login credentials
 type LoginCredentials = {
