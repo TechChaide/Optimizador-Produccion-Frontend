@@ -649,8 +649,8 @@ export default function ImportarVentasPage() {
 
       {/* Tabs Navigation */}
       <div className="bg-white border-b border-gray-200">
-        <div className="px-6 overflow-x-auto">
-          <nav className="flex space-x-1 whitespace-nowrap" aria-label="Tabs">
+        <div className="px-6">
+          <nav className="flex space-x-1" aria-label="Tabs">
             {tabs.map((tab) => (
               <button
                 key={tab.id}

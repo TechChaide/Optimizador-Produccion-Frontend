@@ -277,6 +277,22 @@ export const serviciosService = {
     return response.json();
   },
 
+  async versionsFabricacionPorCentroYCodigoMaterial(Centro: string, CodigoMaterial: string): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/versionesFabricacionMaterialPorCentro", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        Centro: Centro,
+        Codigo: CodigoMaterial
+      }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error al consultar versiones de fabricación por centro y material." }));
+      throw new Error(errorBody.message || "Error al consultar versiones de fabricación por centro y material.");
+    }
+    return response.json();
+  },
+
   async getOrdenesFert(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
     try {
       const response = await fetch(API_URL + "/OrdenesFertPaginadas", {
@@ -396,6 +412,61 @@ export const serviciosService = {
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
       throw new Error(errorBody.message || "Failed to fetch Diccionario");
+    }
+    return response.json();
+  },
+
+  // Alias con ortografía correcta del método anterior (getKPIMAestroLooper) — se mantienen los dos:
+  // TacticalPlanCorteLaminadoSection y TacticalPlanEspumasSection ya llaman al nombre original,
+  // mientras que ProductionPlanSection (rama-Sebastian-Vivar) llama a este.
+  async getKPIMaestroLooper(): Promise<BodyResponse<any>> {
+    return serviciosService.getKPIMAestroLooper();
+  },
+
+  async getKPIMaestroForros(): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/KPIMaestroForros", {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) {
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Error al obtener KPI Maestro de Forros");
+    }
+    return response.json();
+  },
+
+  async ReporteExplosionMateriales(rows: number, rowsPerPage: number): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/ReporteExplosionMateriales", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rows: rows,
+        rowsPerPage: rowsPerPage
+      }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error al consultar la explosión de materiales." }));
+      throw new Error(errorBody.message || "Error al consultar la explosión de materiales.");
+    }
+    return response.json();
+  },
+
+  // Grupos: códigos de grupo concatenados por "&" (ej: "11&12&15")
+  // FechaProgramacion: fecha del plan en formato "YYYY-MM-DD"
+  async detallePlanTacticoPorGrupos(Grupos: string, FechaProgramacion: string): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/detallesPlanGrupo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        Grupos: Grupos,
+        FechaProgramacion: FechaProgramacion
+      }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error al consultar el plan táctico por grupos." }));
+      throw new Error(errorBody.message || "Error al consultar el plan táctico por grupos.");
     }
     return response.json();
   },

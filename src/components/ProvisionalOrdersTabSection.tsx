@@ -509,6 +509,7 @@ export const ProvisionalOrdersTabSection: React.FC = () => {
             <div className="px-4 py-1 bg-white border rounded text-sm font-bold text-indigo-600 min-w-[80px] text-center"> {currentPage} / {totalPagesLocal} </div>
             <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => Math.min(totalPagesLocal, p + 1))} disabled={currentPage === totalPagesLocal}> Siguiente </Button>
           </div>
+          <div className="text-[10px] text-gray-400 font-bold tracking-widest uppercase">{currentCenterOrders.length} registros filtrados</div>
         </div>
       </Tabs>
     </div>

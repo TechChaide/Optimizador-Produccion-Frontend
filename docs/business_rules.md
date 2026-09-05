@@ -4,85 +4,80 @@ Este documento detalla la lógica de negocio y las fuentes de datos utilizadas p
 
 ## 1. Fuentes de Datos Principales
 
-La planificación se basa en la información extraída de dos fuentes de datos principales a través de la API interna.
-
 ### 1.1. Tabla: `Presupuesto`
-
-Esta tabla contiene la proyección de ventas y es el principal impulsor de la demanda.
-
-- **API Query:** `{ source: 'Presupuesto', operation: 'get_data' }`
-- **Campos Críticos Utilizados:**
-    - `Año`, `Mes`: Definen el período de la demanda.
-    - `CodMaterial`: Código del producto vendido. Se normaliza para obtener el código base de 8 dígitos.
-    - `Centro`: **Centro de Demanda**. Indica dónde se registra la venta.
-    - `UnidadesProyectado`: La cantidad de unidades que se espera vender. Es el principal input para la demanda.
-    - `descripciónMaterial`, `Etiqueta`: Se utilizan para obtener un nombre descriptivo del producto.
+- **Uso:** Proyección de ventas y demanda primaria.
+- **Campos:** Año, Mes, CodMaterial, Centro, Unidades.
 
 ### 1.2. Tabla: `TiemposEnsamblado`
+- **Uso:** Maestro técnico de rutas y tiempos.
+- **Regla CRÍTICA:** Identificadores de máquina/puesto inician con **"HR-"**.
 
-Esta es la tabla maestra que define la estructura de producción, los tiempos y las reglas de negocio a nivel de producto.
-
-- **API Query:** `{ source: 'TiemposEnsamblado', operation: 'get_data' }`
-- **Campos Críticos Utilizados:**
-    - `CodMaterial`: Código del producto.
-    - `Centro`: Centro de trabajo donde aplica la configuración.
-    - `Linea`: Nombre de la línea de producción.
-    - `PuestoTrabajo`: Nombre del puesto de trabajo dentro de la línea.
-    - `Tiempo`: **Tiempo de ensamble estándar** en minutos por unidad para un producto en un puesto específico. Es la base para calcular la capacidad y las horas requeridas.
-    - `ClaseAprovisionamiento`: **Regla de negocio CRÍTICA** que define dónde se fabrica un producto.
-    - `StockActual`, `StockSeguridad`, `StockMaximo`: Parámetros de inventario para cada producto en un centro específico. Son fundamentales para calcular la necesidad neta de producción.
-    - `TamLoteMin`: El lote mínimo de producción.
+### 1.3. Tabla: `Explosión de Materiales (BOM)`
+- **Uso:** Identificar los componentes (Tapas, Bandas, Interiores) que integran un producto terminado (Forro).
+- **Lógica:** Cada orden de un producto padre dispara automáticamente órdenes sincronizadas para sus componentes hijos.
 
 ---
 
-## 2. Lógica de Negocio del Motor de Planificación
+## 2. Lógica del Motor de Planificación
 
-### 2.1. Descubrimiento de Estructura (Sincronización)
+### 2.1. Reglas de Aprovisionamiento (`ClaseAprovisionamiento`)
+- **'E' (In-house):** Fabricación en el centro de demanda.
+- **'F' (Fabricación Centralizada):** Fabricación obligatoria en Centro 1000 (Quito) con transferencia a destino.
+- **'X' (Flexible):** Prioriza fabricación local si hay capacidad.
 
-Al presionar "Sincronizar", la aplicación no asume una estructura predefinida. La descubre dinámicamente a partir de los datos de `TiemposEnsamblado`:
-- **Centros de Trabajo:** Se crean a partir de los valores únicos en el campo `Centro`.
-- **Líneas de Producción:** Se crean a partir de las combinaciones únicas de `Centro` y `Linea`.
-- **Puestos de Trabajo:** Se crean a partir de las combinaciones únicas de `Centro` y `PuestoTrabajo`.
-- **Asignaciones:** La aplicación mapea qué puestos de trabajo pertenecen a qué líneas y qué líneas a qué centros, construyendo la jerarquía operativa completa.
+### 2.2. Planificación Táctica (Corto Plazo - Pull System)
+Esta lógica rige la generación automática de la "Programación Componentes":
 
-### 2.2. Reglas de Aprovisionamiento (`ClaseAprovisionamiento`)
+1.  **Prioridad por Destino y Fecha**:
+    - **Fecha 1 (Cercana):** Destino **GYE**. Tiene prioridad absoluta sobre los recursos (tiempos de máquina).
+    - **Fecha 2 (Lejana):** Destino **Quito**. Se planifica con la capacidad remanente.
+2.  **Fechas Inamovibles (Padre):**
+    - Las fechas de ensamble de los **Forros** (producto terminado) son **FIJAS**. No se cambian para garantizar el cumplimiento de la entrega.
+3.  **Flexibilidad en Componentes (Hijos):**
+    - Solo las fechas y máquinas de los **componentes** (Tapas, Bandas, etc.) se ajustan para balancear la capacidad.
+4.  **Regla de Suministro Crítica (JIT):**
+    - El componente debe estar terminado a más tardar el **mismo día** de la fecha fija del forro padre o **máximo un día antes**. Nunca se debe programar un componente para una fecha posterior a la de su padre ni con más de un día de antelación.
+5.  **Explosión de Materiales (BOM)**:
+    - La demanda de un Forro genera necesidades automáticas de componentes (Tapas acolchadas, Bandas, Interiores, Bases).
+6.  **Gestión de Capacidad y Balanceo Dinámico**:
+    - **Ajuste de Fecha como Palanca:** La ventana de "un día antes" es el tiempo disponible para ajustar la carga de trabajo.
+    - **Configuración de Turnos y Personal:** El sistema debe conocer qué puestos tienen **doble turno** y cuántas **personas** por turno para calcular las horas-máquina reales disponibles.
+    - **Capacidad Doble Turno (Referencia):** En configuración de 2 turnos con 84% de eficiencia, la capacidad neta es de **14.49 horas** (869.4 min) por puesto/máquina.
+    - **Jerarquía de Ajuste:**
+        1. **Balanceo por Versión de Fabricación:** Si una máquina se satura, el sistema busca versiones alternas (ej. mover de ACH08 a ACH09) para el componente.
+        2. **Arrastre Sincronizado:** Si se cambia la máquina o fecha de un componente, debe mantenerse el vínculo técnico con el padre.
+        3. **Adelanto de Producción Limitado:** Si no hay capacidad en la fecha requerida por el Forro, el componente solo puede adelantarse a la jornada inmediatamente anterior (**un día antes**).
 
-Esta es una de las reglas más importantes y determina la estrategia de producción y logística:
-- **'E' (In-house):** El producto se fabrica en el mismo centro donde se genera su demanda.
-- **'F' (Fabricación Centralizada):** El producto **siempre** se fabrica en el centro principal (ID "1000"), sin importar dónde se genere la demanda. El planificador generará automáticamente órdenes de transferencia para mover el producto terminado desde el centro 1000 al centro de demanda.
-- **'X' (Flexible):** El producto puede ser fabricado en el centro principal (1000) o en el centro de demanda. Actualmente, la lógica prioriza la fabricación en el mismo centro de la demanda si es posible.
+### 2.3. Sincronización de Procesos (Tapas y Acolchado)
+Existe una dependencia técnica estricta entre las máquinas de confección de tapas y las de acolchado:
+- **Regla de Sufijo Mandatoria:** La máquina de la Tapa (`HR-PEFXX`) debe coincidir SIEMPRE con el número de la del Acolchado (`HR-ACHXX`).
+- **Sincronización por Versión:** Si se cambia la versión de fabricación para mover una orden de `HR-ACH08` a `HR-ACH09`, el proceso de tapas DEBE moverse automáticamente a `HR-PEF09`.
+- **Identificadores Válidos:** Los números de máquina (XX) son: **02, 06, 08, 09 y 10**.
 
-### 2.3. Lógica de Traslados (Cómo funciona la regla 'F')
+### 2.4. Proceso de Bandas
+1.  **Inicio (Acolchado de Banda):** `HR-ACH11`, `HR-ACH12` o `HR-BO01` (especiales). Medido en **metros** por lotes.
+2.  **Rematado Inicial:** Puesto **HR-RMTBx**. Medido en **unidades**.
+3.  **Procesos Adicionales (en metros):** `HR-COS3D` y `HR-ENCBD`.
+4.  **Proceso Final:** Puesto **HR-RMTBm**. Medido en **unidades**.
 
-El sistema no lee una lista de traslados, sino que los **crea y planifica lógicamente**. Este es el proceso:
+### 2.5. Proceso de Interiores
+1.  **Puestos Iniciales:** `INTPR` o `INTPT` (pegado de banda). Generan demanda en **HR-ACH11/12**.
+2.  **Proceso Final:** Puesto **HR-INTPf** (Integra todas las referencias).
 
-1.  **Detección de Demanda:** El motor detecta una necesidad de venta. Ej: "Se necesitan 100 unidades del Producto-A en el Centro `2000`".
-2.  **Consulta de Regla:** El sistema verifica la `ClaseAprovisionamiento` para el Producto-A y ve que es `'F'`.
-3.  **Desplazamiento de la Producción:** En lugar de planificar la producción en el Centro `2000`, el motor **mueve la necesidad de producción** al Centro `1000`. Ahora el plan del Centro `1000` incluye la fabricación de esas 100 unidades adicionales.
-4.  **Impacto en Inventarios:**
-    *   **Centro `1000` (Fabricante):** Su plan de inventario reflejará una **salida** de 100 unidades por "transferencia". El stock se calcula como: `StockInicial + Producción - VentasPropias - TransferenciasSalientes`.
-    *   **Centro `2000` (Receptor):** Su plan de inventario reflejará una **entrada** de 100 unidades por "transferencia" para poder cubrir su demanda de ventas. El stock se calcula como: `StockInicial + TransferenciasEntrantes - VentasPropias`.
+### 2.6. Proceso de Bases
+1.  **Tapa Superior (HR-MTBS1):** Cosido de banda a tela. Genera demanda en **HR-ACH11/12**.
+2.  **Tapa con Cierre (HR-MTBS):** Genera demanda de telas (materias primas).
 
-En esencia, la regla 'F' actúa como un interruptor que centraliza la fabricación y genera implícitamente las órdenes de transferencia que el plan de inventario debe considerar.
+### 2.7. Proceso de Corte de Telas (Cuello de Botella Central)
+- **Puestos:** `HR-CTBAN`, `HR-CTBSC`, `HR-CTCHN`, `HR-CTINT`.
+- **Configuración:** Una sola máquina y **una sola persona** para todos los puestos de corte.
+- **Capacidad:** El tiempo total sumado no puede exceder la capacidad de turnos asignada (1 o 2 jornadas).
 
-### 2.4. Cálculo de Tiempos y Capacidad
+### 2.8. Proceso de Telas y Fundas
+- **Puestos:** `HR-TTCF` y `HR-TTSUP`.
+- **Restricción:** Capacidad limitada por personas asignadas.
+- **Flexibilidad:** Carga de `HR-TTCF` puede derivarse a `HR-INTPf` si es necesario.
 
-- **Tiempo de Fabricación por Producto:** El tiempo total para fabricar una unidad de un producto en una línea específica se considera igual al **cuello de botella** de esa línea, es decir, al tiempo del puesto de trabajo más lento involucrado en su producción.
-- **Capacidad de Línea:** La capacidad total en horas de una línea se calcula sumando las horas laborables de cada día del mes, según lo definido en los `ShiftParameters` (horas normales, extras, de sábados/feriados) y respetando los días no laborables definidos en la restricción de `Holidays`.
-
-### 2.5. Lógica de Planificación Mensual
-
-El objetivo es crear un plan mensual equilibrado.
-1.  **Necesidad Neta:** `Producción Requerida = Demanda del Mes + Stock de Seguridad - Stock Inicial del Mes`.
-2.  **Suavización de Carga (Adelanto de Producción):** El motor analiza la capacidad ociosa en los meses. Si un mes futuro (ej. Mes 3) tiene un pico de demanda que excede su capacidad, pero un mes actual (ej. Mes 2) tiene horas libres, el sistema automáticamente **adelantará** parte de la producción del Mes 3 al Mes 2 para balancear la carga de trabajo y asegurar el cumplimiento.
-
-### 2.6. Lógica de Secuenciación Diaria (Priorización)
-
-Una vez que se tiene el plan mensual, se desglosa día a día. Esta es la lógica más compleja y crítica:
-- **Índice de Urgencia:** Cada día, el sistema **no** produce el producto con la mayor cantidad pendiente. En su lugar, calcula un "índice de urgencia" para cada producto:
-    - `Urgencia = (Stock Actual del Día - Demanda Acumulada) / Demanda Diaria Promedio`
-- **Prioridad:** El sistema siempre priorizará la fabricación del producto que tenga el **menor índice de urgencia** (menos días de cobertura de stock), minimizando así el riesgo de quiebres de inventario.
-
-### 2.7. Cálculo de Costos
-
-El costo laboral de cada lote de producción se estima multiplicando las horas consumidas por la tarifa horaria, aplicando los factores de recargo (`LaborCostFactors`) según si las horas son normales, extras o de fin de semana/feriado.
+### 2.9. Cálculo de Tiempos
+- Eficiencia operativa: **84%**.
+- Tiempos con **dos decimales**.

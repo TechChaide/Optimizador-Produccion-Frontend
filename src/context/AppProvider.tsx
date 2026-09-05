@@ -264,7 +264,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             );
         }
         toast({
-            variant: type === 'error' ? 'destructive' : 'default',
+            variant: type === 'error' ? 'destructive' : type === 'success' ? 'success' : 'default',
             title: type.charAt(0).toUpperCase() + type.slice(1),
             description: description,
             duration: type === 'error' ? 10000 : 5000,

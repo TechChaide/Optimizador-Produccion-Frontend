@@ -32,12 +32,14 @@ export * from './WorkShiftPlanningSection';
 export * from './RealDataSection';
 export * from './InventoryNeedsSection';
 export * from './TacticalPlanMueblesSection';
+export * from './TacticalPlanForrosSection';
 export * from './NeedsCalculationC2000Section';
 export * from './PresupuestoProdSemanalTabSection';
 export * from './ExplosionMaterialesTabSection';
 export * from './RevCapacidadTabSection';
 export { PlanPropuestoTabSection } from './PlanPropuestoTabSection';
 export { MaterialBalanceoLineasTabSection } from './MaterialBalanceoLineasTabSection';
+export * from './CutLaminationPlanSection';
 
 // Widgets y paneles
 export { default as FloatingChatWidget } from './FloatingChatWidget';

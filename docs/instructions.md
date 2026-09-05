@@ -1,45 +1,45 @@
 # INSTRUCCIONES PARA EL ASISTENTE DE IA
 
-Este documento contiene un conjunto de directrices y reglas de negocio clave para asegurar la consistencia, calidad y correctitud en el desarrollo de la aplicación "Production Optimizer Next".
+## 1. Stack Tecnológico
+- **Framework:** Next.js (App Router), TypeScript, TailwindCSS, ShadCN UI.
 
-## 1. Stack Tecnológico (No negociable)
+## 2. Reglas de Negocio Maestras
 
-La aplicación está construida sobre un stack específico. No se deben introducir tecnologías fuera de este ecosistema.
-- **Framework:** Next.js (con App Router)
-- **Lenguaje:** TypeScript
-- **UI:** React, ShadCN UI, TailwindCSS
-- **Iconos:** `lucide-react`
-- **Lógica de Negocio/Estado:** React Context API.
-- **Peticiones a API:** Se utiliza un `fetcher` genérico en `src/hooks/useApiData.ts`. No implementar `axios` u otras librerías.
+### 2.1. Planificación Pull y Prioridad de Cumplimiento
+- **Fechas de Forros (Padres):** Son **INAMOVIBLES**. El plan de producto terminado no se posterga para asegurar el nivel de servicio.
+- **Fecha Límite de Componentes (JIT):** Los componentes deben estar listos el **mismo día** de la fecha fija del Forro padre o, como máximo, **un día antes**.
+- **Ajuste de Capacidad en Componentes:** La ventana de 24 horas antes de la fecha del forro es el espacio para balancear la carga.
+- **Configuración de Turnos y Headcount:** La capacidad por puesto se calcula multiplicando (Horas de Turno) x (Número de Turnos) x (Número de Personas por Turno) x (Eficiencia 84%).
+- **Capacidad Máxima de Prueba:** Para un sistema de 2 turnos, la capacidad efectiva es de **14.49 horas/día**.
+- **Jerarquía de Ajuste de Capacidad:**
+    1. **Versión de Fabricación:** Si hay sobrecarga, buscar versiones alternativas (otras máquinas compatibles) para el componente.
+    2. **Arrastre Sincronizado:** Cualquier cambio en un "Hijo" (Tapa/Banda) debe validar su disponibilidad para la fecha fija del "Padre" (Forro).
+- **Prioridad de Destino:** GYE (Fecha 1) tiene prioridad absoluta sobre los recursos (tiempos de máquina).
 
-## 2. Reglas de Negocio Fundamentales
+### 2.2. Vínculo Técnico y Sincronización Estricta
+- **Regla Espejo ACH-PEF:** El número de máquina `XX` de Acolchado (`HR-ACHXX`) y Tapas (`HR-PEFXX`) debe ser el mismo. Si una orden de tapa se mueve a `ACH09` por balanceo, su tapa debe ir a `PEF09`.
+- **Especialización de Acolchado:** 
+    - **ACH10, 06, 02:** Líneas Económica a Premium Estándar.
+    - **ACH08, 09:** Líneas Superiores (Continental, etc.).
+    - **ACH09 (Exclusividad):** Referencias Top (Grand Palace, Escape, Resiflex).
 
-Estas son las reglas clave del dominio de negocio que deben ser respetadas en toda modificación. Para un detalle exhaustivo, consultar `docs/business_rules.md`.
+### 2.3. Flujos de Componentes y Unidades
+- **Bandas:** `ACH11/12/BO01` (Metros) -> `RMTBx` (Unidades) -> `COS3D/ENCBD` (Metros) -> `RMTBm` (Unidades).
+- **Interiores:** `INTPR/T` -> `INTPf`. Requiere bandas de `ACH11/12`.
+- **Bases:** `MTBS1` (requiere `ACH11/12`) y `MTBS` (telas).
+- **Corte de Telas:** Una sola máquina y **una sola persona** para todos los puestos `HR-CT`.
+- **Telas y Fundas:** Flexibilidad `TTCF` -> `INTPf` en caso de saturación.
 
-- **Aprovisionamiento (`ClaseAprovisionamiento`):** Esta regla es la más importante. Define **dónde** se debe fabricar un producto.
-    - **'F' (Fabricación Centralizada):** La producción se realiza **exclusivamente** en el centro `1000`. Si la demanda es de otro centro, se debe planificar una transferencia.
-    - **'E' (In-house):** La producción se realiza en el mismo centro que genera la demanda.
-- **Secuenciación Diaria:** La prioridad de producción diaria **siempre** se basa en la **urgencia**, calculada como los días de cobertura de stock restantes. No se debe priorizar por volumen total, tamaño de orden o ningún otro criterio.
-- **Cálculo de Tiempos:** El tiempo de fabricación de un producto en una línea es igual al del **puesto de trabajo más lento (cuello de botella)** de esa línea para ese producto específico.
-- **Horizonte de Planificación:** El motor de planificación es agnóstico del período. Debe determinar el horizonte de planificación (primer y último mes) dinámicamente basándose **únicamente** en los `salesData` que recibe como entrada. No debe asumir un período de 12 meses.
+### 2.4. Flexibilidad de Personal
+- Puestos al **50% de capacidad** permitidos para optimizar mano de obra.
+- Factor de eficiencia del **84%**.
 
-## 3. Guías de Estilo de Código y Componentes
+## 3. Protocolo de Datos
+- **Códigos de Material:** Normalizar eliminando ceros a la izquierda.
+- **Explosión de Materiales (BOM):** Usar la tabla BOM para vincular Forros con sus componentes específicos.
+- **Visualización:** Tiempos y cantidades con **dos decimales**.
 
-- **Componentes:**
-    - Priorizar siempre el uso de componentes de **ShadCN** disponibles en `src/components/ui`.
-    - Crear componentes reutilizables y atómicos cuando sea posible.
-    - Evitar la lógica de negocio compleja dentro de los componentes visuales. La lógica debe residir en los `services` o en los `hooks` del contexto.
-- **Estilo:**
-    - Utilizar **TailwindCSS** para todo el estilizado. No usar CSS en línea (`style={...}`) a menos que sea para valores dinámicos que no se pueden lograr con clases.
-    - No añadir colores explícitos (ej. `text-red-500`). En su lugar, usar las variables semánticas de `globals.css` (ej. `text-destructive`, `bg-primary`).
-- **Estado Global:**
-    - El estado de la aplicación se maneja a través del `AppContext` en `src/context/AppProvider.tsx`.
-    - Cualquier modificación al estado debe realizarse a través de las acciones (`dispatch`) definidas en el `appReducer`.
-    - No mutar el estado directamente.
-
-## 4. Interacción y Comunicación
-
-- **Claridad y Precisión:** Antes de implementar un cambio, explicar de forma clara y concisa el **porqué** del cambio y el **cómo** se va a implementar.
-- **Basado en Evidencia:** Utilizar siempre los `console.log` y mensajes de error proporcionados por el usuario como la principal fuente de verdad para la depuración.
-- **No Asumir:** Si una petición es ambigua, hacer preguntas clarificadoras antes de proceder.
-- **Formato de Respuesta:** Las modificaciones de código **siempre** deben entregarse dentro del bloque XML `<changes>`, proveyendo el contenido completo y final de cada archivo modificado.
+## 4. Estilo de Interacción
+- Validar siempre que el movimiento de un componente no comprometa la fecha fija del Forro.
+- Mantener la integridad de la regla espejo ACH-PEF en cada balanceo por versión.
+- El componente puede estar el mismo día del forro, o un día antes, pero nunca después.
