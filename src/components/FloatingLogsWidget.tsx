@@ -10,7 +10,7 @@ import { useWidgetsState } from '@/context/WidgetsStateContext';
 export default function FloatingLogsWidget() {
   const [isMinimized, setIsMinimized] = useState(false);
   // avoid using `window` at module init to prevent SSR errors
-  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [, setPosition] = useState({ x: 0, y: 0 });
   const [minimizedProps, setMinimizedProps] = useState({ y: 0, width: 56, height: 56 });
   const widgetRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
@@ -256,7 +256,7 @@ export default function FloatingLogsWidget() {
 
                     {/* Mostrar operaciones recientes */}
                     <div style={{ color: '#e53935', fontWeight: 'bold', marginBottom: 8, fontSize: 12, marginTop: 12 }}>Recent Operations</div>
-                    {operations.slice(-15).map((op, idx) => {
+                    {operations.slice(-15).map((op) => {
                       const statusColor = op.status === 'completed' ? '#10b981' : op.status === 'failed' ? '#ef4444' : '#fbbf24';
                       const duration = op.duration ? ` [${op.duration}ms]` : '';
                       const error = op.error ? ` - ERROR: ${op.error}` : '';

@@ -4,7 +4,7 @@
 import React, { useMemo, useEffect, useState } from 'react';
 import { useAppContext } from '@/context/AppProvider';
 import { Activity, Check, ChevronsUpDown } from 'lucide-react';
-import { AppConstraints, Holiday, ProductionLine, ShiftParameters, WorkCenter, WorkstationDefinition, DailyCapacityRow as OriginalDailyCapacityRow } from '@/types/types';
+import { AppConstraints, ProductionLine, WorkCenter, WorkstationDefinition, DailyCapacityRow as OriginalDailyCapacityRow } from '@/types/types';
 import { MONTH_NAMES } from '@/constants/constants';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';

@@ -1,4 +1,3 @@
-import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 
@@ -16,10 +15,11 @@ export const serviciosService = {
     return response.json();
   },
 
-  async getCuboInventarios(): Promise<BodyResponse<any>> {
+  async getCuboInventarios(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
     const response = await fetch(API_URL + "/CuboInventarios", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
     });
     if (!response.ok) {
       throw new Error(`Error ${response.status}: Failed to fetch Inventarios`);
@@ -181,6 +181,24 @@ export const serviciosService = {
     return response.json();
   },
 
+  // Endpoint nuevo (tiemposEnsambladoByGrupoYCentro) — reemplaza a TiemposEnsambladoPorCentroYCodigoGrupo:
+  // mismo payload {Centro, CodigoGrupo} y misma forma de respuesta, verificado en vivo (1138 vs 1137
+  // filas para Centro 1000/Grupo 8, 1 material adicional en el nuevo, sin diferencias en el resto) —
+  // se actualiza acá el único punto de llamada, sin tocar los 2 módulos que lo consumen (Venta Externa,
+  // Corte Espuma).
+  async getTiemposEnsambladobyCentroyCodigoGrupo(centro: string, codigoGrupo: number): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/tiemposEnsambladoByGrupoYCentro", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ Centro: String(centro), CodigoGrupo: Number(codigoGrupo) }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Tiempos Ensamblado");
+    }
+    return response.json();
+  },
+
   async getHabilidadesOperadorPorEstacion(): Promise<BodyResponse<any>> {
     const response = await fetch(API_URL + "/HabilidadesOperadorPorEstacion", {
       method: "GET",
@@ -216,15 +234,35 @@ export const serviciosService = {
   },
 
   async OrdenesProvisionalesPaginados(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/OrdenesProvisionalesPaginadas", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
-    });
-    if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Ordenes Prev`);
+    try {
+      const response = await fetch(API_URL + "/OrdenesProvisionalesPaginadas", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
+      });
+      if (!response.ok) {
+        return { data: [], length: 0, totalRegistros: 0 };
+      }
+      return response.json();
+    } catch {
+      return { data: [], length: 0, totalRegistros: 0 };
     }
-    return response.json();
+  },
+
+  async getPendientesTotales(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
+    try {
+      const response = await fetch(API_URL + "/CuboPendientesTotales", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
+      });
+      if (!response.ok) {
+        return { data: [], length: 0, totalRegistros: 0 };
+      }
+      return response.json();
+    } catch {
+      return { data: [], length: 0, totalRegistros: 0 };
+    }
   },
 
   async VersionesFabricacion(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
@@ -238,17 +276,21 @@ export const serviciosService = {
     }
     return response.json();
   },
-  
+
   async getOrdenesFert(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/OrdenesFertPaginadas", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
-    });
-    if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Ordenes Fert`);
+    try {
+      const response = await fetch(API_URL + "/OrdenesFertPaginadas", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
+      });
+      if (!response.ok) {
+        return { data: [], length: 0, totalRegistros: 0 };
+      }
+      return response.json();
+    } catch {
+      return { data: [], length: 0, totalRegistros: 0 };
     }
-    return response.json();
   },
 
   async getProduccionEstimadaPorIntervalo(anio: string, mes: string, semana: string): Promise<BodyResponse<any>> {
@@ -326,4 +368,87 @@ export const serviciosService = {
     }
   },
 
+  async getTiemposCuradoBloqueFormulado(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
+    try {
+      const response = await fetch(API_URL + "/tiemposCuradoBloqueFormulado", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          page: page,
+          rowsPerPage: rowsPerPage,
+        }),
+      });
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({ message: "Error de red al consultar el Maestro de Materiales." }));
+        throw new Error(errorBody.message || "Error al consultar el Maestro de Materiales.");
+      }
+      return response.json();
+    } catch (e) {
+      throw e;
+    }
+  },
+
+  async getKPIMAestroLooper(): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/KPIMaestroLooper", {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Diccionario");
+    }
+    return response.json();
+  },
+
+  async getInventarioAñoActual(): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/InventarioAnioActual", {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Diccionario");
+    }
+    return response.json();
+  },
+
+  async getKPIMaestroCarruseles(): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/KPIMaestroCarruseles", {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Diccionario");
+    }
+    return response.json();
+  },
+
+  async getConsumosFormulado(material: string): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/Registros51Mb", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ Material: material }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Presupuesto");
+    }
+    return response.json();
+  },
+
+  // "destino" es una sola cadena con los correos separados por coma (no un array) — así lo espera
+  // el endpoint real, confirmado por el usuario con el contrato exacto.
+  async enviarCorreo(payload: { destino: string; asunto: string; cuerpo: string; nota?: string }): Promise<{ message: string; destinatarios: string[] }> {
+    const response = await fetch(API_URL + "/enviarCorreo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to send Correo");
+    }
+    return response.json();
+  },
 };

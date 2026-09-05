@@ -1,24 +1,25 @@
 
-import React, { useState, useCallback, useContext, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { logger } from '@/services/LogService';
 import { useRuntimeInspector } from '@/services/RuntimeInspector';
-import { 
-    TacticalRequest, TacticalPlanResult, NotificationMessage, ProvisionalOrder, TacticalOrderItem 
+import {
+    TacticalRequest, TacticalPlanResult, ProvisionalOrder
 } from '@/types/types';
 import { parseTacticalOrdersExcel } from '@/services/OptimizationService';
 import { TacticalSchedulingIcon, DataImportIcon, MAX_FILE_SIZE_MB } from '@/constants/constants';
 import { useAppContext } from '@/context/AppProvider';
 import { ProvisionalOrdersTabSection } from './ProvisionalOrdersTabSection';
+import { fechaLocalEcuador } from '@/lib/dias-laborables';
 
 
 interface TacticalPlanSectionProps {
   onGeneratePlan: (request: TacticalRequest) => TacticalPlanResult;
 }
 
-const getTodayString = () => {
-    const today = new Date();
-    return today.toISOString().split('T')[0]; // YYYY-MM-DD
-};
+// fechaLocalEcuador, no toISOString().split('T')[0]: toISOString() SIEMPRE convierte a UTC — pasadas
+// las 19:00 hora Ecuador (19:00 local + 5h = 00:00 UTC), esto devolvía el día calendario SIGUIENTE,
+// no "hoy" (mismo bug de zona horaria documentado en Corte Espuma, explotarPFFParaCentro).
+const getTodayString = () => fechaLocalEcuador(new Date());
 
 const getTargetDateString = (executionDate: string): string => {
     if (!executionDate) return '';

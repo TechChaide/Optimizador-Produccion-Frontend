@@ -179,6 +179,7 @@ export default function DetallesModal({
       const payload: DetalleCalendario = {
         codigo_detalle: selectedDetalle?.codigo_detalle || 0,
         codigo_calendario: calendario.codigo_calendario || 0,
+        codigo_estacion: selectedDetalle?.codigo_estacion || 0,
         nombre_detalle: formData.nombre_detalle,
         fecha_real: fechaReal,
         fecha_inicio: fechaInicio,

@@ -15,12 +15,12 @@
 export interface DataSnapshot {
   timestamp: Date;
   source: string; // Componente que guardó los datos
-  data: any;
+  data: unknown;
   metadata?: {
     description?: string;
     rowCount?: number;
-    filters?: any;
-    [key: string]: any;
+    filters?: Record<string, unknown>;
+    [key: string]: unknown;
   };
 }
 
@@ -84,7 +84,7 @@ class DataStore {
    */
   public setData(
     key: DataKey,
-    data: any,
+    data: unknown,
     source: string,
     metadata?: DataSnapshot['metadata']
   ): void {
@@ -99,7 +99,7 @@ class DataStore {
     };
 
     // Guardar en estado actual
-    (this.state as any)[key] = snapshot;
+    this.state[key] = snapshot;
 
     // Guardar en historial (mantener últimos 10)
     if (!this.history.has(key)) {
@@ -119,7 +119,7 @@ class DataStore {
    * Obtener datos del store
    */
   public getData(key: DataKey): DataSnapshot | null {
-    return (this.state as any)[key] || null;
+    return this.state[key] || null;
   }
 
   /**
@@ -149,7 +149,12 @@ class DataStore {
     }>;
   } {
     const availableKeys: string[] = [];
-    const dataByKey: Record<string, any> = {};
+    const dataByKey: Record<string, {
+      lastUpdate: Date;
+      source: string;
+      rowCount?: number;
+      description?: string;
+    }> = {};
 
     Object.entries(this.state).forEach(([key, snapshot]) => {
       if (snapshot) {
@@ -170,7 +175,7 @@ class DataStore {
    * Limpiar un dato específico
    */
   public clearData(key: DataKey): void {
-    (this.state as any)[key] = null;
+    this.state[key] = null;
     this.notifyListeners(key, null);
   }
 
@@ -179,7 +184,7 @@ class DataStore {
    */
   public clearAll(): void {
     Object.keys(this.state).forEach(key => {
-      (this.state as any)[key] = null;
+      this.state[key] = null;
     });
     this.history.clear();
   }
@@ -187,10 +192,10 @@ class DataStore {
   /**
    * Serializar datos para almacenamiento seguro
    */
-  private serializeData(data: any): any {
+  private serializeData(data: unknown): unknown {
     try {
       if (data === null || data === undefined) return data;
-      
+
       if (typeof data === 'function') {
         return '[Function]';
       }
@@ -208,10 +213,10 @@ class DataStore {
       }
 
       if (typeof data === 'object') {
-        const serialized: any = {};
+        const serialized: Record<string, unknown> = {};
         for (const key of Object.keys(data)) {
           try {
-            serialized[key] = this.serializeData(data[key]);
+            serialized[key] = this.serializeData((data as Record<string, unknown>)[key]);
           } catch {
             serialized[key] = '[Unserializable]';
           }

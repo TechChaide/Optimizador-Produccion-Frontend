@@ -52,6 +52,11 @@ interface TurnoFormProps {
   onCancel: () => void;
 }
 
+// turnoService.save sends fecha_modificacion as a pre-formatted SQL Server
+// string (see formatDateForSQLServer above), not the `Date` declared on the
+// shared `Turno` interface.
+type TurnoSavePayload = Partial<Omit<Turno, 'fecha_modificacion'>> & { fecha_modificacion?: string };
+
 export default function TurnoForm({ record, onSuccess, onCancel }: TurnoFormProps) {
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
@@ -68,7 +73,7 @@ export default function TurnoForm({ record, onSuccess, onCancel }: TurnoFormProp
 
   const onSubmit = async (values: z.infer<typeof formSchema>) => {
     setIsLoading(true);
-    const data: any = {
+    const data: TurnoSavePayload = {
       codigo_turno: values.codigo_turno || 0,
       nombre_turno: values.nombre_turno,
       estado: values.estado,
@@ -79,7 +84,7 @@ export default function TurnoForm({ record, onSuccess, onCancel }: TurnoFormProp
     }
 
     try {
-      await turnoService.save(data);
+      await turnoService.save(data as unknown as Turno);
       toast({ title: 'Éxito', description: `Turno ${record ? 'actualizado' : 'creado'} correctamente.` });
       onSuccess();
     } catch (error) {

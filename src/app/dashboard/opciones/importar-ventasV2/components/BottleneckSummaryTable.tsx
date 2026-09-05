@@ -59,17 +59,11 @@ interface BottleneckSummaryTableProps {
 }
 
 export const BottleneckSummaryTable: React.FC<BottleneckSummaryTableProps> = ({ 
-  datosEnriquecidosE, 
+  datosEnriquecidosE,
   datosEnriquecidosX,
   datosCalculados,
-  tiemposCanon, 
-  numMaximoSabados, 
-  maxExtrasHoras, 
-  horasTrabajo, 
-  horasExtrasFin,
+  tiemposCanon,
   centroLabel = 'Centro 2000',
-  isCentro1000 = false,
-  showSaldos = false
 }) => {
   const [selectedLinea, setSelectedLinea] = useState<string>('');
   const [selectedRespCtrlProd, setSelectedRespCtrlProd] = useState<string>('');

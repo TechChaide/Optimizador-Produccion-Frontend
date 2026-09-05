@@ -63,12 +63,6 @@ export default function TurnoTable({ records, isLoading, onEdit, onAddNew }: Tur
     ))
   );
 
-  const formatDate = (d?: Date | string) => {
-    if (!d) return '-';
-    const dt = new Date(d);
-    return dt.toLocaleDateString('es-ES');
-  };
-
   return (
     <Card>
       <CardHeader className="flex items-center justify-between">

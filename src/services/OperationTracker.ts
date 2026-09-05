@@ -25,7 +25,7 @@ export interface Operation {
   type: OperationType;
   status: OperationStatus;
   description: string;
-  details?: Record<string, any>;
+  details?: Record<string, unknown>;
   duration?: number; // en milisegundos
   error?: string;
 }
@@ -64,7 +64,7 @@ class OperationTracker {
     section: string,
     type: OperationType,
     description: string,
-    details?: Record<string, any>
+    details?: Record<string, unknown>
   ): string {
     const operationId = `op-${Date.now()}-${Math.random().toString(36).substring(7)}`;
     
@@ -92,7 +92,7 @@ class OperationTracker {
     operationId: string,
     status: OperationStatus,
     description?: string,
-    details?: Record<string, any>
+    details?: Record<string, unknown>
   ): void {
     const operation = this.activeOperations.get(operationId);
     if (!operation) return;
@@ -120,7 +120,7 @@ class OperationTracker {
   public completeOperation(
     operationId: string,
     description?: string,
-    details?: Record<string, any>
+    details?: Record<string, unknown>
   ): void {
     const operation = this.activeOperations.get(operationId);
     if (!operation) return;
@@ -149,7 +149,7 @@ class OperationTracker {
   /**
    * Marcar una operación como fallida
    */
-  public failOperation(operationId: string, error: string, details?: Record<string, any>): void {
+  public failOperation(operationId: string, error: string, details?: Record<string, unknown>): void {
     const operation = this.activeOperations.get(operationId);
     if (!operation) return;
 

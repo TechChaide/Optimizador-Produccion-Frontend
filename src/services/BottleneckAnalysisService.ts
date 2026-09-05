@@ -6,26 +6,25 @@
  * Corregido para preservar el stock máximo en agregaciones de Clase F.
  */
 
-import { dataStore } from './DataStore';
-import type { TiempoCanonResult, TransferNeed } from '@/app/dashboard/opciones/importar-ventasV2/components/types';
+import type { TiempoCanonResult, TransferNeed, BottleneckDataRow } from '@/app/dashboard/opciones/importar-ventasV2/components/types';
 import { normalizeMaterialCode } from '@/app/dashboard/opciones/importar-ventasV2/components/utils';
 
 export interface Center2000Analysis {
-  filteredData: any[];
-  dataEX: any[];
-  dataF: any[];
+  filteredData: BottleneckDataRow[];
+  dataEX: BottleneckDataRow[];
+  dataF: BottleneckDataRow[];
   transferNeedsEX: TransferNeed[];
   transferNeedsF: TransferNeed[];
   transferNeedsConsolidated: TransferNeed[];
-  computedDataEX: any[];
+  computedDataEX: BottleneckDataRow[];
 }
 
 export interface Center1000Analysis {
-  filteredData: any[];
-  datosEnriquecidos: any[];
+  filteredData: BottleneckDataRow[];
+  datosEnriquecidos: BottleneckDataRow[];
   transferNeeds: TransferNeed[];
-  computedData: any[];
-  exportSheet: any[];
+  computedData: BottleneckDataRow[];
+  exportSheet: BottleneckDataRow[];
 }
 
 class BottleneckAnalysisService {
@@ -45,44 +44,45 @@ class BottleneckAnalysisService {
     return BottleneckAnalysisService.instance;
   }
 
-  private generateDataSignature(data: any[]): string {
+  private generateDataSignature(data: BottleneckDataRow[]): string {
     return `${data.length}_${data[0]?.CodMaterial || 'empty'}`;
   }
 
-  private isCacheValid(data: any[]): boolean {
+  private isCacheValid(data: BottleneckDataRow[]): boolean {
     const signature = this.generateDataSignature(data);
     return this.cache.lastDataSignature === signature;
   }
 
-  private safeNumber(v: any): number {
+  private safeNumber(v: unknown): number {
     const n = Number(v);
     return Number.isFinite(n) ? n : 0;
   }
 
-  public analyzeCenter2000(data: any[], tiemposCanon: TiempoCanonResult[]): Center2000Analysis {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public analyzeCenter2000(data: BottleneckDataRow[], tiemposCanon: TiempoCanonResult[]): Center2000Analysis {
     if (!this.isCacheValid(data)) this.clearCache();
     if (this.cache.center2000) return this.cache.center2000;
 
     const filteredData = data.filter(row => String(row.Centro || '').trim() === '2000');
-    
+
     // AGRUPACIÓN POR MATERIAL PARA EVITAR DUPLICADOS
-    const porMaterial = new Map<string, any>();
+    const porMaterial = new Map<string, BottleneckDataRow>();
     filteredData.forEach(row => {
-      const code = normalizeMaterialCode(row.CodMaterial);
+      const code = normalizeMaterialCode(row.CodMaterial ?? '');
       const mes = String(row.Mes);
       const key = `${code}|${mes}`;
-      
+
       if (!porMaterial.has(key)) {
         porMaterial.set(key, { ...row, UnidadesProyectado: 0, StockActual: 0, StockSeguridad: 0 });
       }
       const agg = porMaterial.get(key)!;
-      agg.UnidadesProyectado += this.safeNumber(row.UnidadesProyectado);
-      agg.StockActual = Math.max(agg.StockActual, this.safeNumber(row.StockActual));
-      agg.StockSeguridad = Math.max(agg.StockSeguridad, this.safeNumber(row.StockSeguridad));
+      agg.UnidadesProyectado = this.safeNumber(agg.UnidadesProyectado) + this.safeNumber(row.UnidadesProyectado);
+      agg.StockActual = Math.max(this.safeNumber(agg.StockActual), this.safeNumber(row.StockActual));
+      agg.StockSeguridad = Math.max(this.safeNumber(agg.StockSeguridad), this.safeNumber(row.StockSeguridad));
     });
 
-    const dataEX: any[] = [];
-    const dataF: any[] = [];
+    const dataEX: BottleneckDataRow[] = [];
+    const dataF: BottleneckDataRow[] = [];
     const transferNeedsF: TransferNeed[] = [];
 
     porMaterial.forEach(row => {
@@ -120,7 +120,8 @@ class BottleneckAnalysisService {
     return result;
   }
 
-  public analyzeCenter1000(data: any[], tiemposCanon: TiempoCanonResult[], traslados: TransferNeed[]): Center1000Analysis {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public analyzeCenter1000(data: BottleneckDataRow[], tiemposCanon: TiempoCanonResult[], traslados: TransferNeed[]): Center1000Analysis {
     if (!this.isCacheValid(data)) this.clearCache();
     if (this.cache.center1000) return this.cache.center1000;
 
@@ -133,19 +134,19 @@ class BottleneckAnalysisService {
     });
 
     // AGRUPACIÓN POR MATERIAL
-    const porMaterial = new Map<string, any>();
+    const porMaterial = new Map<string, BottleneckDataRow>();
     filteredData.forEach(row => {
-      const code = normalizeMaterialCode(row.CodMaterial);
+      const code = normalizeMaterialCode(row.CodMaterial ?? '');
       const mes = String(row.Mes);
       const key = `${code}|${mes}`;
-      
+
       if (!porMaterial.has(key)) {
         porMaterial.set(key, { ...row, UnidadesProyectado: 0, StockActual: 0, StockSeguridad: 0 });
       }
       const agg = porMaterial.get(key)!;
-      agg.UnidadesProyectado += this.safeNumber(row.UnidadesProyectado);
-      agg.StockActual = Math.max(agg.StockActual, this.safeNumber(row.StockActual));
-      agg.StockSeguridad = Math.max(agg.StockSeguridad, this.safeNumber(row.StockSeguridad));
+      agg.UnidadesProyectado = this.safeNumber(agg.UnidadesProyectado) + this.safeNumber(row.UnidadesProyectado);
+      agg.StockActual = Math.max(this.safeNumber(agg.StockActual), this.safeNumber(row.StockActual));
+      agg.StockSeguridad = Math.max(this.safeNumber(agg.StockSeguridad), this.safeNumber(row.StockSeguridad));
     });
 
     const result: Center1000Analysis = {

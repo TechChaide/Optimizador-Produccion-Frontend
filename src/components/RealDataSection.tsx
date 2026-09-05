@@ -4,7 +4,8 @@
 import React, { useEffect, useState } from 'react';
 import { logger } from '@/services/LogService';
 import { RealDataIcon } from '@/constants/constants';
-import { queryApi } from '@/hooks/useApiData';
+import { serviciosService } from '@/services/servicios.service';
+import { Button } from '@/components/ui/button';
 
 interface ColumnInfo {
     column_name: string;
@@ -22,13 +23,11 @@ interface Documentation {
     [sourceName: string]: SourceInfo;
 }
 
-// --- Reusable Dictionary Component ---
 interface DataDictionaryProps {
     title: string;
     sourceInfo: SourceInfo | undefined;
     isLoading: boolean;
 }
-// ...existing code...
 
 const DataDictionary: React.FC<DataDictionaryProps> = ({ title, sourceInfo, isLoading }) => {
     if (isLoading) {
@@ -64,14 +63,22 @@ const DataDictionary: React.FC<DataDictionaryProps> = ({ title, sourceInfo, isLo
                         </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
-                        {sourceInfo.columns.map(col => (
-                            <tr key={col.column_name} className="hover:bg-gray-50">
-                                <td className="px-4 py-2 whitespace-nowrap font-mono text-indigo-700">{col.column_name}</td>
-                                <td className="px-4 py-2 whitespace-nowrap text-gray-800">{col.friendly_name}</td>
-                                <td className="px-4 py-2 whitespace-normal text-gray-600">{col.description}</td>
-                                <td className="px-4 py-2 whitespace-nowrap font-mono text-gray-500">{col.sample_value || 'N/A'}</td>
+                        {Array.isArray(sourceInfo.columns) && sourceInfo.columns.length > 0 ? (
+                            sourceInfo.columns.map(col => (
+                                <tr key={col.column_name} className="hover:bg-gray-50">
+                                    <td className="px-4 py-2 whitespace-nowrap font-mono text-indigo-700">{col.column_name}</td>
+                                    <td className="px-4 py-2 whitespace-nowrap text-gray-800">{col.friendly_name}</td>
+                                    <td className="px-4 py-2 whitespace-normal text-gray-600">{col.description}</td>
+                                    <td className="px-4 py-2 whitespace-nowrap font-mono text-gray-500">{col.sample_value || 'N/A'}</td>
+                                </tr>
+                            ))
+                        ) : (
+                            <tr>
+                                <td colSpan={4} className="px-4 py-8 text-center text-gray-500 italic">
+                                    Información de columnas no disponible para esta tabla.
+                                </td>
                             </tr>
-                        ))}
+                        )}
                     </tbody>
                 </table>
             </div>
@@ -79,29 +86,26 @@ const DataDictionary: React.FC<DataDictionaryProps> = ({ title, sourceInfo, isLo
     );
 };
 
-
 export const RealDataSection: React.FC = () => {
-        useEffect(() => {
-            logger.log(`\n--------------------------------------------------\n##################################\n--------------------------------------------------\n[RealDataSection] Montado.`);
-        }, []);
     const [documentation, setDocumentation] = useState<Documentation | null>(null);
     const [isLoading, setIsLoading] = useState<boolean>(true);
-    const [error, setError] = useState<Error | null>(null);
+    const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
+        logger.log(`\n--------------------------------------------------\n[RealDataSection] Montado.`);
         const fetchDocumentation = async () => {
             setIsLoading(true);
             setError(null);
             try {
-                const docData = await queryApi({ operation: 'get_documentation' });
-                setDocumentation(docData);
+                const response = await serviciosService.getDiccionarioDeDatos();
+                const data = response?.data || response;
+                setDocumentation(data && typeof data === 'object' ? data : null);
             } catch (err) {
-                setError(err as Error);
+                setError((err as Error).message);
             } finally {
                 setIsLoading(false);
             }
         };
-
         fetchDocumentation();
     }, []);
 
@@ -116,22 +120,35 @@ export const RealDataSection: React.FC = () => {
             
             <p className="text-gray-600 text-sm">
                 Esta sección muestra los esquemas de las fuentes de datos disponibles directamente desde la API. Cada tabla lista las columnas que se pueden consultar, su descripción y su nombre técnico.
-                Utiliza esta información para entender la estructura de datos al solicitar cambios en la aplicación.
             </p>
 
-            {isLoading && <p className="text-gray-500 animate-pulse text-center">Cargando documentación de la API...</p>}
-            {error && <p className="text-red-500 text-center">Error al cargar la documentación: {error.message}</p>}
+            {isLoading && <p className="text-gray-500 animate-pulse text-center py-20">Consultando Diccionario de Fuentes...</p>}
+            {error && (
+              <div className="bg-red-50 border border-red-200 p-6 rounded-xl text-center">
+                <p className="text-red-600 font-semibold">Error al cargar la documentación</p>
+                <p className="text-red-500 text-sm mt-2">{error}</p>
+                <Button onClick={() => window.location.reload()} className="mt-4" variant="outline">Reintentar</Button>
+              </div>
+            )}
             
-            <div className="space-y-8">
-                {dataSources.map(sourceName => (
-                    <DataDictionary
-                        key={sourceName}
-                        title={`Tabla: ${sourceName}`}
-                        sourceInfo={documentation?.[sourceName]}
-                        isLoading={false}
-                    />
-                ))}
-            </div>
+            {!isLoading && !error && (
+              <div className="space-y-8">
+                  {dataSources.length > 0 ? (
+                      dataSources.map(sourceName => (
+                          <DataDictionary
+                              key={sourceName}
+                              title={`Tabla: ${sourceName}`}
+                              sourceInfo={documentation?.[sourceName]}
+                              isLoading={false}
+                          />
+                      ))
+                  ) : (
+                      <div className="text-center py-20 text-gray-500">
+                          No se cargaron fuentes de datos del diccionario.
+                      </div>
+                  )}
+              </div>
+            )}
         </div>
     );
 };

@@ -72,7 +72,7 @@ export default function GrupoTable({ records, isLoading, onEdit, onAddNew, onMan
     { codigo: 2000, nombre: 'Guayaquil', Icon: TreePalm },
   ];
 
-  const resolveCentro = (codigoOrValue?: any) => {
+  const resolveCentro = (codigoOrValue?: string | number) => {
     if (codigoOrValue == null) return null;
     const codigo = Number(codigoOrValue);
     const c = CENTROS.find(x => x.codigo === codigo);

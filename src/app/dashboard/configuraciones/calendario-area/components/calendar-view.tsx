@@ -362,7 +362,7 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
                   <div className="mt-1 space-y-0.5 text-[10px]">
                     {nonFeriadoDetails.slice(0, 2).map((detail, idx) => (
                       <div
-                        key={`${detail.codigo_detalle_calendario}-${idx}`}
+                        key={`${detail.codigo_detalle}-${idx}`}
                         className="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded truncate"
                         title={detail.nombre_detalle}
                       >

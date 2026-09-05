@@ -246,4 +246,3 @@ export const InventorySummarySection: React.FC = () => {
         </div>
     );
 };
-

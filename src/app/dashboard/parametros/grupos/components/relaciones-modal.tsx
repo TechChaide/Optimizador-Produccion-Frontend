@@ -39,7 +39,7 @@ import { lineaService } from '@/services/linea.service';
 import { estacionService } from '@/services/estacion.service';
 import type { Linea, Estacion, Grupo } from '@/types/interfaces';
 import { z } from 'zod';
-import { useForm } from 'react-hook-form';
+import { useForm, type UseFormReturn } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 
 interface RelacionesModalProps {
@@ -68,6 +68,13 @@ const estacionFormSchema = z.object({
   numero_puestos: z.number().min(1, 'El número de puestos debe ser mayor a 0.'),
   estado: z.string().min(1, 'El estado es requerido.'),
 });
+
+// linea/estacionService.save send fecha_modificacion as a pre-formatted SQL
+// Server string (see formatDateForSQLServer below), not the `Date` declared on
+// the shared `Linea`/`Estacion` interfaces, and codigo_linea is only included
+// when editing an existing line.
+type LineaSavePayload = Partial<Omit<Linea, 'fecha_modificacion'>> & { fecha_modificacion?: string };
+type EstacionSavePayload = Partial<Omit<Estacion, 'fecha_modificacion'>> & { fecha_modificacion?: string };
 
 const formatDateForSQLServer = (date: Date): string => {
   const pad = (n: number) => n.toString().padStart(2, '0');
@@ -106,7 +113,7 @@ function agruparEstaciones(estaciones: Estacion[]): EstacionAgrupada[] {
   
   // Procesar cada grupo
   const agrupadas: EstacionAgrupada[] = [];
-  grupos.forEach((estacionesDelGrupo, key) => {
+  grupos.forEach((estacionesDelGrupo) => {
     // Ordenar por codigo_estacion
     estacionesDelGrupo.sort((a, b) => a.codigo_estacion - b.codigo_estacion);
     
@@ -242,7 +249,7 @@ export default function RelacionesModal({
     if (!grupo) return;
     setIsLoading(true);
     try {
-      const data: any = {
+      const data: LineaSavePayload = {
         codigo_grupo: grupo.codigo_grupo,
         nombre_linea: values.nombre_linea,
         estado: values.estado,
@@ -254,7 +261,7 @@ export default function RelacionesModal({
       data.usuario_modificacion = user?.name || 'admin';
       data.fecha_modificacion = formatDateForSQLServer(new Date());
 
-      await lineaService.save(data);
+      await lineaService.save(data as unknown as Linea);
       toast({
         title: 'Éxito',
         description: `Línea ${selectedLinea ? 'actualizada' : 'creada'} correctamente.`,
@@ -275,7 +282,7 @@ export default function RelacionesModal({
   const onEstacionSubmit = async (values: z.infer<typeof estacionFormSchema>) => {
     setIsLoading(true);
     try {
-      const data: any = {
+      const data: EstacionSavePayload = {
         codigo_estacion: 0,
         codigo_linea: Number(values.codigo_linea),
         nombre_estacion: values.nombre_estacion,
@@ -286,7 +293,7 @@ export default function RelacionesModal({
       data.usuario_modificacion = user?.name || 'admin';
       data.fecha_modificacion = formatDateForSQLServer(new Date());
 
-      await estacionService.save(data);
+      await estacionService.save(data as unknown as Estacion);
       toast({
         title: 'Éxito',
         description: `Estación ${selectedEstacion ? 'actualizada' : 'creada'} correctamente.`,
@@ -551,7 +558,7 @@ function LineaTableRows({
 }
 
 interface LineaFormProps {
-  form: any;
+  form: UseFormReturn<z.infer<typeof lineaFormSchema>>;
   onSubmit: (values: z.infer<typeof lineaFormSchema>) => Promise<void>;
   isLoading: boolean;
   selectedLinea: Linea | null;
@@ -746,7 +753,7 @@ function EstacionTableRows({
 }
 
 interface EstacionFormProps {
-  form: any;
+  form: UseFormReturn<z.infer<typeof estacionFormSchema>>;
   onSubmit: (values: z.infer<typeof estacionFormSchema>) => Promise<void>;
   isLoading: boolean;
   selectedEstacion: Estacion | null;

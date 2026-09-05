@@ -1,11 +1,9 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { logger } from '@/services/LogService';
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, PieChart, Pie, Cell, LineChart, Line, ScatterChart, Scatter } from 'recharts';
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, PieChart, Pie, LineChart, Line, ScatterChart, Scatter } from 'recharts';
 import { ProductionPlanItem, SalesDataRow, AppConstraints, ChartDataItem, Holiday } from '@/types/types';
 import { DashboardIcon, MONTH_NAMES } from '@/constants/constants';
-import { useAppContext } from '@/context/AppProvider';
 
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8', '#82Ca9D'];
 const getDayTypeForProduction = (date: Date, holidays: Holiday[]): 'Weekday' | 'Saturday' | 'Sunday' | 'ProductiveHoliday' | 'NonProductiveHoliday' => {
     const yyyyMmDd = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const holidayInfo = holidays.find(h => h.date === yyyyMmDd);
@@ -28,7 +26,6 @@ interface InteractiveAreaData {
 }
 
 export const DashboardSection: React.FC<{ plan: ProductionPlanItem[]; salesData: SalesDataRow[]; constraints: AppConstraints; }> = ({ plan, salesData, constraints }) => {
-  const [interactiveAreaContent, setInteractiveAreaContent] = useState<string>('');
   const [interactiveAreaData, setInteractiveAreaData] = useState<InteractiveAreaData>({
     barChartData: [],
     pieChartData: [],
@@ -51,10 +48,6 @@ export const DashboardSection: React.FC<{ plan: ProductionPlanItem[]; salesData:
   useEffect(() => {
     localStorage.setItem('interactiveAreaData', JSON.stringify(interactiveAreaData));
   }, [interactiveAreaData]);
-
-  const handleContentChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInteractiveAreaContent(event.target.value);
-  };
 
   const handleGenerateCharts = () => {
     // Simulación de datos para gráficos

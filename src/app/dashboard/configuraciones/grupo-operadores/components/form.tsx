@@ -1,34 +1,34 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { operadorService } from '@/services/operador.service';
-import type { Operador } from '@/types/interfaces';
+import type { Operador, Grupo, Calendario, Restriccion, TipoDetalle, User } from '@/types/interfaces';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 
 interface GrupoOperadorFormProps {
   record: Operador | null;
-  usuarios: any[];
+  usuarios: User[];
   operadorRecords: Operador[];
   onSuccess: () => void;
   onCancel: () => void;
-  grupos?: any[];
-  calendarios?: any[];
-  restricciones?: any[];
-  tiposDetalle?: any[];
+  grupos?: Grupo[];
+  calendarios?: Calendario[];
+  restricciones?: Restriccion[];
+  tiposDetalle?: TipoDetalle[];
 }
 
 interface OperadorAgrupado {
   departamento: string;
   grupoDepartamento: string;
-  operadores: any[];
+  operadores: User[];
 }
 
-const agruparOperadores = (usuarios: any[]): OperadorAgrupado[] => {
-  const grupos = new Map<string, Map<string, any[]>>();
+const agruparOperadores = (usuarios: User[]): OperadorAgrupado[] => {
+  const grupos = new Map<string, Map<string, User[]>>();
   
   usuarios.forEach((u) => {
     const grupoDept = u.GRUPO_DEPARTAMENTO || 'Sin Grupo';
@@ -70,7 +70,6 @@ const agruparOperadores = (usuarios: any[]): OperadorAgrupado[] => {
 export default function GrupoOperadorForm({
   record,
   usuarios,
-  operadorRecords,
   onSuccess,
   onCancel,
 }: Readonly<GrupoOperadorFormProps>) {
@@ -178,7 +177,7 @@ export default function GrupoOperadorForm({
                   >
                     {(() => {
                       const hasSelected = grupo.operadores.some((op) =>
-                        selectedOperadores.includes(op.CODIGO)
+                        selectedOperadores.includes(op.CODIGO ?? '')
                       );
                       return (
                         <button
@@ -211,32 +210,32 @@ export default function GrupoOperadorForm({
                           <label
                             key={op.CODIGO}
                             className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors ${
-                              selectedOperadores.includes(op.CODIGO)
+                              selectedOperadores.includes(op.CODIGO ?? '')
                                 ? 'bg-green-100 border-l-4 border-green-500'
                                 : 'hover:bg-gray-50'
                             }`}
                           >
                             <Checkbox
-                              checked={selectedOperadores.includes(op.CODIGO)}
-                              onCheckedChange={() => toggleOperador(op.CODIGO)}
+                              checked={selectedOperadores.includes(op.CODIGO ?? '')}
+                              onCheckedChange={() => toggleOperador(op.CODIGO ?? '')}
                               disabled={isLoading}
                               className={`${
-                                selectedOperadores.includes(op.CODIGO)
+                                selectedOperadores.includes(op.CODIGO ?? '')
                                   ? 'border-green-500 data-[state=checked]:bg-green-500'
                                   : ''
                               }`}
                             />
                             <div className="flex-1">
-                              <div className={`text-sm font-medium ${selectedOperadores.includes(op.CODIGO) ? 'text-green-700' : 'text-gray-900'}`}>
+                              <div className={`text-sm font-medium ${selectedOperadores.includes(op.CODIGO ?? '') ? 'text-green-700' : 'text-gray-900'}`}>
                                 {op.NOMBRE}
                               </div>
-                              <div className={`text-xs ${selectedOperadores.includes(op.CODIGO) ? 'text-green-600' : 'text-gray-500'}`}>
+                              <div className={`text-xs ${selectedOperadores.includes(op.CODIGO ?? '') ? 'text-green-600' : 'text-gray-500'}`}>
                                 {op.CODIGO} • {op.CARGO}
                               </div>
                             </div>
                           </label>
                         ))}
-                        {grupo.operadores.some((op) => selectedOperadores.includes(op.CODIGO)) && (
+                        {grupo.operadores.some((op) => selectedOperadores.includes(op.CODIGO ?? '')) && (
                           <div className="flex justify-center pt-1">
                             <div className="w-2 h-2 rounded-full bg-green-400 opacity-50"></div>
                           </div>
@@ -252,7 +251,7 @@ export default function GrupoOperadorForm({
                 <span className="font-semibold">Seleccionados: </span>
                 {operadoresAgrupados
                   .flatMap((grupo) => grupo.operadores)
-                  .filter((op) => selectedOperadores.includes(op.CODIGO))
+                  .filter((op) => selectedOperadores.includes(op.CODIGO ?? ''))
                   .map((op) => op.NOMBRE)
                   .join(', ')}
               </div>

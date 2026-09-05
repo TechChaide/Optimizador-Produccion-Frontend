@@ -28,7 +28,7 @@ export const ecuadorHolidaysService = {
       // La API de Nager.Date devuelve `localName` (nombre en idioma local)
       // y `name` (nombre en inglés). Preferimos `localName` para mostrar
       // los feriados en español cuando esté disponible.
-      return data.map((holiday: any) => ({
+      return data.map((holiday: { date: string; localName?: string; name: string }) => ({
         date: holiday.date,
         name: holiday.localName || holiday.name,
         type: 'feriado',
@@ -177,13 +177,4 @@ function getEasterDateComponents(year: number): { month: number; day: number } {
   const day = ((h + l - 7 * m + 114) % 31) + 1;
   
   return { month, day };
-}
-
-/**
- * Algoritmo de Computus para calcular la fecha de Pascua
- * (Domingo de Resurrección)
- */
-function getEasterDate(year: number): Date {
-  const { month, day } = getEasterDateComponents(year);
-  return new Date(year, month - 1, day);
 }

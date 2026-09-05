@@ -2,6 +2,7 @@
 'use server';
 
 import { dataStore } from '@/services/DataStore';
+import type { DataSnapshot } from '@/services/DataStore';
 
 /**
  * Server Actions para sincronizar el DataStore entre cliente y servidor
@@ -9,9 +10,9 @@ import { dataStore } from '@/services/DataStore';
 
 export async function syncDataToStore(
   key: string,
-  data: any,
+  data: unknown,
   source: string,
-  metadata?: any
+  metadata?: DataSnapshot['metadata']
 ) {
   try {
     dataStore.setData(key, data, source, metadata);

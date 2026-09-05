@@ -2,14 +2,12 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { logger } from '@/services/LogService';
-import { operationTracker } from '@/services/OperationTracker';
 import { useRuntimeInspector } from '@/services/RuntimeInspector';
-import { 
-    ProductionPlan, AppConstraints, WorkCenter, ProductionLine, 
-    PlanningGroupMonthlyDetail, MonthlyNeed, MonthlyAssignment, DetailedProductionPlan, SalesDataRow, ProductionPlanItem, ProcessType, WeeklyPlanItem, MonthlyProductionPlanItem, DemandAnalysisResult, Holiday 
+import {
+    MonthlyProductionPlanItem
 } from '@/types/types';
-import { PlanIcon, DataImportIcon, MONTH_NAMES, PROCESS_TYPE_OPTIONS } from '@/constants/constants';
-import { exportDailyPlanToExcel, exportMonthlyPlanToExcel, analyzeSalesDemand, getLineCapacity, exportDailyPlanByLineToExcel } from '@/services/OptimizationService';
+import { PlanIcon, MONTH_NAMES } from '@/constants/constants';
+import { exportMonthlyPlanToExcel, analyzeSalesDemand, getLineCapacity, exportDailyPlanByLineToExcel } from '@/services/OptimizationService';
 import { Button } from '@/components/ui/button';
 import { useAppContext } from '@/context/AppProvider';
 import { Loader2, Check, ChevronsUpDown, Download } from 'lucide-react';
@@ -18,9 +16,6 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from '@/components/ui/command';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
-import { Checkbox } from '@/components/ui/checkbox';
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 
 // --- Reusable MultiSelect Component ---
@@ -249,7 +244,7 @@ export const ProductionPlanSection: React.FC = () => {
   const isDataSynced = syncStatus?.isSynced || false;
   
   // State for inventory filters
-  const [inventoryFilterOptions, setInventoryFilterOptions] = useState<{ centros: string[], sectores: string[] }>({ centros: [], sectores: [] });
+  const [, setInventoryFilterOptions] = useState<{ centros: string[], sectores: string[] }>({ centros: [], sectores: [] });
   const [selectedInventoryCentros, setSelectedInventoryCentros] = useState<string[]>([]);
   const [selectedInventorySectores, setSelectedInventorySectores] = useState<string[]>([]);
 
@@ -276,7 +271,7 @@ export const ProductionPlanSection: React.FC = () => {
     });
   }, [isDataSynced, isLoading, planningStep, productionPlan, salesData, demandAnalysis, inspector]);
   
-  const { monthlyPlan = [], dailyPlan = [] } = productionPlan || { monthlyPlan: [], dailyPlan: [] };
+  const { monthlyPlan = [] } = productionPlan || { monthlyPlan: [] };
 
   // ----- BEGIN: State and Logic for Results Filtering -----
   const [resultsFilterOptions, setResultsFilterOptions] = useState<{
@@ -356,7 +351,7 @@ export const ProductionPlanSection: React.FC = () => {
         dailyPlanFirstMonth = productionPlan.dailyPlan.filter(item => item.year === firstMonth.year && item.month === firstMonth.month);
     }
     
-    let filteredItems = dailyPlanFirstMonth.filter(item => {
+    const filteredItems = dailyPlanFirstMonth.filter(item => {
       const centroMatch = selectedResultsFilters.centros.length === 0 || 
                           selectedResultsFilters.centros.includes(item.producingCenterId || '');
       const lineaMatch = selectedResultsFilters.lineas.length === 0 || 
@@ -532,7 +527,7 @@ export const ProductionPlanSection: React.FC = () => {
             <div className="p-4 border border-yellow-300 bg-yellow-50 rounded-lg">
                 <h4 className="text-md font-semibold text-yellow-800">⚠️ Alerta: Materiales Fabricables sin Clase de Aprovisionamiento</h4>
                 <p className="text-xs text-yellow-700 mt-1 mb-3">
-                    Los siguientes materiales (código inicia con '3' o '4') no tienen una regla de aprovisionamiento ('E', 'F', 'X') definida en `CuboInventarios` y no podrán ser planificados. Esto puede indicar un error en los datos maestros. Los productos comprados (que no inician con 3 o 4) son omitidos correctamente.
+                    Los siguientes materiales (código inicia con &apos;3&apos; o &apos;4&apos;) no tienen una regla de aprovisionamiento (&apos;E&apos;, &apos;F&apos;, &apos;X&apos;) definida en `CuboInventarios` y no podrán ser planificados. Esto puede indicar un error en los datos maestros. Los productos comprados (que no inician con 3 o 4) son omitidos correctamente.
                 </p>
                 <div className="overflow-auto max-h-48 border rounded-md bg-white">
                     <table className="min-w-full text-xs divide-y divide-gray-200">
@@ -608,7 +603,7 @@ export const ProductionPlanSection: React.FC = () => {
                             </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
-                            {productionNeedsFirstMonth.map((item, index) => (
+                            {productionNeedsFirstMonth.map((item) => (
                                 <tr key={`need-${item.producingCenterId}-${item.sector}-${item.claseAprovisionamiento}`} className="hover:bg-gray-50">
                                     <td className="px-3 py-2">{item.producingCenterId}</td>
                                     <td className="px-3 py-2">{item.sector}</td>
@@ -654,7 +649,7 @@ export const ProductionPlanSection: React.FC = () => {
             <div className="space-y-6">
                 <h3 className="text-lg font-semibold text-gray-800">Paso 3: Plan de Producción Mensual (Factible)</h3>
                 <p className="text-sm text-gray-600">
-                    Esta tabla muestra el plan de producción mensual final después de balancear la carga y respetar las restricciones de capacidad. Compare la columna "Producción" con la "Demanda" para ver los ajustes realizados por el motor.
+                    Esta tabla muestra el plan de producción mensual final después de balancear la carga y respetar las restricciones de capacidad. Compare la columna &quot;Producción&quot; con la &quot;Demanda&quot; para ver los ajustes realizados por el motor.
                 </p>
 
                 <div className="bg-white p-6 rounded-xl shadow-lg mt-4">

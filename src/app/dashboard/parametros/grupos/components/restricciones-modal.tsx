@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useState, useEffect, useCallback } from 'react';
@@ -29,12 +30,19 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { MoreHorizontal, Edit, Plus, Trash, Lock } from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { MoreHorizontal, Edit, Plus, Trash, Lock, Copy } from 'lucide-react';
 import { restriccionService } from '@/services/restriccion.service';
 import { grupoService } from '@/services/grupo.service';
 import type { Restriccion, Grupo } from '@/types/interfaces';
 import { z } from 'zod';
-import { useForm } from 'react-hook-form';
+import { useForm, type UseFormReturn } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 
 interface RestriccionesModalProps {
@@ -63,16 +71,25 @@ const formatDateForSQLServer = (date: Date): string => {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${ms}`;
 };
 
+// restriccionService.save sends fecha_modificacion as a pre-formatted SQL
+// Server string (see formatDateForSQLServer above), not the `Date` declared on
+// the shared `Restriccion` interface, and codigo_restriccion is only included
+// when editing/forcing a specific record.
+type RestriccionSavePayload = Partial<Omit<Restriccion, 'fecha_modificacion'>> & { fecha_modificacion?: string };
+
 export default function RestriccionesModal({
   grupo,
   isOpen,
   onClose,
 }: Readonly<RestriccionesModalProps>) {
   const [restricciones, setRestricciones] = useState<Restriccion[]>([]);
+  const [allGrupos, setAllGrupos] = useState<Grupo[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [isCopyModeOpen, setIsCopyModeOpen] = useState(false);
   const [selectedRestriccion, setSelectedRestriccion] = useState<Restriccion | null>(null);
   const [filter, setFilter] = useState('');
+  const [sourceGroupId, setSourceGroupId] = useState<string>('');
   const { toast } = useToast();
   const user = globalThis.window
     ? JSON.parse(globalThis.window.localStorage.getItem('user') || '{}')
@@ -105,14 +122,26 @@ export default function RestriccionesModal({
     }
   }, [grupo, toast]);
 
+  const fetchGrupos = useCallback(async () => {
+    try {
+      const response = await grupoService.getAll();
+      setAllGrupos(response.data || []);
+    } catch (error) {
+      console.error('Error fetching groups:', error);
+    }
+  }, []);
+
   useEffect(() => {
     if (isOpen && grupo) {
       fetchRestricciones();
+      fetchGrupos();
       form.reset();
       setSelectedRestriccion(null);
       setIsFormOpen(false);
+      setIsCopyModeOpen(false);
+      setSourceGroupId('');
     }
-  }, [isOpen, grupo, fetchRestricciones, form]);
+  }, [isOpen, grupo, fetchRestricciones, fetchGrupos, form]);
 
   const handleEditRestriccion = (restriccion: Restriccion) => {
     setSelectedRestriccion(restriccion);
@@ -142,16 +171,9 @@ export default function RestriccionesModal({
     setIsLoading(true);
     try {
       if (values.aplicarATodos && !selectedRestriccion) {
-        // Obtener todos los grupos
-        const gruposResponse = await grupoService.getAll();
-        const grupos = gruposResponse.data || [];
-
         const timestamp = formatDateForSQLServer(new Date());
-        const createdCount = grupos.length;
-
-        // Crear restricción para cada grupo
-        for (const g of grupos) {
-          const data: any = {
+        for (const g of allGrupos) {
+          const data: RestriccionSavePayload = {
             codigo_grupo: g.codigo_grupo,
             nombre_restriccion: values.nombre_restriccion,
             valor_restriccion: values.valor_restriccion,
@@ -160,15 +182,15 @@ export default function RestriccionesModal({
             usuario_modificacion: user?.name || 'admin',
             fecha_modificacion: timestamp,
           };
-          await restriccionService.save(data);
+          await restriccionService.save(data as unknown as Restriccion);
         }
 
         toast({
           title: 'Éxito',
-          description: `Restricción creada en ${createdCount} grupo(s) correctamente.`,
+          description: `Restricción creada en ${allGrupos.length} grupo(s) correctamente.`,
         });
       } else {
-        const data: any = {
+        const data: RestriccionSavePayload = {
           codigo_grupo: grupo.codigo_grupo,
           nombre_restriccion: values.nombre_restriccion,
           valor_restriccion: values.valor_restriccion,
@@ -182,7 +204,7 @@ export default function RestriccionesModal({
         data.usuario_modificacion = user?.name || 'admin';
         data.fecha_modificacion = formatDateForSQLServer(new Date());
 
-        await restriccionService.save(data);
+        await restriccionService.save(data as unknown as Restriccion);
         toast({
           title: 'Éxito',
           description: `Restricción ${selectedRestriccion ? 'actualizada' : 'creada'} correctamente.`,
@@ -195,6 +217,63 @@ export default function RestriccionesModal({
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Ocurrió un error inesperado.';
       toast({ title: 'Error al guardar', description: errorMessage, variant: 'destructive' });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCopyRestrictions = async () => {
+    if (!grupo || !sourceGroupId) return;
+    
+    setIsLoading(true);
+    try {
+      const sourceId = Number(sourceGroupId);
+      const response = await restriccionService.getAll();
+      const allRestrictions = response.data || [];
+      
+      const sourceRestrictions = allRestrictions.filter(r => r.codigo_grupo === sourceId);
+      
+      if (sourceRestrictions.length === 0) {
+        toast({ 
+          title: 'Aviso', 
+          description: 'El grupo seleccionado no tiene restricciones para copiar.',
+          variant: 'default'
+        });
+        setIsLoading(false);
+        return;
+      }
+
+      const timestamp = formatDateForSQLServer(new Date());
+      const username = user?.name || 'admin';
+
+      // Copy each restriction
+      let count = 0;
+      for (const r of sourceRestrictions) {
+        const payload: RestriccionSavePayload = {
+          codigo_restriccion: 0, // Force new record
+          codigo_grupo: grupo.codigo_grupo,
+          nombre_restriccion: r.nombre_restriccion,
+          valor_restriccion: r.valor_restriccion,
+          descripcion: r.descripcion,
+          estado: r.estado,
+          usuario_modificacion: username,
+          fecha_modificacion: timestamp,
+        };
+        await restriccionService.save(payload as unknown as Restriccion);
+        count++;
+      }
+
+      toast({ 
+        title: 'Éxito', 
+        description: `Se han copiado ${count} restricciones correctamente.` 
+      });
+      
+      setIsCopyModeOpen(false);
+      setSourceGroupId('');
+      await fetchRestricciones();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Error al copiar restricciones';
+      toast({ title: 'Error', description: errorMessage, variant: 'destructive' });
     } finally {
       setIsLoading(false);
     }
@@ -239,14 +318,6 @@ export default function RestriccionesModal({
     );
   });
 
-  const getButtonLabel = (): string => {
-    if (isLoading) return 'Guardando...';
-    if (selectedRestriccion) return 'Actualizar';
-    return 'Guardar';
-  };
-
-  const buttonLabel = getButtonLabel();
-
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
@@ -264,13 +335,56 @@ export default function RestriccionesModal({
             onSubmit={onSubmit}
             isLoading={isLoading}
             selectedRestriccion={selectedRestriccion}
-            buttonLabel={buttonLabel}
             onCancel={() => {
               setIsFormOpen(false);
               setSelectedRestriccion(null);
               form.reset();
             }}
           />
+        ) : isCopyModeOpen ? (
+          <div className="space-y-6 py-4">
+            <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <h4 className="font-semibold text-blue-900 mb-1 flex items-center gap-2">
+                <Copy className="h-4 w-4" />
+                Importar Restricciones
+              </h4>
+              <p className="text-sm text-blue-800">
+                Selecciona un grupo para copiar todas sus restricciones hacia <strong>{grupo?.nombre_grupo}</strong>.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-gray-700">Grupo de Origen</label>
+              <Select value={sourceGroupId} onValueChange={setSourceGroupId}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Seleccione un grupo..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {allGrupos
+                    .filter(g => g.codigo_grupo !== grupo?.codigo_grupo)
+                    .map(g => (
+                      <SelectItem key={g.codigo_grupo} value={String(g.codigo_grupo)}>
+                        {g.nombre_grupo} ({g.centro})
+                      </SelectItem>
+                    ))
+                  }
+                </SelectContent>
+              </Select>
+            </div>
+
+            <DialogFooter className="gap-2">
+              <Button variant="outline" onClick={() => setIsCopyModeOpen(false)} disabled={isLoading}>
+                Cancelar
+              </Button>
+              <Button 
+                onClick={handleCopyRestrictions} 
+                disabled={isLoading || !sourceGroupId}
+                className="bg-blue-600 hover:bg-blue-700"
+              >
+                {isLoading ? 'Copiando...' : 'Confirmar Copia'}
+              </Button>
+            </DialogFooter>
+          </div>
         ) : (
           <RestrictionsList
             filteredRestricciones={filteredRestricciones}
@@ -281,6 +395,7 @@ export default function RestriccionesModal({
             onDelete={handleDelete}
             onReplicate={handleReplicarRestriccion}
             onAddNew={handleAddNew}
+            onOpenCopy={() => setIsCopyModeOpen(true)}
             onClose={onClose}
           />
         )}
@@ -298,6 +413,7 @@ interface RestrictionListProps {
   onDelete: (restriccion: Restriccion) => Promise<void>;
   onReplicate: (restriccion: Restriccion) => Promise<void>;
   onAddNew: () => void;
+  onOpenCopy: () => void;
   onClose: () => void;
 }
 
@@ -310,6 +426,7 @@ function RestrictionsList({
   onDelete,
   onReplicate,
   onAddNew,
+  onOpenCopy,
   onClose,
 }: Readonly<RestrictionListProps>) {
   return (
@@ -321,10 +438,16 @@ function RestrictionsList({
           onChange={(e) => onFilterChange(e.target.value)}
           className="flex-1"
         />
-        <Button onClick={onAddNew} disabled={isLoading}>
-          <Plus className="mr-2 h-4 w-4" />
-          Agregar
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={onOpenCopy} disabled={isLoading} className="flex items-center gap-2">
+            <Copy className="h-4 w-4" />
+            Copiar de otro Grupo
+          </Button>
+          <Button onClick={onAddNew} disabled={isLoading} className="flex items-center gap-2">
+            <Plus className="h-4 w-4" />
+            Agregar
+          </Button>
+        </div>
       </div>
 
       <Card>
@@ -341,15 +464,58 @@ function RestrictionsList({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {isLoading && <LoadingRow />}
-                {!isLoading && filteredRestricciones.length === 0 && <EmptyRow />}
+                {isLoading && (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center h-24">Cargando...</TableCell>
+                  </TableRow>
+                )}
+                {!isLoading && filteredRestricciones.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center h-24 text-gray-500">No se encontraron restricciones.</TableCell>
+                  </TableRow>
+                )}
                 {!isLoading && filteredRestricciones.length > 0 && (
-                  <RestrictionTableRows
-                    restricciones={filteredRestricciones}
-                    onEdit={onEdit}
-                    onDelete={onDelete}
-                    onReplicate={onReplicate}
-                  />
+                  filteredRestricciones.map((restriccion) => (
+                    <TableRow key={restriccion.codigo_restriccion}>
+                      <TableCell className="font-medium">{restriccion.nombre_restriccion}</TableCell>
+                      <TableCell>
+                        <Badge variant="secondary" className="font-mono">{restriccion.valor_restriccion}</Badge>
+                      </TableCell>
+                      <TableCell className="max-w-xs truncate">{restriccion.descripcion || '-'}</TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={restriccion.estado === 'A' ? 'default' : 'destructive'}
+                          className={restriccion.estado === 'A' ? 'bg-green-600' : ''}
+                        >
+                          {restriccion.estado === 'A' ? 'Activo' : 'Inactivo'}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" className="h-8 w-8 p-0">
+                              <span className="sr-only">Abrir menú</span>
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => onEdit(restriccion)}>
+                              <Edit className="mr-2 h-4 w-4" />
+                              Editar
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => onReplicate(restriccion)}>
+                              <Plus className="mr-2 h-4 w-4" />
+                              Replicar
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => onDelete(restriccion)} className="text-red-600">
+                              <Trash className="mr-2 h-4 w-4" />
+                              Eliminar
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>
+                  ))
                 )}
               </TableBody>
             </Table>
@@ -366,70 +532,11 @@ function RestrictionsList({
   );
 }
 
-interface RestrictionTableRowsProps {
-  restricciones: Restriccion[];
-  onEdit: (restriccion: Restriccion) => void;
-  onDelete: (restriccion: Restriccion) => Promise<void>;
-  onReplicate: (restriccion: Restriccion) => Promise<void> | void;
-}
-
-function RestrictionTableRows({
-  restricciones,
-  onEdit,
-  onDelete,
-  onReplicate,
-}: Readonly<RestrictionTableRowsProps>) {
-  return (
-    <>
-      {restricciones.map((restriccion) => (
-        <TableRow key={restriccion.codigo_restriccion}>
-          <TableCell className="font-medium">{restriccion.nombre_restriccion}</TableCell>
-          <TableCell>{restriccion.valor_restriccion}</TableCell>
-          <TableCell className="max-w-xs truncate">{restriccion.descripcion || '-'}</TableCell>
-          <TableCell>
-            <Badge
-              variant={restriccion.estado === 'A' ? 'default' : 'destructive'}
-              className={restriccion.estado === 'A' ? 'bg-green-600' : ''}
-            >
-              {restriccion.estado === 'A' ? 'Activo' : 'Inactivo'}
-            </Badge>
-          </TableCell>
-          <TableCell className="text-right">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className="h-8 w-8 p-0">
-                  <span className="sr-only">Abrir menú</span>
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => onEdit(restriccion)}>
-                  <Edit className="mr-2 h-4 w-4" />
-                  Editar
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onReplicate(restriccion)}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  Replicar
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onDelete(restriccion)} className="text-red-600">
-                  <Trash className="mr-2 h-4 w-4" />
-                  Eliminar
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </TableCell>
-        </TableRow>
-      ))}
-    </>
-  );
-}
-
 interface RestrictionFormProps {
-  form: any;
+  form: UseFormReturn<z.infer<typeof formSchema>>;
   onSubmit: (values: z.infer<typeof formSchema>) => Promise<void>;
   isLoading: boolean;
   selectedRestriccion: Restriccion | null;
-  buttonLabel: string;
   onCancel: () => void;
 }
 
@@ -438,7 +545,6 @@ function RestrictionForm({
   onSubmit,
   isLoading,
   selectedRestriccion,
-  buttonLabel,
   onCancel,
 }: Readonly<RestrictionFormProps>) {
   return (
@@ -527,29 +633,9 @@ function RestrictionForm({
           Cancelar
         </Button>
         <Button type="submit" disabled={isLoading}>
-          {buttonLabel}
+          {isLoading ? 'Guardando...' : (selectedRestriccion ? 'Actualizar' : 'Guardar')}
         </Button>
       </DialogFooter>
     </form>
-  );
-}
-
-function LoadingRow() {
-  return (
-    <TableRow>
-      <TableCell colSpan={5} className="text-center h-24">
-        Cargando...
-      </TableCell>
-    </TableRow>
-  );
-}
-
-function EmptyRow() {
-  return (
-    <TableRow>
-      <TableCell colSpan={5} className="text-center h-24">
-        No se encontraron restricciones.
-      </TableCell>
-    </TableRow>
   );
 }

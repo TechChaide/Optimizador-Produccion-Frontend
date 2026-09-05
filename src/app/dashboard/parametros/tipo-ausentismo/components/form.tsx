@@ -45,6 +45,11 @@ interface TipoAusentismoFormProps {
   onCancel: () => void;
 }
 
+// tipoAusentismoService.save sends fecha_modificacion as a pre-formatted SQL
+// Server string (see formatDateForSQLServer above), not the `Date` declared on
+// the shared `TipoAusentismo` interface.
+type TipoAusentismoSavePayload = Partial<Omit<TipoAusentismo, 'fecha_modificacion'>> & { fecha_modificacion?: string };
+
 export default function TipoAusentismoForm({ record, onSuccess, onCancel }: TipoAusentismoFormProps) {
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
@@ -61,7 +66,7 @@ export default function TipoAusentismoForm({ record, onSuccess, onCancel }: Tipo
 
   const onSubmit = async (values: z.infer<typeof formSchema>) => {
     setIsLoading(true);
-    const data: any = {
+    const data: TipoAusentismoSavePayload = {
       codigo_tipo_ausentismo: values.codigo_tipo_ausentismo || 0,
       nombre_tipo_ausentismo: values.nombre_tipo_ausentismo,
       estado: values.estado,
@@ -72,7 +77,7 @@ export default function TipoAusentismoForm({ record, onSuccess, onCancel }: Tipo
     }
 
     try {
-      await tipoAusentismoService.save(data);
+      await tipoAusentismoService.save(data as unknown as TipoAusentismo);
       toast({ title: 'Éxito', description: `Tipo ${record ? 'actualizado' : 'creado'} correctamente.` });
       onSuccess();
     } catch (error) {

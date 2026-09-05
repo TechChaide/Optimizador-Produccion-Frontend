@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { MoreHorizontal, Clock, Plus, AlertCircle, History, X, ChevronUp, ChevronDown, Edit, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { MoreHorizontal, Clock, Plus, AlertCircle, History, ChevronUp, ChevronDown, Edit, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import { ausentimoService } from '@/services/ausentismo.service';
 import { tipoAusentismoService } from '@/services/tipoausentismo.service';
 import { authService } from '@/services/auth.service';
@@ -83,7 +83,7 @@ export const AbsenteeismSection: React.FC = () => {
   const [usuarios, setUsuarios] = useState<User[]>([]);
   const [operadores, setOperadores] = useState<Operador[]>([]);
   const [tiposAusentismo, setTiposAusentismo] = useState<TipoAusentismo[]>([]);
-  const [ausentismos, setAusentismos] = useState<Ausentismo[]>([]);
+  const [, setAusentismos] = useState<Ausentismo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedUsuario, setSelectedUsuario] = useState<User | null>(null);

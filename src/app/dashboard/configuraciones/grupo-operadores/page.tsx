@@ -5,21 +5,15 @@ import { useToast } from '@/hooks/use-toast';
 import GrupoOperadorForm from './components/form';
 import GrupoOperadorTable from './components/table';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import type { Operador, Grupo, Calendario, Restriccion, TipoDetalle } from '@/types/interfaces';
+import type { Operador, Grupo, Calendario, User } from '@/types/interfaces';
 import { operadorService } from '@/services/operador.service';
-import { grupoService } from '@/services/grupo.service';
 import { authService } from '@/services/auth.service';
-import { calendarioService } from '@/services/calendario.service';
-import { restriccionService } from '@/services/restriccion.service';
-import { tipoDetalleService } from '@/services/tipodetalle.service';
 
 export default function GrupoOperadoresPage() {
   const [records, setRecords] = useState<Operador[]>([]);
-  const [grupos, setGrupos] = useState<Grupo[]>([]);
-  const [usuarios, setUsuarios] = useState<any[]>([]);
-  const [calendarios, setCalendarios] = useState<Calendario[]>([]);
-  const [restricciones, setRestricciones] = useState<Restriccion[]>([]);
-  const [tiposDetalle, setTiposDetalle] = useState<TipoDetalle[]>([]);
+  const [grupos] = useState<Grupo[]>([]);
+  const [usuarios, setUsuarios] = useState<User[]>([]);
+  const [calendarios] = useState<Calendario[]>([]);
   const [selectedRecord, setSelectedRecord] = useState<Operador | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -89,7 +83,7 @@ export default function GrupoOperadoresPage() {
     return grupos.find(g => g.codigo_grupo === codigo_grupo)?.nombre_grupo || '-';
   };
 
-  const getUsuarioInfo = (identificador: string): any => {
+  const getUsuarioInfo = (identificador: string): User | undefined => {
     return usuarios.find(u => u.CODIGO === identificador);
   };
 

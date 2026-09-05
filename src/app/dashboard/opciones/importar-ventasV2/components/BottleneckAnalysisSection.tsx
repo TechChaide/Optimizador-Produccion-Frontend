@@ -227,7 +227,8 @@ export const BottleneckAnalysisSection: React.FC<BottleneckAnalysisSectionProps>
               <tbody>
                 {dataFFiltrada.map((row, idx) => {
                   const nec = safeNumber(row._Necesidades);
-                  const mesDisplay = !isNaN(parseInt(row.Mes)) ? (MONTH_NAMES[parseInt(row.Mes)] || row.Mes) : row.Mes;
+                  const mesNum = parseInt(String(row.Mes ?? ''));
+                  const mesDisplay = !isNaN(mesNum) ? (MONTH_NAMES[mesNum] || row.Mes) : row.Mes;
                   return (
                     <tr key={idx} className="border-b border-amber-50">
                       <td className="px-2 py-1 font-bold text-indigo-900">{mesDisplay}</td>

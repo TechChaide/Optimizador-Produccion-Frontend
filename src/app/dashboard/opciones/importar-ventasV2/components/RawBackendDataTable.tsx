@@ -76,14 +76,14 @@ export interface RawBackendDataTableHandle {
 
 export const RawBackendDataTable = forwardRef<RawBackendDataTableHandle, RawBackendDataTableProps>(
   ({ año, meses, centros, onDataLoaded }, ref) => {
-    const [pageSize, setPageSize] = useState<number>(20);
+    const [pageSize] = useState<number>(20);
     const [page, setPage] = useState<number>(1);
     const [searchTerm, setSearchTerm] = useState<string>('');
     const [sectorFilter, setSectorFilter] = useState<string>('');
     const [mesFilter, setMesFilter] = useState<string>('');
     const [rawData, setRawData] = useState<any[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
-    const [error, setError] = useState<string>('');
+    const [, setError] = useState<string>('');
     const [totalRecordsTarget, setTotalRecordsTarget] = useState<number>(0);
     const [processedRecords, setProcessedRecords] = useState<number>(0);
     const [loadingPhase, setLoadingPhase] = useState<'downloading' | 'calculating' | null>(null);

@@ -134,7 +134,7 @@ export const BottleneckMonthlySummaryC1000Section: React.FC<BottleneckMonthlySum
   }, [filteredDataCentro1000, trasladosDesdeCentro2000, data]);
 
   if (data.length === 0) {
-    return <div className="p-4 text-center text-gray-600">Carga datos primero desde la pestaña "Datos del Backend"</div>;
+    return <div className="p-4 text-center text-gray-600">Carga datos primero desde la pestaña &quot;Datos del Backend&quot;</div>;
   }
 
   return (

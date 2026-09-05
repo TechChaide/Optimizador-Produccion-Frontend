@@ -75,12 +75,8 @@ interface Centro1000SummaryTableProps {
 }
 
 export const Centro1000SummaryTable: React.FC<Centro1000SummaryTableProps> = ({ 
-  datosEnriquecidos, 
-  tiemposCanon, 
-  numMaximoSabados, 
-  maxExtrasHoras, 
-  horasTrabajo, 
-  horasExtrasFin 
+  datosEnriquecidos,
+  tiemposCanon,
 }) => {
   const [selectedLinea, setSelectedLinea] = useState<string>('');
   const [selectedRespCtrlProd, setSelectedRespCtrlProd] = useState<string>('');

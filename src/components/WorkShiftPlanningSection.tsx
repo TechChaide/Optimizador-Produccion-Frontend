@@ -1,7 +1,6 @@
 import React, {
   useState,
   useMemo,
-  useContext,
   useCallback,
   useEffect,
 } from "react";
@@ -13,7 +12,6 @@ import {
   Employee,
   AbsenteeismEvent,
   ProcessType,
-  NotificationMessage,
   EmployeeSkill,
 } from "@/types/types";
 import { WorkShiftIcon, PROCESS_TYPE_OPTIONS } from "@/constants/constants";
@@ -431,7 +429,7 @@ export const WorkShiftPlanningSection: React.FC<
                 <tr>
                   <td colSpan={8} className="text-center p-4 text-gray-500">
                     No hay líneas o puestos de trabajo configurados para el tipo
-                    de proceso '{selectedProcessType}'.
+                    de proceso &apos;{selectedProcessType}&apos;.
                   </td>
                 </tr>
               )}

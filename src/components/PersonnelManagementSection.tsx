@@ -2,7 +2,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { logger } from '@/services/LogService';
 import { useRuntimeInspector } from '@/services/RuntimeInspector';
-import { Employee, EmployeeSkill, NotificationMessage, Machine, AppConstraints, Qualification, WorkCenter } from '@/types/types';
+import { Employee, EmployeeSkill, Machine, AppConstraints, Qualification, WorkCenter } from '@/types/types';
 import { PersonnelIcon, PlusIcon, EditIcon, DeleteIcon, DataImportIcon } from '@/constants/constants';
 import { useAppContext } from '@/context/AppProvider';
 import { MACHINE_CATALOG } from '@/lib/catalogs/machineCatalog';
@@ -419,7 +419,7 @@ export const PersonnelManagementSection: React.FC<PersonnelManagementSectionProp
                  ) : (
                     <div className="text-center py-10">
                         <p className="text-gray-500">Este empleado aún no tiene competencias registradas.</p>
-                        <p className="text-sm text-gray-400">Haga clic en "Añadir Competencia" para empezar.</p>
+                        <p className="text-sm text-gray-400">Haga clic en &quot;Añadir Competencia&quot; para empezar.</p>
                     </div>
                  )}
               </div>

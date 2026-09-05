@@ -4,21 +4,22 @@
 import React, { useState, useMemo, useEffect, memo, useRef } from 'react';
 import { MONTH_NAMES, MONTH_NUMBERS } from './constants';
 import { safeNumber, exportToXLSX, normalizeMaterialCode } from './utils';
-import { TiempoCanonResult, TransferNeed, ViableTransfer, BottleneckClassTableProps } from './types';
+import { TiempoCanonResult, BottleneckClassTableProps, BottleneckDataRow } from './types';
 import { Download } from 'lucide-react';
 
 const EMPTY_TRANSFER_NEEDS: TransferNeed[] = [];
 const EMPTY_VIABLE_TRANSFERS: ViableTransfer[] = [];
 
 // Componente de fila optimizado con guarda de hidratación
-const DataRow = memo(({ row, idx, linea, isCentro1000, showSaldos, isMounted }: { row: any, idx: number, linea: string, isCentro1000: boolean, showSaldos: boolean, isMounted: boolean }) => {
-  const mesDisplay = !isNaN(parseInt(row.mesRef)) ? (MONTH_NAMES[parseInt(row.mesRef)] || row.mesRef) : row.mesRef;
+const DataRow = memo(({ row, idx, linea, isCentro1000, showSaldos, isMounted }: { row: BottleneckDataRow, idx: number, linea: string, isCentro1000: boolean, showSaldos: boolean, isMounted: boolean }) => {
+  const mesRefStr = String(row.mesRef ?? '');
+  const mesDisplay = !isNaN(parseInt(mesRefStr)) ? (MONTH_NAMES[parseInt(mesRefStr)] || mesRefStr) : mesRefStr;
 
-  const format = (val: number, decimals: number = 0) => {
+  const format = (val: number | string | undefined, decimals: number = 0) => {
     if (!isMounted) return '';
-    return Number(val || 0).toLocaleString(undefined, { 
-      minimumFractionDigits: decimals, 
-      maximumFractionDigits: decimals 
+    return Number(val || 0).toLocaleString(undefined, {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals
     });
   };
 
@@ -64,27 +65,27 @@ const DataRow = memo(({ row, idx, linea, isCentro1000, showSaldos, isMounted }: 
       
       {showSaldos ? (
         <>
-          <td className={`px-2 py-2 text-right font-mono font-semibold ${row._deficitGeneral > 0 ? 'text-red-700' : 'text-green-700'} bg-red-50/10 min-w-[80px]`}>{format(row._deficitGeneral)}</td>
+          <td className={`px-2 py-2 text-right font-mono font-semibold ${(row._deficitGeneral ?? 0) > 0 ? 'text-red-700' : 'text-green-700'} bg-red-50/10 min-w-[80px]`}>{format(row._deficitGeneral)}</td>
           <td className="px-2 py-2 text-right font-mono text-teal-700 font-semibold bg-teal-50/20 min-w-[90px]">{format(row._trValorAMostrar)}</td>
           <td className="px-2 py-2 text-right font-mono text-indigo-700 font-semibold bg-indigo-50/30 min-w-[90px]">{format(row._stockInitial)}</td>
           <td className="px-2 py-2 text-right font-mono text-gray-700 min-w-[80px]">{format(row.up)}</td>
           <td className="px-2 py-2 text-right font-mono text-green-700 font-bold bg-green-50/30 min-w-[90px]">{format(row._demandaCubierta)}</td>
-          <td className={`px-2 py-2 text-right font-mono font-bold bg-blue-50/30 ${row._backlogVentas > 0 ? 'text-red-600' : 'text-blue-700'} min-w-[80px]`}>{format(row._backlogVentas)}</td>
-          <td className={`px-2 py-2 text-right font-mono font-bold bg-amber-50/30 ${row._backlogTraslado > 0 ? 'text-amber-800' : 'text-gray-500'} min-w-[80px]`}>{format(row._backlogTraslado ?? 0)}</td>
-          <td className={`px-2 py-2 text-right font-mono font-bold border-r-2 border-gray-300 bg-emerald-50/30 ${row._saldoFinal < 0 ? 'text-red-700' : 'text-emerald-700'} min-w-[90px]`}>{format(row._saldoFinal)}</td>
+          <td className={`px-2 py-2 text-right font-mono font-bold bg-blue-50/30 ${(row._backlogVentas ?? 0) > 0 ? 'text-red-600' : 'text-blue-700'} min-w-[80px]`}>{format(row._backlogVentas)}</td>
+          <td className={`px-2 py-2 text-right font-mono font-bold bg-amber-50/30 ${(row._backlogTraslado ?? 0) > 0 ? 'text-amber-800' : 'text-gray-500'} min-w-[80px]`}>{format(row._backlogTraslado ?? 0)}</td>
+          <td className={`px-2 py-2 text-right font-mono font-bold border-r-2 border-gray-300 bg-emerald-50/30 ${(row._saldoFinal ?? 0) < 0 ? 'text-red-700' : 'text-emerald-700'} min-w-[90px]`}>{format(row._saldoFinal)}</td>
         </>
       ) : isCentro1000 ? (
         <>
           <td className="px-2 py-2 text-right font-mono text-teal-700 font-semibold bg-teal-50/10 min-w-[80px]">{format(row._envioC2000Plan ?? row._trValorAMostrar)}</td>
           <td className="px-2 py-2 text-right font-mono text-teal-800 font-semibold bg-teal-50/20 min-w-[80px]">{format(row._envioC2000)}</td>
           <td className="px-2 py-2 text-right font-mono text-cyan-700 font-semibold bg-cyan-50/10 min-w-[90px]">{format(row._quedaC1000)}</td>
-          <td className={`px-2 py-2 text-right font-mono font-semibold ${row._deficitGeneral > 0 ? 'text-red-700' : 'text-green-700'} border-r-2 border-gray-300 min-w-[80px]`}>{format(row._deficitGeneral)}</td>
+          <td className={`px-2 py-2 text-right font-mono font-semibold ${(row._deficitGeneral ?? 0) > 0 ? 'text-red-700' : 'text-green-700'} border-r-2 border-gray-300 min-w-[80px]`}>{format(row._deficitGeneral)}</td>
         </>
       ) : (
         <>
-          <td className={`px-2 py-2 text-right font-mono font-semibold ${row._deficitGeneral > 0 ? 'text-red-700' : 'text-green-700'} bg-red-50/10 min-w-[80px]`}>{format(row._deficitGeneral)}</td>
+          <td className={`px-2 py-2 text-right font-mono font-semibold ${(row._deficitGeneral ?? 0) > 0 ? 'text-red-700' : 'text-green-700'} bg-red-50/10 min-w-[80px]`}>{format(row._deficitGeneral)}</td>
           <td className="px-2 py-2 text-right font-mono text-teal-700 font-semibold bg-teal-50/20 min-w-[90px]">{format(row._trValorAMostrar)}</td>
-          <td className={`px-2 py-2 text-right font-mono font-bold ${row._deficitNeto2000 > 0 ? 'text-red-700' : 'text-green-700'} border-r-2 border-gray-300 bg-purple-50/20 min-w-[80px]`}>{format(row._deficitNeto2000)}</td>
+          <td className={`px-2 py-2 text-right font-mono font-bold ${(row._deficitNeto2000 ?? 0) > 0 ? 'text-red-700' : 'text-green-700'} border-r-2 border-gray-300 bg-purple-50/20 min-w-[80px]`}>{format(row._deficitNeto2000)}</td>
         </>
       )}
     </tr>
@@ -93,9 +94,8 @@ const DataRow = memo(({ row, idx, linea, isCentro1000, showSaldos, isMounted }: 
 DataRow.displayName = 'DataRow';
 
 export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSaldos?: boolean }> = ({ 
-  datos, 
-  datosCompletos,
-  titulo, 
+  datos,
+  titulo,
   tiemposCanon, 
   onTransferNeedsCalculated,
   onComputedDataReady,
@@ -121,7 +121,7 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
   const lastEmittedSignature = useRef<string>('');
   const lastTransferNeedsSignature = useRef<string>('');
 
-  const getTimelineKey = (row: any) => {
+  const getTimelineKey = (row: BottleneckDataRow) => {
     const year = safeNumber(row.Año || row.año || new Date().getFullYear());
     let month = 0;
     const mesRaw = String(row.Mes || row.mesRef || '');
@@ -163,7 +163,7 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
     if (timeline.length === 0) return [];
 
     const stockTracker = new Map<string, number>(); 
-    const todasLasFilasProcesadas: any[] = [];
+    const todasLasFilasProcesadas: BottleneckDataRow[] = [];
     const trasladosAplicados = new Set<string>(); 
 
     for (const tKey of timeline) {
@@ -213,7 +213,7 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
 
         if (!tiempoDispGlobalPorLinea.has(keyLinea)) {
           const lineaNorm = String(linea).toLowerCase().replace(/\s+/g, '');
-          const registrosLinea = tc.data.filter((item: any) => {
+          const registrosLinea = tc.data.filter(item => {
             const nl = String(item?.nombre_linea ?? '').toLowerCase().replace(/\s+/g, '');
             return nl === lineaNorm || nl.includes(lineaNorm) || lineaNorm.includes(nl);
           });
@@ -317,7 +317,7 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
         const deficitSabados = Math.max(0, deficitHE - maxSab);
         const _deficitGeneral = Math.max(0, r._necesidad - _prodViable);
         
-        const trKey = `${normalizeMaterialCode(r.CodMaterial)}|${r.mesRef}`;
+        const trKey = `${normalizeMaterialCode(r.CodMaterial ?? '')}|${r.mesRef}`;
         const trViableValue = quickMaps.viables.get(trKey) || 0;
 
         const trasladoPlan =
@@ -436,8 +436,10 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
     }
     if (selectedMes) {
       result = result.filter(row => {
-        const mesNombre = !isNaN(parseInt(row.mesRef)) ? (MONTH_NAMES[parseInt(row.mesRef)] || row.mesRef) : row.mesRef;
-        return mesNombre === selectedMes || String(row.mesRef) === selectedMes;
+        const mesRefStr = String(row.mesRef ?? '');
+        const mesNum = parseInt(mesRefStr);
+        const mesNombre = !isNaN(mesNum) ? (MONTH_NAMES[mesNum] || mesRefStr) : mesRefStr;
+        return mesNombre === selectedMes || mesRefStr === selectedMes;
       });
     }
     if (selectedSector) {
@@ -453,7 +455,7 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
       defGral: 0, trViable: 0, defNeto: 0, stockIni: 0, demanda: 0, demCubierta: 0, backlog: 0, backlogTrasl: 0, saldoFinal: 0,
       envio2000: 0, envio2000Plan: 0, queda1000: 0
     };
-    datosFiltrados.forEach((r: any) => {
+    datosFiltrados.forEach(r => {
       res.necPropia += safeNumber(r._necPropia);
       res.traslados += safeNumber(r._traslado);
       res.necesidad += safeNumber(r._necesidad);
@@ -503,7 +505,7 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
     
     return Array.from(new Set(nombres)).sort((a, b) => {
       const getNum = (name: string) => {
-        const entry = Object.entries(MONTH_NAMES).find(([_, v]) => v === name);
+        const entry = Object.entries(MONTH_NAMES).find(([, v]) => v === name);
         return entry ? parseInt(entry[0]) : 0;
       };
       return getNum(a) - getNum(b);
@@ -622,8 +624,8 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {paginatedData.map((row: any, idx: number) => (
-              <DataRow key={`row-${row.CodMaterial}-${idx}`} row={row} idx={idx} linea={row.lineaRef} isCentro1000={isCentro1000} showSaldos={showSaldos} isMounted={isMounted} />
+            {paginatedData.map((row, idx: number) => (
+              <DataRow key={`row-${row.CodMaterial}-${idx}`} row={row} idx={idx} linea={row.lineaRef || ''} isCentro1000={isCentro1000} showSaldos={showSaldos} isMounted={isMounted} />
             ))}
           </tbody>
           <tfoot className="sticky bottom-0 z-20 bg-gray-800 text-white font-bold text-[10px]">

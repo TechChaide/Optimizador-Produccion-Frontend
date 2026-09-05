@@ -52,6 +52,11 @@ interface TipoDetalleFormProps {
   onCancel: () => void;
 }
 
+// tipoDetalleService.save sends fecha_modificacion as a pre-formatted SQL
+// Server string (see formatDateForSQLServer above), not the `Date` declared on
+// the shared `TipoDetalle` interface.
+type TipoDetalleSavePayload = Partial<Omit<TipoDetalle, 'fecha_modificacion'>> & { fecha_modificacion?: string };
+
 export default function TipoDetalleForm({ record, onSuccess, onCancel }: TipoDetalleFormProps) {
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
@@ -68,7 +73,7 @@ export default function TipoDetalleForm({ record, onSuccess, onCancel }: TipoDet
 
   const onSubmit = async (values: z.infer<typeof formSchema>) => {
     setIsLoading(true);
-    const data: any = {
+    const data: TipoDetalleSavePayload = {
       codigo_tipo_detalle: values.codigo_tipo_detalle || 0,
       nombre_tipo_detalle: values.nombre_tipo_detalle,
       estado: values.estado,
@@ -79,7 +84,7 @@ export default function TipoDetalleForm({ record, onSuccess, onCancel }: TipoDet
     }
 
     try {
-      await tipoDetalleService.save(data);
+      await tipoDetalleService.save(data as unknown as TipoDetalle);
       toast({ title: 'Éxito', description: `Tipo ${record ? 'actualizado' : 'creado'} correctamente.` });
       onSuccess();
     } catch (error) {

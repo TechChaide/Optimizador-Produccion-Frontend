@@ -430,7 +430,7 @@ export interface NotificationMessage {
 export interface ChartDataItem {
   name: string;
   value?: number;
-  [key: string]: any;
+  [key: string]: string | number | undefined;
 }
 
 export interface MonthlyInventoryState {
@@ -513,7 +513,7 @@ export type ApiQuery =
       operation: 'get_data';
       source: string;
       columns?: string[]; 
-      filters?: { [key: string]: any };
+      filters?: { [key: string]: string | number | boolean | string[] | number[] };
       pagination?: { skip?: number; limit?: number };
     }
   | {
@@ -562,7 +562,10 @@ export interface CuboInventariosItem {
     StockActual?: number;
     StockSeguridad?: number;
     Sector?: string;
-    [key: string]: any; // Allow other fields
+    Descripcion?: string;
+    Categoria?: string;
+    RespCtrlProd?: string;
+    [key: string]: string | number | null | undefined; // Allow other fields
 }
 
 // New type for the demand analysis step

@@ -194,7 +194,7 @@ export default function ChatInterface() {
       const response = await sendMessage([...messages, userMessage], recentLogs, shareContext ? contextData : undefined);
 
       setMessages(prev => [...prev, { role: 'model', content: response.text }]);
-    } catch (error) {
+    } catch {
       setMessages(prev => [...prev, { role: 'model', content: 'Sorry, something went wrong.' }]);
     } finally {
       setIsLoading(false);

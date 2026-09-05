@@ -3,11 +3,9 @@
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useAppContext } from '@/context/AppProvider';
-import { SalesDataRow, CuboInventariosItem, AppConstraints, ProductProcessInfo, TiempoEnsambleItem, ProductionLine } from '@/types/types';
 import { Button } from '@/components/ui/button';
 import { Loader2, Check, ChevronsUpDown } from 'lucide-react';
 import { NeedsCalculationIcon, MONTH_NAMES } from '@/constants/constants';
-import { queryApi } from '@/hooks/useApiData';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from '@/components/ui/command';
 import { cn } from '@/lib/utils';

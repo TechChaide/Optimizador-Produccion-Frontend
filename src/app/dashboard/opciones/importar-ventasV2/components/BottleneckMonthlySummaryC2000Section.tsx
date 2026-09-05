@@ -53,7 +53,7 @@ export const BottleneckMonthlySummaryC2000Section: React.FC<BottleneckMonthlySum
   }, [filteredDataCentro2000]);
 
   if (data.length === 0) {
-    return <div className="p-4 text-center text-gray-600">Carga datos primero desde la pestaña "Datos del Backend"</div>;
+    return <div className="p-4 text-center text-gray-600">Carga datos primero desde la pestaña &quot;Datos del Backend&quot;</div>;
   }
 
   return (

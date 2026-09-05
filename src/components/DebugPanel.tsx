@@ -6,6 +6,7 @@ import { X, Bug, Eye, Activity, Database } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { runtimeInspector, VariableSnapshot, ExecutionContext, StateSnapshot } from '@/services/RuntimeInspector';
 import { useWidgetsState } from '@/context/WidgetsStateContext';
+import { dataStore } from '@/services/DataStore';
 
 export default function DebugPanel() {
   const { debugIsOpen, closeDebug, openDebug } = useWidgetsState();
@@ -52,9 +53,9 @@ export default function DebugPanel() {
     
     if (typeof value === 'string') {
       if (value.length > 100) {
-        return <span style={{ color: '#a8e6cf' }}>"{value.substring(0, 100)}..."</span>;
+        return <span style={{ color: '#a8e6cf' }}>&quot;{value.substring(0, 100)}...&quot;</span>;
       }
-      return <span style={{ color: '#a8e6cf' }}>"{value}"</span>;
+      return <span style={{ color: '#a8e6cf' }}>&quot;{value}&quot;</span>;
     }
     
     if (typeof value === 'number') {
@@ -240,7 +241,6 @@ export default function DebugPanel() {
                 <Database size={14} color="#10b981" />
                 <span>DataStore: {(() => {
                   try {
-                    const { dataStore } = require('@/services/DataStore');
                     return dataStore.getSummary().availableKeys.length;
                   } catch {
                     return 0;

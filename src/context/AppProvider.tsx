@@ -7,10 +7,10 @@ import {
     AppState, AppAction, SalesDataRow, ProductionPlan, TacticalRequest,
     TacticalPlanResult, Employee, EmployeeSkill, AbsenteeismEvent, MaintenanceEvent,
     WorkShift, AppConstraints, NotificationMessage, TiempoEnsambleItem, SyncStatus,
-    DetailedProductionPlan, PresupuestoItem, PlanningProgress, DemandAnalysisResult, CuboInventariosItem
+    DetailedProductionPlan, PlanningProgress, DemandAnalysisResult, CuboInventariosItem
 } from '@/types/types';
-import { ActiveView, MONTH_NAMES } from '@/constants/constants';
-import { generateProductionPlan, processAndValidateAssemblyData, analyzeSalesDemand } from '@/services/OptimizationService';
+import { ActiveView } from '@/constants/constants';
+import { generateProductionPlan, processAndValidateAssemblyData } from '@/services/OptimizationService';
 import { queryApi } from '@/hooks/useApiData';
 import { syncDataToStore } from '../app/actions/datastore';
 import { runtimeInspector } from '@/services/RuntimeInspector';
@@ -355,6 +355,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         dispatch({ type: 'SET_PLANNING_STEP', payload: 4 });
     }, []);
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const handleGenerateFullPlan = useCallback(async (inventoryFilters: { centros: string[], sectores: string[] }): Promise<boolean> => {
         
         if (!state.year) {

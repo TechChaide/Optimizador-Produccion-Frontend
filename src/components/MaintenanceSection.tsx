@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { MaintenanceEvent, ProductionLine, WorkstationDefinition, NotificationMessage, AppConstraints, Machine, ProcessType } from '@/types/types';
+import { MaintenanceEvent, WorkstationDefinition, NotificationMessage, AppConstraints, Machine } from '@/types/types';
 import { MaintenanceIcon, PlusIcon, EditIcon, DeleteIcon, PROCESS_TYPE_OPTIONS } from '@/constants/constants';
 import { MACHINE_CATALOG } from '@/lib/catalogs/machineCatalog';
 import { logger } from '@/services/LogService';

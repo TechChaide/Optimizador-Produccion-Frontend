@@ -1,19 +1,18 @@
 
 
-import { 
-    SalesDataRow, AppConstraints, ProductionPlan, ProductionPlanItem, 
+import {
+    SalesDataRow, AppConstraints, ProductionPlan, ProductionPlanItem,
     ProductProcessInfo, WorkCenter, ProductionLine, LaborCostSettings, InventorySetting, Holiday,
-    MonthlyInventoryState, ProcessType, WorkstationDefinition,
-    SupplyInfo, MonthlyProductionPlanItem, NotificationMessage, LineMonthlySummary, 
-    TacticalRequest, TacticalPlanResult, TacticalOrderItem, ProvisionalOrder, Employee, EmployeeSkill, MaintenanceEvent, AbsenteeismEvent, AssignedPersonnel, ShiftParameters,
-    Machine, Qualification, TiempoEnsambleItem, DetailedProductionPlan, PlanningGroupMonthlyDetail, MonthlyNeed, MonthlyAssignment, PresupuestoItem,
-    PlanningProgress, WeeklyPlanItem, DemandAnalysisResult, CuboInventariosItem, ShiftConfigRow
+    WorkstationDefinition,
+    MonthlyProductionPlanItem,
+    TacticalRequest, TacticalPlanResult, ProvisionalOrder, Employee, EmployeeSkill, ShiftParameters,
+    Machine, TiempoEnsambleItem,
+    PlanningProgress, DemandAnalysisResult, CuboInventariosItem, ShiftConfigRow
 } from '@/types/types';
-import { MONTH_NAMES, PROCESS_TYPE_OPTIONS, HOLIDAY_APPLIES_TO_OPTIONS, HOLIDAY_DAY_TYPE_OPTIONS } from '@/constants/constants'; 
-import { queryApi } from '@/hooks/useApiData';
+import { MONTH_NAMES } from '@/constants/constants';
 import { logger } from './LogService';
 
-declare var XLSX: any; 
+declare let XLSX: any; 
 
 const normalizeMaterialCode = (code: string | number): string => {
     const codeStr = String(code);
@@ -25,6 +24,7 @@ export const analyzeSalesDemand = async (
     salesData: SalesDataRow[],
     cuboInventariosData: CuboInventariosItem[],
     constraints: AppConstraints,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     inventoryFilters: { centros: string[]; sectores: string[] }
 ): Promise<DemandAnalysisResult> => {
     const auditLog: string[] = [];
@@ -487,7 +487,7 @@ export const generateProductionPlan = async (
     logger.log(`--- INICIANDO GENERACIÓN DE PLAN DE PRODUCCIÓN (Prorrateo forzado a: ${finalProrateCurrentMonth}) ---`, 'info');
     auditLog.push(`[${new Date().toLocaleTimeString()}] INICIO: Generación de plan (Prorrateo mes actual forzado a: ${finalProrateCurrentMonth}).`);
 
-    const { holidays, productionLines, workstationDefinitions, shiftParameters, laborCostFactors, globalBaseCostPerHour } = constraints;
+    const { shiftParameters, laborCostFactors, globalBaseCostPerHour } = constraints;
 
     if (salesData.length === 0) {
         auditLog.push(`Error: No hay datos de ventas para planificar.`);
@@ -590,7 +590,7 @@ export const generateProductionPlan = async (
         });
 
         const finalProductionPlan = new Map<string, number>(); 
-        let allBacklog: { productId: string, centerId: string, units: number }[] = [];
+        const allBacklog: { productId: string, centerId: string, units: number }[] = [];
 
         productionNeedsByCenter.forEach((data, producingCenterId) => {
             const availableCapacity = constraints.productionLines
@@ -834,6 +834,7 @@ export const exportDailyPlanToExcel = (plan: ProductionPlanItem[], constraints: 
 export const exportDailyPlanByLineToExcel = (
     planByLine: Array<{ lineName: string; dailyData: Record<number, { units: number; hours: number }> }>,
     days: number[],
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     constraints: AppConstraints
 ): void => {
     if (!planByLine || planByLine.length === 0) return;
@@ -854,7 +855,7 @@ export const exportDailyPlanByLineToExcel = (
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
     // You might want to adjust column widths for better readability
     const cols = [{ wch: 30 }]; // Line Name
-    days.forEach(day => {
+    days.forEach(() => {
         cols.push({ wch: 15 }); // Units
         cols.push({ wch: 15 }); // Hours
     });
@@ -1028,10 +1029,13 @@ export const parseShiftsAndCostsExcel = (file: File): Promise<{
 };
 
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export const parseTacticalOrdersExcel = (file: File): Promise<ProvisionalOrder[]> => { return Promise.resolve([]); };
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export const generateTacticalPlan = ( request: TacticalRequest, context: any ): TacticalPlanResult => { return { plan: [], alerts: [] }; };
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export const exportSkillsToExcel = ( employees: Employee[], skills: EmployeeSkill[], machines: Machine[], constraints: AppConstraints ): void => {};
 
 export const parseHolidaysExcel = (file: File): Promise<Holiday[]> => {

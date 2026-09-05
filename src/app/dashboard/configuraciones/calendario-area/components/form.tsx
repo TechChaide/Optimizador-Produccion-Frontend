@@ -15,6 +15,14 @@ import LineaEstacionPicker from './linea-estacion-picker';
 import DetallesModal from './detalles-modal';
 import { Settings } from 'lucide-react';
 
+// Matches the (unexported) `Holiday` shape returned by ecuadorHolidaysService,
+// which is distinct from the `Holiday` type in src/types/types.ts.
+interface EcuadorHoliday {
+  date: string;
+  name: string;
+  type: string;
+}
+
 interface CalendarioFormProps {
   record: Calendario | null;
   onSuccess: () => void;
@@ -38,7 +46,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
   const [isFetching, setIsFetching] = useState(true);
   const [showDetallesModal, setShowDetallesModal] = useState(false);
   const [previewDetalles, setPreviewDetalles] = useState<DetalleCalendario[]>([]);
-  const [holidaysToImport, setHolidaysToImport] = useState<any[]>([]);
+  const [holidaysToImport, setHolidaysToImport] = useState<EcuadorHoliday[]>([]);
   const [codigoTipoFeriado, setCodigoTipoFeriado] = useState<number | null>(null);
   const { toast } = useToast();
 
@@ -87,7 +95,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
         setHolidaysToImport(holidays);
 
         // Crear preview de detalles vacío (se generarán por cada estación durante save)
-        setPreviewDetalles(holidays.map((holiday: any, idx: number) => ({
+        setPreviewDetalles(holidays.map((holiday: EcuadorHoliday, idx: number) => ({
           codigo_detalle: -(idx + 1),
           codigo_calendario: 0,
           codigo_estacion: 0,
@@ -112,7 +120,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
     
-    let finalValue: any = value;
+    let finalValue: string | number | null = value;
     if (name === 'codigo_turno' || name === 'codigo_grupo') {
       finalValue = value ? Number(value) : null;
     }
@@ -201,7 +209,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     
-    const futureFeriados = holidaysToImport.filter((holiday: any) => {
+    const futureFeriados = holidaysToImport.filter((holiday) => {
       const holidayDate = new Date(holiday.date);
       holidayDate.setHours(0, 0, 0, 0);
       return holidayDate >= today;
@@ -217,7 +225,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
     try {
       // Por cada estación, crear detalles para todos los feriados
       for (const codigoEstacion of estacionesIds) {
-        const detallesACrear: DetalleCalendario[] = futureFeriados.map((holiday: any) => ({
+        const detallesACrear: DetalleCalendario[] = futureFeriados.map((holiday) => ({
           codigo_detalle: 0,
           codigo_calendario: codigoCalendario,
           codigo_estacion: codigoEstacion,
@@ -311,7 +319,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
                 onChange={(e) => {
                   // Limpiar selecciones previas al cambiar grupo
                   setSelectedLineaEstaciones(new Map());
-                  handleInputChange(e as any);
+                  handleInputChange(e);
                 }}
                 className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
                 required

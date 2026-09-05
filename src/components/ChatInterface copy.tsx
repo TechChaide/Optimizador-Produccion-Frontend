@@ -17,11 +17,11 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useAppContext } from '@/context/AppProvider';
 
 export default function ChatInterface() {
   const { logs } = useLogs();
-  const appContext = require('@/context/AppProvider');
-  const ctx = appContext.useAppContext();
+  const ctx = useAppContext();
   const {
     salesData,
     productionPlan,
@@ -167,7 +167,7 @@ export default function ChatInterface() {
       
       const response = await sendMessage([...messages, userMessage], recentLogs, shareContext ? contextData : undefined);
       setMessages(prev => [...prev, { role: 'model', content: response.text }]);
-    } catch (error) {
+    } catch {
       setMessages(prev => [...prev, { role: 'model', content: 'Sorry, something went wrong.' }]);
     } finally {
       setIsLoading(false);

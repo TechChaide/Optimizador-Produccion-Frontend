@@ -33,7 +33,7 @@ export const MaestroMaterialesBrutosSection: React.FC = () => {
 
     setIsLoading(true);
     try {
-      const response = await serviciosService.getMMaterialesBrutosPorMaterialMateriaPrima(blockPage, BLOCK_SIZE);
+      const response = await serviciosService.getMaterialesBrutosPorMaterialMateriaPrima(blockPage, BLOCK_SIZE);
       if (response && response.data) {
         const dataArray = Array.isArray(response.data) ? response.data : [response.data];
         const receivedCount = dataArray.length;

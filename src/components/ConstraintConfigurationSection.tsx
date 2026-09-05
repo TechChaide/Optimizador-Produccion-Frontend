@@ -16,35 +16,8 @@ import { estacionService } from '@/services/estacion.service';
 import type { Restriccion, Grupo, Linea, Estacion } from '@/types/interfaces';
 
 
-interface ConstraintConfigurationSectionProps {
-  // All props are removidos, data vendrá del contexto
-}
-
-// --- Reusable Form Components ---
-const InputField: React.FC<React.InputHTMLAttributes<HTMLInputElement> & { label: string; containerClassName?: string }> = ({ label, id, containerClassName, ...props }) => (
-  <div className={containerClassName || "mb-3"}>
-    <label htmlFor={id} className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-    <input id={id} {...props} className={`w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm ${props.disabled ? 'bg-gray-100 cursor-not-allowed' : ''}`} />
-  </div>
-);
-
-const SelectField: React.FC<React.SelectHTMLAttributes<HTMLSelectElement> & { label: string; options: Array<{value: string | number; label: string}>; containerClassName?: string }> = ({ label, id, options, containerClassName, ...props }) => (
-    <div className={containerClassName || "mb-3"}>
-        <label htmlFor={id} className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-        <select id={id} {...props} className={`w-full px-3 py-2 border border-gray-300 bg-white rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm ${props.disabled ? 'bg-gray-100' : ''}`}>
-            <option value="">Seleccione...</option>
-            {options.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-        </select>
-    </div>
-);
-
-const CheckboxField: React.FC<React.InputHTMLAttributes<HTMLInputElement> & { label: string; containerClassName?: string; labelClassName?: string }> = ({ label, id, containerClassName, labelClassName, ...props }) => (
-  <div className={containerClassName || "flex items-center my-1"}>
-    <input id={id} type="checkbox" {...props} className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500" />
-    <label htmlFor={id} className={`ml-2 block text-sm text-gray-700 ${labelClassName || ''}`}>{label}</label>
-  </div>
-);
-// --- End Reusable Form Components ---
+// All props are removidos, data vendrá del contexto
+type ConstraintConfigurationSectionProps = Record<string, unknown>;
 
 export const ConstraintConfigurationSection: React.FC<ConstraintConfigurationSectionProps> = () => {
     const inspector = useRuntimeInspector('ConstraintConfiguration');

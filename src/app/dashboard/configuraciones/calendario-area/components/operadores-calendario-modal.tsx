@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
-import { Operador, Calendario, Restriccion } from '@/types/interfaces';
+import { Operador, Calendario, Restriccion, User } from '@/types/interfaces';
 import { operadorService } from '@/services/operador.service';
 import { authService } from '@/services/auth.service';
 
@@ -22,7 +22,29 @@ interface OperadoresCalendarioModalProps {
 interface OperadorAgrupado {
   departamento: string;
   grupoDepartamento: string;
-  operadores: any[];
+  operadores: User[];
+}
+
+// `operador.service` accepts additional fields (codigo_grupo, codigo_calendario)
+// and a formatted date string for fecha_creacion that are not modeled on the
+// shared `Operador` interface (defined in src/types/interfaces.ts, outside this
+// batch's scope). This local shape documents exactly what this file actually sends.
+interface OperadorSavePayload {
+  codigo_operador?: number;
+  codigo_grupo?: number;
+  codigo_calendario?: number;
+  identificador_operador: string;
+  estado: string;
+  usuario_creacion: string;
+  fecha_creacion: string;
+}
+
+// Igual que OperadorSavePayload pero para lo que devuelve operadorService.getAll(): el backend sí
+// puebla codigo_grupo/codigo_calendario en la lectura (se usan para filtrar qué operadores están
+// asignados a este calendario), aunque el `Operador` compartido no los declare.
+interface OperadorConCalendario extends Operador {
+  codigo_grupo?: number;
+  codigo_calendario?: number;
 }
 
 const formatDateForSQLServer = (date: Date): string => {
@@ -30,8 +52,8 @@ const formatDateForSQLServer = (date: Date): string => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${date.getMilliseconds().toString().padStart(3, '0')}`;
 };
 
-const agruparOperadores = (usuarios: any[]): OperadorAgrupado[] => {
-  const grupos = new Map<string, Map<string, any[]>>();
+const agruparOperadores = (usuarios: User[]): OperadorAgrupado[] => {
+  const grupos = new Map<string, Map<string, User[]>>();
   usuarios.forEach((u) => {
     const grupoDept = u.GRUPO_DEPARTAMENTO || 'Sin Grupo';
     if (!grupoDept.toUpperCase().includes('PRODUCCION')) return;
@@ -44,7 +66,7 @@ const agruparOperadores = (usuarios: any[]): OperadorAgrupado[] => {
   const resultado: OperadorAgrupado[] = [];
   grupos.forEach((sub, dept) => {
     sub.forEach((ops, grupoDept) => {
-      resultado.push({ departamento: dept, grupoDepartamento: grupoDept, operadores: ops.toSorted((a: any, b: any) => (a.NOMBRE || '').localeCompare(b.NOMBRE || '')) });
+      resultado.push({ departamento: dept, grupoDepartamento: grupoDept, operadores: ops.toSorted((a, b) => (a.NOMBRE || '').localeCompare(b.NOMBRE || '')) });
     });
   });
   return resultado.sort((a, b) => a.departamento.localeCompare(b.departamento));
@@ -57,8 +79,8 @@ export default function OperadoresCalendarioModal({
   calendarios,
   restricciones,
 }: Readonly<OperadoresCalendarioModalProps>) {
-  const [allOperadores, setAllOperadores] = useState<Operador[]>([]);
-  const [usuarios, setUsuarios] = useState<any[]>([]);
+  const [allOperadores, setAllOperadores] = useState<OperadorConCalendario[]>([]);
+  const [usuarios, setUsuarios] = useState<User[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [selectedToAdd, setSelectedToAdd] = useState<string[]>([]);
@@ -79,7 +101,7 @@ export default function OperadoresCalendarioModal({
     return `${String(fin.getHours()).padStart(2, '0')}:${String(fin.getMinutes()).padStart(2, '0')}`;
   };
 
-  const getGroupRestrictions = useCallback((codigoGrupo: number) => {
+  const getGroupRestrictions = useCallback((codigoGrupo: number | undefined) => {
     const gr = restricciones.filter(r => r.codigo_grupo === codigoGrupo);
     const ht = gr.find(r => r.nombre_restriccion === 'HORAS_TRABAJO');
     const me = gr.find(r => r.nombre_restriccion === 'MAX_EXTRAS_HORAS');
@@ -128,7 +150,7 @@ export default function OperadoresCalendarioModal({
   const toggleDepartamento = (dept: string) => {
     setExpandedDepts(prev => {
       const next = new Set(prev);
-      next.has(dept) ? next.delete(dept) : next.add(dept);
+      if (next.has(dept)) { next.delete(dept); } else { next.add(dept); }
       return next;
     });
   };
@@ -140,7 +162,7 @@ export default function OperadoresCalendarioModal({
   const toggleToRemove = (codigoOperador: number) => {
     setSelectedToRemove(prev => {
       const next = new Set(prev);
-      next.has(codigoOperador) ? next.delete(codigoOperador) : next.add(codigoOperador);
+      if (next.has(codigoOperador)) { next.delete(codigoOperador); } else { next.add(codigoOperador); }
       return next;
     });
   };
@@ -159,7 +181,7 @@ export default function OperadoresCalendarioModal({
           estado: 'A',
           usuario_creacion: user?.name || 'admin',
           fecha_creacion: timestamp,
-        } as any);
+        } as OperadorSavePayload as unknown as Operador);
       }
       toast({ title: 'Éxito', description: `${selectedToAdd.length} operador(es) asignado(s) al calendario` });
       setSelectedToAdd([]);
@@ -189,7 +211,7 @@ export default function OperadoresCalendarioModal({
           estado: 'I',
           usuario_creacion: user?.name || 'admin',
           fecha_creacion: timestamp,
-        } as any);
+        } as OperadorSavePayload as unknown as Operador);
       }
       toast({ title: 'Éxito', description: `${selectedToRemove.size} operador(es) removido(s)` });
       setSelectedToRemove(new Set());
@@ -203,7 +225,7 @@ export default function OperadoresCalendarioModal({
   };
 
   // Mover operador a otro calendario: desactivar actual + crear nuevo
-  const handleChangeCalendario = async (operador: Operador, nuevoCalId: number) => {
+  const handleChangeCalendario = async (operador: OperadorConCalendario, nuevoCalId: number) => {
     setIsSaving(true);
     try {
       const timestamp = formatDateForSQLServer(new Date());
@@ -216,7 +238,7 @@ export default function OperadoresCalendarioModal({
         estado: 'I',
         usuario_creacion: user?.name || 'admin',
         fecha_creacion: timestamp,
-      } as any);
+      } as OperadorSavePayload as unknown as Operador);
       // Crear nuevo con el calendario nuevo
       const nuevoCal = calendarios.find(c => c.codigo_calendario === nuevoCalId);
       await operadorService.save({
@@ -226,7 +248,7 @@ export default function OperadoresCalendarioModal({
         estado: 'A',
         usuario_creacion: user?.name || 'admin',
         fecha_creacion: timestamp,
-      } as any);
+      } as OperadorSavePayload as unknown as Operador);
       toast({ title: 'Éxito', description: 'Calendario cambiado correctamente' });
       await loadData();
       globalThis.dispatchEvent(new Event('records-changed'));
@@ -369,7 +391,7 @@ export default function OperadoresCalendarioModal({
                     <p className="text-gray-400 text-center py-4">No hay operadores disponibles</p>
                   )}
                   {operadoresAgrupados.map((grupo, idx) => {
-                    const hasSelected = grupo.operadores.some(op => selectedToAdd.includes(op.CODIGO));
+                    const hasSelected = grupo.operadores.some(op => selectedToAdd.includes(op.CODIGO ?? ''));
                     return (
                       <div key={`grp-${idx}-${grupo.departamento}`} className="mb-2">
                         <button
@@ -390,25 +412,26 @@ export default function OperadoresCalendarioModal({
                         {expandedDepts.has(grupo.departamento) && (
                           <div className="ml-4 space-y-1 mt-1">
                             {grupo.operadores.map(op => {
-                              const yaEnEste = operadoresDelCalendario.some(o => o.identificador_operador === op.CODIGO);
-                              const yaEnOtro = idsYaAsignados.has(op.CODIGO) && !yaEnEste;
+                              const codigoOp = op.CODIGO ?? '';
+                              const yaEnEste = operadoresDelCalendario.some(o => o.identificador_operador === codigoOp);
+                              const yaEnOtro = idsYaAsignados.has(codigoOp) && !yaEnEste;
                               const disabled = yaEnEste || yaEnOtro;
                               const getRowClass = () => {
                                 if (yaEnEste) return 'bg-blue-50 opacity-60 cursor-not-allowed';
                                 if (yaEnOtro) return 'bg-yellow-50 opacity-60 cursor-not-allowed';
-                                if (selectedToAdd.includes(op.CODIGO)) return 'bg-green-100 border-l-4 border-green-500';
+                                if (selectedToAdd.includes(codigoOp)) return 'bg-green-100 border-l-4 border-green-500';
                                 return 'hover:bg-white';
                               };
                               return (
                                 <label
-                                  key={op.CODIGO}
+                                  key={codigoOp}
                                   className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors text-sm ${getRowClass()}`}
                                 >
                                   <Checkbox
-                                    checked={selectedToAdd.includes(op.CODIGO) || yaEnEste}
-                                    onCheckedChange={() => !disabled && toggleToAdd(op.CODIGO)}
+                                    checked={selectedToAdd.includes(codigoOp) || yaEnEste}
+                                    onCheckedChange={() => !disabled && toggleToAdd(codigoOp)}
                                     disabled={disabled}
-                                    className={selectedToAdd.includes(op.CODIGO) ? 'border-green-500 data-[state=checked]:bg-green-500' : ''}
+                                    className={selectedToAdd.includes(codigoOp) ? 'border-green-500 data-[state=checked]:bg-green-500' : ''}
                                   />
                                   <div className="flex-1 min-w-0">
                                     <div className="font-medium text-gray-900 truncate">{op.NOMBRE}</div>
@@ -429,7 +452,7 @@ export default function OperadoresCalendarioModal({
                 {selectedToAdd.length > 0 && (
                   <div className="text-xs text-gray-600 mt-2">
                     <span className="font-semibold">Seleccionados: </span>
-                    {operadoresAgrupados.flatMap(g => g.operadores).filter(op => selectedToAdd.includes(op.CODIGO)).map(op => op.NOMBRE).join(', ')}
+                    {operadoresAgrupados.flatMap(g => g.operadores).filter(op => selectedToAdd.includes(op.CODIGO ?? '')).map(op => op.NOMBRE).join(', ')}
                   </div>
                 )}
               </div>

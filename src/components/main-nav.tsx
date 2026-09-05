@@ -3,10 +3,10 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ActiveView, viewConfig, OPCIONES_ITEMS, PARAMETROS_ITEMS, CONFIGURACIONES_ITEMS } from '@/constants/constants';
+import { ActiveView, viewConfig, TACTICAL_ITEMS, OPCIONES_ITEMS, PARAMETROS_ITEMS, CONFIGURACIONES_ITEMS } from '@/constants/constants';
 import { useAppLoading } from '@/context/AppProvider';
 import { cn } from '@/lib/utils';
-import { Loader2, ChevronDown, ChevronRight, LayoutDashboard, Settings, Folder } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronRight, LayoutDashboard, Settings, Folder, CalendarClock } from 'lucide-react';
 
 interface CollapsibleSectionProps {
   title: string;
@@ -96,7 +96,8 @@ export function MainNav({ className, isCollapsed = false, ...props }: Readonly<R
   const pathname = usePathname();
   const [mounted, setMounted] = useState(false);
   
-  const [opcionesOpen, setOpcionesOpen] = useState(true);
+  const [tacticaOpen, setTacticaOpen] = useState(true);
+  const [opcionesOpen, setOpcionesOpen] = useState(false);
   const [parametrosOpen, setParametrosOpen] = useState(false);
   const [configuracionesOpen, setConfiguracionesOpen] = useState(false);
 
@@ -134,7 +135,19 @@ export function MainNav({ className, isCollapsed = false, ...props }: Readonly<R
         {!isCollapsed && <span className="flex-1">Dashboard</span>}
       </Link>
 
-      {/* Opciones - sección contraíble */}
+      {/* Programación Táctica - sección contraíble, abierta por defecto (los 4 módulos vigentes) */}
+      <CollapsibleSection
+        title="Programación Táctica"
+        icon={<CalendarClock className="h-5 w-5" />}
+        items={TACTICAL_ITEMS}
+        isOpen={tacticaOpen}
+        onToggle={() => setTacticaOpen(!tacticaOpen)}
+        pathname={pathname}
+        isLoading={isLoading}
+        isCollapsed={isCollapsed}
+      />
+
+      {/* Opciones - sección contraíble, cerrada por defecto */}
       <CollapsibleSection
         title="Opciones"
         icon={<Folder className="h-5 w-5" />}

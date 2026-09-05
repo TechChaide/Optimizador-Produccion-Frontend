@@ -1,10 +1,9 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { useLogs } from "@/context/LogContext";
 import { useWidgetsState } from "@/context/WidgetsStateContext";
 import ChatInterface from "./ChatInterface";
@@ -14,8 +13,7 @@ export default function FloatingChatWidget() {
   const [isMinimized, setIsMinimized] = useState(false);
   const { chatIsOpen, openChat, closeChat } = useWidgetsState();
 
-  const constraintsRef = useRef(null);
-  const { logs } = useLogs();
+  useLogs();
 
   const handleClose = () => {
     closeChat();

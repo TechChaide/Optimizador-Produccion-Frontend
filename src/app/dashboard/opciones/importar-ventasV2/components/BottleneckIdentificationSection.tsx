@@ -44,10 +44,6 @@ export const BottleneckIdentificationSection: React.FC<BottleneckIdentificationS
     return Math.max(0, up - sa + ss);
   };
 
-  const normalizarLinea = (linea: string): string => {
-    return String(linea).toLowerCase().replace(/\s+/g, '').replace('linea', '').replace('línea', '');
-  };
-
   const buscarTiempoCanon = (mesRaw: string) => {
     let found = tiemposCanon.find((t: any) => t.mes === mesRaw);
     if (found) return found;
@@ -326,7 +322,7 @@ export const BottleneckIdentificationSection: React.FC<BottleneckIdentificationS
   }, [data]);
 
   if (data.length === 0) {
-    return <div className="p-4 text-center text-gray-600">Carga datos primero desde la pestaña "Datos del Backend"</div>;
+    return <div className="p-4 text-center text-gray-600">Carga datos primero desde la pestaña &quot;Datos del Backend&quot;</div>;
   }
 
   return (

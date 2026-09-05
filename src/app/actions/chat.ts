@@ -1,11 +1,11 @@
 
 'use server';
 
+import fs from 'fs';
 import { ai } from '@/ai/genkit';
 import { LogEntry } from '@/services/LogService';
 import { analysisTools } from './chat-tools';
-import { requestContext } from '@/lib/request-context';
-import { runtimeInspector } from '@/services/RuntimeInspector';
+import { requestContext, ChatContextData } from '@/lib/request-context';
 import { dataStore } from '@/services/DataStore';
 
 export interface ChatMessage {
@@ -13,18 +13,18 @@ export interface ChatMessage {
   content: string;
 }
 
-export async function sendMessage(history: ChatMessage[], contextLogs: LogEntry[], contextData?: any) {
+export async function sendMessage(history: ChatMessage[], contextLogs: LogEntry[], contextData?: ChatContextData) {
   // Wrap the entire execution in the request context store
-  return requestContext.run(contextData, async () => {
+  return requestContext.run(contextData ?? {}, async () => {
     try {
-      const sanitize = (data: any) => {
+      const sanitize = (data: unknown): unknown => {
         const copy = JSON.parse(JSON.stringify(data));
         // Simple sanitizer: remove obvious emails and long numbers, replace with masked placeholders
         const redactString = (s: string) => s.replace(/[\w.-]+@[\w.-]+/g, '[REDACTED_EMAIL]').replace(/\b\d{6,}\b/g, '[REDACTED_ID]');
-        const walk = (obj: any): any => {
+        const walk = (obj: unknown): unknown => {
           if (!obj || typeof obj !== 'object') return obj;
           if (Array.isArray(obj)) return obj.map(v => walk(v));
-          const ret: any = {};
+          const ret: Record<string, unknown> = {};
           for (const [k, v] of Object.entries(obj)) {
             if (typeof v === 'string') ret[k] = redactString(v);
             else if (typeof v === 'number') ret[k] = v; // keep numbers, but be cautious
@@ -35,12 +35,12 @@ export async function sendMessage(history: ChatMessage[], contextLogs: LogEntry[
         return walk(copy);
       };
 
-      const safeContext = contextData ? sanitize(contextData) : null;
+      const safeContext = contextData ? sanitize(contextData) as Record<string, unknown> : null;
       // Summarize large arrays to avoid sending huge prompts
-      const summarizeLargeArrays = (obj: any, includeFull: boolean | undefined) => {
+      const summarizeLargeArrays = (obj: unknown, includeFull: boolean | undefined): unknown => {
         const SAMPLE_LIMIT = 10;
         const MAX_ROWS = 500;
-        const walk = (o: any): any => {
+        const walk = (o: unknown): unknown => {
           if (!o || typeof o !== 'object') return o;
           if (Array.isArray(o)) {
             const len = o.length;
@@ -52,13 +52,13 @@ export async function sendMessage(history: ChatMessage[], contextLogs: LogEntry[
             }
             return o.map(v => walk(v));
           }
-          const ret: any = {};
+          const ret: Record<string, unknown> = {};
           for (const [k, v] of Object.entries(o)) ret[k] = walk(v);
           return ret;
         };
         return walk(obj);
       };
-      const summarizedContext = safeContext ? summarizeLargeArrays(safeContext, safeContext?.includeFull) : null;
+      const summarizedContext = safeContext ? summarizeLargeArrays(safeContext, safeContext?.includeFull as boolean | undefined) as Record<string, unknown> | null : null;
 
       const systemPrompt = `You are a helpful AI assistant for a Production Optimization system with analytical and operational awareness capabilities.
 Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.
@@ -87,7 +87,7 @@ ${contextData?.runtimeInspector ? (() => {
   
   return `
 Available Variables (${summary.totalVariables} total, last ${variables.length} shown):
-${variables.map((v: any) => {
+${variables.map((v) => {
   let valuePreview = '';
   if (Array.isArray(v.value)) {
     valuePreview = `Array(${v.value.length}) - First item: ${JSON.stringify(v.value[0] || {}).substring(0, 100)}`;
@@ -100,10 +100,10 @@ ${variables.map((v: any) => {
 }).join('\n')}
 
 Current States (${Object.keys(states).length} sections):
-${Object.entries(states).map(([section, state]: [string, any]) => `- ${section}: ${Object.keys(state.state || {}).join(', ')}`).join('\n')}
+${Object.entries(states).map(([section, state]) => `- ${section}: ${Object.keys((state.state as Record<string, unknown>) || {}).join(', ')}`).join('\n')}
 
 Recent Activity (last 5):
-${summary.recentActivity.slice(-5).map((a: any) => `- [${a.section}] ${a.action} at ${new Date(a.timestamp).toLocaleTimeString()}`).join('\n')}
+${summary.recentActivity.slice(-5).map((a) => `- [${a.section}] ${a.action} at ${new Date(a.timestamp).toLocaleTimeString()}`).join('\n')}
 
 **IMPORTANT**: When user asks for data samples (like "dame una muestra de los datos"):
 1. FIRST use getDataFromStore tool - this is the PRIMARY data source
@@ -121,7 +121,7 @@ ${(() => {
   
   return `
 Available Datasets (${storeSummary.availableKeys.length}):
-${Object.entries(storeSummary.dataByKey).map(([key, info]: [string, any]) => 
+${Object.entries(storeSummary.dataByKey).map(([key, info]) =>
   `- ${key}: ${info.description || 'No description'} (${info.rowCount || 'N/A'} records) - Updated: ${new Date(info.lastUpdate).toLocaleTimeString()} by ${info.source}`
 ).join('\n')}
 
@@ -179,7 +179,7 @@ Keep your answers concise and actionable.`;
 
       // Diagnostic: print a compact preview of messages to detect malformed content
       try {
-        const preview = messages.map((m: any, i: number) => ({
+        const preview = messages.map((m, i: number) => ({
           i,
           role: m.role,
           contentIsArray: Array.isArray(m.content),
@@ -192,7 +192,7 @@ Keep your answers concise and actionable.`;
       }
 
       console.log('[AI GENERATE] Starting generation with', messages.length, 'messages and', analysisTools.length, 'tools');
-      console.log('[AI GENERATE] Tools available:', analysisTools.map((t: any) => t.name).join(', '));
+      console.log('[AI GENERATE] Tools available:', analysisTools.map((t) => t.name).join(', '));
 
       // Llamada al AI con las tools configuradas
       const response = await ai.generate({
@@ -205,17 +205,17 @@ Keep your answers concise and actionable.`;
 
       console.log('[CHAT RESPONSE] Success:', { textLength: response.text?.length, hasText: !!response.text });
       return { text: response.text };
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
       console.error('[CHAT ERROR] Full error object:', error);
-      console.error('[CHAT ERROR] Error message:', error.message);
-      console.error('[CHAT ERROR] Error stack:', error.stack);
+      console.error('[CHAT ERROR] Error message:', err.message);
+      console.error('[CHAT ERROR] Error stack:', err.stack);
       console.error('[CHAT ERROR] Error details:', JSON.stringify(error, null, 2));
-      
+
       // Log to file for debugging
-      const fs = require('fs');
       try {
-        fs.appendFileSync('debug_error.log', `[${new Date().toISOString()}] Error: ${error.message}\nStack: ${error.stack}\nFull: ${JSON.stringify(error, null, 2)}\n\n`);
-      } catch (e) { /* ignore */ }
+        fs.appendFileSync('debug_error.log', `[${new Date().toISOString()}] Error: ${err.message}\nStack: ${err.stack}\nFull: ${JSON.stringify(error, null, 2)}\n\n`);
+      } catch { /* ignore */ }
       
       return { text: 'Sorry, I encountered an error processing your request.' };
     }

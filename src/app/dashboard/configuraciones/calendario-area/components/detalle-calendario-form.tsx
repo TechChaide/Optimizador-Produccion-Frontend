@@ -20,13 +20,23 @@ function convertDateToString(date: Date | string | null | undefined): string {
   return new Date(date).toISOString().split('T')[0];
 }
 
+// El formulario trabaja las 3 fechas como string (formato yyyy-MM-dd de <input type="date">); solo
+// se convierten a Date al armar el payload para guardar (ver handleSubmit). DetalleCalendario las
+// declara como Date porque así las persiste el backend — son representaciones distintas del mismo
+// dato en cada punta, no un error de una de las dos.
+type DetalleCalendarioFormState = Omit<Partial<DetalleCalendario>, 'fecha_real' | 'fecha_inicio' | 'fecha_fin'> & {
+  fecha_real: string;
+  fecha_inicio: string;
+  fecha_fin: string;
+};
+
 export default function DetalleCalendarioForm({
   record,
   codigoCalendario,
   onSuccess,
   onCancel,
 }: Readonly<DetalleCalendarioFormProps>) {
-  const [formData, setFormData] = useState<Partial<DetalleCalendario>>({
+  const [formData, setFormData] = useState<DetalleCalendarioFormState>({
     codigo_detalle: record?.codigo_detalle,
     codigo_calendario: codigoCalendario,
     nombre_detalle: record?.nombre_detalle || '',
@@ -75,8 +85,8 @@ export default function DetalleCalendarioForm({
       setIsLoading(true);
 
       // Validar que las fechas sean coherentes
-      const fechaInicio = new Date(formData.fecha_inicio as string);
-      const fechaFin = new Date(formData.fecha_fin as string);
+      const fechaInicio = new Date(formData.fecha_inicio);
+      const fechaFin = new Date(formData.fecha_fin);
 
       if (fechaInicio > fechaFin) {
         toast({

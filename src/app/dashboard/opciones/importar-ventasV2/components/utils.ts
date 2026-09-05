@@ -2,7 +2,7 @@
 
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { MONTH_NUMBERS, MONTH_NAMES } from './constants';
-import type { WorkDaysCalculation, TiempoCanonResult, FilaHorasExtras, HorasExtrasPorMesCentro } from './types';
+import type { WorkDaysCalculation, TiempoCanonResult, FilaHorasExtras, HorasExtrasPorMesCentro, BottleneckDataRow } from './types';
 import * as XLSX from 'xlsx';
 
 // Función para normalizar códigos de material a 8 dígitos consistentes
@@ -12,19 +12,19 @@ export const normalizeMaterialCode = (code: string | number): string => {
 };
 
 // Función para exportar datos a XLSX
-export function exportToXLSX(data: any[], filename: string, columns?: { key: string; header: string }[]) {
+export function exportToXLSX<T extends Record<string, unknown>>(data: T[], filename: string, columns?: { key: string; header: string }[]) {
   if (!data || data.length === 0) {
     alert('No hay datos para exportar');
     return;
   }
 
   // Preparar datos para el Excel
-  let exportData: any[] = [];
-  
+  let exportData: Record<string, unknown>[] = [];
+
   if (columns && columns.length > 0) {
     // Usar columnas específicas
     exportData = data.map(row => {
-      const newRow: any = {};
+      const newRow: Record<string, unknown> = {};
       columns.forEach(col => {
         newRow[col.header] = row[col.key] ?? '';
       });
@@ -52,7 +52,7 @@ export function exportToXLSX(data: any[], filename: string, columns?: { key: str
 }
 
 // Función para exportar múltiples hojas en un único archivo XLSX
-export function exportToXLSXMultiSheet(sheets: { sheetName: string; data: any[] }[], filename: string) {
+export function exportToXLSXMultiSheet(sheets: { sheetName: string; data: Record<string, unknown>[] }[], filename: string) {
   const workbook = XLSX.utils.book_new();
   sheets.forEach(({ sheetName, data }) => {
     if (!data || data.length === 0) return;
@@ -81,13 +81,13 @@ export function getMesNombre(mesNum: number): string {
 }
 
 // Función segura para convertir a número
-export const safeNumber = (v: any): number => {
+export const safeNumber = (v: unknown): number => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
 
 // Calcular necesidades
-export function computeNecesidades(row: any): number {
+export function computeNecesidades(row: BottleneckDataRow): number {
   const unidadesProy = safeNumber(row.UnidadesProyectado ?? 0);
   const stockSeg = safeNumber(row.StockSeguridad ?? 0);
   const stockAct = safeNumber(row.StockActual ?? 0);
@@ -136,11 +136,11 @@ export async function calculateWorkDays(year: number, month: number): Promise<Wo
 
 // Función compartida: enriquecer datos de una clase con participación, necesidad máxima, etc.
 export function enriquecerDatosClase(
-  datos: any[],
+  datos: BottleneckDataRow[],
   tiemposCanon: TiempoCanonResult[],
   tiempoConsumidoAnterior: { [mesLinea: string]: number } = {}
 ) {
-  const computeNec = (row: any) => {
+  const computeNec = (row: BottleneckDataRow) => {
     const up = safeNumber(row.UnidadesProyectado ?? 0);
     const ss = safeNumber(row.StockSeguridad ?? 0);
     const sa = safeNumber(row.StockActual ?? 0);
@@ -148,14 +148,14 @@ export function enriquecerDatosClase(
   };
 
   const buscarTiempoCanon = (mesRaw: string) => {
-    let found = tiemposCanon.find((t: any) => t.mes === mesRaw);
+    let found = tiemposCanon.find(t => t.mes === mesRaw);
     if (found) return found;
     const mesNum = parseInt(mesRaw);
     if (!isNaN(mesNum) && mesNum >= 1 && mesNum <= 12) {
       const mesNombre = MONTH_NAMES[mesNum];
-      found = tiemposCanon.find((t: any) => t.mes === mesNombre);
+      found = tiemposCanon.find(t => t.mes === mesNombre);
       if (found) return found;
-      found = tiemposCanon.find((t: any) => t.mesNumero === mesNum);
+      found = tiemposCanon.find(t => t.mesNumero === mesNum);
       if (found) return found;
     }
     return null;
@@ -173,7 +173,7 @@ export function enriquecerDatosClase(
     const lineaNorm = normalizarLinea(linea);
     
     // Primero filtrar por línea
-    const registrosLinea = tc.data.filter((item: any) => {
+    const registrosLinea = tc.data.filter(item => {
       const nombreLinea = normalizarLinea(item?.nombre_linea ?? '');
       return nombreLinea === lineaNorm || nombreLinea.includes(lineaNorm) || lineaNorm.includes(nombreLinea);
     });
@@ -182,7 +182,7 @@ export function enriquecerDatosClase(
     if (registrosLinea.length === 0) {
       if (puesto && puesto !== '-' && puesto !== '') {
         const pn = String(puesto).toLowerCase().trim();
-        const dp = tc.data.find((item: any) => {
+        const dp = tc.data.find(item => {
           const nombreEstacion = String(item?.nombre_estacion ?? '').toLowerCase().trim();
           return nombreEstacion.includes(pn) || pn.includes(nombreEstacion);
         });
@@ -204,7 +204,7 @@ export function enriquecerDatosClase(
     let minutos_con_extras = 0;
     let minutos_fin_semana = 0;
     
-    registrosLinea.forEach((dato: any) => {
+    registrosLinea.forEach(dato => {
       minutos_horario_normal += safeNumber(dato?.minutos_horario_normal_CON_PUESTOS ?? dato?.minutos_horario_normal_TOTAL ?? 0);
       minutos_con_extras += safeNumber(dato?.minutos_extras_CON_PUESTOS ?? dato?.minutos_extras_TOTAL ?? 0);
       minutos_fin_semana += safeNumber(dato?.minutos_sabado_CON_PUESTOS ?? dato?.minutos_sabado_TOTAL ?? 0);
@@ -238,7 +238,7 @@ export function enriquecerDatosClase(
     const tiempoUnitarioPorPuesto = numeroPuestos > 0 ? tiempoPorUnidad / numeroPuestos : 0;
     // T. Total necesidad inicial = (Tiempo Unitarío / Puestos) * Necesidades
     const tiempoTotalNecesidad = tiempoUnitarioPorPuesto * necesidad;
-    const tiempoDisp = obtenerTiempoDisp(mes, linea, row.PuestoCuellodeBottella);
+    const tiempoDisp = obtenerTiempoDisp(mes, linea, row.PuestoCuellodeBottella ?? null);
 
     let necesidadMaximaAFabricar = 0;
     let horasExtrasUsadas = 0;
@@ -302,7 +302,7 @@ export interface BottleneckMaterialAnalysis {
 }
 
 // Función de voto a mayoría: Retorna el item más frecuente en una lista
-export function votarPorMayoria<T>(items: T[], selector: (item: T) => any): T | null {
+export function votarPorMayoria<T, K extends string | number>(items: T[], selector: (item: T) => K): T | null {
   if (items.length === 0) return null;
   
   const frecuencia: { [key: string]: { count: number; item: T } } = {};
@@ -331,9 +331,9 @@ export function votarPorMayoria<T>(items: T[], selector: (item: T) => any): T | 
 // Función para extraer el material con mayor necesidad por Centro+Línea
 // Si hay empate, usa voto a mayoría
 export function getMaterialesCuelloBotellaPorLinea(
-  datos: any[]
+  datos: BottleneckDataRow[]
 ): BottleneckMaterialAnalysis[] {
-  const gruposPorLinea: { [key: string]: any[] } = {};
+  const gruposPorLinea: { [key: string]: BottleneckDataRow[] } = {};
   
   // Agrupar por Centro + LineaFabricacion
   datos.forEach(row => {
@@ -371,7 +371,7 @@ export function getMaterialesCuelloBotellaPorLinea(
     });
     
     // Si hay empate, usar voto a mayoría por puesto de trabajo
-    let materialSeleccionado: any | null = null;
+    let materialSeleccionado: BottleneckDataRow | null = null;
     let metodologia = 'Mayor necesidad';
     
     if (materialesConMaxNecesidad.length > 1) {
@@ -566,9 +566,7 @@ export function consumirHorasExtras(
     
     // Si la fila ya está completamente consumida, saltar
     if (fila.consumido) continue;
-    
-    const horasDisponibles = fila.totalHoras - fila.horasConsumidas;
-    
+
     // Consumir de 2 en 2 horas (o según maxExtrasHoras)
     while (minutosRestantes > 0 && fila.horasConsumidas < fila.totalHoras) {
       // Calcular cuántas horas podemos consumir en esta iteración

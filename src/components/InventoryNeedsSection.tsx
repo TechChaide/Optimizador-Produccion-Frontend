@@ -6,7 +6,7 @@ import { useAppContext } from '@/context/AppProvider';
 import { queryApi } from '@/hooks/useApiData';
 import { Sheet, Loader2, Check, ChevronsUpDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { ProductionLine, WorkstationDefinition, PresupuestoItem } from '@/types/types';
+import { ProductionLine, PresupuestoItem } from '@/types/types';
 import { MONTH_NAMES } from '@/constants/constants';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from '@/components/ui/command';
@@ -296,8 +296,8 @@ export const InventoryNeedsSection: React.FC = () => {
                     if (best.line && best.bottleneckTime !== Infinity) bestLineInfo = best;
                 }
 
-                const stockActual = parseFloat(String(cuboItem.StockActual || '0'));
-                const stockSeguridad = parseFloat(String(cuboItem.StockSeguridad || '0'));
+                const stockActual = parseFloat(String(cuboItem?.StockActual || '0'));
+                const stockSeguridad = parseFloat(String(cuboItem?.StockSeguridad || '0'));
                 const necesidad = Math.max(0, Math.round(stockSeguridad) - Math.round(stockActual));
                 const salesDemand = presupuestoByKey.get(`${productId}---${stockCenter}`) || 0;
 
@@ -309,8 +309,8 @@ export const InventoryNeedsSection: React.FC = () => {
                 return {
                     CentroStock: stockCenter,
                     CentroProduccion: producingCenter,
-                    ClaseAprovisionam: cuboItem.ClaseAprovisionam || null,
-                    Descripcion: cuboItem.Descripcion,
+                    ClaseAprovisionam: cuboItem?.ClaseAprovisionam || null,
+                    Descripcion: cuboItem?.Descripcion,
                     Material: productId,
                     Sector: sector,
                     StockActual: Math.round(stockActual),

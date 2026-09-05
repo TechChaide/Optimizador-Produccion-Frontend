@@ -18,25 +18,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { MoreHorizontal, Edit, Plus, Trash } from 'lucide-react';
 import { operadorService } from '@/services/operador.service';
-import type { Operador } from '@/types/interfaces';
+import type { Operador, User } from '@/types/interfaces';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useState, useMemo } from 'react';
-
-// Helper para formato de fecha/hora en zona horaria de Ecuador (UTC-5)
-const formatEcuadorDateTime = (date: string | Date | undefined): string => {
-  if (!date) return '-';
-  const d = typeof date === 'string' ? new Date(date) : date;
-  return d.toLocaleString('es-EC', { 
-    timeZone: 'America/Guayaquil',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  });
-};
 
 interface GrupoOperadorTableProps {
   records: Operador[];
@@ -44,7 +29,7 @@ interface GrupoOperadorTableProps {
   onEdit: (record: Operador) => void;
   onAddNew: () => void;
   getGrupoNombre?: (codigo_grupo: number) => string;
-  getUsuarioInfo?: (identificador: string) => any;
+  getUsuarioInfo?: (identificador: string) => User | undefined;
   getCalendarioNombre?: (codigo_calendario: number) => string;
 }
 
@@ -55,9 +40,7 @@ export default function GrupoOperadorTable({
   isLoading,
   onEdit,
   onAddNew,
-  getGrupoNombre = () => '-',
-  getUsuarioInfo = () => ({}),
-  getCalendarioNombre = () => '-',
+  getUsuarioInfo = () => undefined,
 }: Readonly<GrupoOperadorTableProps>) {
   const [page, setPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(PAGE_SIZE_OPTIONS[0]);
@@ -84,22 +67,6 @@ export default function GrupoOperadorTable({
   }, [filtered, page, rowsPerPage]);
 
   if (page > totalPages && totalPages > 0) setPage(totalPages);
-
-  const renderSkeleton = () => (
-    ['sk-1', 'sk-2', 'sk-3', 'sk-4', 'sk-5'].map((key) => (
-      <TableRow key={key}>
-        <TableCell><Skeleton className="h-4 w-12" /></TableCell>
-        <TableCell><Skeleton className="h-4 w-32" /></TableCell>
-        <TableCell><Skeleton className="h-4 w-32" /></TableCell>
-        <TableCell><Skeleton className="h-4 w-28" /></TableCell>
-        <TableCell><Skeleton className="h-4 w-20" /></TableCell>
-        <TableCell><Skeleton className="h-4 w-20" /></TableCell>
-        <TableCell><Skeleton className="h-4 w-24" /></TableCell>
-        <TableCell><Skeleton className="h-4 w-20" /></TableCell>
-        <TableCell className="text-right"><Skeleton className="h-8 w-8" /></TableCell>
-      </TableRow>
-    ))
-  );
 
   return (
     <Card>

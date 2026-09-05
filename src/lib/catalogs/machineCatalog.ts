@@ -1,5 +1,5 @@
 
-import { Machine, ProcessType } from '@/types/types';
+import { Machine } from '@/types/types';
 
 /**
  * @fileoverview Fixed machine catalog data.

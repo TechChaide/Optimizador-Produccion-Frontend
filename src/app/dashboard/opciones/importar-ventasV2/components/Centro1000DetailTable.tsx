@@ -282,10 +282,6 @@ export const Centro1000DetailTable = forwardRef<Centro1000DetailTableHandle, Cen
       // Calcular Tiempo Requerido: (Tiempo Unitarío / Puestos) * (Necesidad Requerida)
       tMaxProm = tiempoUnitarioPorPuesto * necesidadMaximaAFabricar;
       
-      const tiempoNormalRestante = tiempoDisp.minutos_horario_normal;
-      const tiempoNormalParaEsteMaterial = (participacionIndividual / 100) * tiempoNormalRestante;
-      const tiempoRealUsado = Math.min(necesidadTotal, necesidadMaximaAFabricar) * tiempoPorUnidad;
-      
       // Horas extras = parte proporcional de los minutos extras del pool para esta línea
       const minutosExtrasLinea = extrasMap[key] || 0;
       const minutosExtrasMaterial = (participacionIndividual / 100) * minutosExtrasLinea;
@@ -611,7 +607,6 @@ export const Centro1000DetailTable = forwardRef<Centro1000DetailTableHandle, Cen
                   const totalParticipacion = filasLinea.reduce((sum: number, row: any) => sum + safeNumber(row.participacionIndividual ?? 0), 0);
                   const totalTiempoParaMaterial = filasLinea.reduce((sum: number, row: any) => sum + safeNumber(row.tiempoParaMaterial ?? 0), 0);
                   const totalNecesidadMax = filasLinea.reduce((sum: number, row: any) => sum + safeNumber(row.necesidadMaximaAFabricar ?? 0), 0);
-                  const totalTiempoNecMax = filasLinea.reduce((sum: number, row: any) => sum + safeNumber(row.TiempoPorUnidad ?? 0) * safeNumber(row.necesidadMaximaAFabricar ?? 0), 0);
                   const totalTMaxProm = filasLinea.reduce((sum: number, row: any) => sum + safeNumber(row.tMaxProm ?? 0), 0);
                   const totalHorasExtras = filasLinea.reduce((sum: number, row: any) => sum + safeNumber(row.horasExtrasUsadas ?? 0), 0);
                   
@@ -651,7 +646,6 @@ export const Centro1000DetailTable = forwardRef<Centro1000DetailTableHandle, Cen
               }, 0);
               const totalTiempoParaMaterial = datosFiltrados.reduce((sum: number, row: any) => sum + safeNumber(row.tiempoParaMaterial ?? 0), 0);
               const totalNecesidadMax = datosFiltrados.reduce((sum: number, row: any) => sum + safeNumber(row.necesidadMaximaAFabricar ?? 0), 0);
-              const totalTiempoNecMax = datosFiltrados.reduce((sum: number, row: any) => sum + safeNumber(row.TiempoPorUnidad ?? 0) * safeNumber(row.necesidadMaximaAFabricar ?? 0), 0);
               const totalTMaxProm = datosFiltrados.reduce((sum: number, row: any) => sum + safeNumber(row.tMaxProm ?? 0), 0);
               const totalHorasExtras = datosFiltrados.reduce((sum: number, row: any) => sum + safeNumber(row.horasExtrasUsadas ?? 0), 0);
               const totalTLibre = totalTiempoParaMaterial - totalTMaxProm;

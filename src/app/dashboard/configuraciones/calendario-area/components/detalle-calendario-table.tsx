@@ -120,7 +120,7 @@ export default function DetalleCalendarioTable({
     return 'bg-gray-100 text-gray-800';
   };
 
-  const formatDate = (date: any) => {
+  const formatDate = (date: Date | string | undefined) => {
     if (!date) return '-';
     try {
       return new Date(date).toLocaleDateString('es-ES');
