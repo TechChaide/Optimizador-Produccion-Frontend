@@ -1,15 +1,15 @@
 
 export const environment = {
     production: true,
-    nombreAplicacion: "APP_BASE",
+    nombreAplicacion: "APP_OPTIMIZADOR_PRODUCCION",
 
-    aplicaciones: ["APP_BASE", "APP_CERTIFICADOS_CALIDAD", "APP_IT_ACTIVOS"],
+    aplicaciones: ["APP_OPTIMIZADOR_PRODUCCION"],
 
     basePath: process.env.NEXT_PUBLIC_BASE_PATH || '',
 
     ////////////////////////////////////////Api de Producción (Optimizador)
     //apiURL : 'http://localhost:5400',
-    apiURL : 'https://apps.chaide.com/ProductionOptimizer',
+    apiURL : 'https://apps.chaide.com/ProductionOptimizer/api',
 
     ////////////////////////////////////////Api de Seguridades
     //apiURLSeguridades : 'http://localhost:5400',
