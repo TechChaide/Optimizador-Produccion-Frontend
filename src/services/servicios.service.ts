@@ -404,7 +404,7 @@ export const serviciosService = {
     }
   },
 
-  async getKPIMAestroLooper(): Promise<BodyResponse<any>> {
+  async getKPIMaestroLooper(): Promise<BodyResponse<any>> {
     const response = await fetch(API_URL + "/KPIMaestroLooper", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
@@ -414,13 +414,6 @@ export const serviciosService = {
       throw new Error(errorBody.message || "Failed to fetch Diccionario");
     }
     return response.json();
-  },
-
-  // Alias con ortografía correcta del método anterior (getKPIMAestroLooper) — se mantienen los dos:
-  // TacticalPlanCorteLaminadoSection y TacticalPlanEspumasSection ya llaman al nombre original,
-  // mientras que ProductionPlanSection (rama-Sebastian-Vivar) llama a este.
-  async getKPIMaestroLooper(): Promise<BodyResponse<any>> {
-    return serviciosService.getKPIMAestroLooper();
   },
 
   async getKPIMaestroForros(): Promise<BodyResponse<any>> {

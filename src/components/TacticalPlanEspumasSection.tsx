@@ -2592,7 +2592,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         serviciosService.getInventarioAñoActual().catch(() => ({ data: [] })),
         serviciosService.getCuboHabilidadesOP().catch(() => ({ data: [] })),
         serviciosService.ListarMantenimientoPreventivosProgramados().catch(() => ({ data: [] })),
-        serviciosService.getKPIMAestroLooper().catch(() => ({ data: [] })),
+        serviciosService.getKPIMaestroLooper().catch(() => ({ data: [] })),
         serviciosService.getKPIMaestroCarruseles().catch(() => ({ data: [] })),
         serviciosService.getCuboInventarios(1, 50000).catch(() => ({ data: [] }))
       ]);

@@ -900,7 +900,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const [restrs, provs, kpiLooper, invSAP, ferts, skills, maint, tiempos] = await Promise.all([
         restriccionService.getAll(),
         serviciosService.OrdenesProvisionalesPaginados(1, 20000).catch(() => ({ data: [] })),
-        serviciosService.getKPIMAestroLooper().catch(() => ({ data: [] })),
+        serviciosService.getKPIMaestroLooper().catch(() => ({ data: [] })),
         serviciosService.getInventarioAñoActual().catch(() => ({ data: [] })),
         serviciosService.getOrdenesFert(1, 20000).catch(() => ({ data: [] })),
         serviciosService.getCuboHabilidadesOP().catch(() => ({ data: [] })),
