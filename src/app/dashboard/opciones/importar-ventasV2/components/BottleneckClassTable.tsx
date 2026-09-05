@@ -4,7 +4,7 @@
 import React, { useState, useMemo, useEffect, memo, useRef } from 'react';
 import { MONTH_NAMES, MONTH_NUMBERS } from './constants';
 import { safeNumber, exportToXLSX, normalizeMaterialCode } from './utils';
-import { TiempoCanonResult, BottleneckClassTableProps, BottleneckDataRow } from './types';
+import { TiempoCanonResult, BottleneckClassTableProps, BottleneckDataRow, TransferNeed, ViableTransfer } from './types';
 import { Download } from 'lucide-react';
 
 const EMPTY_TRANSFER_NEEDS: TransferNeed[] = [];
@@ -409,7 +409,7 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
     const newNeeds = filasCalculadas
       .filter(r => safeNumber(r._deficitGeneral) > 0)
       .map(r => ({
-        CodMaterial: normalizeMaterialCode(r.CodMaterial),
+        CodMaterial: normalizeMaterialCode(r.CodMaterial ?? ''),
         mes: String(r.mesRef ?? ''),
         necesidadTraslado: safeNumber(r._deficitGeneral),
       }))

@@ -204,8 +204,8 @@ export const TacticalPlan2Section: React.FC = () => {
                             <TableCell>{centro?.nombre || '-'}</TableCell>
                             <TableCell className="font-medium">{g.nombre_grupo}</TableCell>
                             <TableCell className="text-center">
-                              <Badge variant={g.status === 'A' ? 'default' : 'destructive'} className={g.status === 'A' ? 'bg-green-600' : ''}>
-                                {g.status === 'A' ? 'Activo' : 'Inactivo'}
+                              <Badge variant={g.estado === 'A' ? 'default' : 'destructive'} className={g.estado === 'A' ? 'bg-green-600' : ''}>
+                                {g.estado === 'A' ? 'Activo' : 'Inactivo'}
                               </Badge>
                             </TableCell>
                           </TableRow>

@@ -136,7 +136,9 @@ export interface BottleneckDataRow {
   _quedaC1000?: number;
   _demandaCubierta?: number;
   _backlogVentas?: number;
+  _backlogTraslado?: number;
   _saldoFinal?: number;
+  _envioC2000Plan?: number;
 
   [key: string]: unknown;
 }

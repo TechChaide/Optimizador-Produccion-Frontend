@@ -3228,7 +3228,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         cantidad: parseQty(d.cantidad_produccion_neta),
         marcadoEliminar: true,
         esNuevo: false,
-        codigo_plan_grupo_padre: d.codigo_plan_grupo_padre,
+        codigo_plan_grupo_padre: d.codigo_plan_grupo_padre ?? 0,
       });
     });
 

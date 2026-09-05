@@ -11,8 +11,33 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { ProvisionalOrder } from '@/types/types';
 import type { Grupo, Restriccion } from '@/types/interfaces';
+
+// Forma real de la orden tal como la devuelve el backend en este tab — distinta del
+// ProvisionalOrder de @/types/types (que es el objeto de entrada del optimizador).
+interface ProvisionalOrder {
+  ORDENPREVISIONAL: string;
+  MATERIAL: string;
+  NOMBRE: string;
+  CATEGORIA: string;
+  CANTIDAD: number;
+  UNIDAD: string;
+  FECHAINICIO: string;
+  FECHAFIN: string;
+  RESPCONTROLPROD: string;
+  Centro: string;
+  Almacen: string;
+  Maquina: string | null;
+  MAQUINA: string | null;
+  RECURSO: string | null;
+  ClaseOrden: string;
+  CodMaterial: string;
+  LINEA?: string;
+  Pedidoventas?: string;
+  PEDIDOVENTAS?: string;
+  POSICIONPEDIDO?: string;
+  PosicionPedido?: string;
+}
 
 // Mapeo de equivalencias Máquina -> Línea: la columna "Línea" se llena únicamente a partir de la
 // Máquina de la orden (ya no por patrones en Categoría). Máquinas fuera de esta tabla no
