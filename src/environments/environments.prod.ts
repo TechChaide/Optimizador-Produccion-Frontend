@@ -11,6 +11,9 @@ export const environment = {
     //apiURL : 'http://localhost:5400',
     apiURL : 'https://apps.chaide.com/ProductionOptimizer/api',
 
+    ////////////////////////////////////////Api Planificador de Turnos (Gestión Turno Operadores)
+    apiPlanificadorTurnos : 'http://localhost:8000',
+
     ////////////////////////////////////////Api de Seguridades
     //apiURLSeguridades : 'http://localhost:5400',
     apiURLSeguridades : 'https://apps.chaide.com/seguridadesGuard',

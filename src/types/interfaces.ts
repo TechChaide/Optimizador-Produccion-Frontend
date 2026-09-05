@@ -238,6 +238,8 @@ export interface Estacion {
     codigo_linea: number;
     nombre_estacion: string;
     numero_puestos: number;
+    numero_personas?: number;
+    puesto_habilidades?: string;
     estado: string;
     fecha_modificacion: Date;
     usuario_modificacion: string;
@@ -255,6 +257,7 @@ export interface FamiliaProductos {
 export interface Grupo {
     codigo_grupo: number;
     centro: string;
+    departamentos_mapea?: string;
     nombre_grupo: string;
     estado: string;
     fecha_modificacion: Date;

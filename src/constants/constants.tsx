@@ -65,6 +65,7 @@ export enum ActiveView {
   CONFIGURACIONES_GRUPO_OPERADORES = 'CONFIGURACIONES_GRUPO_OPERADORES',
   PLAN_SEMANAL = 'PLAN_SEMANAL',
   PLANES_MEDIANO_PLAZO = 'PLANES_MEDIANO_PLAZO',
+  GESTION_TURNO_OPERADORES = 'GESTION_TURNO_OPERADORES',
 }
 
 // SVG Icons are now imported from lucide-react for consistency
@@ -141,6 +142,7 @@ const NAVIGATION_ITEMS = [
   { id: ActiveView.TACTICAL_SCHEDULING_CORTE_LAMINADO, label: 'Programación Táctica Laminado', icon: <Scissors className="w-5 h-5" />, href: '/dashboard/opciones/tactica-corte-laminado' },
   { id: ActiveView.TACTICAL_SCHEDULING_FORROS, label: 'Programación Táctica Forros', icon: <TacticalSchedulingIcon />, href: '/dashboard/opciones/programacion-tactica-forros' },
   { id: ActiveView.WORK_SHIFT_PLANNING, label: 'Planificación de Turnos', icon: <WorkShiftIcon />, href: '/dashboard/opciones/planificacion-turnos' },
+  { id: ActiveView.GESTION_TURNO_OPERADORES, label: 'Gestión Turno - Operadores', icon: <PersonnelIcon />, href: '/dashboard/opciones/gestion-turno-operadores' },
   { id: ActiveView.DICTIONARY, label: 'Diccionario de Datos', icon: <RealDataIcon />, href: '/dashboard/opciones/diccionario-datos' },
   { id: ActiveView.CUT_LAMINATION_PLAN, label: 'Plan de Corte y Laminado', icon: <CutLaminationIcon />, href: '/dashboard/opciones/corte-laminado' },
   { id: ActiveView.PRODUCTION_PLAN, label: 'Plan de Producción', icon: <CapacityIcon />, href: '/dashboard/opciones/plan-produccion' },
@@ -180,6 +182,7 @@ export const OPCIONES_ITEMS: ActiveView[] = [
   ActiveView.TACTICAL_SCHEDULING_MUEBLES,
   ActiveView.TACTICAL_SCHEDULING_FORROS,
   ActiveView.WORK_SHIFT_PLANNING,
+  ActiveView.GESTION_TURNO_OPERADORES,
   ActiveView.DICTIONARY,
   ActiveView.PRODUCTION_PLAN,
   ActiveView.CUT_LAMINATION_PLAN,
