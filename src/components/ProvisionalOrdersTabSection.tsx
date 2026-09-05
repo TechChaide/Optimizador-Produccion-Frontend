@@ -37,6 +37,8 @@ interface ProvisionalOrder {
   PEDIDOVENTAS?: string;
   POSICIONPEDIDO?: string;
   PosicionPedido?: string;
+  /** true cuando la Línea se infirió cruzando tiempos de ensamblado (la orden no traía Máquina). */
+  _lineaResuelta?: boolean;
 }
 
 // Mapeo de equivalencias Máquina -> Línea: la columna "Línea" se llena únicamente a partir de la
@@ -63,6 +65,10 @@ export const ProvisionalOrdersTabSection: React.FC = () => {
   const [restricciones, setRestricciones] = useState<Restriccion[]>([]);
   const [availableCenters, setAvailableCenters] = useState<string[]>([]);
   const [selectedCenter, setSelectedCenter] = useState<string>("");
+
+  // Tiempos de ensamblado por grupo de colchones — se usan para resolver la Máquina (y con
+  // ella la Línea) de órdenes que llegan del backend sin ese dato.
+  const [tiemposProduccion, setTiemposProduccion] = useState<any[]>([]);
   
   // UI States
   const [searchTerm, setSearchTerm] = useState('');
@@ -83,6 +89,61 @@ export const ProvisionalOrdersTabSection: React.FC = () => {
   const normalizeMaterialCode = (code: string | number): string => {
     return String(code || '').trim().slice(-8);
   };
+
+  // Grupos de colchones (mismo criterio que Programación Táctica Colchones) para los que
+  // se consultan tiempos de ensamblado y así poder resolver la Máquina cuando la orden no la trae.
+  const colchonesGruposList = useMemo(() => {
+    return groups.filter(g => {
+      const name = (g.nombre_grupo || '').toUpperCase();
+      return name.includes('COLCHON') || name.includes('COLCHÓN');
+    });
+  }, [groups]);
+
+  useEffect(() => {
+    if (colchonesGruposList.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const responses = await Promise.all(
+          colchonesGruposList.map(g => serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(g.centro, g.codigo_grupo))
+        );
+        if (!cancelled) {
+          setTiemposProduccion(responses.flatMap(res => res.data || []));
+        }
+      } catch (error) {
+        console.error('Error al cargar tiempos de producción para resolver máquina:', error);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [colchonesGruposList]);
+
+  // Cuando la orden no trae Máquina/PuestoTrabajo, se infiere cruzando el material contra los
+  // tiempos de ensamblado ya cargados para los grupos de colchones.
+  const getResolvedMachine = useCallback((order: ProvisionalOrder): string => {
+    const orderFields = ['MAQUINA', 'Maquina', 'maquina', 'PUESTOTRABAJO', 'PuestoTrabajo', 'puestotrabajo'] as const;
+    for (const k of orderFields) {
+      const val = (order as any)[k];
+      if (val && String(val).trim() !== '' && String(val).toLowerCase() !== 'null') {
+        return String(val).trim().toUpperCase();
+      }
+    }
+
+    const material = normalizeMaterialCode(order.CodMaterial || order.MATERIAL || '');
+    if (!material) return '';
+
+    const matches = tiemposProduccion.filter(t =>
+      normalizeMaterialCode(t.CodMaterial || t.Material || '') === material
+    );
+    if (matches.length === 0) return '';
+
+    for (const m of matches) {
+      const values = Object.values(m).map(v => String(v || '').trim().toUpperCase());
+      const hrValue = values.find(v => v.startsWith('HR'));
+      if (hrValue) return hrValue;
+    }
+    const best = matches.find(m => Number(m.Tiempo || m.Tiempo_Min) > 0) || matches[0];
+    return String(best.PuestoTrabajo || best.Maquina || best.nombre_estacion || '').trim().toUpperCase();
+  }, [tiemposProduccion]);
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
@@ -170,10 +231,23 @@ export const ProvisionalOrdersTabSection: React.FC = () => {
       .filter(Boolean);
   }, [selectedCenter, restricciones, groups]);
 
+  // Completa LINEA (vía Máquina resuelta) para las órdenes que llegaron sin ese dato — no pisa
+  // la Máquina/Línea ya calculada en loadData() a partir del campo real del backend.
+  const resolvedOrders = useMemo(() => {
+    if (tiemposProduccion.length === 0) return orders;
+    return orders.map(order => {
+      if (order.LINEA) return order;
+      const resolvedMachine = getResolvedMachine(order);
+      const resolvedLinea = MAQUINA_LINEA_MAP[resolvedMachine] || '';
+      if (!resolvedLinea) return order;
+      return { ...order, LINEA: resolvedLinea, _lineaResuelta: true };
+    });
+  }, [orders, tiemposProduccion, getResolvedMachine]);
+
   const currentCenterOrders = useMemo(() => {
     const term = searchTerm.toLowerCase().trim();
-    
-    return orders.filter(order => {
+
+    return resolvedOrders.filter(order => {
       // FILTRO 1: Centro seleccionado
       if (String(order.Centro || '').trim() !== selectedCenter) return false;
 
@@ -195,7 +269,7 @@ export const ProvisionalOrdersTabSection: React.FC = () => {
       }
       return true;
     });
-  }, [orders, searchTerm, selectedCenter, allowedResponsables]);
+  }, [resolvedOrders, searchTerm, selectedCenter, allowedResponsables]);
 
   const summaryByDateLine = useMemo(() => {
     const map = new Map<string, Map<string, number>>();
@@ -366,7 +440,9 @@ export const ProvisionalOrdersTabSection: React.FC = () => {
                                       <tr key={`${order.ORDENPREVISIONAL}-${idx}`} className="hover:bg-gray-50">
                                         <td className="px-3 py-1.5 whitespace-nowrap text-xs font-bold text-indigo-600 font-mono">{order.ORDENPREVISIONAL}</td>
                                         <td className="px-3 py-1.5 whitespace-nowrap text-xs text-gray-600">{order.CATEGORIA || '-'}</td>
-                                        <td className="px-3 py-1.5 whitespace-nowrap text-[10px] font-bold text-indigo-700">{order.LINEA || '-'}</td>
+                                        <td className="px-3 py-1.5 whitespace-nowrap text-[10px] font-bold text-indigo-700" title={order._lineaResuelta ? 'Línea inferida a partir de tiempos de ensamblado (la orden no traía Máquina)' : undefined}>
+                                          {order.LINEA || '-'}{order._lineaResuelta && <span className="ml-1 text-amber-500">*</span>}
+                                        </td>
                                         <td className="px-3 py-1.5 whitespace-nowrap text-xs font-mono text-gray-600">{formatMaterial(order.CodMaterial || order.MATERIAL)}</td>
                                         <td className="px-3 py-1.5 text-xs text-gray-600 max-w-xs truncate" title={order.NOMBRE}>{order.NOMBRE}</td>
                                         <td className="px-3 py-1.5 whitespace-nowrap text-xs font-bold text-right text-indigo-600">{(Number(order.CANTIDAD) || 0).toLocaleString()}</td>
@@ -464,7 +540,9 @@ export const ProvisionalOrdersTabSection: React.FC = () => {
                   <tr key={`${order.ORDENPREVISIONAL}-${idx}`} className="hover:bg-gray-50 transition-colors">
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-indigo-600 font-mono">{order.ORDENPREVISIONAL}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-600 font-medium">{order.CATEGORIA || '-'}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-[10px] font-bold text-indigo-700 bg-indigo-50/10">{order.LINEA || '-'}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-[10px] font-bold text-indigo-700 bg-indigo-50/10" title={order._lineaResuelta ? 'Línea inferida a partir de tiempos de ensamblado (la orden no traía Máquina)' : undefined}>
+                      {order.LINEA || '-'}{order._lineaResuelta && <span className="ml-1 text-amber-500">*</span>}
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-600">{formatMaterial(order.CodMaterial || order.MATERIAL)}</td>
                     <td className="px-6 py-4 text-sm text-gray-600 max-w-xs truncate" title={order.NOMBRE}>{order.NOMBRE}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-right text-indigo-600">{(Number(order.CANTIDAD) || 0).toLocaleString()}</td>
