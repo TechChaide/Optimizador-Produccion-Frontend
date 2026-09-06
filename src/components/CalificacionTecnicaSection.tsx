@@ -16,6 +16,13 @@ import {
   CheckCircle2,
   MousePointerClick,
   X,
+  ChevronDown,
+  Maximize2,
+  Minimize2,
+  ChevronsLeft,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsRight,
 } from 'lucide-react';
 import { useAppContext } from '@/context/AppProvider';
 import { humanizeLabel } from '@/lib/utils';
@@ -24,11 +31,13 @@ interface HabilidadOperador {
   [key: string]: any;
 }
 
-interface StationGroup {
+interface RowGroup {
   key: string;
   identity: Record<string, any>;
   rows: HabilidadOperador[];
 }
+
+const OPERATORS_PER_PAGE = 8;
 
 // Normaliza un encabezado de columna a solo mayúsculas/letras para poder
 // detectar columnas por significado (p.ej. "Puesto_Trabajo" -> "PUESTOTRABAJO")
@@ -43,6 +52,8 @@ export const CalificacionTecnicaSection: React.FC = () => {
   const [columns, setColumns] = useState<string[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [operatorPage, setOperatorPage] = useState(1);
+  const [expandedOperators, setExpandedOperators] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchHabilidades();
@@ -79,11 +90,18 @@ export const CalificacionTecnicaSection: React.FC = () => {
   const calificacionColumn = useMemo(() => columns.find(c => norm(c).includes('CALIFICACION')), [columns]);
   const prioridadColumn = useMemo(() => columns.find(c => norm(c).includes('PRIORIDAD')), [columns]);
   const rolColumn = useMemo(() => columns.find(c => norm(c) === 'ROL'), [columns]);
+  const codigoColumn = useMemo(() => stationIdColumns.find(c => norm(c) === 'PUESTOTRABAJO'), [stationIdColumns]);
+  const nombreEstacionColumn = useMemo(() => stationIdColumns.find(c => c !== codigoColumn), [stationIdColumns, codigoColumn]);
   const detailColumns = useMemo(
     () => columns.filter(c => !stationIdColumns.includes(c)),
     [columns, stationIdColumns]
   );
   const hasGrouping = stationIdColumns.length > 0;
+
+  const stationLabelFor = (row: HabilidadOperador) => {
+    const parts = stationIdColumns.map(c => row[c]).filter(v => v !== undefined && v !== null && v !== '');
+    return parts.length > 0 ? parts.join(' — ') : '-';
+  };
 
   const filteredData = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
@@ -93,15 +111,19 @@ export const CalificacionTecnicaSection: React.FC = () => {
     );
   }, [habilidades, columns, searchTerm]);
 
-  const buildGroups = (rows: HabilidadOperador[]): StationGroup[] => {
-    if (!hasGrouping) return [];
-    const map = new Map<string, StationGroup>();
+  useEffect(() => {
+    setOperatorPage(1);
+  }, [searchTerm]);
+
+  const groupBy = (rows: HabilidadOperador[], idCols: string[]): RowGroup[] => {
+    if (idCols.length === 0) return [];
+    const map = new Map<string, RowGroup>();
     for (const row of rows) {
-      const key = stationIdColumns.map(c => String(row[c] ?? '')).join('||');
+      const key = idCols.map(c => String(row[c] ?? '')).join('||');
       let group = map.get(key);
       if (!group) {
         const identity: Record<string, any> = {};
-        stationIdColumns.forEach(c => { identity[c] = row[c]; });
+        idCols.forEach(c => { identity[c] = row[c]; });
         group = { key, identity, rows: [] };
         map.set(key, group);
       }
@@ -110,14 +132,44 @@ export const CalificacionTecnicaSection: React.FC = () => {
     return Array.from(map.values());
   };
 
-  const stationGroups = useMemo(() => buildGroups(filteredData), [filteredData, stationIdColumns, hasGrouping]);
+  const stationGroups = useMemo(() => groupBy(filteredData, stationIdColumns), [filteredData, stationIdColumns]);
   // Totales del header: se calculan sobre el dataset completo (sin filtro de búsqueda)
   // para que las cifras de arriba no "salten" mientras el usuario escribe.
-  const allStationGroups = useMemo(() => buildGroups(habilidades), [habilidades, stationIdColumns, hasGrouping]);
+  const allStationGroups = useMemo(() => groupBy(habilidades, stationIdColumns), [habilidades, stationIdColumns]);
   const totalOperadoresUnicos = useMemo(() => {
     if (operatorIdColumns.length === 0) return null;
     return new Set(habilidades.map(row => operatorIdColumns.map(c => String(row[c] ?? '')).join('||'))).size;
   }, [habilidades, operatorIdColumns]);
+
+  // ── Lista de operadores (parte inferior): agrupada por operador, con su
+  // puesto de trabajo, calificación y prioridad exactos por fila ──────────
+  const operatorGroups = useMemo(() => groupBy(filteredData, operatorIdColumns), [filteredData, operatorIdColumns]);
+  const operatorTotalPages = Math.max(1, Math.ceil(operatorGroups.length / OPERATORS_PER_PAGE));
+  const operatorStart = (operatorPage - 1) * OPERATORS_PER_PAGE;
+  const currentOperatorGroups = operatorGroups.slice(operatorStart, operatorStart + OPERATORS_PER_PAGE);
+  const goToOperatorPage = (page: number) => setOperatorPage(Math.max(1, Math.min(page, operatorTotalPages)));
+
+  const isSearching = searchTerm.trim().length > 0;
+  const isOperatorExpanded = (key: string) => isSearching || expandedOperators.has(key);
+  const toggleOperatorExpand = (key: string) => {
+    setExpandedOperators(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+  const allCurrentOperatorsExpanded = currentOperatorGroups.length > 0 && currentOperatorGroups.every(g => isOperatorExpanded(g.key));
+  const toggleExpandAllOperators = () => {
+    setExpandedOperators(prev => {
+      const next = new Set(prev);
+      if (allCurrentOperatorsExpanded) {
+        currentOperatorGroups.forEach(g => next.delete(g.key));
+      } else {
+        currentOperatorGroups.forEach(g => next.add(g.key));
+      }
+      return next;
+    });
+  };
 
   const selectedGroup = useMemo(
     () => stationGroups.find(g => g.key === selectedKey) || null,
@@ -144,13 +196,6 @@ export const CalificacionTecnicaSection: React.FC = () => {
       ? calificacionValues.reduce((a, b) => a + b, 0) / calificacionValues.length
       : null;
 
-    const prioridadValues = prioridadColumn
-      ? rows.map(r => Number(r[prioridadColumn])).filter(n => !Number.isNaN(n))
-      : [];
-    const prioridadAvg = prioridadValues.length > 0
-      ? prioridadValues.reduce((a, b) => a + b, 0) / prioridadValues.length
-      : null;
-
     let rolBreakdown: { rol: string; count: number; pct: number }[] = [];
     if (rolColumn) {
       const counts = new Map<string, number>();
@@ -163,8 +208,8 @@ export const CalificacionTecnicaSection: React.FC = () => {
         .sort((a, b) => b.count - a.count);
     }
 
-    return { operadoresUnicos, lineasUnicas, calificacionAvg, prioridadAvg, rolBreakdown };
-  }, [selectedGroup, operatorIdColumns, nombreLineaColumn, calificacionColumn, prioridadColumn, rolColumn]);
+    return { operadoresUnicos, lineasUnicas, calificacionAvg, rolBreakdown };
+  }, [selectedGroup, operatorIdColumns, nombreLineaColumn, calificacionColumn, rolColumn]);
 
   return (
     <div className="p-6 md:p-8 space-y-6">
@@ -226,6 +271,7 @@ export const CalificacionTecnicaSection: React.FC = () => {
           </p>
         </div>
       ) : (
+        <div className="space-y-6">
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_400px] lg:items-start">
           {/* Cards grid: un puesto de trabajo por tarjeta */}
           <div className="grid max-h-[70vh] grid-cols-1 gap-3 overflow-y-auto rounded-2xl border border-gray-100 bg-gray-50/60 p-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -237,8 +283,8 @@ export const CalificacionTecnicaSection: React.FC = () => {
               const lineasUnicas = nombreLineaColumn
                 ? new Set(group.rows.map(r => String(r[nombreLineaColumn] ?? ''))).size
                 : null;
-              const codigo = stationIdColumns.find(c => norm(c) === 'PUESTOTRABAJO');
-              const nombreEstacion = stationIdColumns.find(c => c !== codigo);
+              const codigo = codigoColumn;
+              const nombreEstacion = nombreEstacionColumn;
 
               return (
                 <button
@@ -324,39 +370,30 @@ export const CalificacionTecnicaSection: React.FC = () => {
                 </div>
 
                 {/* Stat tiles */}
-                <div className="grid grid-cols-2 gap-3 px-5 pt-4">
-                  <div className="rounded-xl bg-indigo-50 p-3">
+                <div className="grid grid-cols-3 gap-2 px-5 pt-4">
+                  <div className="rounded-xl bg-indigo-50 p-2.5">
                     <div className="flex items-center gap-1.5 text-indigo-600">
                       <UserRound className="h-3.5 w-3.5" />
-                      <span className="text-[11px] font-bold uppercase tracking-wide">Operadores</span>
+                      <span className="text-[10px] font-bold uppercase tracking-wide">Operadores</span>
                     </div>
-                    <p className="mt-1 text-2xl font-bold text-indigo-900">{selectedStats.operadoresUnicos}</p>
+                    <p className="mt-1 text-xl font-bold text-indigo-900">{selectedStats.operadoresUnicos}</p>
                   </div>
                   {selectedStats.lineasUnicas !== null && (
-                    <div className="rounded-xl bg-emerald-50 p-3">
+                    <div className="rounded-xl bg-emerald-50 p-2.5">
                       <div className="flex items-center gap-1.5 text-emerald-600">
                         <Route className="h-3.5 w-3.5" />
-                        <span className="text-[11px] font-bold uppercase tracking-wide">Líneas</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wide">Líneas</span>
                       </div>
-                      <p className="mt-1 text-2xl font-bold text-emerald-900">{selectedStats.lineasUnicas}</p>
+                      <p className="mt-1 text-xl font-bold text-emerald-900">{selectedStats.lineasUnicas}</p>
                     </div>
                   )}
                   {selectedStats.calificacionAvg !== null && (
-                    <div className="rounded-xl bg-amber-50 p-3">
+                    <div className="rounded-xl bg-amber-50 p-2.5">
                       <div className="flex items-center gap-1.5 text-amber-600">
                         <Gauge className="h-3.5 w-3.5" />
-                        <span className="text-[11px] font-bold uppercase tracking-wide">Calificación</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wide">Calificación</span>
                       </div>
-                      <p className="mt-1 text-2xl font-bold text-amber-900">{selectedStats.calificacionAvg.toFixed(0)}</p>
-                    </div>
-                  )}
-                  {selectedStats.prioridadAvg !== null && (
-                    <div className="rounded-xl bg-rose-50 p-3">
-                      <div className="flex items-center gap-1.5 text-rose-600">
-                        <ArrowUpNarrowWide className="h-3.5 w-3.5" />
-                        <span className="text-[11px] font-bold uppercase tracking-wide">Prioridad prom.</span>
-                      </div>
-                      <p className="mt-1 text-2xl font-bold text-rose-900">{selectedStats.prioridadAvg.toFixed(1)}</p>
+                      <p className="mt-1 text-xl font-bold text-amber-900">{selectedStats.calificacionAvg.toFixed(0)}</p>
                     </div>
                   )}
                 </div>
@@ -412,6 +449,140 @@ export const CalificacionTecnicaSection: React.FC = () => {
               </>
             )}
           </div>
+        </div>
+
+        {/* Operadores: panel expandible por operador con puesto, calificación y prioridad */}
+        <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+          <div className="flex flex-col gap-3 border-b border-gray-100 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-600/10">
+                <UserRound className="h-4.5 w-4.5 text-emerald-600" />
+              </div>
+              <div>
+                <h2 className="text-base font-semibold text-gray-900">Operadores</h2>
+                <p className="text-xs text-gray-500">Puesto de trabajo, calificación y prioridad exactos de cada operador.</p>
+              </div>
+            </div>
+            {currentOperatorGroups.length > 0 && (
+              <button
+                onClick={toggleExpandAllOperators}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+              >
+                {allCurrentOperatorsExpanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                {allCurrentOperatorsExpanded ? 'Colapsar todo' : 'Expandir todo'}
+              </button>
+            )}
+          </div>
+
+          <div className="space-y-2 p-3">
+            {currentOperatorGroups.map((group) => {
+              const expandedNow = isOperatorExpanded(group.key);
+              return (
+                <div key={group.key} className="overflow-hidden rounded-xl border border-gray-100">
+                  <button
+                    type="button"
+                    onClick={() => toggleOperatorExpand(group.key)}
+                    className="flex w-full items-center gap-3 bg-gray-50/70 px-4 py-3 text-left transition-colors hover:bg-gray-100"
+                  >
+                    <ChevronDown className={`h-4 w-4 flex-shrink-0 text-gray-400 transition-transform ${expandedNow ? '' : '-rotate-90'}`} />
+                    <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-emerald-600/10">
+                      <UserRound className="h-4 w-4 text-emerald-600" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-baseline gap-x-2">
+                        {operatorIdColumns.map((col) => (
+                          <span key={col} className="text-sm font-semibold text-gray-900">
+                            {String(group.identity[col] ?? '-')}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <span className="flex-shrink-0 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-700">
+                      {group.rows.length} puesto{group.rows.length === 1 ? '' : 's'}
+                    </span>
+                  </button>
+
+                  {expandedNow && (
+                    <div className="overflow-x-auto border-t border-gray-100">
+                      <table className="w-full border-collapse text-sm">
+                        <thead>
+                          <tr>
+                            <th className="whitespace-nowrap border-b border-gray-100 px-4 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                              Puesto de Trabajo
+                            </th>
+                            {calificacionColumn && (
+                              <th className="whitespace-nowrap border-b border-gray-100 px-4 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                                Calificación
+                              </th>
+                            )}
+                            {prioridadColumn && (
+                              <th className="whitespace-nowrap border-b border-gray-100 px-4 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                                Prioridad
+                              </th>
+                            )}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-50">
+                          {group.rows.map((row, idx) => (
+                            <tr key={idx} className="transition-colors hover:bg-emerald-50/40">
+                              <td className="whitespace-nowrap px-4 py-2.5 text-gray-700">
+                                <span className="flex items-center gap-1.5">
+                                  <Wrench className="h-3.5 w-3.5 text-gray-400" />
+                                  {stationLabelFor(row)}
+                                </span>
+                              </td>
+                              {calificacionColumn && (
+                                <td className="whitespace-nowrap px-4 py-2.5 text-gray-700">
+                                  <span className="flex items-center gap-1.5">
+                                    <Gauge className="h-3.5 w-3.5 text-amber-500" />
+                                    {String(row[calificacionColumn] ?? '-')}
+                                  </span>
+                                </td>
+                              )}
+                              {prioridadColumn && (
+                                <td className="whitespace-nowrap px-4 py-2.5 text-gray-700">
+                                  <span className="flex items-center gap-1.5">
+                                    <ArrowUpNarrowWide className="h-3.5 w-3.5 text-rose-500" />
+                                    {String(row[prioridadColumn] ?? '-')}
+                                  </span>
+                                </td>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {operatorTotalPages > 1 && (
+            <div className="flex flex-col gap-3 border-t border-gray-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs text-gray-400">
+                Mostrando operadores {operatorStart + 1}–{Math.min(operatorStart + OPERATORS_PER_PAGE, operatorGroups.length)} de {operatorGroups.length}
+              </p>
+              <div className="flex items-center gap-1">
+                <button onClick={() => goToOperatorPage(1)} disabled={operatorPage === 1} className="rounded-md p-1.5 text-gray-500 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-30">
+                  <ChevronsLeft className="h-4 w-4" />
+                </button>
+                <button onClick={() => goToOperatorPage(operatorPage - 1)} disabled={operatorPage === 1} className="rounded-md p-1.5 text-gray-500 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-30">
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <div className="min-w-[90px] rounded-md bg-gray-50 px-3 py-1.5 text-center text-xs font-semibold text-gray-600">
+                  Página {operatorPage} de {operatorTotalPages}
+                </div>
+                <button onClick={() => goToOperatorPage(operatorPage + 1)} disabled={operatorPage === operatorTotalPages} className="rounded-md p-1.5 text-gray-500 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-30">
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+                <button onClick={() => goToOperatorPage(operatorTotalPages)} disabled={operatorPage === operatorTotalPages} className="rounded-md p-1.5 text-gray-500 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-30">
+                  <ChevronsRight className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
         </div>
       )}
     </div>
