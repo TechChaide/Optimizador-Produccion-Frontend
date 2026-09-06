@@ -510,6 +510,11 @@ export const CalificacionTecnicaSection: React.FC = () => {
                             <th className="whitespace-nowrap border-b border-gray-100 px-4 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">
                               Puesto de Trabajo
                             </th>
+                            {nombreLineaColumn && (
+                              <th className="whitespace-nowrap border-b border-gray-100 px-4 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                                Línea
+                              </th>
+                            )}
                             {calificacionColumn && (
                               <th className="whitespace-nowrap border-b border-gray-100 px-4 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">
                                 Calificación
@@ -531,6 +536,14 @@ export const CalificacionTecnicaSection: React.FC = () => {
                                   {stationLabelFor(row)}
                                 </span>
                               </td>
+                              {nombreLineaColumn && (
+                                <td className="whitespace-nowrap px-4 py-2.5 text-gray-700">
+                                  <span className="flex items-center gap-1.5">
+                                    <Route className="h-3.5 w-3.5 text-emerald-500" />
+                                    {String(row[nombreLineaColumn] ?? '-')}
+                                  </span>
+                                </td>
+                              )}
                               {calificacionColumn && (
                                 <td className="whitespace-nowrap px-4 py-2.5 text-gray-700">
                                   <span className="flex items-center gap-1.5">
