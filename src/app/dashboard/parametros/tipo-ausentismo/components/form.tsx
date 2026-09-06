@@ -7,6 +7,13 @@ import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
   Form,
   FormControl,
   FormField,
@@ -14,7 +21,7 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form';
-import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
+import { CalendarOff } from 'lucide-react';
 import { useState } from 'react';
 import { TipoAusentismo } from '@/types/interfaces';
 import { tipoAusentismoService } from '@/services/tipoausentismo.service';
@@ -88,30 +95,20 @@ export default function TipoAusentismoForm({ record, onSuccess, onCancel }: Tipo
     }
   };
 
-  const handleDelete = async () => {
-    if (!record) return;
-    if (!confirm('¿Confirma eliminar este tipo de ausentismo?')) return;
-    setIsLoading(true);
-    try {
-      await tipoAusentismoService.delete(record.codigo_tipo_ausentismo);
-      toast({ title: 'Eliminado', description: 'Tipo eliminado correctamente.' });
-      onSuccess();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'No se pudo eliminar.';
-      toast({ title: 'Error al eliminar', description: errorMessage, variant: 'destructive' });
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  // La eliminación se maneja desde el menú de acciones de la tabla, para mantener un único
+  // punto de confirmación (AlertDialog) en vez de duplicarlo aquí con un confirm() nativo.
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{record ? 'Editar Tipo de Ausentismo' : 'Nuevo Tipo de Ausentismo'}</CardTitle>
-      </CardHeader>
+    <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+      <div className="flex items-center gap-3 border-b border-gray-100 px-6 py-4">
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600/10">
+          <CalendarOff className="h-4.5 w-4.5 text-indigo-600" />
+        </div>
+        <h3 className="text-base font-semibold text-gray-900">{record ? 'Editar Tipo de Ausentismo' : 'Nuevo Tipo de Ausentismo'}</h3>
+      </div>
       <Form {...form}>
         <form onSubmit={form.handleSubmit(onSubmit)}>
-          <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 px-6 py-5 md:grid-cols-2">
             <FormField
               control={form.control}
               name="nombre_tipo_ausentismo"
@@ -133,10 +130,27 @@ export default function TipoAusentismoForm({ record, onSuccess, onCancel }: Tipo
                 <FormItem>
                   <FormLabel>Estado</FormLabel>
                   <FormControl>
-                    <select className="border rounded px-2 py-2 w-full" value={field.value} onChange={e => field.onChange(e.target.value)}>
-                      <option value="A">Activo</option>
-                      <option value="I">Inactivo</option>
-                    </select>
+                    <Select onValueChange={field.onChange} value={field.value}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Seleccione un estado" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="A">
+                          <div className="flex items-center">
+                            Activo
+                            <span className="ml-2 h-2 w-2 rounded-full bg-green-500" />
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="I">
+                          <div className="flex items-center">
+                            Inactivo
+                            <span className="ml-2 h-2 w-2 rounded-full bg-red-500" />
+                          </div>
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -144,29 +158,24 @@ export default function TipoAusentismoForm({ record, onSuccess, onCancel }: Tipo
             />
 
             {record && (
-              <div className="col-span-1 md:col-span-2 grid grid-cols-2 gap-4">
+              <div className="col-span-1 grid grid-cols-2 gap-4 md:col-span-2">
                 <div>
-                  <label className="text-sm text-muted-foreground">Usuario modificación</label>
-                  <div className="mt-1 p-2 border rounded bg-gray-50">{record.usuario_modificacion || '-'}</div>
+                  <label className="text-xs font-medium uppercase tracking-wide text-gray-400">Usuario modificación</label>
+                  <div className="mt-1 rounded-lg border border-gray-100 bg-gray-50 p-2 text-sm text-gray-600">{record.usuario_modificacion || '-'}</div>
                 </div>
                 <div>
-                  <label className="text-sm text-muted-foreground">Fecha modificación</label>
-                  <div className="mt-1 p-2 border rounded bg-gray-50">{record.fecha_modificacion ? new Date(record.fecha_modificacion).toLocaleString('es-ES') : '-'}</div>
+                  <label className="text-xs font-medium uppercase tracking-wide text-gray-400">Fecha modificación</label>
+                  <div className="mt-1 rounded-lg border border-gray-100 bg-gray-50 p-2 text-sm text-gray-600">{record.fecha_modificacion ? new Date(record.fecha_modificacion).toLocaleString('es-ES') : '-'}</div>
                 </div>
               </div>
             )}
-          </CardContent>
-          <CardFooter className="flex justify-end gap-2">
-            {record && (
-              <Button type="button" variant="destructive" onClick={handleDelete} disabled={isLoading}>
-                Eliminar
-              </Button>
-            )}
+          </div>
+          <div className="flex justify-end gap-2 border-t border-gray-100 px-6 py-4">
             <Button type="button" variant="outline" onClick={onCancel} disabled={isLoading}>Cancelar</Button>
             <Button type="submit" disabled={isLoading}>{isLoading ? (record ? 'Actualizando...' : 'Guardando...') : (record ? 'Actualizar' : 'Guardar')}</Button>
-          </CardFooter>
+          </div>
         </form>
       </Form>
-    </Card>
+    </div>
   );
 }

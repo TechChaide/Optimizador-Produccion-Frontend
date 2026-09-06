@@ -21,7 +21,7 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form';
-import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
+import { Clock } from 'lucide-react';
 import { useState } from 'react';
 import { Turno } from '@/types/interfaces';
 import { turnoService } from '@/services/turno.service';
@@ -95,16 +95,17 @@ export default function TurnoForm({ record, onSuccess, onCancel }: TurnoFormProp
     }
   };
 
-  
-
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{record ? 'Editar Turno' : 'Nuevo Turno'}</CardTitle>
-      </CardHeader>
+    <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+      <div className="flex items-center gap-3 border-b border-gray-100 px-6 py-4">
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600/10">
+          <Clock className="h-4.5 w-4.5 text-indigo-600" />
+        </div>
+        <h3 className="text-base font-semibold text-gray-900">{record ? 'Editar Turno' : 'Nuevo Turno'}</h3>
+      </div>
       <Form {...form}>
         <form onSubmit={form.handleSubmit(onSubmit)}>
-          <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 px-6 py-5 md:grid-cols-2">
             <FormField
               control={form.control}
               name="nombre_turno"
@@ -143,24 +144,24 @@ export default function TurnoForm({ record, onSuccess, onCancel }: TurnoFormProp
               )}
             />
             {record && (
-              <div className="col-span-1 md:col-span-2 grid grid-cols-2 gap-4">
+              <div className="col-span-1 grid grid-cols-2 gap-4 md:col-span-2">
                 <div>
-                  <label className="text-sm text-muted-foreground">Usuario modificación</label>
-                  <div className="mt-1 p-2 border rounded bg-gray-50">{record.usuario_modificacion || '-'}</div>
+                  <label className="text-xs font-medium uppercase tracking-wide text-gray-400">Usuario modificación</label>
+                  <div className="mt-1 rounded-lg border border-gray-100 bg-gray-50 p-2 text-sm text-gray-600">{record.usuario_modificacion || '-'}</div>
                 </div>
                 <div>
-                  <label className="text-sm text-muted-foreground">Fecha modificación</label>
-                  <div className="mt-1 p-2 border rounded bg-gray-50">{record.fecha_modificacion ? new Date(record.fecha_modificacion).toLocaleString('es-ES') : '-'}</div>
+                  <label className="text-xs font-medium uppercase tracking-wide text-gray-400">Fecha modificación</label>
+                  <div className="mt-1 rounded-lg border border-gray-100 bg-gray-50 p-2 text-sm text-gray-600">{record.fecha_modificacion ? new Date(record.fecha_modificacion).toLocaleString('es-ES') : '-'}</div>
                 </div>
               </div>
             )}
-          </CardContent>
-          <CardFooter className="flex justify-end gap-2">
+          </div>
+          <div className="flex justify-end gap-2 border-t border-gray-100 px-6 py-4">
             <Button type="button" variant="outline" onClick={onCancel} disabled={isLoading}>Cancelar</Button>
-            <Button type="submit" variant={record ? 'destructive' : undefined} disabled={isLoading}>{isLoading ? (record ? 'Actualizando...' : 'Guardando...') : (record ? 'Actualizar' : 'Guardar')}</Button>
-          </CardFooter>
+            <Button type="submit" disabled={isLoading}>{isLoading ? (record ? 'Actualizando...' : 'Guardando...') : (record ? 'Actualizar' : 'Guardar')}</Button>
+          </div>
         </form>
       </Form>
-    </Card>
+    </div>
   );
 }

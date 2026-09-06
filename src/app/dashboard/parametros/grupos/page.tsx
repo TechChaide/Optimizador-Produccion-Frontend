@@ -8,7 +8,7 @@ import RestriccionesModal from './components/restricciones-modal';
 import RelacionesModal from './components/relaciones-modal';
 import MaterialesBalanceoModal from './components/materiales-balanceo-modal';
 import MaterialesBalanceoCargaMasivaModal from './components/materiales-balanceo-carga-masiva-modal';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Users2 } from 'lucide-react';
 import { Grupo } from '@/types/interfaces';
 import { grupoService } from '@/services/grupo.service';
 
@@ -78,18 +78,15 @@ export default function GruposPage() {
 
   return (
     <div className="p-6 md:p-8 space-y-6">
-      <div className="flex items-center space-x-3">
-        <h2 className="text-2xl font-semibold text-gray-700">Parámetros - Grupos</h2>
+      <div className="flex items-center gap-3">
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-600/10">
+          <Users2 className="h-6 w-6 text-indigo-600" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-gray-900">Grupos</h1>
+          <p className="text-sm text-gray-500">Grupos operativos, sus restricciones, relaciones y materiales de balanceo.</p>
+        </div>
       </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Configuración de Grupos</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p>Administra los grupos de trabajo usados en la planificación.</p>
-        </CardContent>
-      </Card>
 
       {isFormOpen && (
         <GrupoForm record={selectedRecord} onSuccess={handleSuccess} onCancel={handleCancel} />
