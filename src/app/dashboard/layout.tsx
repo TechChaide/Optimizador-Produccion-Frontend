@@ -16,7 +16,11 @@ import {
     TooltipProvider,
     TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { ChevronsUpDown, BookUser, Shield, Users, Settings, Building, MenuSquare, UserCog, UserPlus, Minus, LogOut, CircleUser, AppWindow } from 'lucide-react';
+// Se importa el namespace completo de lucide-react (en vez de una lista fija de nombres)
+// para que cualquier ícono definido en el backend (campo `icono` del menú) se resuelva
+// automáticamente, incluyendo íconos agregados después de este archivo. Ver resolveIcon más abajo.
+import * as LucideIcons from 'lucide-react';
+import { ChevronsUpDown, LogOut } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { menuService } from '@/services/seguridades/menu.service';
@@ -39,19 +43,14 @@ type MenuNode = {
     children?: MenuNode[];
 };
 
-// Mapa de iconos string -> componente Lucide
-const iconMap: Record<string, React.ComponentType<any>> = {
-    Shield,
-    BookUser,
-    Users,
-    Settings,
-    Building,
-    MenuSquare,
-    UserCog,
-    UserPlus,
-    CircleUser,
-    AppWindow,
-};
+// Resuelve un ícono por nombre contra el paquete lucide-react completo (todos los
+// exports, no una lista curada), así el mapeo siempre refleja la última versión
+// instalada y cualquier nombre de ícono nuevo enviado por el backend se muestra
+// sin tener que editar este archivo cada vez.
+function resolveIcon(name: string): React.ComponentType<any> {
+    const icons = LucideIcons as unknown as Record<string, React.ComponentType<any>>;
+    return icons[name] || icons.Shield;
+}
 
 // Construir árbol de menú a partir de un array plano basándose en padre-hijo
 function buildMenuTree(flatItems: MenuNode[]): MenuNode[] {
@@ -164,7 +163,7 @@ function filterActive(nodes: MenuNode[]): MenuNode[] {
 // Transformar árbol backend -> estructura esperada por RecursiveMenu
 function toRecursiveItems(nodes: MenuNode[]): any[] {
     return nodes.map(n => {
-        const IconComp = iconMap[n.icono] || Shield;
+        const IconComp = resolveIcon(n.icono);
         const hasChildren = !!(n.children && n.children.length);
         // Reglas:
         // '.' => raíz (no navegable)

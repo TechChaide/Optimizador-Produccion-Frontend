@@ -212,7 +212,7 @@ export default function LoginPage() {
                                 height={46}
                                 priority
                             />
-                            <CardTitle className="text-2xl">Módulo Base</CardTitle>
+                            <CardTitle className="text-2xl">Módulo de Optimización de la Planificación</CardTitle>
                         </div>
                         <CardDescription>
                             Inicio de Sesión

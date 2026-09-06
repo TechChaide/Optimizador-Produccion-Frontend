@@ -56,7 +56,7 @@ export const authService = {
 
   async getUsersInfo(): Promise<BodyListResponse<User>> {
     const response = await fetch(
-      `${environment.apiURLSeguridades}/api/usuarios/fichasUsuarios`,
+      `${environment.apiURLSeguridades1}/api/usuarios/fichasUsuarios`,
       {
         method: "GET",
         headers: { "Content-Type": "application/json" },

@@ -15,6 +15,8 @@ export const environment = {
     apiPlanificadorTurnos : 'http://localhost:8000',
 
     ////////////////////////////////////////Api de Seguridades
+    apiURLSeguridades1 : 'https://apps.chaide.com/seguridades',
+
     //apiURLSeguridades : 'http://localhost:5400',
     apiURLSeguridades : 'https://apps.chaide.com/seguridadesGuard',
 
