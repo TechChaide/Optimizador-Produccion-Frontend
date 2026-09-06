@@ -3,6 +3,7 @@
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { DetalleCalendario } from '@/types/interfaces';
+import { toFechaEcuador } from '@/lib/fecha-ecuador';
 
 interface CalendarPreviewProps {
   readonly detalles: DetalleCalendario[];
@@ -20,11 +21,11 @@ export default function CalendarPreview({
   const firstDay = monthDate.getDay();
 
   const getDetailForDay = (day: number): DetalleCalendario | null => {
-    const dateStr = new Date(year, month, day).toISOString().split('T')[0];
+    const dateStr = toFechaEcuador(new Date(year, month, day));
     return (
       detalles.find(d => {
-        const fechaInicio = new Date(d.fecha_inicio).toISOString().split('T')[0];
-        const fechaFin = new Date(d.fecha_fin).toISOString().split('T')[0];
+        const fechaInicio = toFechaEcuador(d.fecha_inicio);
+        const fechaFin = toFechaEcuador(d.fecha_fin);
         return fechaInicio <= dateStr && dateStr <= fechaFin;
       }) || null
     );

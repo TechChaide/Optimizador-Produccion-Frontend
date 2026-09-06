@@ -2186,7 +2186,7 @@ export const ProductionPlanSection: React.FC = () => {
                         </tr>
                     ))}
                 </tbody>
-                <tfoot className="bg-gray-800 text-white sticky bottom-0">
+                <tfoot className="bg-indigo-50 text-indigo-900 sticky bottom-0 border-t-2 border-indigo-200">
                     <tr>
                         <th colSpan={4} className="px-3 py-2 text-right font-bold uppercase">Total Demanda Centro 1000</th>
                         <th className="px-3 py-2 text-right font-bold uppercase">{Math.round(totalNecesidadCentro1000).toLocaleString()}</th>
@@ -2195,7 +2195,7 @@ export const ProductionPlanSection: React.FC = () => {
                         <th colSpan={4} className="px-3 py-2 text-right font-bold uppercase">Total Demanda Centro 2000</th>
                         <th className="px-3 py-2 text-right font-bold uppercase">{Math.round(totalNecesidadCentro2000).toLocaleString()}</th>
                     </tr>
-                    <tr className="bg-gray-900">
+                    <tr className="bg-indigo-100">
                         <th colSpan={4} className="px-3 py-2 text-right font-bold uppercase">Total General Demanda (Planificable)</th>
                         <th className="px-3 py-2 text-right font-bold uppercase">{Math.round(totalGeneral).toLocaleString()}</th>
                     </tr>

@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { DetalleCalendario, TipoDetalle } from '@/types/interfaces';
 import { detalleCalendarioService } from '@/services/detallecalendario.service';
 import { tipoDetalleService } from '@/services/tipodetalle.service';
+import { toFechaEcuador } from '@/lib/fecha-ecuador';
 
 interface DetalleCalendarioFormProps {
   readonly record: DetalleCalendario | null;
@@ -17,7 +18,7 @@ interface DetalleCalendarioFormProps {
 function convertDateToString(date: Date | string | null | undefined): string {
   if (!date) return '';
   if (typeof date === 'string') return date;
-  return new Date(date).toISOString().split('T')[0];
+  return toFechaEcuador(date);
 }
 
 // El formulario trabaja las 3 fechas como string (formato yyyy-MM-dd de <input type="date">); solo

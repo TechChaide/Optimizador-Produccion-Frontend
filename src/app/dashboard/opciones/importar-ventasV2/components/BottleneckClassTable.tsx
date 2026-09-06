@@ -628,48 +628,48 @@ export const BottleneckClassTable: React.FC<BottleneckClassTableProps & { showSa
               <DataRow key={`row-${row.CodMaterial}-${idx}`} row={row} idx={idx} linea={row.lineaRef || ''} isCentro1000={isCentro1000} showSaldos={showSaldos} isMounted={isMounted} />
             ))}
           </tbody>
-          <tfoot className="sticky bottom-0 z-20 bg-gray-800 text-white font-bold text-[10px]">
+          <tfoot className="sticky bottom-0 z-20 bg-slate-100 text-slate-700 font-bold text-[10px] border-t-2 border-slate-300">
             <tr>
-              <td colSpan={11} className="px-2 py-2 border-r-2 border-gray-600">TOTALES FILTRADOS</td>
-              <td className="px-2 py-2 text-right font-mono text-teal-300 min-w-[80px]">{formatTotal(totals.traslados)}</td>
-              <td className="px-2 py-2 text-right font-mono text-gray-300 min-w-[80px]">{formatTotal(totals.necPropia)}</td>
-              <td className="px-2 py-2 text-right font-mono text-blue-300 border-r-2 border-gray-600 min-w-[90px]">{formatTotal(totals.necesidad)}</td>
-              <td className="px-2 py-2 text-right font-mono text-blue-200 min-w-[80px]">{formatTotal(totals.tiempoNec, 1)}</td>
-              <td className="min-w-[60px]"></td><td className="px-2 py-2 text-right font-mono text-blue-200 min-w-[90px]">{formatTotal(totals.dispMinJN)}</td>
-              <td className="px-2 py-2 text-right font-mono text-blue-300 min-w-[80px]">{formatTotal(totals.maxJN)}</td>
-              <td className="px-2 py-2 text-right font-mono text-green-300 border-r-2 border-gray-600 min-w-[80px]">{formatTotal(totals.defJN)}</td>
-              <td className="px-2 py-2 text-right font-mono text-green-200 min-w-[80px]">{formatTotal(totals.tDefJN, 1)}</td>
-              <td className="min-w-[60px]"></td><td className="px-2 py-2 text-right font-mono text-green-200 min-w-[90px]">{formatTotal(totals.tMinHE)}</td>
-              <td className="px-2 py-2 text-right font-mono text-green-300 min-w-[80px]">{formatTotal(totals.maxHE)}</td>
-              <td className="px-2 py-2 text-right font-mono text-orange-300 border-r-2 border-gray-600 min-w-[80px]">{formatTotal(totals.defHE)}</td>
-              <td className="px-2 py-2 text-right font-mono text-orange-200 min-w-[80px]">{formatTotal(totals.tDefHE, 1)}</td>
-              <td className="min-w-[60px]"></td><td className="px-2 py-2 text-right font-mono text-orange-200 min-w-[90px]">{formatTotal(totals.tMinSAB)}</td>
-              <td className="px-2 py-2 text-right font-mono text-orange-300 min-w-[80px]">{formatTotal(totals.maxSAB)}</td>
-              <td className="px-2 py-2 text-right font-mono text-orange-200 border-r-2 border-gray-600 min-w-[80px]">{formatTotal(totals.defSAB)}</td>
-              <td className="px-2 py-2 text-right font-mono text-purple-300 bg-purple-900/20 border-r-2 border-gray-600 min-w-[90px]">{formatTotal(totals.viable)}</td>
+              <td colSpan={11} className="px-2 py-2 border-r-2 border-slate-300">TOTALES FILTRADOS</td>
+              <td className="px-2 py-2 text-right font-mono text-teal-700 min-w-[80px]">{formatTotal(totals.traslados)}</td>
+              <td className="px-2 py-2 text-right font-mono text-slate-600 min-w-[80px]">{formatTotal(totals.necPropia)}</td>
+              <td className="px-2 py-2 text-right font-mono text-blue-700 border-r-2 border-slate-300 min-w-[90px]">{formatTotal(totals.necesidad)}</td>
+              <td className="px-2 py-2 text-right font-mono text-blue-600 min-w-[80px]">{formatTotal(totals.tiempoNec, 1)}</td>
+              <td className="min-w-[60px]"></td><td className="px-2 py-2 text-right font-mono text-blue-600 min-w-[90px]">{formatTotal(totals.dispMinJN)}</td>
+              <td className="px-2 py-2 text-right font-mono text-blue-700 min-w-[80px]">{formatTotal(totals.maxJN)}</td>
+              <td className="px-2 py-2 text-right font-mono text-green-700 border-r-2 border-slate-300 min-w-[80px]">{formatTotal(totals.defJN)}</td>
+              <td className="px-2 py-2 text-right font-mono text-green-600 min-w-[80px]">{formatTotal(totals.tDefJN, 1)}</td>
+              <td className="min-w-[60px]"></td><td className="px-2 py-2 text-right font-mono text-green-600 min-w-[90px]">{formatTotal(totals.tMinHE)}</td>
+              <td className="px-2 py-2 text-right font-mono text-green-700 min-w-[80px]">{formatTotal(totals.maxHE)}</td>
+              <td className="px-2 py-2 text-right font-mono text-orange-700 border-r-2 border-slate-300 min-w-[80px]">{formatTotal(totals.defHE)}</td>
+              <td className="px-2 py-2 text-right font-mono text-orange-600 min-w-[80px]">{formatTotal(totals.tDefHE, 1)}</td>
+              <td className="min-w-[60px]"></td><td className="px-2 py-2 text-right font-mono text-orange-600 min-w-[90px]">{formatTotal(totals.tMinSAB)}</td>
+              <td className="px-2 py-2 text-right font-mono text-orange-700 min-w-[80px]">{formatTotal(totals.maxSAB)}</td>
+              <td className="px-2 py-2 text-right font-mono text-orange-600 border-r-2 border-slate-300 min-w-[80px]">{formatTotal(totals.defSAB)}</td>
+              <td className="px-2 py-2 text-right font-mono text-purple-700 bg-purple-50 border-r-2 border-slate-300 min-w-[90px]">{formatTotal(totals.viable)}</td>
               {showSaldos ? (
                 <>
-                  <td className="px-2 py-2 text-right font-mono text-red-300 min-w-[80px]">{formatTotal(totals.defGral)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-teal-300 min-w-[90px]">{formatTotal(totals.trViable)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-indigo-300 min-w-[90px]">{formatTotal(totals.stockIni)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-gray-300 min-w-[80px]">{formatTotal(totals.demanda)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-green-300 min-w-[90px]">{formatTotal(totals.demCubierta)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-blue-300 min-w-[80px]">{formatTotal(totals.backlog)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-amber-200 min-w-[80px]">{formatTotal(totals.backlogTrasl)}</td>
-                  <td className="px-2 py-2 text-right font-mono border-r-2 border-gray-600 min-w-[90px]">{formatTotal(totals.saldoFinal)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-red-700 min-w-[80px]">{formatTotal(totals.defGral)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-teal-700 min-w-[90px]">{formatTotal(totals.trViable)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-indigo-700 min-w-[90px]">{formatTotal(totals.stockIni)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-slate-600 min-w-[80px]">{formatTotal(totals.demanda)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-green-700 min-w-[90px]">{formatTotal(totals.demCubierta)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-blue-700 min-w-[80px]">{formatTotal(totals.backlog)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-amber-700 min-w-[80px]">{formatTotal(totals.backlogTrasl)}</td>
+                  <td className="px-2 py-2 text-right font-mono border-r-2 border-slate-300 min-w-[90px]">{formatTotal(totals.saldoFinal)}</td>
                 </>
               ) : isCentro1000 ? (
                 <>
-                  <td className="px-2 py-2 text-right font-mono text-teal-300 min-w-[80px]">{formatTotal(totals.envio2000Plan)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-teal-200 min-w-[80px]">{formatTotal(totals.envio2000)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-cyan-300 min-w-[90px]">{formatTotal(totals.queda1000)}</td>
-                  <td className="px-2 py-2 text-right font-mono border-r-2 border-gray-600 min-w-[80px]">{formatTotal(totals.defGral)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-teal-700 min-w-[80px]">{formatTotal(totals.envio2000Plan)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-teal-700 min-w-[80px]">{formatTotal(totals.envio2000)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-cyan-700 min-w-[90px]">{formatTotal(totals.queda1000)}</td>
+                  <td className="px-2 py-2 text-right font-mono border-r-2 border-slate-300 min-w-[80px]">{formatTotal(totals.defGral)}</td>
                 </>
               ) : (
                 <>
-                  <td className="px-2 py-2 text-right font-mono text-red-300 min-w-[80px]">{formatTotal(totals.defGral)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-teal-300 min-w-[90px]">{formatTotal(totals.trViable)}</td>
-                  <td className="px-2 py-2 text-right font-mono border-r-2 border-gray-600 min-w-[80px]">{formatTotal(totals.defNeto)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-red-700 min-w-[80px]">{formatTotal(totals.defGral)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-teal-700 min-w-[90px]">{formatTotal(totals.trViable)}</td>
+                  <td className="px-2 py-2 text-right font-mono border-r-2 border-slate-300 min-w-[80px]">{formatTotal(totals.defNeto)}</td>
                 </>
               )}
             </tr>

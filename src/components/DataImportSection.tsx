@@ -567,7 +567,7 @@ export const DataImportSection: React.FC<DataImportSectionProps> = ({ onDataImpo
                                     );
                                 })}
                             </tr>
-                            <tr className="bg-gray-800 text-white font-bold">
+                            <tr className="bg-indigo-50 text-indigo-900 font-bold border-t-2 border-indigo-200">
                                 <td className="p-2 border-r">TOTAL GENERAL</td>
                                 <td className="p-2 text-right font-mono border-r">{Math.round(reportSummary.grandTotal).toLocaleString()}</td>
                                 {reportSummary.centrosUnicos.map(centro => {

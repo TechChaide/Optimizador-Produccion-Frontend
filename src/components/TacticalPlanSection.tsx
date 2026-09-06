@@ -25,7 +25,7 @@ const getTargetDateString = (executionDate: string): string => {
     if (!executionDate) return '';
     const date = new Date(executionDate + 'T00:00:00');
     date.setDate(date.getDate() + 4);
-    return date.toISOString().split('T')[0];
+    return fechaLocalEcuador(date);
 };
 
 

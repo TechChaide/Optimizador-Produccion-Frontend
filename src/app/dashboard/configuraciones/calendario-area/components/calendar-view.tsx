@@ -6,6 +6,7 @@ import type { Calendario, DetalleCalendario, Restriccion } from '@/types/interfa
 import { detalleCalendarioService } from '@/services/detallecalendario.service';
 import DetallesModal from './detalles-modal';
 import OperadoresCalendarioModal from './operadores-calendario-modal';
+import { toFechaEcuador } from '@/lib/fecha-ecuador';
 
 interface CalendarViewProps {
   readonly calendario: Calendario;
@@ -99,12 +100,11 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
   const emptyDays = Array.from({ length: firstDay }, (_, i) => i);
 
   const getDetailsForDay = (day: number): DetalleCalendario[] => {
-    const dateStr = new Date(currentDate.getFullYear(), currentDate.getMonth(), day)
-      .toISOString().split('T')[0];
+    const dateStr = toFechaEcuador(new Date(currentDate.getFullYear(), currentDate.getMonth(), day));
 
     return detalles.filter(d => {
-      const start = new Date(d.fecha_inicio).toISOString().split('T')[0];
-      const end = new Date(d.fecha_fin).toISOString().split('T')[0];
+      const start = toFechaEcuador(d.fecha_inicio);
+      const end = toFechaEcuador(d.fecha_fin);
       return start <= dateStr && dateStr <= end;
     });
   };

@@ -19,6 +19,7 @@ import { authService } from '@/services/auth.service';
 import { operadorService } from '@/services/operador.service';
 import type { Ausentismo, TipoAusentismo, User, Operador } from '@/types/interfaces';
 import { useToast } from '@/hooks/use-toast';
+import { toFechaHoraEcuador } from '@/lib/fecha-ecuador';
 
 interface PermissionFormState {
   codigo_tipo_ausentismo: string;
@@ -173,8 +174,10 @@ export const AbsenteeismSection: React.FC = () => {
     
     setFormState({
       codigo_tipo_ausentismo: ausentismo.codigo_tipo_ausentismo.toString(),
-      fecha_inicio: startDate.toISOString().slice(0, 16), // Format for datetime-local
-      fecha_fin: endDate.toISOString().slice(0, 16),
+      // Hora de Ecuador para el input datetime-local: con toISOString() el formulario mostraba la
+      // hora en UTC, 5 h adelantada, y al guardar se corría el registro (o el día, después de las 19:00).
+      fecha_inicio: toFechaHoraEcuador(startDate),
+      fecha_fin: toFechaHoraEcuador(endDate),
       tiempo_efectivo: ausentismo.tiempo_efectivo,
       descripcion: ausentismo.descripcion || '',
     });

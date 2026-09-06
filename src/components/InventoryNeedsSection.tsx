@@ -485,7 +485,7 @@ export const InventoryNeedsSection: React.FC = () => {
                             </tr>
                         )}
                     </tbody>
-                     <tfoot className="bg-gray-800 text-white sticky bottom-0 z-10">
+                     <tfoot className="bg-indigo-50 text-indigo-900 sticky bottom-0 z-10 border-t-2 border-indigo-200">
                         <tr>
                             <th colSpan={7} className="px-2 py-2 text-right font-bold uppercase">TOTALES FILTRADOS:</th>
                             <td className="px-2 py-2 text-right font-mono font-bold">{footerTotals.StockActual.toLocaleString()}</td>

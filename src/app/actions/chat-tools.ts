@@ -5,6 +5,7 @@ import { z } from 'genkit';
 import { getRequestContext } from '@/lib/request-context';
 import { runtimeInspector } from '@/services/RuntimeInspector';
 import { dataStore } from '@/services/DataStore';
+import { toFechaEcuador, getFechaEcuadorHoy, toMesEcuador } from '@/lib/fecha-ecuador';
 
 /**
  * Herramientas de análisis para el Production Assistant
@@ -66,14 +67,14 @@ function groupSalesBy(sales: any[], groupBy: string) {
     
     switch (groupBy) {
       case 'day':
-        key = saleDate.toISOString().split('T')[0];
+        key = toFechaEcuador(saleDate);
         break;
       case 'week':
         const week = getWeekNumber(saleDate);
         key = `Week ${week}`;
         break;
       case 'month':
-        key = saleDate.toISOString().slice(0, 7); // YYYY-MM
+        key = toMesEcuador(saleDate); // YYYY-MM
         break;
       case 'product':
         key = sale.productId || sale.producto || 'Unknown';
@@ -301,11 +302,11 @@ export const analyzeEmployeeAvailabilityTool = ai.defineTool({
   const absenteeism = contextData.absenteeismFull || contextData.absenteeismSample || [];
   const shifts = contextData.workShiftsFull || contextData.workShiftSample || [];
   
-  const targetDate = params.date || new Date().toISOString().split('T')[0];
+  const targetDate = params.date || getFechaEcuadorHoy();
   
   // Filtrar ausencias para la fecha
   const absencesOnDate = absenteeism.filter((a: any) => {
-    const absenceDate = new Date(a.fecha || a.date).toISOString().split('T')[0];
+    const absenceDate = toFechaEcuador(a.fecha || a.date);
     return absenceDate === targetDate;
   });
   
@@ -340,7 +341,7 @@ export const analyzeEmployeeAvailabilityTool = ai.defineTool({
     absenceReasons: absencesOnDate.map((a: any) => a.reason || a.tipo),
     departmentStats,
     shiftsScheduled: shifts.filter((s: any) => {
-      const shiftDate = new Date(s.fecha || s.date).toISOString().split('T')[0];
+      const shiftDate = toFechaEcuador(s.fecha || s.date);
       return shiftDate === targetDate;
     }).length
   };

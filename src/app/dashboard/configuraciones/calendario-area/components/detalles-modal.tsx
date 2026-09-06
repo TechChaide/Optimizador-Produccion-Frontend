@@ -16,6 +16,7 @@ import { DetalleCalendario, Calendario, TipoDetalle } from '@/types/interfaces';
 import { detalleCalendarioService } from '@/services/detallecalendario.service';
 import { tipoDetalleService } from '@/services/tipodetalle.service';
 import { Trash2, Plus, Edit2, AlertCircle } from 'lucide-react';
+import { toFechaEcuador, getFechaEcuadorHoy } from '@/lib/fecha-ecuador';
 
 interface DetallesModalProps {
   calendario: Calendario | null;
@@ -50,14 +51,14 @@ export default function DetallesModal({
   const [selectedDetalle, setSelectedDetalle] = useState<DetalleCalendario | null>(null);
   const [formData, setFormData] = useState<DetalleFormData>({
     nombre_detalle: '',
-    fecha_inicio_str: new Date().toISOString().split('T')[0],
-    fecha_fin_str: new Date().toISOString().split('T')[0],
+    fecha_inicio_str: getFechaEcuadorHoy(),
+    fecha_fin_str: getFechaEcuadorHoy(),
     codigo_tipo_detalle: 0,
     estado: 'A',
   });
   const { toast } = useToast();
 
-  const selectedDateStr = selectedDate ? selectedDate.toISOString().split('T')[0] : '';
+  const selectedDateStr = selectedDate ? toFechaEcuador(selectedDate) : '';
 
   const selectedDateFormatted = selectedDate
     ? selectedDate.toLocaleDateString('es-ES', {
@@ -87,8 +88,8 @@ export default function DetallesModal({
       // Si hay fecha seleccionada, filtrar solo detalles de esa fecha
       if (selectedDate) {
         const filtered = allForCalendar.filter(d => {
-          const start = new Date(d.fecha_inicio).toISOString().split('T')[0];
-          const end = new Date(d.fecha_fin).toISOString().split('T')[0];
+          const start = toFechaEcuador(d.fecha_inicio);
+          const end = toFechaEcuador(d.fecha_fin);
           return start <= selectedDateStr && selectedDateStr <= end;
         });
         setDetalles(filtered);
@@ -126,9 +127,9 @@ export default function DetallesModal({
     setSelectedDetalle(detalle);
     setFormData({
       nombre_detalle: detalle.nombre_detalle,
-      fecha_real_str: new Date(detalle.fecha_real).toISOString().split('T')[0],
-      fecha_inicio_str: new Date(detalle.fecha_inicio).toISOString().split('T')[0],
-      fecha_fin_str: new Date(detalle.fecha_fin).toISOString().split('T')[0],
+      fecha_real_str: toFechaEcuador(detalle.fecha_real),
+      fecha_inicio_str: toFechaEcuador(detalle.fecha_inicio),
+      fecha_fin_str: toFechaEcuador(detalle.fecha_fin),
       codigo_tipo_detalle: detalle.codigo_tipo_detalle,
       estado: detalle.estado,
     });

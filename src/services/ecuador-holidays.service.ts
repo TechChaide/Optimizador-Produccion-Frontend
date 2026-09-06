@@ -71,13 +71,11 @@ function getDefaultEcuadorHolidays(year: number): Holiday[] {
     // Feriados fijos
     { date: `${year}-01-01`, name: 'Año Nuevo', type: 'feriado' },
     { date: `${year}-05-01`, name: 'Día del Trabajo', type: 'feriado' },
-    { date: `${year}-07-24`, name: 'Natalicio de Simón Bolívar', type: 'feriado' },
-    { date: `${year}-08-10`, name: 'Independencia de Guayaquil', type: 'feriado' },
-    { date: `${year}-10-09`, name: 'Independencia de Cuenca', type: 'feriado' },
-    { date: `${year}-10-12`, name: 'Colón descubre América', type: 'feriado' },
-    { date: `${year}-11-01`, name: 'Día de Difuntos', type: 'feriado' },
-    { date: `${year}-11-11`, name: 'Independencia de Latacunga', type: 'feriado' },
-    { date: `${year}-12-06`, name: 'Fundación de Quito', type: 'feriado' },
+    { date: `${year}-05-24`, name: 'Batalla de Pichincha', type: 'feriado' },
+    { date: `${year}-08-10`, name: 'Primer Grito de Independencia', type: 'feriado' },
+    { date: `${year}-10-09`, name: 'Independencia de Guayaquil', type: 'feriado' },
+    { date: `${year}-11-02`, name: 'Día de los Difuntos', type: 'feriado' },
+    { date: `${year}-11-03`, name: 'Independencia de Cuenca', type: 'feriado' },
     { date: `${year}-12-25`, name: 'Navidad', type: 'feriado' },
     
     // Feriados móviles - Carnaval (viernes y sábado antes del miércoles de ceniza)

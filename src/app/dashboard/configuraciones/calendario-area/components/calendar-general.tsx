@@ -3,6 +3,7 @@
 import { useState, useRef } from 'react';
 import { ChevronLeft, ChevronRight, Plus, Settings, Calendar } from 'lucide-react';
 import { Calendario, DetalleCalendario, Restriccion } from '@/types/interfaces';
+import { toFechaEcuador } from '@/lib/fecha-ecuador';
 
 interface CalendarGeneralProps {
   readonly calendarios: Calendario[];
@@ -116,22 +117,20 @@ export default function CalendarGeneral({
 
   // Get feriados for a specific day (across all calendarios)
   const getFeriadosForDay = (day: number): DetalleCalendario[] => {
-    const dateStr = new Date(currentDate.getFullYear(), currentDate.getMonth(), day)
-      .toISOString().split('T')[0];
+    const dateStr = toFechaEcuador(new Date(currentDate.getFullYear(), currentDate.getMonth(), day));
 
     return allDetalles.filter(d => {
       const isFeriado = d.tipo_detalle?.nombre_tipo_detalle?.toLowerCase().includes('feriado');
       if (!isFeriado) return false;
-      const start = new Date(d.fecha_inicio).toISOString().split('T')[0];
-      const end = new Date(d.fecha_fin).toISOString().split('T')[0];
+      const start = toFechaEcuador(d.fecha_inicio);
+      const end = toFechaEcuador(d.fecha_fin);
       return start <= dateStr && dateStr <= end;
     });
   };
 
   // Get all details for a specific day grouped by calendario/group
   const getGroupDetailsForDay = (day: number) => {
-    const dateStr = new Date(currentDate.getFullYear(), currentDate.getMonth(), day)
-      .toISOString().split('T')[0];
+    const dateStr = toFechaEcuador(new Date(currentDate.getFullYear(), currentDate.getMonth(), day));
 
     const groupMap = new Map<number, {
       calendario: Calendario;
@@ -141,8 +140,8 @@ export default function CalendarGeneral({
     for (const cal of calendarios) {
       const calDetalles = allDetalles.filter(d => {
         if (d.codigo_calendario !== cal.codigo_calendario) return false;
-        const start = new Date(d.fecha_inicio).toISOString().split('T')[0];
-        const end = new Date(d.fecha_fin).toISOString().split('T')[0];
+        const start = toFechaEcuador(d.fecha_inicio);
+        const end = toFechaEcuador(d.fecha_fin);
         return start <= dateStr && dateStr <= end;
       });
 
@@ -156,8 +155,7 @@ export default function CalendarGeneral({
 
   // Count non-feriado event types for day badges
   const getTypeBadgesForDay = (day: number) => {
-    const dateStr = new Date(currentDate.getFullYear(), currentDate.getMonth(), day)
-      .toISOString().split('T')[0];
+    const dateStr = toFechaEcuador(new Date(currentDate.getFullYear(), currentDate.getMonth(), day));
 
     const typeCount = new Map<string, { count: number; color: string }>();
 
@@ -165,8 +163,8 @@ export default function CalendarGeneral({
       const isFeriado = d.tipo_detalle?.nombre_tipo_detalle?.toLowerCase().includes('feriado');
       if (isFeriado) continue;
 
-      const start = new Date(d.fecha_inicio).toISOString().split('T')[0];
-      const end = new Date(d.fecha_fin).toISOString().split('T')[0];
+      const start = toFechaEcuador(d.fecha_inicio);
+      const end = toFechaEcuador(d.fecha_fin);
       if (start > dateStr || dateStr > end) continue;
 
       const typeName = d.tipo_detalle?.nombre_tipo_detalle || 'Otro';

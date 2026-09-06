@@ -4,6 +4,7 @@ import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { MONTH_NUMBERS, MONTH_NAMES } from './constants';
 import type { WorkDaysCalculation, TiempoCanonResult, FilaHorasExtras, HorasExtrasPorMesCentro, BottleneckDataRow } from './types';
 import * as XLSX from 'xlsx';
+import { toFechaEcuador, getFechaEcuadorHoy } from '@/lib/fecha-ecuador';
 
 // Función para normalizar códigos de material a 8 dígitos consistentes
 export const normalizeMaterialCode = (code: string | number): string => {
@@ -47,7 +48,7 @@ export function exportToXLSX<T extends Record<string, unknown>>(data: T[], filen
   worksheet['!cols'] = columnWidths;
 
   // Descargar el archivo
-  const dateStr = new Date().toISOString().split('T')[0];
+  const dateStr = getFechaEcuadorHoy();
   XLSX.writeFile(workbook, `${filename}_${dateStr}.xlsx`);
 }
 
@@ -62,7 +63,7 @@ export function exportToXLSXMultiSheet(sheets: { sheetName: string; data: Record
     XLSX.utils.book_append_sheet(workbook, worksheet, sheetName.substring(0, 31));
   });
   if (workbook.SheetNames.length === 0) { alert('No hay datos para exportar'); return; }
-  const dateStr = new Date().toISOString().split('T')[0];
+  const dateStr = getFechaEcuadorHoy();
   XLSX.writeFile(workbook, `${filename}_${dateStr}.xlsx`);
 }
 
@@ -114,7 +115,7 @@ export async function calculateWorkDays(year: number, month: number): Promise<Wo
   for (let day = 1; day <= endDate.getDate(); day++) {
     const date = new Date(year, month - 1, day);
     const dayOfWeek = date.getDay();
-    const dateString = date.toISOString().split('T')[0];
+    const dateString = toFechaEcuador(date);
 
     if (holidayDates.has(dateString)) {
       continue;

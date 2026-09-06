@@ -661,20 +661,20 @@ export const Centro1000DetailTable = forwardRef<Centro1000DetailTableHandle, Cen
                 : 0;
               
               return (
-                <tr className="bg-gray-800 text-white">
+                <tr className="bg-indigo-50 text-indigo-900 border-t-2 border-indigo-200">
                   <td colSpan={8} className="px-3 py-3 text-sm font-bold">TOTAL GENERAL ({lineas.length} líneas)</td>
                   <td className="px-3 py-3 text-sm text-right font-mono font-bold">{Math.floor(totalNecPropia).toLocaleString()}</td>
-                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-amber-300">{Math.floor(totalTraslados).toLocaleString()}</td>
-                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-teal-300">{Math.floor(totalNecTotal).toLocaleString()}</td>
-                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-indigo-300">{totalTiempoUnitarioPorPuesto.toLocaleString(undefined, { maximumFractionDigits: 3 })}</td>
+                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-amber-700">{Math.floor(totalTraslados).toLocaleString()}</td>
+                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-teal-700">{Math.floor(totalNecTotal).toLocaleString()}</td>
+                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-indigo-700">{totalTiempoUnitarioPorPuesto.toLocaleString(undefined, { maximumFractionDigits: 3 })}</td>
                   <td className="px-3 py-3 text-sm text-right font-mono font-bold">{totalTiempoNecesidad.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
                   <td className="px-3 py-3 text-sm text-right font-mono font-bold" title="Promedio de participación por línea (cada línea suma ~100%)">~{promedioParticipacion.toLocaleString(undefined, { maximumFractionDigits: 1 })}%</td>
-                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-pink-300">{totalTiempoParaMaterial.toLocaleString(undefined, { maximumFractionDigits: 2 })} min</td>
-                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-cyan-300">{totalTMaxProm.toLocaleString(undefined, { maximumFractionDigits: 2 })} min</td>
-                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-lime-300">{totalTLibre.toLocaleString(undefined, { maximumFractionDigits: 2 })} min</td>
-                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-emerald-300">{totalNecesidadMax.toLocaleString()}</td>
-                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-orange-300">{totalTMaxProm.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
-                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-purple-300">{totalHorasExtras.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-pink-700">{totalTiempoParaMaterial.toLocaleString(undefined, { maximumFractionDigits: 2 })} min</td>
+                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-cyan-700">{totalTMaxProm.toLocaleString(undefined, { maximumFractionDigits: 2 })} min</td>
+                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-lime-700">{totalTLibre.toLocaleString(undefined, { maximumFractionDigits: 2 })} min</td>
+                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-emerald-700">{totalNecesidadMax.toLocaleString()}</td>
+                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-orange-700">{totalTMaxProm.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                  <td className="px-3 py-3 text-sm text-right font-mono font-bold text-purple-700">{totalHorasExtras.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
                 </tr>
               );
             })()}

@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from '@/components/ui/command';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
+import { toFechaEcuador } from '@/lib/fecha-ecuador';
 
 interface CapacityRow {
     center: WorkCenter;
@@ -34,7 +35,7 @@ const getDailyHours = (date: Date, constraints: AppConstraints): number => {
     const { holidays, shiftParameters } = constraints;
     if (!shiftParameters) return 0;
     
-    const dateString = date.toISOString().split('T')[0];
+    const dateString = toFechaEcuador(date);
     const holiday = holidays.find(h => h.date === dateString && h.appliesTo !== 'Distribucion');
     const dayOfWeek = date.getDay();
 
@@ -260,7 +261,7 @@ export const ProductionCapacitySection: React.FC = () => {
                                 año: year,
                                 fecha: date.toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: 'numeric' }),
                                 dia: weekdaysEs[date.getDay()],
-                                esFeriado: constraints.holidays.some(h => h.date === date.toISOString().split('T')[0] && h.dayType === 'asueto' && h.appliesTo !== 'Distribucion') ? 'Si' : 'No',
+                                esFeriado: constraints.holidays.some(h => h.date === toFechaEcuador(date) && h.dayType === 'asueto' && h.appliesTo !== 'Distribucion') ? 'Si' : 'No',
                                 maxHorasJornada,
                                 puestoDeTrabajo: workstation.name,
                                 linea: line.name,
@@ -417,7 +418,7 @@ export const ProductionCapacitySection: React.FC = () => {
                                     </tr>
                                 ))}
                             </tbody>
-                             <tfoot className="bg-gray-800 text-white sticky bottom-0 font-bold">
+                             <tfoot className="bg-indigo-50 text-indigo-900 sticky bottom-0 font-bold border-t-2 border-indigo-200">
                                 <tr>
                                     <th colSpan={8} className="px-2 py-2 text-right uppercase">TOTAL HORAS DISPONIBLES FILTRADAS:</th>
                                     <td className="px-2 py-2 text-right font-mono">

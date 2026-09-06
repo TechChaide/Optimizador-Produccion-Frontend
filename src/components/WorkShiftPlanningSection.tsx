@@ -17,6 +17,7 @@ import {
 import { WorkShiftIcon, PROCESS_TYPE_OPTIONS } from "@/constants/constants";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useAppContext } from "@/context/AppProvider";
+import { toFechaEcuador } from '@/lib/fecha-ecuador';
 
 interface WorkShiftPlanningSectionProps {
   shifts: WorkShift[];
@@ -123,7 +124,7 @@ export const WorkShiftPlanningSection: React.FC<
     employeeId: string | null,
     assignmentIndex: number
   ) => {
-    const dateString = date.toISOString().split("T")[0];
+    const dateString = toFechaEcuador(date);
 
     if (employeeId && isEmployeeAbsent(employeeId, date)) {
       addNotification(
@@ -179,7 +180,7 @@ export const WorkShiftPlanningSection: React.FC<
     workstationDefId: string,
     shiftType: "day" | "night"
   ): (string | null)[] => {
-    const dateString = date.toISOString().split("T")[0];
+    const dateString = toFechaEcuador(date);
     const shift = shifts.find(
       (s) =>
         s.date === dateString &&

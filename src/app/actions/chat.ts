@@ -7,6 +7,7 @@ import { LogEntry } from '@/services/LogService';
 import { analysisTools } from './chat-tools';
 import { requestContext, ChatContextData } from '@/lib/request-context';
 import { dataStore } from '@/services/DataStore';
+import { getFechaEcuadorHoy } from '@/lib/fecha-ecuador';
 
 export interface ChatMessage {
   role: 'user' | 'model';
@@ -144,7 +145,7 @@ IMPORTANT GUIDELINES:
 2. **Log Markers**: Look for entries like "[SECTION] ▶️/⏳/✅/❌ description (duration)" in the logs
 3. **Progress Tracking**: Operations show in logs as they progress - acknowledge them from the logs you see
 4. **Error Detection**: Failed operations will show as "[SECTION] ❌ description - ERROR: message"
-6. **Date Inference**: If the user says "last week", "yesterday", or "this month", calculate the dates based on "Today" (${new Date().toISOString().split('T')[0]}) and pass them to the tools. Do NOT ask the user to calculate dates for you.
+6. **Date Inference**: If the user says "last week", "yesterday", or "this month", calculate the dates based on "Today" (${getFechaEcuadorHoy()}) and pass them to the tools. Do NOT ask the user to calculate dates for you.
 7. **Defaults**: If parameters are optional (like groupBy), choose a sensible default (e.g., 'day' or 'product') based on the question instead of asking the user.
 8. **Actionable Answers**: Provide the analysis results directly.
 
