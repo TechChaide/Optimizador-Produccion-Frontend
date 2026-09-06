@@ -3,7 +3,7 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Turno } from "../types/interfaces";
 
-const API_URL = `${environment.apiURL}/turno`;
+const API_URL = `${environment.apiURL}/api/turno`;
 
 export const turnoService = {
   async getAll(): Promise<BodyListResponse<Turno>> {

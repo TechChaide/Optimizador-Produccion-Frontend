@@ -1,7 +1,7 @@
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 
-const API_URL = `${environment.apiURL}/servicios`;
+const API_URL = `${environment.apiURL}/api/servicios`;
 
 export const serviciosService = {
   async getCuboHabilidadesOP(): Promise<BodyResponse<any>> {

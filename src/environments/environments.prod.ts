@@ -9,7 +9,7 @@ export const environment = {
 
     ////////////////////////////////////////Api de Producción (Optimizador)
     //apiURL : 'http://localhost:5400',
-    apiURL : 'https://apps.chaide.com/ProductionOptimizer/api',
+    apiURL : 'https://apps.chaide.com/ProductionOptimizer',
 
     ////////////////////////////////////////Api Planificador de Turnos (Gestión Turno Operadores)
     apiPlanificadorTurnos : 'http://localhost:8000',

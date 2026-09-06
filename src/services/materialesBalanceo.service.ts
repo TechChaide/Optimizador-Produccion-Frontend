@@ -3,7 +3,7 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { MaterialesBalanceo, PlanGlobal } from "../types/interfaces";
 
-const API_URL = `${environment.apiURL}/materiales_balanceo`;
+const API_URL = `${environment.apiURL}/api/materiales_balanceo`;
 
 export const materialesBalanceoService = {
   async getAll(): Promise<BodyListResponse<MaterialesBalanceo>> {
