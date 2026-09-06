@@ -14,10 +14,11 @@ import {
   ProcessType,
   EmployeeSkill,
 } from "@/types/types";
-import { WorkShiftIcon, PROCESS_TYPE_OPTIONS } from "@/constants/constants";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { PROCESS_TYPE_OPTIONS } from "@/constants/constants";
+import { ChevronLeft, ChevronRight, CalendarRange, Sun, Moon, UserX, Users2, LayoutGrid } from "lucide-react";
 import { useAppContext } from "@/context/AppProvider";
 import { toFechaEcuador } from '@/lib/fecha-ecuador';
+import { cn } from "@/lib/utils";
 
 interface WorkShiftPlanningSectionProps {
   shifts: WorkShift[];
@@ -46,7 +47,7 @@ export const WorkShiftPlanningSection: React.FC<
   employeeSkills,
 }) => {
   const inspector = useRuntimeInspector('WorkShiftPlanning');
-  
+
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedProcessType, setSelectedProcessType] = useState<
     ProcessType | ""
@@ -59,6 +60,7 @@ export const WorkShiftPlanningSection: React.FC<
     date.setDate(date.getDate() + i);
     return date;
   });
+  const weekEnd = weekDates[6];
 
   const relevantLines = useMemo(() => {
     if (!selectedProcessType) return [];
@@ -191,260 +193,221 @@ export const WorkShiftPlanningSection: React.FC<
     return shift?.employeeIds || [];
   };
 
-  const renderWeekControls = () => (
-    <div className="flex justify-between items-center mb-4">
-      <button
-        onClick={() =>
-          setCurrentDate(
-            new Date(currentDate.setDate(currentDate.getDate() - 7))
-          )
-        }
-        className="p-2 rounded-md hover:bg-gray-200"
-      >
-        <ChevronLeft className="w-6 h-6" />
-      </button>
-      <h3 className="text-xl font-semibold">
-        Semana del{" "}
-        {weekStart.toLocaleDateString("es-ES", {
-          day: "2-digit",
-          month: "long",
-        })}
-      </h3>
-      <button
-        onClick={() =>
-          setCurrentDate(
-            new Date(currentDate.setDate(currentDate.getDate() + 7))
-          )
-        }
-        className="p-2 rounded-md hover:bg-gray-200"
-      >
-        <ChevronRight className="w-6 h-6" />
-      </button>
-    </div>
-  );
+  const rangeLabel = `${weekStart.toLocaleDateString("es-ES", { day: "2-digit", month: "short" })} – ${weekEnd.toLocaleDateString("es-ES", { day: "2-digit", month: "short", year: "numeric" })}`;
 
-  const renderFilters = () => (
-    <div className="mb-6">
-      <label
-        htmlFor="processTypeFilter"
-        className="block text-sm font-medium text-gray-700 mb-1"
-      >
-        Filtrar por Tipo de Proceso
-      </label>
+  const renderShiftSelect = (
+    date: Date,
+    line: (typeof relevantLines)[number],
+    ws: (typeof relevantWorkstations)[number],
+    shiftType: "day" | "night",
+    slotIndex: number,
+    qualifiedEmployeesForPost: Employee[],
+  ) => {
+    const value = getShiftAssignment(date, line.id, ws.id, shiftType)[slotIndex] || "";
+    return (
       <select
-        id="processTypeFilter"
-        value={selectedProcessType}
+        key={slotIndex}
+        value={value}
         onChange={(e) =>
-          setSelectedProcessType(e.target.value as ProcessType | "")
+          handleShiftChange(date, line.id, ws.id, shiftType, e.target.value || null, slotIndex)
         }
-        className="w-full md:w-1/3 border border-gray-300 bg-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+        className={cn(
+          "w-full rounded-lg border px-1.5 py-1 text-[11px] font-medium outline-none transition-colors focus:ring-2",
+          value
+            ? shiftType === "day"
+              ? "border-amber-200 bg-amber-50 text-amber-800 focus:ring-amber-100"
+              : "border-indigo-200 bg-indigo-50 text-indigo-800 focus:ring-indigo-100"
+            : "border-dashed border-gray-200 bg-white text-gray-400 focus:ring-gray-100"
+        )}
       >
-        <option value="">-- Seleccionar Proceso --</option>
-        {PROCESS_TYPE_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
+        <option value="">Sin asignar</option>
+        {qualifiedEmployeesForPost.map((emp) => (
+          <option
+            key={emp.id}
+            value={emp.id}
+            disabled={isEmployeeAbsent(emp.id, date)}
+          >
+            {emp.name}
+            {isEmployeeAbsent(emp.id, date) ? " (Ausente)" : ""}
           </option>
         ))}
       </select>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="p-6 md:p-8 space-y-6">
-      <div className="flex items-center space-x-3">
-        <WorkShiftIcon />
-        <h2 className="text-2xl font-semibold text-gray-700">
-          Planificación de Turnos de Trabajo
-        </h2>
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-600/10">
+          <LayoutGrid className="h-6 w-6 text-emerald-600" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-gray-900">Planificación de Turnos</h1>
+          <p className="text-sm text-gray-500">Asigna operadores a cada puesto de trabajo por día y turno.</p>
+        </div>
       </div>
 
-      <div className="bg-white p-6 rounded-xl shadow-lg">
-        {renderFilters()}
-        {renderWeekControls()}
-
-        <div className="overflow-x-auto">
-          <table className="min-w-full border-collapse border border-gray-300">
-            <thead className="bg-gray-100 sticky top-0 z-20">
-              <tr>
-                <th className="border border-gray-300 p-2 font-semibold text-gray-700 sticky left-0 bg-gray-100 z-30">
-                  Puesto / Línea
-                </th>
-                {weekDates.map((date) => (
-                  <th
-                    key={date.toISOString()}
-                    className="border border-gray-300 p-2 font-semibold text-gray-700"
-                  >
-                    {date.toLocaleDateString("es-ES", {
-                      weekday: "short",
-                      day: "2-digit",
-                    })}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {relevantLines.map((line) =>
-                relevantWorkstations
-                  .filter((ws) =>
-                    line.assignedWorkstations.some(
-                      (as) => as.definitionId === ws.id
-                    )
-                  )
-                  .map((ws) => {
-                    const qualifiedEmployeesForPost =
-                      getQualifiedEmployeesForWorkstation(ws.id);
-                    const assignedWs = line.assignedWorkstations.find(
-                      (as) => as.definitionId === ws.id
-                    );
-                    const employeesRequired = assignedWs?.quantity || 1;
-
-                    return (
-                      <React.Fragment key={`${line.id}-${ws.id}`}>
-                        <tr className="bg-gray-50">
-                          <td className="border border-gray-300 p-2 font-medium text-gray-800 sticky left-0 bg-gray-50 z-10 align-top">
-                            {ws.name} (Req: {employeesRequired})
-                            <span className="block text-xs text-gray-500">
-                              {line.name}
-                            </span>
-                          </td>
-                          <td
-                            colSpan={7}
-                            className="p-0 border-transparent"
-                          ></td>
-                        </tr>
-                        <tr>
-                          <td className="border border-gray-300 p-2 text-right text-sm font-medium text-gray-600 align-top sticky left-0 bg-white z-10">
-                            Día
-                          </td>
-                          {weekDates.map((date) => (
-                            <td
-                              key={`${date.toISOString()}-day`}
-                              className="border border-gray-300 p-1 align-top space-y-1"
-                            >
-                              {Array.from({ length: employeesRequired }).map(
-                                (_, i) => (
-                                  <select
-                                    key={i}
-                                    value={
-                                      getShiftAssignment(
-                                        date,
-                                        line.id,
-                                        ws.id,
-                                        "day"
-                                      )[i] || ""
-                                    }
-                                    onChange={(e) =>
-                                      handleShiftChange(
-                                        date,
-                                        line.id,
-                                        ws.id,
-                                        "day",
-                                        e.target.value || null,
-                                        i
-                                      )
-                                    }
-                                    className="w-full text-xs p-1 border-gray-200 rounded"
-                                  >
-                                    <option value="">-- Asignar --</option>
-                                    {qualifiedEmployeesForPost.map((emp) => (
-                                      <option
-                                        key={emp.id}
-                                        value={emp.id}
-                                        disabled={isEmployeeAbsent(
-                                          emp.id,
-                                          date
-                                        )}
-                                      >
-                                        {emp.name}{" "}
-                                        {isEmployeeAbsent(emp.id, date)
-                                          ? "(Ausente)"
-                                          : ""}
-                                      </option>
-                                    ))}
-                                  </select>
-                                )
-                              )}
-                            </td>
-                          ))}
-                        </tr>
-                        <tr>
-                          <td className="border border-gray-300 p-2 text-right text-sm font-medium text-gray-600 align-top sticky left-0 bg-white z-10">
-                            Noche
-                          </td>
-                          {weekDates.map((date) => (
-                            <td
-                              key={`${date.toISOString()}-night`}
-                              className="border border-gray-300 p-1 align-top space-y-1"
-                            >
-                              {Array.from({ length: employeesRequired }).map(
-                                (_, i) => (
-                                  <select
-                                    key={i}
-                                    value={
-                                      getShiftAssignment(
-                                        date,
-                                        line.id,
-                                        ws.id,
-                                        "night"
-                                      )[i] || ""
-                                    }
-                                    onChange={(e) =>
-                                      handleShiftChange(
-                                        date,
-                                        line.id,
-                                        ws.id,
-                                        "night",
-                                        e.target.value || null,
-                                        i
-                                      )
-                                    }
-                                    className="w-full text-xs p-1 border-gray-200 rounded"
-                                  >
-                                    <option value="">-- Asignar --</option>
-                                    {qualifiedEmployeesForPost.map((emp) => (
-                                      <option
-                                        key={emp.id}
-                                        value={emp.id}
-                                        disabled={isEmployeeAbsent(
-                                          emp.id,
-                                          date
-                                        )}
-                                      >
-                                        {emp.name}{" "}
-                                        {isEmployeeAbsent(emp.id, date)
-                                          ? "(Ausente)"
-                                          : ""}
-                                      </option>
-                                    ))}
-                                  </select>
-                                )
-                              )}
-                            </td>
-                          ))}
-                        </tr>
-                      </React.Fragment>
-                    );
-                  })
-              )}
-              {selectedProcessType && relevantLines.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="text-center p-4 text-gray-500">
-                    No hay líneas o puestos de trabajo configurados para el tipo
-                    de proceso &apos;{selectedProcessType}&apos;.
-                  </td>
-                </tr>
-              )}
-              {!selectedProcessType && (
-                <tr>
-                  <td colSpan={8} className="text-center p-8 text-gray-600">
-                    Por favor, seleccione un tipo de proceso para comenzar a
-                    planificar los turnos.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+      <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm space-y-5">
+        {/* Selector de proceso */}
+        <div>
+          <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-gray-500">
+            Tipo de Proceso
+          </label>
+          <div className="flex flex-wrap gap-2">
+            {PROCESS_TYPE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setSelectedProcessType(opt.value)}
+                className={cn(
+                  "rounded-full border px-4 py-1.5 text-sm font-medium transition-colors",
+                  selectedProcessType === opt.value
+                    ? "border-emerald-600 bg-emerald-600 text-white shadow-sm"
+                    : "border-gray-200 bg-white text-gray-600 hover:border-emerald-200 hover:bg-emerald-50"
+                )}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {/* Navegación de semana */}
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
+          <button
+            onClick={() =>
+              setCurrentDate(
+                new Date(new Date(currentDate).setDate(currentDate.getDate() - 7))
+              )
+            }
+            className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-white hover:text-gray-900"
+            aria-label="Semana anterior"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+          <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+            <CalendarRange className="h-4 w-4 text-emerald-600" />
+            {rangeLabel}
+          </div>
+          <button
+            onClick={() =>
+              setCurrentDate(
+                new Date(new Date(currentDate).setDate(currentDate.getDate() + 7))
+              )
+            }
+            className="rounded-lg p-2 text-gray-500 transition-colors hover:bg-white hover:text-gray-900"
+            aria-label="Semana siguiente"
+          >
+            <ChevronRight className="w-5 h-5" />
+          </button>
+        </div>
+
+        {!selectedProcessType ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-20 text-gray-400">
+            <Users2 className="h-10 w-10" />
+            <p className="text-sm">Selecciona un tipo de proceso para comenzar a planificar los turnos.</p>
+          </div>
+        ) : relevantLines.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-20 text-gray-400">
+            <Users2 className="h-10 w-10" />
+            <p className="text-sm">
+              No hay líneas o puestos de trabajo configurados para el proceso &apos;{selectedProcessType}&apos;.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {/* Leyenda */}
+            <div className="flex flex-wrap items-center gap-4 text-xs text-gray-500">
+              <span className="flex items-center gap-1.5"><Sun className="h-3.5 w-3.5 text-amber-500" /> Turno día</span>
+              <span className="flex items-center gap-1.5"><Moon className="h-3.5 w-3.5 text-indigo-500" /> Turno noche</span>
+              <span className="flex items-center gap-1.5"><UserX className="h-3.5 w-3.5 text-red-400" /> Empleado con ausentismo (no seleccionable)</span>
+            </div>
+
+            <div className="overflow-x-auto rounded-xl border border-gray-100">
+              <table className="min-w-full border-collapse text-sm">
+                <thead className="sticky top-0 z-20 bg-gray-50">
+                  <tr>
+                    <th className="sticky left-0 z-30 border-b border-r border-gray-100 bg-gray-50 p-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                      Puesto / Línea
+                    </th>
+                    {weekDates.map((date) => (
+                      <th
+                        key={date.toISOString()}
+                        className="border-b border-gray-100 p-2 text-center text-[11px] font-bold uppercase tracking-wide text-gray-500"
+                      >
+                        {date.toLocaleDateString("es-ES", { weekday: "short", day: "2-digit" })}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {relevantLines.map((line) =>
+                    relevantWorkstations
+                      .filter((ws) =>
+                        line.assignedWorkstations.some(
+                          (as) => as.definitionId === ws.id
+                        )
+                      )
+                      .map((ws) => {
+                        const qualifiedEmployeesForPost =
+                          getQualifiedEmployeesForWorkstation(ws.id);
+                        const assignedWs = line.assignedWorkstations.find(
+                          (as) => as.definitionId === ws.id
+                        );
+                        const employeesRequired = assignedWs?.quantity || 1;
+
+                        return (
+                          <React.Fragment key={`${line.id}-${ws.id}`}>
+                            <tr>
+                              <td colSpan={8} className="sticky left-0 border-b border-gray-100 bg-gray-50/70 px-3 py-1.5">
+                                <span className="text-sm font-semibold text-gray-800">{ws.name}</span>
+                                <span className="ml-2 text-xs text-gray-400">{line.name} · Req: {employeesRequired}</span>
+                              </td>
+                            </tr>
+                            <tr className="border-b border-gray-50">
+                              <td className="sticky left-0 z-10 bg-white p-2 text-right align-top">
+                                <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600">
+                                  <Sun className="h-3.5 w-3.5" /> Día
+                                </span>
+                              </td>
+                              {weekDates.map((date) => (
+                                <td
+                                  key={`${date.toISOString()}-day`}
+                                  className="space-y-1 p-1.5 align-top"
+                                >
+                                  {Array.from({ length: employeesRequired }).map((_, i) =>
+                                    renderShiftSelect(date, line, ws, "day", i, qualifiedEmployeesForPost)
+                                  )}
+                                </td>
+                              ))}
+                            </tr>
+                            <tr className="border-b border-gray-100">
+                              <td className="sticky left-0 z-10 bg-white p-2 text-right align-top">
+                                <span className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600">
+                                  <Moon className="h-3.5 w-3.5" /> Noche
+                                </span>
+                              </td>
+                              {weekDates.map((date) => (
+                                <td
+                                  key={`${date.toISOString()}-night`}
+                                  className="space-y-1 p-1.5 align-top"
+                                >
+                                  {Array.from({ length: employeesRequired }).map((_, i) =>
+                                    renderShiftSelect(date, line, ws, "night", i, qualifiedEmployeesForPost)
+                                  )}
+                                </td>
+                              ))}
+                            </tr>
+                          </React.Fragment>
+                        );
+                      })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

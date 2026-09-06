@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { MoreHorizontal, Clock, Plus, AlertCircle, History, ChevronUp, ChevronDown, Edit, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { MoreHorizontal, Clock, Plus, AlertCircle, History, ChevronUp, ChevronDown, Edit, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, CalendarOff, Search, UserRound, CalendarClock } from 'lucide-react';
 import { ausentimoService } from '@/services/ausentismo.service';
 import { tipoAusentismoService } from '@/services/tipoausentismo.service';
 import { authService } from '@/services/auth.service';
@@ -370,74 +370,78 @@ export const AbsenteeismSection: React.FC = () => {
 
   return (
     <div className="space-y-6 p-6 md:p-8">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Gestión de Ausentismos</h1>
-          <p className="text-gray-600 mt-1">Registra y gestiona los ausentismos</p>
+      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-blue-600/10">
+            <CalendarOff className="h-6 w-6 text-blue-600" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-gray-900">Gestión de Ausentismos</h1>
+            <p className="text-sm text-gray-500">Registra permisos, faltas y consulta el historial por empleado.</p>
+          </div>
         </div>
-        <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 rounded-lg border border-blue-200">
-          <Clock className="w-4 h-4 text-blue-600" />
-          <span className="text-sm font-medium text-blue-600">{usuarios.length} Empleados</span>
+        <div className="flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3.5 py-2">
+          <Clock className="h-4 w-4 text-blue-600" />
+          <span className="text-sm font-semibold text-blue-700">{usuarios.length} empleados</span>
         </div>
       </div>
 
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
+      <Card className="overflow-hidden rounded-2xl border-gray-100 shadow-sm">
+        <CardHeader className="border-b border-gray-100 pb-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <CardTitle>Empleados - Mantenimiento de ausentismos de Empleados</CardTitle>
-              <CardDescription>Total registros: {filteredUsuarios.length}{filteredUsuarios.length !== usuarios.length ? ` (de ${usuarios.length})` : ''} — Página {currentPage} de {totalPages}</CardDescription>
+              <CardTitle>Empleados</CardTitle>
+              <CardDescription>
+                {filteredUsuarios.length} registro{filteredUsuarios.length === 1 ? '' : 's'}
+                {filteredUsuarios.length !== usuarios.length ? ` de ${usuarios.length}` : ''} · Página {currentPage} de {totalPages}
+              </CardDescription>
+            </div>
+            <div className="relative w-full sm:w-72">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+              <input
+                type="search"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Buscar por nombre, cédula, cargo..."
+                className="w-full rounded-lg border border-gray-200 bg-gray-50 py-2 pl-9 pr-3 text-sm outline-none transition-colors focus:border-blue-300 focus:bg-white focus:ring-2 focus:ring-blue-100"
+              />
             </div>
           </div>
         </CardHeader>
 
-        <CardContent>
-          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between mb-4">
-            <div>
-              <p className="text-sm text-gray-500">Filtra por código, nombre, cédula, departamento, grupo o cargo</p>
-            </div>
-            <input
-              type="search"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Buscar usuarios..."
-              className="w-full md:w-64 px-3 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
+        <CardContent className="p-0">
           {isLoading ? (
-            <div className="space-y-3">
+            <div className="space-y-3 p-6">
               {[...Array(5)].map((_, i) => (
                 <Skeleton key={i} className="h-12 w-full" />
               ))}
             </div>
           ) : usuarios.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-gray-500">
-              <AlertCircle className="w-12 h-12 mb-3 text-gray-400" />
-              <p>No hay usuarios disponibles</p>
+            <div className="flex flex-col items-center justify-center gap-2 py-20 text-gray-400">
+              <AlertCircle className="h-10 w-10" />
+              <p className="text-sm">No hay usuarios disponibles</p>
             </div>
           ) : filteredUsuarios.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-gray-500">
-              <AlertCircle className="w-12 h-12 mb-3 text-gray-400" />
-              <p>No se encontraron usuarios que coincidan con la búsqueda</p>
+            <div className="flex flex-col items-center justify-center gap-2 py-20 text-gray-400">
+              <Search className="h-10 w-10" />
+              <p className="text-sm">No se encontraron usuarios que coincidan con la búsqueda</p>
             </div>
           ) : (
             <>
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
-                  <tr className="border-b border-gray-200 bg-gray-50">
-                    <th className="px-6 py-3 text-left font-semibold text-gray-700">Código</th>
-                    <th className="px-6 py-3 text-left font-semibold text-gray-700">Cédula</th>
-                    <th className="px-6 py-3 text-left font-semibold text-gray-700">Localidad</th>
-                    <th className="px-6 py-3 text-left font-semibold text-gray-700">Nombre</th>
-                    <th className="px-6 py-3 text-left font-semibold text-gray-700">Grupo Departamento</th>
-                    <th className="px-6 py-3 text-left font-semibold text-gray-700">Departamento</th>
-                    <th className="px-6 py-3 text-left font-semibold text-gray-700">Cargo</th>
-                    <th className="px-6 py-3 text-left font-semibold text-gray-700">Status</th>
-                    <th className="px-6 py-3 text-right font-semibold text-gray-700">Acciones</th>
+                  <tr className="border-b border-gray-100 bg-gray-50/80">
+                    <th className="px-6 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">Empleado</th>
+                    <th className="px-6 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">Cédula</th>
+                    <th className="px-6 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">Localidad</th>
+                    <th className="px-6 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">Grupo / Depto.</th>
+                    <th className="px-6 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">Cargo</th>
+                    <th className="px-6 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">Estado</th>
+                    <th className="px-6 py-3 text-right text-[11px] font-bold uppercase tracking-wide text-gray-500">Acciones</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-200">
+                <tbody className="divide-y divide-gray-50">
                   {paginatedUsuarios.map((usuario, index) => {
                     const display = getUsuarioDisplayData(usuario);
                     const statusIsActive = isStatusActive(display.status);
@@ -447,22 +451,34 @@ export const AbsenteeismSection: React.FC = () => {
                       : 'bg-gray-50 border-gray-200 text-gray-600';
                     const indicatorColor = statusIsActive ? 'bg-green-500' : 'bg-gray-400';
                     const uniqueKey = usuario.codigo_usuario ?? usuario.CODIGO ?? `user-${index}`;
+                    const iniciales = display.nombre.trim().split(/\s+/).slice(0, 2).map(p => p[0]).join('').toUpperCase() || '?';
                     return (
-                      <tr key={uniqueKey} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-6 py-4 font-medium text-gray-900">{display.codigo}</td>
-                        <td className="px-6 py-4 text-gray-600">{display.cedula}</td>
-                        <td className="px-6 py-4 text-gray-600">{display.localidad}</td>
-                        <td className="px-6 py-4 text-gray-600">{display.nombre}</td>
-                        <td className="px-6 py-4 text-gray-600">{display.grupoDepartamento}</td>
-                        <td className="px-6 py-4 text-gray-600">{display.departamento}</td>
-                        <td className="px-6 py-4 text-gray-600">{display.cargo}</td>
-                        <td className="px-6 py-4">
+                      <tr key={uniqueKey} className="transition-colors hover:bg-blue-50/40">
+                        <td className="px-6 py-3.5">
+                          <div className="flex items-center gap-3">
+                            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-blue-100 text-xs font-bold text-blue-700">
+                              {iniciales}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="truncate font-medium text-gray-900">{display.nombre}</p>
+                              <p className="text-xs text-gray-400">Cód. {display.codigo}</p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-3.5 text-gray-600">{display.cedula}</td>
+                        <td className="px-6 py-3.5 text-gray-600">{display.localidad}</td>
+                        <td className="px-6 py-3.5 text-gray-600">
+                          <p>{display.departamento}</p>
+                          <p className="text-xs text-gray-400">{display.grupoDepartamento}</p>
+                        </td>
+                        <td className="px-6 py-3.5 text-gray-600">{display.cargo}</td>
+                        <td className="px-6 py-3.5">
                           <Badge variant="outline" className={badgeBase}>
                             <span className={`inline-block w-2 h-2 rounded-full mr-1.5 ${indicatorColor}`}></span>
                             {statusLabel}
                           </Badge>
                         </td>
-                        <td className="px-6 py-4 text-right">
+                        <td className="px-6 py-3.5 text-right">
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
@@ -490,7 +506,7 @@ export const AbsenteeismSection: React.FC = () => {
 
             {/* Paginador */}
             {totalPages > 1 && (
-              <div className="flex items-center justify-center gap-1 pt-4">
+              <div className="flex items-center justify-center gap-1 border-t border-gray-100 py-4">
                 {/* Primera página */}
                 <button
                   onClick={() => setCurrentPage(1)}
@@ -520,7 +536,7 @@ export const AbsenteeismSection: React.FC = () => {
                       onClick={() => setCurrentPage(page)}
                       className={`min-w-[36px] h-9 rounded-md text-sm font-medium transition-colors ${
                         currentPage === page
-                          ? 'bg-cyan-500 text-white shadow-sm'
+                          ? 'bg-blue-600 text-white shadow-sm'
                           : 'text-gray-700 hover:bg-gray-100'
                       }`}
                     >
@@ -563,14 +579,20 @@ export const AbsenteeismSection: React.FC = () => {
       }}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{editingAusentismo ? 'Editar Ausentismo' : 'Registrar Ausentismo'}</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <CalendarClock className="h-5 w-5 text-blue-600" />
+              {editingAusentismo ? 'Editar Ausentismo' : 'Registrar Ausentismo'}
+            </DialogTitle>
           </DialogHeader>
 
           {selectedUsuario && (
             <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                <p className="text-sm text-gray-600">
-                  <span className="font-semibold">Usuario:</span> {getUsuarioDisplayData(editingAusentismo ? { NOMBRE: editingAusentismo.operador?.identificador_operador, usuario: editingAusentismo.codigo_empleado, codigo_usuario: parseInt(editingAusentismo.codigo_empleado) } as User : selectedUsuario).nombre}
+              <div className="flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-3">
+                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-blue-600/10">
+                  <UserRound className="h-4.5 w-4.5 text-blue-600" />
+                </div>
+                <p className="text-sm text-gray-700">
+                  <span className="font-semibold">{getUsuarioDisplayData(editingAusentismo ? { NOMBRE: editingAusentismo.operador?.identificador_operador, usuario: editingAusentismo.codigo_empleado, codigo_usuario: parseInt(editingAusentismo.codigo_empleado) } as User : selectedUsuario).nombre}</span>
                 </p>
               </div>
 
@@ -583,7 +605,7 @@ export const AbsenteeismSection: React.FC = () => {
                   name="codigo_tipo_ausentismo"
                   value={formState.codigo_tipo_ausentismo}
                   onChange={handleFormChange}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 outline-none transition-colors focus:border-blue-300 focus:ring-2 focus:ring-blue-100"
                   required
                 >
                   <option value="">Seleccionar tipo...</option>
@@ -606,7 +628,7 @@ export const AbsenteeismSection: React.FC = () => {
                     name="fecha_inicio"
                     value={formState.fecha_inicio}
                     onChange={handleFormChange}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 outline-none transition-colors focus:border-blue-300 focus:ring-2 focus:ring-blue-100"
                     required
                   />
                 </div>
@@ -620,7 +642,7 @@ export const AbsenteeismSection: React.FC = () => {
                     name="fecha_fin"
                     value={formState.fecha_fin}
                     onChange={handleFormChange}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 outline-none transition-colors focus:border-blue-300 focus:ring-2 focus:ring-blue-100"
                     required
                   />
                 </div>
@@ -636,7 +658,7 @@ export const AbsenteeismSection: React.FC = () => {
                   name="tiempo_efectivo"
                   value={formState.tiempo_efectivo || '0'}
                   readOnly
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md bg-gray-50 text-gray-600 cursor-not-allowed"
+                  className="w-full cursor-not-allowed rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-gray-600"
                 />
               </div>
 
@@ -651,11 +673,11 @@ export const AbsenteeismSection: React.FC = () => {
                   onChange={handleFormChange}
                   rows={3}
                   placeholder="Notas adicionales sobre el ausentismo..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 outline-none transition-colors focus:border-blue-300 focus:ring-2 focus:ring-blue-100"
                 />
               </div>
 
-              <div className="flex gap-2 justify-end pt-4 border-t">
+              <div className="flex gap-2 justify-end pt-4 border-t border-gray-100">
                 <Button
                   type="button"
                   variant="outline"
@@ -690,21 +712,24 @@ export const AbsenteeismSection: React.FC = () => {
       >
         <DialogContent className="sm:max-w-4xl">
           <DialogHeader>
-            <DialogTitle>Historial de Ausentismos</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <History className="h-5 w-5 text-blue-600" />
+              Historial de Ausentismos
+            </DialogTitle>
           </DialogHeader>
 
           {selectedUsuarioHistory && (
             <div className="space-y-4">
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                <p className="text-sm text-gray-600">
-                  <span className="font-semibold">Usuario:</span> {getUsuarioDisplayData(selectedUsuarioHistory).nombre}
-                </p>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-medium text-gray-700">
-                  Total de registros: <span className="text-blue-600 font-bold">{historyRecords.length}</span>
-                </p>
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50 p-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-blue-600/10">
+                    <UserRound className="h-4.5 w-4.5 text-blue-600" />
+                  </div>
+                  <p className="text-sm font-semibold text-gray-700">{getUsuarioDisplayData(selectedUsuarioHistory).nombre}</p>
+                </div>
+                <Badge variant="outline" className="border-blue-200 bg-white text-blue-700">
+                  {historyRecords.length} registro{historyRecords.length === 1 ? '' : 's'}
+                </Badge>
               </div>
 
               {isHistoryLoading ? (
@@ -714,18 +739,18 @@ export const AbsenteeismSection: React.FC = () => {
                   ))}
                 </div>
               ) : historyRecords.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-gray-500">
-                  <AlertCircle className="w-12 h-12 mb-3 text-gray-400" />
-                  <p>No hay registros de ausentismo para este usuario</p>
+                <div className="flex flex-col items-center justify-center gap-2 py-16 text-gray-400">
+                  <AlertCircle className="h-10 w-10" />
+                  <p className="text-sm">No hay registros de ausentismo para este usuario</p>
                 </div>
               ) : (
-                <div className="border rounded-lg overflow-hidden max-h-96 overflow-y-auto">
+                <div className="max-h-96 overflow-y-auto rounded-xl border border-gray-100">
                   <table className="w-full text-sm">
-                    <thead className="bg-gray-50 sticky top-0">
+                    <thead className="sticky top-0 bg-gray-50/90 backdrop-blur">
                       <tr>
-                        <th className="px-4 py-3 text-left font-semibold text-gray-700">Tipo</th>
-                        <th 
-                          className="px-4 py-3 text-left font-semibold text-gray-700 cursor-pointer hover:bg-gray-100 select-none"
+                        <th className="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">Tipo</th>
+                        <th
+                          className="cursor-pointer select-none px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500 hover:bg-gray-100"
                           onClick={() => handleSort('fecha_inicio')}
                         >
                           <div className="flex items-center gap-1">
@@ -735,8 +760,8 @@ export const AbsenteeismSection: React.FC = () => {
                             )}
                           </div>
                         </th>
-                        <th 
-                          className="px-4 py-3 text-left font-semibold text-gray-700 cursor-pointer hover:bg-gray-100 select-none"
+                        <th
+                          className="cursor-pointer select-none px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500 hover:bg-gray-100"
                           onClick={() => handleSort('fecha_fin')}
                         >
                           <div className="flex items-center gap-1">
@@ -746,16 +771,16 @@ export const AbsenteeismSection: React.FC = () => {
                             )}
                           </div>
                         </th>
-                        <th className="px-4 py-3 text-left font-semibold text-gray-700">Tiempo</th>
-                        <th className="px-4 py-3 text-left font-semibold text-gray-700">Estado</th>
-                        <th className="px-4 py-3 text-center font-semibold text-gray-700">Acciones</th>
+                        <th className="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">Tiempo</th>
+                        <th className="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wide text-gray-500">Estado</th>
+                        <th className="px-4 py-3 text-center text-[11px] font-bold uppercase tracking-wide text-gray-500">Acciones</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-gray-200">
+                    <tbody className="divide-y divide-gray-50">
                       {sortedHistoryRecords.map((item, idx) => {
                         const uniqueKey = item.codigo_ausentismo ? `ausentismo-${item.codigo_ausentismo}` : `history-${idx}-${item.codigo_tipo_ausentismo}-${new Date(item.fecha_inicio).getTime()}`;
                         return (
-                        <tr key={uniqueKey} className="hover:bg-gray-50">
+                        <tr key={uniqueKey} className="transition-colors hover:bg-blue-50/40">
                           <td className="px-4 py-3 font-medium text-gray-900">
                             {getTipoAusentismoNombre(item.codigo_tipo_ausentismo)}
                           </td>
@@ -789,7 +814,7 @@ export const AbsenteeismSection: React.FC = () => {
                 </div>
               )}
 
-              <div className="flex gap-2 justify-end pt-4 border-t">
+              <div className="flex gap-2 justify-end pt-4 border-t border-gray-100">
                 <Button
                   type="button"
                   variant="outline"
