@@ -135,7 +135,7 @@ export default function LineaEstacionPicker({ selectedData, onChange, codigoGrup
     return (
       <div className="space-y-2">
         <div className="block text-sm font-medium text-gray-700">Línea(s) y Estación(es) <span className="text-red-500">*</span></div>
-        <div className="border rounded-md p-4 bg-gray-50 text-gray-500">Selecciona primero un Grupo para ver las líneas y estaciones asociadas.</div>
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-gray-500">Selecciona primero un Grupo para ver las líneas y estaciones asociadas.</div>
         <p className="text-xs text-gray-500 italic">Selecciona un grupo arriba para filtrar líneas y estaciones.</p>
       </div>
     );
@@ -146,7 +146,7 @@ export default function LineaEstacionPicker({ selectedData, onChange, codigoGrup
       <div className="block text-sm font-medium text-gray-700">
         Línea(s) y Estación(es) <span className="text-red-500">*</span>
       </div>
-      <div className="border rounded-md p-4 bg-white max-h-80 overflow-y-auto space-y-2">
+      <div className="max-h-80 space-y-2 overflow-y-auto rounded-xl border border-gray-200 bg-white p-4">
         {lineasConEstaciones.length === 0 ? (
           <p className="text-gray-500 text-sm">No hay líneas disponibles</p>
         ) : (
@@ -157,7 +157,7 @@ export default function LineaEstacionPicker({ selectedData, onChange, codigoGrup
                 <button
                   type="button"
                   onClick={() => toggleLineaExpanded(linea.codigo_linea)}
-                  className="p-0 hover:bg-gray-100 rounded flex-shrink-0"
+                  className="flex-shrink-0 rounded p-0 hover:bg-gray-100"
                 >
                   {expandedLineas.has(linea.codigo_linea) ? (
                     <ChevronDown className="w-4 h-4 text-gray-600" />

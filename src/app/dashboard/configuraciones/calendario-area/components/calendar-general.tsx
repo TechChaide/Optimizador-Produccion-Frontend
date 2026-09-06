@@ -291,22 +291,22 @@ export default function CalendarGeneral({
     <div className="w-full" ref={calendarRef}>
       {/* Top Bar */}
       <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <button
             onClick={goToToday}
-            className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
+            className="rounded-full border border-gray-300 px-4 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 hover:shadow-sm"
           >
             Hoy
           </button>
           <div className="flex items-center">
-            <button onClick={previousMonth} className="p-2 hover:bg-gray-100 rounded-full transition">
+            <button onClick={previousMonth} className="rounded-full p-2 transition hover:bg-gray-100">
               <ChevronLeft className="h-5 w-5 text-gray-600" />
             </button>
-            <button onClick={nextMonth} className="p-2 hover:bg-gray-100 rounded-full transition">
+            <button onClick={nextMonth} className="rounded-full p-2 transition hover:bg-gray-100">
               <ChevronRight className="h-5 w-5 text-gray-600" />
             </button>
           </div>
-          <h2 className="text-xl font-medium text-gray-900 capitalize">
+          <h2 className="text-xl font-normal text-gray-900 capitalize">
             {monthName} de {yearName}
           </h2>
         </div>
@@ -314,7 +314,7 @@ export default function CalendarGeneral({
         <div className="flex items-center gap-3">
           <button
             onClick={onAddNew}
-            className="flex items-center gap-2 px-4 py-2 bg-[#0055b8] text-white rounded-lg text-sm font-medium hover:bg-[#004494] transition shadow-sm"
+            className="flex items-center gap-2 rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-700 hover:shadow"
           >
             <Plus className="h-4 w-4" />
             Nuevo Calendario
@@ -323,7 +323,7 @@ export default function CalendarGeneral({
       </div>
 
       {/* Groups sidebar + Calendar */}
-      <div className="flex gap-0 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <div className="flex gap-0 overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm">
         {/* Left sidebar: Groups */}
         <div className="w-56 border-r border-gray-200 flex-shrink-0">
           <div className="p-3 bg-gray-50 border-b border-gray-200">
@@ -434,7 +434,7 @@ export default function CalendarGeneral({
               // Determine day number style
               let dayNumClass = 'text-gray-700';
               if (isToday) {
-                dayNumClass = 'bg-[#0055b8] text-white w-7 h-7 rounded-full flex items-center justify-center';
+                dayNumClass = 'bg-indigo-600 text-white w-7 h-7 rounded-full flex items-center justify-center';
               } else if (isWeekend) {
                 dayNumClass = 'text-gray-400';
               }
@@ -443,10 +443,10 @@ export default function CalendarGeneral({
                 <button
                   key={day}
                   type="button"
-                  className={`min-h-28 border-r border-b border-gray-200 last:border-r-0 p-1.5 transition-colors relative text-left block w-full
+                  className={`min-h-28 border-r border-b border-gray-200 last:border-r-0 p-1.5 transition relative text-left block w-full
                     ${cellBg}
-                    ${isToday ? 'ring-2 ring-[#0055b8] ring-inset' : ''}
-                    hover:brightness-95 focus:outline-none focus:brightness-95
+                    ${isToday ? 'ring-2 ring-indigo-600 ring-inset' : ''}
+                    hover:z-10 hover:shadow-md focus:outline-none focus:z-10 focus:shadow-md
                   `}
                   onMouseEnter={(e) => handleDayHover(day, e)}
                   onMouseLeave={handleDayLeave}
@@ -475,13 +475,13 @@ export default function CalendarGeneral({
                     </div>
                   )}
 
-                  {/* Jornada / Feriado rectangular labels */}
+                  {/* Jornada / Feriado pill chips */}
                   <div className="space-y-0.5">
                     {hasFeriado
                       ? uniqueFeriados.map(f => (
                           <div
                             key={f.nombre}
-                            className="bg-red-500 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded truncate"
+                            className="truncate rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-semibold text-white"
                             title={`${f.tipo} - ${f.nombre}`}
                           >
                             {f.tipo} - {f.nombre}
@@ -489,7 +489,7 @@ export default function CalendarGeneral({
                         ))
                       : jornadaLabel && (
                           <div
-                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded truncate ${
+                            className={`truncate rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                               isSaturday
                                 ? 'bg-yellow-500 text-white'
                                 : 'bg-green-600 text-white'
@@ -518,7 +518,7 @@ export default function CalendarGeneral({
             >
               {/* Day header */}
               <div className="flex items-center gap-3 mb-3 pb-2 border-b border-gray-100">
-                <div className="bg-[#0055b8] text-white w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm">
+                <div className="bg-indigo-600 text-white w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm">
                   {tooltip.day}
                 </div>
                 <div className="flex-1">
@@ -590,31 +590,31 @@ export default function CalendarGeneral({
       </div>
 
       {/* Bottom legend */}
-      <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-gray-500">
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-green-100 border border-green-300" />
-          <span>Jornada Normal (L-V)</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-yellow-100 border border-yellow-300" />
-          <span>Jornada Reducida (Sáb)</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-red-100 border border-red-300" />
-          <span>Feriado</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-gray-100 border border-gray-300" />
-          <span>Domingo (Sin trabajo)</span>
-        </div>
-        <span className="text-gray-300">|</span>
+      <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+        <span className="flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1">
+          <span className="h-2.5 w-2.5 rounded-full bg-green-500" />
+          Jornada Normal (L-V)
+        </span>
+        <span className="flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1">
+          <span className="h-2.5 w-2.5 rounded-full bg-yellow-500" />
+          Jornada Reducida (Sáb)
+        </span>
+        <span className="flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1">
+          <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
+          Feriado
+        </span>
+        <span className="flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1">
+          <span className="h-2.5 w-2.5 rounded-full bg-gray-300" />
+          Domingo (Sin trabajo)
+        </span>
+        <span className="mx-1 text-gray-300">|</span>
         {calendarios.map(cal => {
           const color = getGroupColor(cal.codigo_grupo);
           return (
-            <div key={cal.codigo_calendario} className="flex items-center gap-1.5">
-              <div className={`w-3 h-3 rounded-full ${color.dot}`} />
-              <span>{cal.grupo?.nombre_grupo || 'Grupo'} ({cal.grupo?.centro || '-'})</span>
-            </div>
+            <span key={cal.codigo_calendario} className="flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1">
+              <span className={`h-2.5 w-2.5 rounded-full ${color.dot}`} />
+              {cal.grupo?.nombre_grupo || 'Grupo'} ({cal.grupo?.centro || '-'})
+            </span>
           );
         })}
       </div>

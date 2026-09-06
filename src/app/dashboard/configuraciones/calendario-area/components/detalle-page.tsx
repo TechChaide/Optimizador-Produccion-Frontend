@@ -2,9 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { ChevronLeft } from 'lucide-react';
+import { ChevronLeft, CalendarRange } from 'lucide-react';
 import DetalleCalendarioTable from './detalle-calendario-table';
 import DetalleCalendarioForm from './detalle-calendario-form';
 import { DetalleCalendario, Calendario } from '@/types/interfaces';
@@ -88,30 +87,32 @@ export default function DetallesCalendarioPage() {
         <Button
           variant="ghost"
           size="icon"
+          className="rounded-full"
           onClick={() => router.push('/dashboard/configuraciones/calendario-area')}
         >
           <ChevronLeft className="h-5 w-5" />
         </Button>
-        <div>
-          <h2 className="text-2xl font-semibold text-gray-700">Gestión de Detalles</h2>
-          <p className="text-gray-600">
-            {calendario.nombre_calendario} • {calendario.grupo?.nombre_grupo}
-          </p>
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-600/10">
+            <CalendarRange className="h-6 w-6 text-indigo-600" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-gray-900">Gestión de Detalles</h1>
+            <p className="text-sm text-gray-500">
+              {calendario.nombre_calendario} • {calendario.grupo?.nombre_grupo}
+            </p>
+          </div>
         </div>
       </div>
 
       {/* Contenido */}
       {isFormOpen ? (
-        <Card>
-          <CardContent className="p-6">
-            <DetalleCalendarioForm
-              record={selectedRecord}
-              codigoCalendario={calendario.codigo_calendario}
-              onSuccess={handleSuccess}
-              onCancel={handleCancel}
-            />
-          </CardContent>
-        </Card>
+        <DetalleCalendarioForm
+          record={selectedRecord}
+          codigoCalendario={calendario.codigo_calendario}
+          onSuccess={handleSuccess}
+          onCancel={handleCancel}
+        />
       ) : (
         <DetalleCalendarioTable
           codigoCalendario={calendario.codigo_calendario}

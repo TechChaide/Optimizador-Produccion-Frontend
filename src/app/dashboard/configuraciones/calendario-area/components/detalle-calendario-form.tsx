@@ -2,7 +2,16 @@
 
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { CalendarClock } from 'lucide-react';
 import { DetalleCalendario, TipoDetalle } from '@/types/interfaces';
 import { detalleCalendarioService } from '@/services/detallecalendario.service';
 import { tipoDetalleService } from '@/services/tipodetalle.service';
@@ -122,35 +131,35 @@ export default function DetalleCalendarioForm({
 
   if (isFetching) {
     return (
-      <Card>
-        <CardContent className="pt-6">
-          <div className="text-center text-gray-500">Cargando opciones...</div>
-        </CardContent>
-      </Card>
+      <div className="rounded-2xl border border-gray-100 bg-white p-6 shadow-sm">
+        <div className="text-center text-gray-500">Cargando opciones...</div>
+      </div>
     );
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>
+    <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+      <div className="flex items-center gap-3 border-b border-gray-100 px-6 py-4">
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600/10">
+          <CalendarClock className="h-4.5 w-4.5 text-indigo-600" />
+        </div>
+        <h3 className="text-base font-semibold text-gray-900">
           {record ? 'Editar Detalle de Calendario' : 'Crear Detalle de Calendario'}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
+        </h3>
+      </div>
+      <div className="px-6 py-5">
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
             <label htmlFor="nombre_detalle" className="block text-sm font-medium text-gray-700">
               Nombre/Descripción <span className="text-red-500">*</span>
             </label>
-            <input
+            <Input
               id="nombre_detalle"
               type="text"
               name="nombre_detalle"
               value={formData.nombre_detalle || ''}
               onChange={handleInputChange}
               placeholder="Ej: Feriado de Año Nuevo"
-              className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
               required
             />
           </div>
@@ -160,34 +169,33 @@ export default function DetalleCalendarioForm({
               <label htmlFor="tipo_detalle" className="block text-sm font-medium text-gray-700">
                 Tipo de Detalle
               </label>
-              <select
-                id="tipo_detalle"
-                value={formData.codigo_detalle || ''}
-                onChange={(e) => {
-                  setFormData(prev => ({ ...prev, codigo_detalle: e.target.value ? Number(e.target.value) : undefined }));
-                }}
-                className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+              <Select
+                value={formData.codigo_detalle ? String(formData.codigo_detalle) : ''}
+                onValueChange={(value) => setFormData(prev => ({ ...prev, codigo_detalle: value ? Number(value) : undefined }))}
               >
-                <option value="">Selecciona un tipo...</option>
-                {tiposDetalle.map(tipo => (
-                  <option key={tipo.codigo_tipo_detalle} value={tipo.codigo_tipo_detalle}>
-                    {tipo.nombre_tipo_detalle}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger id="tipo_detalle" className="w-full">
+                  <SelectValue placeholder="Selecciona un tipo..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {tiposDetalle.map(tipo => (
+                    <SelectItem key={tipo.codigo_tipo_detalle} value={String(tipo.codigo_tipo_detalle)}>
+                      {tipo.nombre_tipo_detalle}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-2">
               <label htmlFor="fecha_real" className="block text-sm font-medium text-gray-700">
                 Fecha Real <span className="text-red-500">*</span>
               </label>
-              <input
+              <Input
                 id="fecha_real"
                 type="date"
                 name="fecha_real"
                 value={formData.fecha_real || ''}
                 onChange={handleInputChange}
-                className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
                 required
               />
             </div>
@@ -198,13 +206,12 @@ export default function DetalleCalendarioForm({
               <label htmlFor="fecha_inicio" className="block text-sm font-medium text-gray-700">
                 Fecha de Inicio <span className="text-red-500">*</span>
               </label>
-              <input
+              <Input
                 id="fecha_inicio"
                 type="date"
                 name="fecha_inicio"
                 value={formData.fecha_inicio || ''}
                 onChange={handleInputChange}
-                className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
                 required
               />
             </div>
@@ -213,13 +220,12 @@ export default function DetalleCalendarioForm({
               <label htmlFor="fecha_fin" className="block text-sm font-medium text-gray-700">
                 Fecha de Fin <span className="text-red-500">*</span>
               </label>
-              <input
+              <Input
                 id="fecha_fin"
                 type="date"
                 name="fecha_fin"
                 value={formData.fecha_fin || ''}
                 onChange={handleInputChange}
-                className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
                 required
               />
             </div>
@@ -229,36 +235,40 @@ export default function DetalleCalendarioForm({
             <label htmlFor="estado" className="block text-sm font-medium text-gray-700">
               Estado
             </label>
-            <select
-              id="estado"
-              name="estado"
+            <Select
               value={formData.estado || 'A'}
-              onChange={handleInputChange}
-              className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+              onValueChange={(value) => setFormData(prev => ({ ...prev, estado: value }))}
             >
-              <option value="A">Activo</option>
-              <option value="I">Inactivo</option>
-            </select>
+              <SelectTrigger id="estado" className="w-full">
+                <SelectValue placeholder="Seleccione un estado" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="A">
+                  <div className="flex items-center">
+                    Activo
+                    <span className="ml-2 h-2 w-2 rounded-full bg-green-500" />
+                  </div>
+                </SelectItem>
+                <SelectItem value="I">
+                  <div className="flex items-center">
+                    Inactivo
+                    <span className="ml-2 h-2 w-2 rounded-full bg-red-500" />
+                  </div>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
-          <div className="flex justify-end gap-2 pt-4">
-            <button
-              type="button"
-              onClick={onCancel}
-              className="px-4 py-2 text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300 transition"
-            >
+          <div className="flex justify-end gap-2 border-t border-gray-100 pt-4">
+            <Button type="button" variant="outline" onClick={onCancel} disabled={isLoading}>
               Cancelar
-            </button>
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition disabled:opacity-50"
-            >
+            </Button>
+            <Button type="submit" disabled={isLoading}>
               {isLoading ? 'Guardando...' : 'Guardar'}
-            </button>
+            </Button>
           </div>
         </form>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }

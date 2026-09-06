@@ -188,30 +188,30 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
     <div className="w-full" ref={calendarRef}>
       {/* Top Bar */}
       <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <button
             onClick={goToToday}
-            className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
+            className="rounded-full border border-gray-300 px-4 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 hover:shadow-sm"
           >
             Hoy
           </button>
           <div className="flex items-center">
-            <button onClick={previousMonth} className="p-2 hover:bg-gray-100 rounded-full transition">
+            <button onClick={previousMonth} className="rounded-full p-2 transition hover:bg-gray-100">
               <ChevronLeft className="h-5 w-5 text-gray-600" />
             </button>
-            <button onClick={nextMonth} className="p-2 hover:bg-gray-100 rounded-full transition">
+            <button onClick={nextMonth} className="rounded-full p-2 transition hover:bg-gray-100">
               <ChevronRight className="h-5 w-5 text-gray-600" />
             </button>
           </div>
-          <h2 className="text-xl font-medium text-gray-900 capitalize">
+          <h2 className="text-xl font-normal text-gray-900 capitalize">
             {monthName} de {yearName}
           </h2>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
           <button
             onClick={() => setShowOperadoresModal(true)}
-            className="flex items-center gap-2 px-3 py-2 hover:bg-gray-100 rounded-lg transition"
+            className="flex items-center gap-2 rounded-full px-3 py-2 transition hover:bg-gray-100"
             title="Ver operadores y calendarios"
           >
             <Users className="h-5 w-5 text-gray-600" />
@@ -220,7 +220,7 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
           <button
             onClick={loadDetalles}
             disabled={isLoadingDetalles}
-            className="p-2 hover:bg-gray-100 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+            className="rounded-full p-2 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
             title="Recargar horario"
           >
             <RefreshCw className={`h-5 w-5 text-gray-600 ${isLoadingDetalles ? 'animate-spin' : ''}`} />
@@ -229,8 +229,8 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
       </div>
 
       {/* Group info header */}
-      <div className="mb-4 flex items-center gap-3">
-        <div className="w-3 h-3 rounded-full bg-[#0055b8] flex-shrink-0" />
+      <div className="mb-4 flex items-center gap-3 rounded-full bg-gray-50 px-3 py-1.5 w-fit">
+        <div className="w-2.5 h-2.5 rounded-full bg-indigo-600 flex-shrink-0" />
         <div>
           <span className="text-sm font-semibold text-gray-900">{groupName}</span>
           <span className="text-xs text-gray-500 ml-2">Centro: {centro} · Turno: {turno}</span>
@@ -238,7 +238,7 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
       </div>
 
       {/* Calendar */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden relative">
+      <div className="relative overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm">
         {/* Week day header */}
         <div className="grid grid-cols-7 border-b border-gray-200 bg-gray-50">
           {weekDays.map(day => (
@@ -301,7 +301,7 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
             // Day number style
             let dayNumClass = 'text-gray-700';
             if (isToday) {
-              dayNumClass = 'bg-[#0055b8] text-white w-7 h-7 rounded-full flex items-center justify-center';
+              dayNumClass = 'bg-indigo-600 text-white w-7 h-7 rounded-full flex items-center justify-center';
             } else if (isWeekend) {
               dayNumClass = 'text-gray-400';
             }
@@ -310,10 +310,10 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
               <button
                 key={day}
                 type="button"
-                className={`day-cell min-h-28 border-r border-b border-gray-200 last:border-r-0 p-1.5 transition-colors relative text-left block w-full
+                className={`day-cell min-h-28 border-r border-b border-gray-200 last:border-r-0 p-1.5 transition relative text-left block w-full
                   ${cellBg}
-                  ${isToday ? 'ring-2 ring-[#0055b8] ring-inset' : ''}
-                  hover:brightness-95 focus:outline-none focus:brightness-95
+                  ${isToday ? 'ring-2 ring-indigo-600 ring-inset' : ''}
+                  hover:z-10 hover:shadow-md focus:outline-none focus:z-10 focus:shadow-md
                 `}
                 onClick={(e) => handleDayClick(day, e)}
               >
@@ -330,13 +330,13 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
                   )}
                 </div>
 
-                {/* Jornada / Feriado rectangular labels */}
+                {/* Jornada / Feriado pill chips */}
                 <div className="space-y-0.5">
                   {hasFeriado
                     ? uniqueFeriados.map(f => (
                         <div
                           key={f.nombre}
-                          className="bg-red-500 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded truncate"
+                          className="truncate rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-semibold text-white"
                           title={`${f.tipo} - ${f.nombre}`}
                         >
                           {f.tipo} - {f.nombre}
@@ -344,7 +344,7 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
                       ))
                     : jornadaLabel && (
                         <div
-                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded truncate ${
+                          className={`truncate rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                             isSaturday
                               ? 'bg-yellow-500 text-white'
                               : 'bg-green-600 text-white'
@@ -363,7 +363,7 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
                     {nonFeriadoDetails.slice(0, 2).map((detail, idx) => (
                       <div
                         key={`${detail.codigo_detalle}-${idx}`}
-                        className="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded truncate"
+                        className="truncate rounded-full bg-blue-100 px-2 py-0.5 text-blue-800"
                         title={detail.nombre_detalle}
                       >
                         {detail.nombre_detalle}
@@ -394,7 +394,7 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
           >
             {/* Day header */}
             <div className="flex items-center gap-3 mb-3 pb-2 border-b border-gray-100">
-              <div className="bg-[#0055b8] text-white w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm">
+              <div className="bg-indigo-600 text-white w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm">
                 {tooltip.day}
               </div>
               <div className="flex-1">
@@ -428,7 +428,7 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
                 <div className="bg-blue-50 rounded-lg p-2.5">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <div className="w-2.5 h-2.5 rounded-full bg-[#0055b8]" />
+                      <div className="w-2.5 h-2.5 rounded-full bg-indigo-600" />
                       <span className="text-sm font-semibold text-blue-800">{groupName}</span>
                     </div>
                     <span className="text-[10px] font-bold text-gray-500 bg-white/60 px-1.5 py-0.5 rounded">{centro}</span>
@@ -477,23 +477,23 @@ export default function CalendarView({ calendario, detalles: initialDetalles, ca
       </div>
 
       {/* Bottom legend */}
-      <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-gray-500">
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-green-100 border border-green-300" />
-          <span>Jornada Normal (L-V)</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-yellow-100 border border-yellow-300" />
-          <span>Jornada Reducida (Sáb)</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-red-100 border border-red-300" />
-          <span>Feriado</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-gray-100 border border-gray-300" />
-          <span>Domingo (Sin trabajo)</span>
-        </div>
+      <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+        <span className="flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1">
+          <span className="h-2.5 w-2.5 rounded-full bg-green-500" />
+          Jornada Normal (L-V)
+        </span>
+        <span className="flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1">
+          <span className="h-2.5 w-2.5 rounded-full bg-yellow-500" />
+          Jornada Reducida (Sáb)
+        </span>
+        <span className="flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1">
+          <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
+          Feriado
+        </span>
+        <span className="flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1">
+          <span className="h-2.5 w-2.5 rounded-full bg-gray-300" />
+          Domingo (Sin trabajo)
+        </span>
       </div>
 
       <DetallesModal

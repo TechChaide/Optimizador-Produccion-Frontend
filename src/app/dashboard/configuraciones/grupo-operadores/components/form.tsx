@@ -3,11 +3,17 @@
 import { useState } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { operadorService } from '@/services/operador.service';
 import type { Operador, Grupo, Calendario, Restriccion, TipoDetalle, User } from '@/types/interfaces';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, UsersRound } from 'lucide-react';
 
 interface GrupoOperadorFormProps {
   record: Operador | null;
@@ -153,11 +159,14 @@ export default function GrupoOperadorForm({
   };
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{record ? 'Editar' : 'Crear'} Operador</CardTitle>
-      </CardHeader>
-      <CardContent>
+    <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+      <div className="flex items-center gap-3 border-b border-gray-100 px-6 py-4">
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600/10">
+          <UsersRound className="h-4.5 w-4.5 text-indigo-600" />
+        </div>
+        <h3 className="text-base font-semibold text-gray-900">{record ? 'Editar' : 'Crear'} Operador</h3>
+      </div>
+      <div className="px-6 py-5">
         <form onSubmit={handleSubmit} className="space-y-6">
           
           {/* Operadores */}
@@ -165,7 +174,7 @@ export default function GrupoOperadorForm({
             <label htmlFor="operadores-list" className="block text-sm font-medium text-gray-700">
               Operadores <span className="text-red-500">*</span>
             </label>
-            <div id="operadores-list" className="border rounded-lg p-4 max-h-96 overflow-y-auto">
+            <div id="operadores-list" className="rounded-xl border border-gray-200 p-4 max-h-96 overflow-y-auto">
               {operadoresAgrupados.length === 0 && (
                 <p className="text-gray-500">No hay operadores disponibles.</p>
               )}
@@ -263,37 +272,46 @@ export default function GrupoOperadorForm({
             <label htmlFor="estado" className="block text-sm font-medium text-gray-700">
               Estado <span className="text-red-500">*</span>
             </label>
-            <select
-              id="estado"
-              value={estado}
-              onChange={(e) => setEstado(e.target.value)}
-              className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
-              disabled={isLoading}
-            >
-              <option value="A">Activo</option>
-              <option value="I">Inactivo</option>
-            </select>
+            <Select value={estado} onValueChange={setEstado} disabled={isLoading}>
+              <SelectTrigger id="estado" className="w-full">
+                <SelectValue placeholder="Seleccione un estado" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="A">
+                  <div className="flex items-center">
+                    Activo
+                    <span className="ml-2 h-2 w-2 rounded-full bg-green-500" />
+                  </div>
+                </SelectItem>
+                <SelectItem value="I">
+                  <div className="flex items-center">
+                    Inactivo
+                    <span className="ml-2 h-2 w-2 rounded-full bg-red-500" />
+                  </div>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           {/* Botones de acción */}
-          <div className="flex gap-4">
-            <Button 
-              type="submit" 
-              disabled={isLoading || selectedOperadores.length === 0}
-            >
-              {isLoading ? 'Guardando...' : (record ? 'Actualizar' : 'Crear')}
-            </Button>
-            <Button 
-              type="button" 
-              variant="outline" 
-              onClick={onCancel} 
+          <div className="flex justify-end gap-2 border-t border-gray-100 pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onCancel}
               disabled={isLoading}
             >
               Cancelar
             </Button>
+            <Button
+              type="submit"
+              disabled={isLoading || selectedOperadores.length === 0}
+            >
+              {isLoading ? 'Guardando...' : (record ? 'Actualizar' : 'Crear')}
+            </Button>
           </div>
         </form>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }

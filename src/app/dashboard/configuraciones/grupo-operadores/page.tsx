@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import GrupoOperadorForm from './components/form';
 import GrupoOperadorTable from './components/table';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { UsersRound } from 'lucide-react';
 import type { Operador, Grupo, Calendario, User } from '@/types/interfaces';
 import { operadorService } from '@/services/operador.service';
 import { authService } from '@/services/auth.service';
@@ -93,18 +93,15 @@ export default function GrupoOperadoresPage() {
 
   return (
     <div className="p-6 md:p-8 space-y-6">
-      <div className="flex items-center space-x-3">
-        <h2 className="text-2xl font-semibold text-gray-700">Configuraciones - Grupo-Operadores</h2>
+      <div className="flex items-center gap-3">
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-600/10">
+          <UsersRound className="h-6 w-6 text-indigo-600" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-gray-900">Grupo-Operadores</h1>
+          <p className="text-sm text-gray-500">Administra las asociaciones entre grupos y operadores del sistema.</p>
+        </div>
       </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Gestión de Grupo-Operadores</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p>Administra las asociaciones entre grupos y operadores en el sistema.</p>
-        </CardContent>
-      </Card>
 
       {isFormOpen && (
         <GrupoOperadorForm

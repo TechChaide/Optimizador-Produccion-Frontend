@@ -2,8 +2,15 @@
 
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Calendario, Grupo, Turno, DetalleCalendario, TipoDetalle } from '@/types/interfaces';
 import { calendarioService } from '@/services/calendario.service';
 import { grupoService } from '@/services/grupo.service';
@@ -13,7 +20,7 @@ import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { tipoDetalleService } from '@/services/tipodetalle.service';
 import LineaEstacionPicker from './linea-estacion-picker';
 import DetallesModal from './detalles-modal';
-import { Settings } from 'lucide-react';
+import { Settings, CalendarRange } from 'lucide-react';
 
 // Matches the (unexported) `Holiday` shape returned by ecuadorHolidaysService,
 // which is distinct from the `Holiday` type in src/types/types.ts.
@@ -291,20 +298,21 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
 
   if (isFetching) {
     return (
-      <Card>
-        <CardContent className="p-6">
-          <div className="text-center">Cargando opciones...</div>
-        </CardContent>
-      </Card>
+      <div className="rounded-2xl border border-gray-100 bg-white p-6 shadow-sm">
+        <div className="text-center text-gray-500">Cargando opciones...</div>
+      </div>
     );
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{record ? 'Editar Calendario' : 'Nuevo Calendario'}</CardTitle>
-      </CardHeader>
-      <CardContent>
+    <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+      <div className="flex items-center gap-3 border-b border-gray-100 px-6 py-4">
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600/10">
+          <CalendarRange className="h-4.5 w-4.5 text-indigo-600" />
+        </div>
+        <h3 className="text-base font-semibold text-gray-900">{record ? 'Editar Calendario' : 'Nuevo Calendario'}</h3>
+      </div>
+      <div className="px-6 py-5">
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Grupo + Turno (debajo del título) */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -312,44 +320,43 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
               <label htmlFor="codigo_grupo" className="block text-sm font-medium text-gray-700">
                 Grupo <span className="text-red-500">*</span>
               </label>
-              <select
-                id="codigo_grupo"
-                name="codigo_grupo"
-                value={formData.codigo_grupo || ''}
-                onChange={(e) => {
-                  // Limpiar selecciones previas al cambiar grupo
+              <Select
+                value={formData.codigo_grupo ? String(formData.codigo_grupo) : ''}
+                onValueChange={(value) => {
                   setSelectedLineaEstaciones(new Map());
-                  handleInputChange(e);
+                  setFormData(prev => ({ ...prev, codigo_grupo: Number(value) }));
                 }}
-                className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
-                required
               >
-                <option value="">Selecciona un grupo...</option>
-                {grupos.map(g => (
-                  <option key={g.codigo_grupo} value={g.codigo_grupo}>{`${g.nombre_grupo} — ${g.centro}`}</option>
-                ))}
-              </select>
+                <SelectTrigger id="codigo_grupo" className="w-full">
+                  <SelectValue placeholder="Selecciona un grupo..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {grupos.map(g => (
+                    <SelectItem key={g.codigo_grupo} value={String(g.codigo_grupo)}>{`${g.nombre_grupo} — ${g.centro}`}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-2">
               <label htmlFor="codigo_turno" className="block text-sm font-medium text-gray-700">
                 Turno <span className="text-red-500">*</span>
               </label>
-              <select
-                id="codigo_turno"
-                name="codigo_turno"
-                value={formData.codigo_turno || ''}
-                onChange={handleInputChange}
-                className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
-                required
+              <Select
+                value={formData.codigo_turno ? String(formData.codigo_turno) : ''}
+                onValueChange={(value) => setFormData(prev => ({ ...prev, codigo_turno: Number(value) }))}
               >
-                <option value="">Selecciona un turno...</option>
-                {turnos.map(turno => (
-                  <option key={turno.codigo_turno} value={turno.codigo_turno}>
-                    {turno.nombre_turno}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger id="codigo_turno" className="w-full">
+                  <SelectValue placeholder="Selecciona un turno..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {turnos.map(turno => (
+                    <SelectItem key={turno.codigo_turno} value={String(turno.codigo_turno)}>
+                      {turno.nombre_turno}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
@@ -359,14 +366,13 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
               <label htmlFor="nombre_calendario" className="block text-sm font-medium text-gray-700">
                 Nombre del Calendario <span className="text-red-500">*</span>
               </label>
-              <input
+              <Input
                 id="nombre_calendario"
                 type="text"
                 name="nombre_calendario"
                 value={formData.nombre_calendario || ''}
                 onChange={handleInputChange}
                 placeholder="Ej: Calendario Colchones Q1"
-                className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
                 required
               />
             </div>
@@ -389,7 +395,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
                       hora_inicio: `${hour}:${minute}`
                     }));
                   }}
-                  className="flex-1 px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+                  className="flex-1 rounded-lg border border-gray-200 px-4 py-2 outline-none transition-colors focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100"
                   required
                 >
                   {Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0')).map(hour => (
@@ -408,7 +414,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
                       hora_inicio: `${hour}:${minute}`
                     }));
                   }}
-                  className="flex-1 px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+                  className="flex-1 rounded-lg border border-gray-200 px-4 py-2 outline-none transition-colors focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100"
                   required
                 >
                   {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(minute => (
@@ -417,7 +423,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
                 </select>
               </div>
               {formData.hora_inicio && (
-                <p className="text-sm font-semibold text-green-200">Hora seleccionada: {formData.hora_inicio}</p>
+                <p className="text-sm font-medium text-indigo-600">Hora seleccionada: {formData.hora_inicio}</p>
               )}
             </div>
           </div>
@@ -436,21 +442,33 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
             <label htmlFor="estado" className="block text-sm font-medium text-gray-700">
               Estado <span className="text-red-500">*</span>
             </label>
-            <select
-              id="estado"
-              name="estado"
+            <Select
               value={formData.estado || 'A'}
-              onChange={handleInputChange}
-              className="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+              onValueChange={(value) => setFormData(prev => ({ ...prev, estado: value }))}
             >
-              <option value="A">Activo</option>
-              <option value="I">Inactivo</option>
-            </select>
+              <SelectTrigger id="estado" className="w-full">
+                <SelectValue placeholder="Seleccione un estado" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="A">
+                  <div className="flex items-center">
+                    Activo
+                    <span className="ml-2 h-2 w-2 rounded-full bg-green-500" />
+                  </div>
+                </SelectItem>
+                <SelectItem value="I">
+                  <div className="flex items-center">
+                    Inactivo
+                    <span className="ml-2 h-2 w-2 rounded-full bg-red-500" />
+                  </div>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           {/* Sección de importación de feriados */}
-          <div className="border-t pt-6">
-            <h3 className="text-lg font-semibold text-gray-700 mb-4">Gestión de Feriados</h3>
+          <div className="border-t border-gray-100 pt-6">
+            <h3 className="mb-4 text-sm font-semibold uppercase tracking-wide text-gray-500">Gestión de Feriados</h3>
             {previewDetalles.length > 0 && (
               <div className="space-y-3 mb-6">
                 <h4 className="text-sm font-semibold text-gray-700">
@@ -463,12 +481,12 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
                     const fechaDetalle = new Date(detalle.fecha_inicio);
                     fechaDetalle.setHours(0, 0, 0, 0);
                     const isPast = fechaDetalle < today;
-                    
+
                     return (
                       <div
                         key={detalle.codigo_detalle}
-                        className={`p-3 border border-gray-300 rounded-md ${
-                          isPast ? 'bg-gray-100 text-gray-500' : 'bg-red-50'
+                        className={`rounded-xl border p-3 ${
+                          isPast ? 'border-gray-200 bg-gray-50 text-gray-500' : 'border-red-100 bg-red-50'
                         }`}
                       >
                         <p className={`text-sm font-semibold ${isPast ? 'text-gray-500' : 'text-gray-900'}`}>
@@ -486,14 +504,15 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
           </div>
 
           {/* Botones de acción */}
-          <div className="flex gap-3 pt-6 border-t">
-            <button
-              type="submit"
+          <div className="flex justify-end gap-2 border-t border-gray-100 pt-6">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onCancel}
               disabled={isLoading}
-              className="px-6 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isLoading ? 'Guardando...' : 'Guardar Calendario'}
-            </button>
+              Cancelar
+            </Button>
             {record && (
               <Button
                 type="button"
@@ -505,14 +524,12 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
                 Gestionar Detalles
               </Button>
             )}
-            <button
-              type="button"
-              onClick={onCancel}
+            <Button
+              type="submit"
               disabled={isLoading}
-              className="px-6 py-2 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 disabled:opacity-50"
             >
-              Cancelar
-            </button>
+              {isLoading ? 'Guardando...' : 'Guardar Calendario'}
+            </Button>
           </div>
         </form>
 
@@ -526,7 +543,7 @@ export default function CalendarioForm({ record, onSuccess, onCancel }: Readonly
             globalThis.dispatchEvent(new Event('records-changed'));
           }}
         />
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
