@@ -4,18 +4,26 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import {
   Table,
   TableHeader,
@@ -37,7 +45,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { MoreHorizontal, Edit, Plus, Trash, Lock, Copy } from 'lucide-react';
+import { MoreHorizontal, Edit, Plus, Trash2, Lock, Copy, Search, Inbox } from 'lucide-react';
 import { restriccionService } from '@/services/restriccion.service';
 import { grupoService } from '@/services/grupo.service';
 import type { Restriccion, Grupo } from '@/types/interfaces';
@@ -90,6 +98,10 @@ export default function RestriccionesModal({
   const [selectedRestriccion, setSelectedRestriccion] = useState<Restriccion | null>(null);
   const [filter, setFilter] = useState('');
   const [sourceGroupId, setSourceGroupId] = useState<string>('');
+  const [pendingDelete, setPendingDelete] = useState<Restriccion | null>(null);
+  const [pendingReplicate, setPendingReplicate] = useState<Restriccion | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isReplicating, setIsReplicating] = useState(false);
   const { toast } = useToast();
   const user = globalThis.window
     ? JSON.parse(globalThis.window.localStorage.getItem('user') || '{}')
@@ -224,18 +236,18 @@ export default function RestriccionesModal({
 
   const handleCopyRestrictions = async () => {
     if (!grupo || !sourceGroupId) return;
-    
+
     setIsLoading(true);
     try {
       const sourceId = Number(sourceGroupId);
       const response = await restriccionService.getAll();
       const allRestrictions = response.data || [];
-      
+
       const sourceRestrictions = allRestrictions.filter(r => r.codigo_grupo === sourceId);
-      
+
       if (sourceRestrictions.length === 0) {
-        toast({ 
-          title: 'Aviso', 
+        toast({
+          title: 'Aviso',
           description: 'El grupo seleccionado no tiene restricciones para copiar.',
           variant: 'default'
         });
@@ -263,11 +275,11 @@ export default function RestriccionesModal({
         count++;
       }
 
-      toast({ 
-        title: 'Éxito', 
-        description: `Se han copiado ${count} restricciones correctamente.` 
+      toast({
+        title: 'Éxito',
+        description: `Se han copiado ${count} restricciones correctamente.`
       });
-      
+
       setIsCopyModeOpen(false);
       setSourceGroupId('');
       await fetchRestricciones();
@@ -279,34 +291,35 @@ export default function RestriccionesModal({
     }
   };
 
-  const handleDelete = async (restriccion: Restriccion) => {
-    if (!confirm('¿Confirma eliminar esta restricción?')) return;
-    setIsLoading(true);
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete) return;
+    setIsDeleting(true);
     try {
-      await restriccionService.delete(restriccion.codigo_restriccion);
+      await restriccionService.delete(pendingDelete.codigo_restriccion);
       toast({ title: 'Éxito', description: 'Restricción eliminada correctamente.' });
       await fetchRestricciones();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Error al eliminar';
       toast({ title: 'Error', description: errorMessage, variant: 'destructive' });
     } finally {
-      setIsLoading(false);
+      setIsDeleting(false);
+      setPendingDelete(null);
     }
   };
 
-  const handleReplicarRestriccion = async (restriccion: Restriccion) => {
-    if (!grupo) return;
-    if (!confirm(`¿Confirma replicar la restricción "${restriccion.nombre_restriccion}"?`)) return;
-    setIsLoading(true);
+  const handleConfirmReplicate = async () => {
+    if (!pendingReplicate) return;
+    setIsReplicating(true);
     try {
-      await restriccionService.replicarRestriccion(restriccion.nombre_restriccion);
+      await restriccionService.replicarRestriccion(pendingReplicate.nombre_restriccion);
       toast({ title: 'Éxito', description: 'Restricción replicada correctamente.' });
       await fetchRestricciones();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Error al replicar';
       toast({ title: 'Error', description: errorMessage, variant: 'destructive' });
     } finally {
-      setIsLoading(false);
+      setIsReplicating(false);
+      setPendingReplicate(null);
     }
   };
 
@@ -322,11 +335,15 @@ export default function RestriccionesModal({
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Lock className="h-5 w-5" />
-            Restricciones del Grupo: {grupo?.nombre_grupo}
+          <DialogTitle className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-rose-600/10">
+              <Lock className="h-4.5 w-4.5 text-rose-600" />
+            </div>
+            <div>
+              <p className="text-base font-semibold text-gray-900">Restricciones del Grupo: {grupo?.nombre_grupo}</p>
+              <p className="text-xs font-normal text-gray-500">Centro: {grupo?.centro}</p>
+            </div>
           </DialogTitle>
-          <DialogDescription>Centro: {grupo?.centro}</DialogDescription>
         </DialogHeader>
 
         {isFormOpen ? (
@@ -343,12 +360,12 @@ export default function RestriccionesModal({
           />
         ) : isCopyModeOpen ? (
           <div className="space-y-6 py-4">
-            <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-              <h4 className="font-semibold text-blue-900 mb-1 flex items-center gap-2">
+            <div className="rounded-2xl border border-sky-100 bg-sky-50 p-4">
+              <h4 className="mb-1 flex items-center gap-2 font-semibold text-sky-900">
                 <Copy className="h-4 w-4" />
                 Importar Restricciones
               </h4>
-              <p className="text-sm text-blue-800">
+              <p className="text-sm text-sky-800">
                 Selecciona un grupo para copiar todas sus restricciones hacia <strong>{grupo?.nombre_grupo}</strong>.
               </p>
             </div>
@@ -376,10 +393,9 @@ export default function RestriccionesModal({
               <Button variant="outline" onClick={() => setIsCopyModeOpen(false)} disabled={isLoading}>
                 Cancelar
               </Button>
-              <Button 
-                onClick={handleCopyRestrictions} 
+              <Button
+                onClick={handleCopyRestrictions}
                 disabled={isLoading || !sourceGroupId}
-                className="bg-blue-600 hover:bg-blue-700"
               >
                 {isLoading ? 'Copiando...' : 'Confirmar Copia'}
               </Button>
@@ -392,14 +408,48 @@ export default function RestriccionesModal({
             isLoading={isLoading}
             onFilterChange={setFilter}
             onEdit={handleEditRestriccion}
-            onDelete={handleDelete}
-            onReplicate={handleReplicarRestriccion}
+            onDelete={setPendingDelete}
+            onReplicate={setPendingReplicate}
             onAddNew={handleAddNew}
             onOpenCopy={() => setIsCopyModeOpen(true)}
             onClose={onClose}
           />
         )}
       </DialogContent>
+
+      <AlertDialog open={!!pendingDelete} onOpenChange={(open) => !open && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar esta restricción?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Esta acción eliminará &quot;{pendingDelete?.nombre_restriccion}&quot; y no se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmDelete} disabled={isDeleting} className="bg-red-600 hover:bg-red-700">
+              {isDeleting ? 'Eliminando...' : 'Eliminar'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!pendingReplicate} onOpenChange={(open) => !open && setPendingReplicate(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Replicar esta restricción?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Se replicará &quot;{pendingReplicate?.nombre_restriccion}&quot; según la lógica del servidor.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isReplicating}>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmReplicate} disabled={isReplicating}>
+              {isReplicating ? 'Replicando...' : 'Replicar'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }
@@ -410,8 +460,8 @@ interface RestrictionListProps {
   isLoading: boolean;
   onFilterChange: (filter: string) => void;
   onEdit: (restriccion: Restriccion) => void;
-  onDelete: (restriccion: Restriccion) => Promise<void>;
-  onReplicate: (restriccion: Restriccion) => Promise<void>;
+  onDelete: (restriccion: Restriccion) => void;
+  onReplicate: (restriccion: Restriccion) => void;
   onAddNew: () => void;
   onOpenCopy: () => void;
   onClose: () => void;
@@ -431,36 +481,45 @@ function RestrictionsList({
 }: Readonly<RestrictionListProps>) {
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-4">
-        <Input
-          placeholder="Buscar restricciones..."
-          value={filter}
-          onChange={(e) => onFilterChange(e.target.value)}
-          className="flex-1"
-        />
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            className="w-full rounded-lg border border-gray-200 bg-gray-50 py-2 pl-9 pr-3 text-sm outline-none transition-colors focus:border-rose-300 focus:bg-white focus:ring-2 focus:ring-rose-100"
+            placeholder="Buscar restricciones..."
+            value={filter}
+            onChange={(e) => onFilterChange(e.target.value)}
+          />
+        </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={onOpenCopy} disabled={isLoading} className="flex items-center gap-2">
+          <Button variant="outline" onClick={onOpenCopy} disabled={isLoading} className="gap-2">
             <Copy className="h-4 w-4" />
             Copiar de otro Grupo
           </Button>
-          <Button onClick={onAddNew} disabled={isLoading} className="flex items-center gap-2">
+          <Button onClick={onAddNew} disabled={isLoading} className="gap-2">
             <Plus className="h-4 w-4" />
             Agregar
           </Button>
         </div>
       </div>
 
-      <Card>
-        <CardContent className="pt-6">
-          <div className="rounded-md border">
+      <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+        {!isLoading && filteredRestricciones.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-16 text-gray-400">
+            <Inbox className="h-9 w-9" />
+            <p className="text-sm">No se encontraron restricciones.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
             <Table>
               <TableHeader>
-                <TableRow>
-                  <TableHead>Nombre</TableHead>
-                  <TableHead>Valor</TableHead>
-                  <TableHead>Descripción</TableHead>
-                  <TableHead>Estado</TableHead>
-                  <TableHead className="text-right">Acciones</TableHead>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Nombre</TableHead>
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Valor</TableHead>
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Descripción</TableHead>
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Estado</TableHead>
+                  <TableHead className="text-right text-[11px] font-bold uppercase tracking-wide text-gray-500">Acciones</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -469,59 +528,52 @@ function RestrictionsList({
                     <TableCell colSpan={5} className="text-center h-24">Cargando...</TableCell>
                   </TableRow>
                 )}
-                {!isLoading && filteredRestricciones.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={5} className="text-center h-24 text-gray-500">No se encontraron restricciones.</TableCell>
+                {!isLoading && filteredRestricciones.map((restriccion) => (
+                  <TableRow key={restriccion.codigo_restriccion} className="hover:bg-rose-50/40">
+                    <TableCell className="font-medium text-gray-900">{restriccion.nombre_restriccion}</TableCell>
+                    <TableCell>
+                      <Badge variant="secondary" className="font-mono">{restriccion.valor_restriccion}</Badge>
+                    </TableCell>
+                    <TableCell className="max-w-xs truncate text-gray-600">{restriccion.descripcion || '-'}</TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={restriccion.estado === 'A' ? 'default' : 'destructive'}
+                        className={restriccion.estado === 'A' ? 'bg-green-600' : ''}
+                      >
+                        {restriccion.estado === 'A' ? 'Activo' : 'Inactivo'}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" className="h-8 w-8 p-0">
+                            <span className="sr-only">Abrir menú</span>
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => onEdit(restriccion)}>
+                            <Edit className="mr-2 h-4 w-4" />
+                            Editar
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => onReplicate(restriccion)}>
+                            <Copy className="mr-2 h-4 w-4" />
+                            Replicar
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => onDelete(restriccion)} className="text-red-600 focus:text-red-600">
+                            <Trash2 className="mr-2 h-4 w-4" />
+                            Eliminar
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </TableCell>
                   </TableRow>
-                )}
-                {!isLoading && filteredRestricciones.length > 0 && (
-                  filteredRestricciones.map((restriccion) => (
-                    <TableRow key={restriccion.codigo_restriccion}>
-                      <TableCell className="font-medium">{restriccion.nombre_restriccion}</TableCell>
-                      <TableCell>
-                        <Badge variant="secondary" className="font-mono">{restriccion.valor_restriccion}</Badge>
-                      </TableCell>
-                      <TableCell className="max-w-xs truncate">{restriccion.descripcion || '-'}</TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={restriccion.estado === 'A' ? 'default' : 'destructive'}
-                          className={restriccion.estado === 'A' ? 'bg-green-600' : ''}
-                        >
-                          {restriccion.estado === 'A' ? 'Activo' : 'Inactivo'}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" className="h-8 w-8 p-0">
-                              <span className="sr-only">Abrir menú</span>
-                              <MoreHorizontal className="h-4 w-4" />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem onClick={() => onEdit(restriccion)}>
-                              <Edit className="mr-2 h-4 w-4" />
-                              Editar
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => onReplicate(restriccion)}>
-                              <Plus className="mr-2 h-4 w-4" />
-                              Replicar
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => onDelete(restriccion)} className="text-red-600">
-                              <Trash className="mr-2 h-4 w-4" />
-                              Eliminar
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
+                ))}
               </TableBody>
             </Table>
           </div>
-        </CardContent>
-      </Card>
+        )}
+      </div>
 
       <DialogFooter>
         <Button variant="outline" onClick={onClose}>
@@ -613,7 +665,7 @@ function RestrictionForm({
       </div>
 
       {!selectedRestriccion && (
-        <div className="flex items-center gap-3 p-3 bg-blue-50 rounded-md border border-blue-200">
+        <div className="flex items-center gap-3 rounded-2xl border border-sky-100 bg-sky-50 p-3">
           <input
             type="checkbox"
             id="aplicarATodos"

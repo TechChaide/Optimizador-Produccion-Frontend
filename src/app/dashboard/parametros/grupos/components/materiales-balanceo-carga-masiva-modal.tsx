@@ -4,12 +4,10 @@ import { useState, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
@@ -189,15 +187,19 @@ export default function MaterialesBalanceoCargaMasivaModal({
     <Dialog open={isOpen} onOpenChange={handleClose}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Upload className="h-5 w-5" />
-            Carga Masiva de Materiales de Balanceo: {grupo?.nombre_grupo}
+          <DialogTitle className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-600/10">
+              <Upload className="h-4.5 w-4.5 text-sky-600" />
+            </div>
+            <div>
+              <p className="text-base font-semibold text-gray-900">Carga Masiva de Materiales de Balanceo: {grupo?.nombre_grupo}</p>
+              <p className="text-xs font-normal text-gray-500">Centro: {grupo?.centro}</p>
+            </div>
           </DialogTitle>
-          <DialogDescription>Centro: {grupo?.centro}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
-          <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg text-blue-800">
+          <div className="flex items-center gap-2 rounded-2xl border border-sky-100 bg-sky-50 p-3 text-sky-800">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <p className="text-xs">
               Descargue la plantilla, complete los materiales de balanceo y súbala nuevamente. Columnas esperadas: {TEMPLATE_HEADERS.join(', ')}.
@@ -205,16 +207,17 @@ export default function MaterialesBalanceoCargaMasivaModal({
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={handleDownloadTemplate} disabled={isProcessing}>
-              <Download className="mr-2 h-4 w-4" />
+            <Button variant="outline" onClick={handleDownloadTemplate} disabled={isProcessing} className="gap-2">
+              <Download className="h-4 w-4" />
               Descargar Plantilla
             </Button>
             <Button
               variant="outline"
               onClick={() => fileInputRef.current?.click()}
               disabled={isProcessing || isReadingFile}
+              className="gap-2"
             >
-              <FileSpreadsheet className="mr-2 h-4 w-4" />
+              <FileSpreadsheet className="h-4 w-4" />
               {isReadingFile ? 'Leyendo...' : 'Seleccionar Archivo'}
             </Button>
             <input
@@ -228,44 +231,42 @@ export default function MaterialesBalanceoCargaMasivaModal({
           </div>
 
           {filas.length > 0 && (
-            <Card>
-              <CardContent className="pt-6 space-y-3">
-                <div className="flex items-center gap-3 text-sm">
-                  <Badge className="bg-green-600">{filasValidas.length} válidas</Badge>
-                  {filasConError.length > 0 && (
-                    <Badge variant="destructive">{filasConError.length} con error</Badge>
-                  )}
-                </div>
-                <div className="rounded-md border max-h-[40vh] overflow-y-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Fila</TableHead>
-                        <TableHead>Código Material</TableHead>
-                        <TableHead className="text-center">% Mínimo</TableHead>
-                        <TableHead className="text-center">% Máximo</TableHead>
-                        <TableHead className="text-center">Prioridad</TableHead>
-                        <TableHead>Estado</TableHead>
-                        <TableHead>Validación</TableHead>
+            <div className="space-y-3 rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
+              <div className="flex items-center gap-3 text-sm">
+                <Badge className="bg-green-600">{filasValidas.length} válidas</Badge>
+                {filasConError.length > 0 && (
+                  <Badge variant="destructive">{filasConError.length} con error</Badge>
+                )}
+              </div>
+              <div className="max-h-[40vh] overflow-y-auto rounded-xl border border-gray-100">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Fila</TableHead>
+                      <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Código Material</TableHead>
+                      <TableHead className="text-center text-[11px] font-bold uppercase tracking-wide text-gray-500">% Mínimo</TableHead>
+                      <TableHead className="text-center text-[11px] font-bold uppercase tracking-wide text-gray-500">% Máximo</TableHead>
+                      <TableHead className="text-center text-[11px] font-bold uppercase tracking-wide text-gray-500">Prioridad</TableHead>
+                      <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Estado</TableHead>
+                      <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Validación</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filas.map((fila) => (
+                      <TableRow key={fila.fila} className={fila.error ? 'bg-red-50' : ''}>
+                        <TableCell>{fila.fila}</TableCell>
+                        <TableCell className="font-medium">{fila.codigo_material || '-'}</TableCell>
+                        <TableCell className="text-center">{fila.porc_minimo_balanceo}%</TableCell>
+                        <TableCell className="text-center">{fila.porc_maximo_balanceo}%</TableCell>
+                        <TableCell className="text-center">{fila.prioridad}</TableCell>
+                        <TableCell>{fila.estado === 'A' ? 'Activo' : 'Inactivo'}</TableCell>
+                        <TableCell className="text-red-600 text-xs">{fila.error || 'OK'}</TableCell>
                       </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {filas.map((fila) => (
-                        <TableRow key={fila.fila} className={fila.error ? 'bg-red-50' : ''}>
-                          <TableCell>{fila.fila}</TableCell>
-                          <TableCell className="font-medium">{fila.codigo_material || '-'}</TableCell>
-                          <TableCell className="text-center">{fila.porc_minimo_balanceo}%</TableCell>
-                          <TableCell className="text-center">{fila.porc_maximo_balanceo}%</TableCell>
-                          <TableCell className="text-center">{fila.prioridad}</TableCell>
-                          <TableCell>{fila.estado === 'A' ? 'Activo' : 'Inactivo'}</TableCell>
-                          <TableCell className="text-red-600 text-xs">{fila.error || 'OK'}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              </CardContent>
-            </Card>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
           )}
         </div>
 

@@ -3,17 +3,25 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import {
   Tabs,
   TabsContent,
@@ -34,7 +42,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { MoreHorizontal, Edit, Plus, Trash, GitBranch } from 'lucide-react';
+import { MoreHorizontal, Edit, Plus, Trash2, GitBranch, Search, Inbox } from 'lucide-react';
 import { lineaService } from '@/services/linea.service';
 import { estacionService } from '@/services/estacion.service';
 import type { Linea, Estacion, Grupo } from '@/types/interfaces';
@@ -88,20 +96,10 @@ const formatDateForSQLServer = (date: Date): string => {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${ms}`;
 };
 
-// Helper para evitar ternarios anidados en botones
-function getButtonLabel(isLoading: boolean, isEditing: boolean): string {
-  if (isLoading) return 'Guardando...';
-  return isEditing ? 'Actualizar' : 'Guardar';
-}
-
-function getButtonVariant(isEditing: boolean): 'default' | 'destructive' {
-  return isEditing ? 'destructive' : 'default';
-}
-
 // Agrupa estaciones por nombre_estacion y codigo_linea, mostrando original y última versión
 function agruparEstaciones(estaciones: Estacion[]): EstacionAgrupada[] {
   const grupos = new Map<string, Estacion[]>();
-  
+
   // Agrupar por nombre_estacion + codigo_linea
   estaciones.forEach(estacion => {
     const key = `${estacion.nombre_estacion}|${estacion.codigo_linea}`;
@@ -110,16 +108,16 @@ function agruparEstaciones(estaciones: Estacion[]): EstacionAgrupada[] {
     }
     grupos.get(key)!.push(estacion);
   });
-  
+
   // Procesar cada grupo
   const agrupadas: EstacionAgrupada[] = [];
   grupos.forEach((estacionesDelGrupo) => {
     // Ordenar por codigo_estacion
     estacionesDelGrupo.sort((a, b) => a.codigo_estacion - b.codigo_estacion);
-    
+
     const original = estacionesDelGrupo[0];
     const latest = estacionesDelGrupo[estacionesDelGrupo.length - 1];
-    
+
     agrupadas.push({
       nombre_estacion: original.nombre_estacion,
       codigo_linea: original.codigo_linea,
@@ -129,7 +127,7 @@ function agruparEstaciones(estaciones: Estacion[]): EstacionAgrupada[] {
       numeroPuestosLatest: latest.numero_puestos,
     });
   });
-  
+
   return agrupadas;
 }
 
@@ -147,6 +145,9 @@ export default function RelacionesModal({
   const [selectedEstacion, setSelectedEstacion] = useState<Estacion | null>(null);
   const [filterLinea, setFilterLinea] = useState('');
   const [filterEstacion, setFilterEstacion] = useState('');
+  const [pendingDeleteLinea, setPendingDeleteLinea] = useState<Linea | null>(null);
+  const [pendingDeleteEstacion, setPendingDeleteEstacion] = useState<Estacion | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const { toast } = useToast();
   const user = globalThis.window
     ? JSON.parse(globalThis.window.localStorage.getItem('user') || '{}')
@@ -311,33 +312,35 @@ export default function RelacionesModal({
     }
   };
 
-  const handleDeleteLinea = async (linea: Linea) => {
-    if (!confirm('¿Confirma eliminar esta línea?')) return;
-    setIsLoading(true);
+  const handleConfirmDeleteLinea = async () => {
+    if (!pendingDeleteLinea) return;
+    setIsDeleting(true);
     try {
-      await lineaService.delete(linea.codigo_linea);
+      await lineaService.delete(pendingDeleteLinea.codigo_linea);
       toast({ title: 'Éxito', description: 'Línea eliminada correctamente.' });
       await fetchRelaciones();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Error al eliminar';
       toast({ title: 'Error', description: errorMessage, variant: 'destructive' });
     } finally {
-      setIsLoading(false);
+      setIsDeleting(false);
+      setPendingDeleteLinea(null);
     }
   };
 
-  const handleDeleteEstacion = async (estacion: Estacion) => {
-    if (!confirm('¿Confirma eliminar esta estación?')) return;
-    setIsLoading(true);
+  const handleConfirmDeleteEstacion = async () => {
+    if (!pendingDeleteEstacion) return;
+    setIsDeleting(true);
     try {
-      await estacionService.delete(estacion.codigo_estacion);
+      await estacionService.delete(pendingDeleteEstacion.codigo_estacion);
       toast({ title: 'Éxito', description: 'Estación eliminada correctamente.' });
       await fetchRelaciones();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Error al eliminar';
       toast({ title: 'Error', description: errorMessage, variant: 'destructive' });
     } finally {
-      setIsLoading(false);
+      setIsDeleting(false);
+      setPendingDeleteEstacion(null);
     }
   };
 
@@ -365,11 +368,15 @@ export default function RelacionesModal({
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <GitBranch className="h-5 w-5" />
-            Relaciones del Grupo: {grupo?.nombre_grupo}
+          <DialogTitle className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600/10">
+              <GitBranch className="h-4.5 w-4.5 text-indigo-600" />
+            </div>
+            <div>
+              <p className="text-base font-semibold text-gray-900">Relaciones del Grupo: {grupo?.nombre_grupo}</p>
+              <p className="text-xs font-normal text-gray-500">Centro: {grupo?.centro}</p>
+            </div>
           </DialogTitle>
-          <DialogDescription>Centro: {grupo?.centro}</DialogDescription>
         </DialogHeader>
 
         <Tabs defaultValue="lineas" className="w-full">
@@ -398,7 +405,7 @@ export default function RelacionesModal({
                 isLoading={isLoading}
                 onFilterChange={setFilterLinea}
                 onEdit={handleEditLinea}
-                onDelete={handleDeleteLinea}
+                onDelete={setPendingDeleteLinea}
                 onAddNew={handleAddNewLinea}
               />
             )}
@@ -425,7 +432,7 @@ export default function RelacionesModal({
                 isLoading={isLoading}
                 onFilterChange={setFilterEstacion}
                 onEdit={handleEditEstacion}
-                onDelete={handleDeleteEstacion}
+                onDelete={setPendingDeleteEstacion}
                 onAddNew={handleAddNewEstacion}
                 getLineaNameById={getLineaNameById}
               />
@@ -439,6 +446,40 @@ export default function RelacionesModal({
           </Button>
         </DialogFooter>
       </DialogContent>
+
+      <AlertDialog open={!!pendingDeleteLinea} onOpenChange={(open) => !open && setPendingDeleteLinea(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar esta línea?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Esta acción eliminará &quot;{pendingDeleteLinea?.nombre_linea}&quot; y no se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmDeleteLinea} disabled={isDeleting} className="bg-red-600 hover:bg-red-700">
+              {isDeleting ? 'Eliminando...' : 'Eliminar'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!pendingDeleteEstacion} onOpenChange={(open) => !open && setPendingDeleteEstacion(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar esta estación?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Esta acción eliminará &quot;{pendingDeleteEstacion?.nombre_estacion}&quot; y no se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmDeleteEstacion} disabled={isDeleting} className="bg-red-600 hover:bg-red-700">
+              {isDeleting ? 'Eliminando...' : 'Eliminar'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }
@@ -449,7 +490,7 @@ interface LineasListProps {
   isLoading: boolean;
   onFilterChange: (filter: string) => void;
   onEdit: (linea: Linea) => void;
-  onDelete: (linea: Linea) => Promise<void>;
+  onDelete: (linea: Linea) => void;
   onAddNew: () => void;
 }
 
@@ -465,32 +506,40 @@ function LineasList({
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4">
-        <Input
-          placeholder="Buscar líneas..."
-          value={filter}
-          onChange={(e) => onFilterChange(e.target.value)}
-          className="flex-1"
-        />
-        <Button onClick={onAddNew} disabled={isLoading}>
-          <Plus className="mr-2 h-4 w-4" />
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            className="w-full rounded-lg border border-gray-200 bg-gray-50 py-2 pl-9 pr-3 text-sm outline-none transition-colors focus:border-indigo-300 focus:bg-white focus:ring-2 focus:ring-indigo-100"
+            placeholder="Buscar líneas..."
+            value={filter}
+            onChange={(e) => onFilterChange(e.target.value)}
+          />
+        </div>
+        <Button onClick={onAddNew} disabled={isLoading} className="gap-2">
+          <Plus className="h-4 w-4" />
           Agregar Línea
         </Button>
       </div>
 
-      <Card>
-        <CardContent className="pt-6">
-          <div className="rounded-md border">
+      <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+        {!isLoading && filteredLineas.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-16 text-gray-400">
+            <Inbox className="h-9 w-9" />
+            <p className="text-sm">No se encontraron líneas.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
             <Table>
               <TableHeader>
-                <TableRow>
-                  <TableHead>Nombre</TableHead>
-                  <TableHead>Estado</TableHead>
-                  <TableHead className="text-right">Acciones</TableHead>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Nombre</TableHead>
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Estado</TableHead>
+                  <TableHead className="text-right text-[11px] font-bold uppercase tracking-wide text-gray-500">Acciones</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {isLoading && <LoadingRow colSpan={3} />}
-                {!isLoading && filteredLineas.length === 0 && <EmptyRow colSpan={3} />}
                 {!isLoading && filteredLineas.length > 0 && (
                   <LineaTableRows
                     lineas={filteredLineas}
@@ -501,8 +550,8 @@ function LineasList({
               </TableBody>
             </Table>
           </div>
-        </CardContent>
-      </Card>
+        )}
+      </div>
     </div>
   );
 }
@@ -510,7 +559,7 @@ function LineasList({
 interface LineaTableRowsProps {
   lineas: Linea[];
   onEdit: (linea: Linea) => void;
-  onDelete: (linea: Linea) => Promise<void>;
+  onDelete: (linea: Linea) => void;
 }
 
 function LineaTableRows({
@@ -521,8 +570,8 @@ function LineaTableRows({
   return (
     <>
       {lineas.map((linea) => (
-        <TableRow key={linea.codigo_linea}>
-          <TableCell className="font-medium">{linea.nombre_linea}</TableCell>
+        <TableRow key={linea.codigo_linea} className="hover:bg-indigo-50/40">
+          <TableCell className="font-medium text-gray-900">{linea.nombre_linea}</TableCell>
           <TableCell>
             <Badge
               variant={linea.estado === 'A' ? 'default' : 'destructive'}
@@ -544,8 +593,8 @@ function LineaTableRows({
                   <Edit className="mr-2 h-4 w-4" />
                   Editar
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onDelete(linea)} className="text-red-600">
-                  <Trash className="mr-2 h-4 w-4" />
+                <DropdownMenuItem onClick={() => onDelete(linea)} className="text-red-600 focus:text-red-600">
+                  <Trash2 className="mr-2 h-4 w-4" />
                   Eliminar
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -611,8 +660,8 @@ function LineaForm({
         <Button type="button" variant="outline" onClick={onCancel} disabled={isLoading}>
           Cancelar
         </Button>
-        <Button type="submit" variant={getButtonVariant(Boolean(selectedLinea))} disabled={isLoading}>
-          {getButtonLabel(isLoading, Boolean(selectedLinea))}
+        <Button type="submit" disabled={isLoading}>
+          {isLoading ? 'Guardando...' : (selectedLinea ? 'Actualizar' : 'Guardar')}
         </Button>
       </DialogFooter>
     </form>
@@ -625,7 +674,7 @@ interface EstacionesListProps {
   isLoading: boolean;
   onFilterChange: (filter: string) => void;
   onEdit: (estacionAgrupada: EstacionAgrupada) => void;
-  onDelete: (estacion: Estacion) => Promise<void>;
+  onDelete: (estacion: Estacion) => void;
   onAddNew: () => void;
   getLineaNameById: (codigo_linea: number) => string;
 }
@@ -643,34 +692,42 @@ function EstacionesList({
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4">
-        <Input
-          placeholder="Buscar estaciones..."
-          value={filter}
-          onChange={(e) => onFilterChange(e.target.value)}
-          className="flex-1"
-        />
-        <Button onClick={onAddNew} disabled={isLoading}>
-          <Plus className="mr-2 h-4 w-4" />
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            className="w-full rounded-lg border border-gray-200 bg-gray-50 py-2 pl-9 pr-3 text-sm outline-none transition-colors focus:border-indigo-300 focus:bg-white focus:ring-2 focus:ring-indigo-100"
+            placeholder="Buscar estaciones..."
+            value={filter}
+            onChange={(e) => onFilterChange(e.target.value)}
+          />
+        </div>
+        <Button onClick={onAddNew} disabled={isLoading} className="gap-2">
+          <Plus className="h-4 w-4" />
           Agregar Estación
         </Button>
       </div>
 
-      <Card>
-        <CardContent className="pt-6">
-          <div className="rounded-md border">
+      <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+        {!isLoading && filteredEstaciones.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-16 text-gray-400">
+            <Inbox className="h-9 w-9" />
+            <p className="text-sm">No se encontraron estaciones.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
             <Table>
               <TableHeader>
-                <TableRow>
-                  <TableHead>Nombre</TableHead>
-                  <TableHead>Línea</TableHead>
-                  <TableHead className="text-center">Nº Puestos</TableHead>
-                  <TableHead>Estado</TableHead>
-                  <TableHead className="text-right">Acciones</TableHead>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Nombre</TableHead>
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Línea</TableHead>
+                  <TableHead className="text-center text-[11px] font-bold uppercase tracking-wide text-gray-500">Nº Puestos</TableHead>
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Estado</TableHead>
+                  <TableHead className="text-right text-[11px] font-bold uppercase tracking-wide text-gray-500">Acciones</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {isLoading && <LoadingRow colSpan={5} />}
-                {!isLoading && filteredEstaciones.length === 0 && <EmptyRow colSpan={5} />}
                 {!isLoading && filteredEstaciones.length > 0 && (
                   <EstacionTableRows
                     estacionesAgrupadas={filteredEstaciones}
@@ -682,8 +739,8 @@ function EstacionesList({
               </TableBody>
             </Table>
           </div>
-        </CardContent>
-      </Card>
+        )}
+      </div>
     </div>
   );
 }
@@ -691,7 +748,7 @@ function EstacionesList({
 interface EstacionTableRowsProps {
   estacionesAgrupadas: EstacionAgrupada[];
   onEdit: (estacionAgrupada: EstacionAgrupada) => void;
-  onDelete: (estacion: Estacion) => Promise<void>;
+  onDelete: (estacion: Estacion) => void;
   getLineaNameById: (codigo_linea: number) => string;
 }
 
@@ -704,9 +761,9 @@ function EstacionTableRows({
   return (
     <>
       {estacionesAgrupadas.map((eg) => (
-        <TableRow key={`${eg.nombre_estacion}-${eg.codigo_linea}`}>
-          <TableCell className="font-medium">{eg.nombre_estacion}</TableCell>
-          <TableCell>{getLineaNameById(eg.codigo_linea)}</TableCell>
+        <TableRow key={`${eg.nombre_estacion}-${eg.codigo_linea}`} className="hover:bg-indigo-50/40">
+          <TableCell className="font-medium text-gray-900">{eg.nombre_estacion}</TableCell>
+          <TableCell className="text-gray-600">{getLineaNameById(eg.codigo_linea)}</TableCell>
           <TableCell className="text-center">
             {eg.original ? (
               <span className="text-sm">
@@ -739,8 +796,8 @@ function EstacionTableRows({
                   <Edit className="mr-2 h-4 w-4" />
                   Editar
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onDelete(eg.latest)} className="text-red-600">
-                  <Trash className="mr-2 h-4 w-4" />
+                <DropdownMenuItem onClick={() => onDelete(eg.latest)} className="text-red-600 focus:text-red-600">
+                  <Trash2 className="mr-2 h-4 w-4" />
                   Eliminar
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -850,8 +907,8 @@ function EstacionForm({
         <Button type="button" variant="outline" onClick={onCancel} disabled={isLoading}>
           Cancelar
         </Button>
-        <Button type="submit" variant={getButtonVariant(Boolean(selectedEstacion))} disabled={isLoading || lineas.length === 0}>
-          {getButtonLabel(isLoading, Boolean(selectedEstacion))}
+        <Button type="submit" disabled={isLoading || lineas.length === 0}>
+          {isLoading ? 'Guardando...' : (selectedEstacion ? 'Actualizar' : 'Guardar')}
         </Button>
       </DialogFooter>
     </form>
@@ -863,16 +920,6 @@ function LoadingRow({ colSpan }: Readonly<{ colSpan: number }>) {
     <TableRow>
       <TableCell colSpan={colSpan} className="text-center h-24">
         Cargando...
-      </TableCell>
-    </TableRow>
-  );
-}
-
-function EmptyRow({ colSpan }: Readonly<{ colSpan: number }>) {
-  return (
-    <TableRow>
-      <TableCell colSpan={colSpan} className="text-center h-24">
-        No se encontraron registros.
       </TableCell>
     </TableRow>
   );

@@ -3,17 +3,25 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import {
   Table,
   TableHeader,
@@ -28,11 +36,11 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { MoreHorizontal, Edit, Plus, Trash, Boxes } from 'lucide-react';
+import { MoreHorizontal, Edit, Plus, Trash2, Boxes, Search, Inbox } from 'lucide-react';
 import { materialesBalanceoService } from '@/services/materialesBalanceo.service';
 import type { MaterialesBalanceoGrupo, Grupo } from '@/types/interfaces';
 import { z } from 'zod';
-import { useForm } from 'react-hook-form';
+import { useForm, type UseFormReturn } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 
 interface MaterialesBalanceoModalProps {
@@ -71,6 +79,8 @@ export default function MaterialesBalanceoModal({
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialesBalanceoGrupo | null>(null);
   const [filter, setFilter] = useState('');
+  const [pendingDelete, setPendingDelete] = useState<MaterialesBalanceoGrupo | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const { toast } = useToast();
   const user = globalThis.window
     ? JSON.parse(globalThis.window.localStorage.getItem('user') || '{}')
@@ -172,18 +182,19 @@ export default function MaterialesBalanceoModal({
     }
   };
 
-  const handleDelete = async (material: MaterialesBalanceoGrupo) => {
-    if (!confirm('¿Confirma eliminar este material de balanceo?')) return;
-    setIsLoading(true);
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete) return;
+    setIsDeleting(true);
     try {
-      await materialesBalanceoService.delete(material.codigo_material_balanceo);
+      await materialesBalanceoService.delete(pendingDelete.codigo_material_balanceo);
       toast({ title: 'Éxito', description: 'Material de balanceo eliminado correctamente.' });
       await fetchMateriales();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Error al eliminar';
       toast({ title: 'Error', description: errorMessage, variant: 'destructive' });
     } finally {
-      setIsLoading(false);
+      setIsDeleting(false);
+      setPendingDelete(null);
     }
   };
 
@@ -205,11 +216,15 @@ export default function MaterialesBalanceoModal({
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Boxes className="h-5 w-5" />
-            Materiales de Balanceo del Grupo: {grupo?.nombre_grupo}
+          <DialogTitle className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-600/10">
+              <Boxes className="h-4.5 w-4.5 text-emerald-600" />
+            </div>
+            <div>
+              <p className="text-base font-semibold text-gray-900">Materiales de Balanceo del Grupo: {grupo?.nombre_grupo}</p>
+              <p className="text-xs font-normal text-gray-500">Centro: {grupo?.centro}</p>
+            </div>
           </DialogTitle>
-          <DialogDescription>Centro: {grupo?.centro}</DialogDescription>
         </DialogHeader>
 
         {isFormOpen ? (
@@ -232,12 +247,29 @@ export default function MaterialesBalanceoModal({
             isLoading={isLoading}
             onFilterChange={setFilter}
             onEdit={handleEditMaterial}
-            onDelete={handleDelete}
+            onDelete={setPendingDelete}
             onAddNew={handleAddNew}
             onClose={onClose}
           />
         )}
       </DialogContent>
+
+      <AlertDialog open={!!pendingDelete} onOpenChange={(open) => !open && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar este material de balanceo?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Esta acción eliminará el material &quot;{pendingDelete?.codigo_material}&quot; y no se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmDelete} disabled={isDeleting} className="bg-red-600 hover:bg-red-700">
+              {isDeleting ? 'Eliminando...' : 'Eliminar'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }
@@ -248,7 +280,7 @@ interface MaterialesBalanceoListProps {
   isLoading: boolean;
   onFilterChange: (filter: string) => void;
   onEdit: (material: MaterialesBalanceoGrupo) => void;
-  onDelete: (material: MaterialesBalanceoGrupo) => Promise<void>;
+  onDelete: (material: MaterialesBalanceoGrupo) => void;
   onAddNew: () => void;
   onClose: () => void;
 }
@@ -266,35 +298,43 @@ function MaterialesBalanceoList({
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4">
-        <Input
-          placeholder="Buscar por código de material..."
-          value={filter}
-          onChange={(e) => onFilterChange(e.target.value)}
-          className="flex-1"
-        />
-        <Button onClick={onAddNew} disabled={isLoading}>
-          <Plus className="mr-2 h-4 w-4" />
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            className="w-full rounded-lg border border-gray-200 bg-gray-50 py-2 pl-9 pr-3 text-sm outline-none transition-colors focus:border-emerald-300 focus:bg-white focus:ring-2 focus:ring-emerald-100"
+            placeholder="Buscar por código de material..."
+            value={filter}
+            onChange={(e) => onFilterChange(e.target.value)}
+          />
+        </div>
+        <Button onClick={onAddNew} disabled={isLoading} className="gap-2">
+          <Plus className="h-4 w-4" />
           Agregar
         </Button>
       </div>
 
-      <Card>
-        <CardContent className="pt-6">
-          <div className="rounded-md border">
+      <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
+        {!isLoading && filteredMateriales.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-16 text-gray-400">
+            <Inbox className="h-9 w-9" />
+            <p className="text-sm">No se encontraron materiales de balanceo.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
             <Table>
               <TableHeader>
-                <TableRow>
-                  <TableHead>Código Material</TableHead>
-                  <TableHead className="text-center">% Mínimo</TableHead>
-                  <TableHead className="text-center">% Máximo</TableHead>
-                  <TableHead className="text-center">Prioridad</TableHead>
-                  <TableHead>Estado</TableHead>
-                  <TableHead className="text-right">Acciones</TableHead>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Código Material</TableHead>
+                  <TableHead className="text-center text-[11px] font-bold uppercase tracking-wide text-gray-500">% Mínimo</TableHead>
+                  <TableHead className="text-center text-[11px] font-bold uppercase tracking-wide text-gray-500">% Máximo</TableHead>
+                  <TableHead className="text-center text-[11px] font-bold uppercase tracking-wide text-gray-500">Prioridad</TableHead>
+                  <TableHead className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Estado</TableHead>
+                  <TableHead className="text-right text-[11px] font-bold uppercase tracking-wide text-gray-500">Acciones</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {isLoading && <LoadingRow />}
-                {!isLoading && filteredMateriales.length === 0 && <EmptyRow />}
                 {!isLoading && filteredMateriales.length > 0 && (
                   <MaterialesBalanceoTableRows
                     materiales={filteredMateriales}
@@ -305,8 +345,8 @@ function MaterialesBalanceoList({
               </TableBody>
             </Table>
           </div>
-        </CardContent>
-      </Card>
+        )}
+      </div>
 
       <DialogFooter>
         <Button variant="outline" onClick={onClose}>
@@ -320,7 +360,7 @@ function MaterialesBalanceoList({
 interface MaterialesBalanceoTableRowsProps {
   materiales: MaterialesBalanceoGrupo[];
   onEdit: (material: MaterialesBalanceoGrupo) => void;
-  onDelete: (material: MaterialesBalanceoGrupo) => Promise<void>;
+  onDelete: (material: MaterialesBalanceoGrupo) => void;
 }
 
 function MaterialesBalanceoTableRows({
@@ -331,8 +371,8 @@ function MaterialesBalanceoTableRows({
   return (
     <>
       {materiales.map((material) => (
-        <TableRow key={material.codigo_material_balanceo}>
-          <TableCell className="font-medium">{material.codigo_material}</TableCell>
+        <TableRow key={material.codigo_material_balanceo} className="hover:bg-emerald-50/40">
+          <TableCell className="font-medium text-gray-900">{material.codigo_material}</TableCell>
           <TableCell className="text-center">{material.porc_minimo_balanceo}%</TableCell>
           <TableCell className="text-center">{material.porc_maximo_balanceo}%</TableCell>
           <TableCell className="text-center">{material.prioridad}</TableCell>
@@ -357,8 +397,8 @@ function MaterialesBalanceoTableRows({
                   <Edit className="mr-2 h-4 w-4" />
                   Editar
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onDelete(material)} className="text-red-600">
-                  <Trash className="mr-2 h-4 w-4" />
+                <DropdownMenuItem onClick={() => onDelete(material)} className="text-red-600 focus:text-red-600">
+                  <Trash2 className="mr-2 h-4 w-4" />
                   Eliminar
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -371,7 +411,7 @@ function MaterialesBalanceoTableRows({
 }
 
 interface MaterialBalanceoFormProps {
-  form: any;
+  form: UseFormReturn<z.infer<typeof formSchema>>;
   onSubmit: (values: z.infer<typeof formSchema>) => Promise<void>;
   isLoading: boolean;
   selectedMaterial: MaterialesBalanceoGrupo | null;
@@ -383,7 +423,6 @@ function MaterialBalanceoForm({
   form,
   onSubmit,
   isLoading,
-  selectedMaterial,
   buttonLabel,
   onCancel,
 }: Readonly<MaterialBalanceoFormProps>) {
@@ -491,16 +530,6 @@ function LoadingRow() {
     <TableRow>
       <TableCell colSpan={6} className="text-center h-24">
         Cargando...
-      </TableCell>
-    </TableRow>
-  );
-}
-
-function EmptyRow() {
-  return (
-    <TableRow>
-      <TableCell colSpan={6} className="text-center h-24">
-        No se encontraron materiales de balanceo.
       </TableCell>
     </TableRow>
   );
