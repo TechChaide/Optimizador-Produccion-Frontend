@@ -7,11 +7,11 @@ networks:
 services:
   frontend:
     build: .
-    image: cachaide/certificados-calidad-frontend:1.0
-    container_name: certificados-calidad_frontend_prod
+    image: techchaide/optimizador-produccion-frontend:1.0
+    container_name: optimizador-produccion_frontend_prod
     restart: unless-stopped
     environment:
-      - NEXT_PUBLIC_BASE_PATH=/Certificados-Calidad
+      - NEXT_PUBLIC_BASE_PATH=/Optimizador-Produccion
       - HOSTNAME=0.0.0.0
     volumes:
       - "/fotomenu:/app/fotomenu"
@@ -21,16 +21,16 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-net"
-      - "traefik.http.routers.certificados-calidad-frontend-prod.rule=Host(`apps.chaide.com`) && (PathPrefix(`/Certificados-Calidad`) || PathPrefix(`/_next`) || PathPrefix(`/favicon.ico`))"
-      - "traefik.http.routers.certificados-calidad-frontend-prod.entrypoints=websecure"
-      - "traefik.http.routers.certificados-calidad-frontend-prod.priority=100"
+      - "traefik.http.routers.optimizador-produccion-frontend-prod.rule=Host(`apps.chaide.com`) && (PathPrefix(`/Optimizador-Produccion`) || PathPrefix(`/_next`) || PathPrefix(`/favicon.ico`))"
+      - "traefik.http.routers.optimizador-produccion-frontend-prod.entrypoints=websecure"
+      - "traefik.http.routers.optimizador-produccion-frontend-prod.priority=100"
       # Note: No stripPrefix middleware for frontend so the app receives the /b2b prefix.
-      - "traefik.http.routers.certificados-calidad-frontend-prod.tls=true"
-      - "traefik.http.services.certificados-calidad-frontend-prod.loadbalancer.server.port=3000"
+      - "traefik.http.routers.optimizador-produccion-frontend-prod.tls=true"
+      - "traefik.http.services.optimizador-produccion-frontend-prod.loadbalancer.server.port=3000"
 
       # --- LÍNEAS AÑADIDAS ---
       # 1. Define el middleware de la lista blanca de IPs
-      - "traefik.http.middlewares.lista-ips-calidad.ipwhitelist.sourceRange=127.0.0.1/32, 201.234.212.234/32"
+      - "traefik.http.middlewares.lista-ips-optimizador.ipwhitelist.sourceRange=127.0.0.1/32, 201.234.212.234/32, 201.234.220.2/32, 200.41.89.176/32"
 
       # 2. Aplica el middleware al router del frontend
-      - "traefik.http.routers.certificados-calidad-frontend-prod.middlewares=lista-ips-calidad"
+      - "traefik.http.routers.optimizador-produccion-frontend-prod.middlewares=lista-ips-optimizador"
