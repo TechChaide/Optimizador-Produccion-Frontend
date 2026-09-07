@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Grupo } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/grupo`;
 
 export const grupoService = {
   async getAll(): Promise<BodyListResponse<Grupo>> {
-    const response = await fetch(API_URL, {
+    const response = await fetchWithAuth(API_URL, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -26,7 +27,7 @@ export const grupoService = {
   },
 
   async getById(codigo_grupo: number): Promise<BodyResponse<Grupo>> {
-    const response = await fetch(`${API_URL}/${codigo_grupo}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_grupo}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -45,7 +46,7 @@ export const grupoService = {
   },
 
   async save(grupo: Grupo): Promise<BodyResponse<Grupo>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(grupo),
@@ -65,7 +66,7 @@ export const grupoService = {
   },
 
   async delete(codigo_grupo: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_grupo}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_grupo}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });

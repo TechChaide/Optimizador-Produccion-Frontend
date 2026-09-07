@@ -2,6 +2,7 @@ import type { Auth, User } from "@/types/interfaces";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { BodyListResponse } from "@/types/body-list-response";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURLSeguridades}/api/auths/login`;
 
@@ -13,7 +14,7 @@ type LoginCredentials = {
 
 export const authService = {
   async login(credentials: LoginCredentials): Promise<BodyResponse<Auth>> {
-    const response = await fetch(API_URL, {
+    const response = await fetchWithAuth(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -35,7 +36,7 @@ export const authService = {
   },
 
   async getUsuarioInfo(codigo_empleado: string): Promise<BodyResponse<any>> {
-    const response = await fetch(
+    const response = await fetchWithAuth(
       `${environment.apiURLSeguridades}/api/usuarios/usuarioIDusuario`,
       {
         method: "POST",
@@ -55,7 +56,7 @@ export const authService = {
   },
 
   async getUsersInfo(): Promise<BodyListResponse<User>> {
-    const response = await fetch(
+    const response = await fetchWithAuth(
       `${environment.apiURLSeguridades1}/api/usuarios/fichasUsuarios`,
       {
         method: "GET",

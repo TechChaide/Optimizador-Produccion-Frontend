@@ -4,6 +4,7 @@ import type {
   RespuestaPlanificacionData,
   SolicitudPlanificacionItem,
 } from "@/types/planificador-personas";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiPlanificadorTurnos}/api/v1`;
 
@@ -12,7 +13,7 @@ export const planificadorPersonasService = {
   async solicitarRecomendacionPlanificacion(
     solicitud: SolicitudPlanificacionItem[]
   ): Promise<BodyResponse<RespuestaPlanificacionData>> {
-    const response = await fetch(`${API_URL}/estaciones/asignar-operadores-turnos`, {
+    const response = await fetchWithAuth(`${API_URL}/estaciones/asignar-operadores-turnos`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(solicitud),

@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Ausentismo } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/ausentismo`;
 
 export const ausentimoService = {
   async getAll(): Promise<BodyListResponse<Ausentismo>> {
-    const response = await fetch(API_URL);
+    const response = await fetchWithAuth(API_URL);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Error al obtener los Ausentismos');
@@ -16,7 +17,7 @@ export const ausentimoService = {
   },
 
   async getById(codigo_ausentismo: number): Promise<BodyResponse<Ausentismo>> {
-    const response = await fetch(`${API_URL}/${codigo_ausentismo}`);
+    const response = await fetchWithAuth(`${API_URL}/${codigo_ausentismo}`);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Ausentismo no encontrado');
@@ -25,7 +26,7 @@ export const ausentimoService = {
   },
 
   async save(ausentismo: Ausentismo): Promise<BodyResponse<Ausentismo>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(ausentismo),
@@ -38,7 +39,7 @@ export const ausentimoService = {
   },
 
   async delete(codigo_ausentismo: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_ausentismo}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_ausentismo}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -51,7 +52,7 @@ export const ausentimoService = {
 
 
   async getAusentismosEmpleado(codigoEmpleado: string): Promise<BodyListResponse<Ausentismo>> {
-    const response = await fetch(`${API_URL}/AusentismoOperador`, {
+    const response = await fetchWithAuth(`${API_URL}/AusentismoOperador`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ codigoEmpleado: codigoEmpleado }),

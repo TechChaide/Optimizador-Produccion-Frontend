@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { TipoAusentismo } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/tipo_ausentismo`;
 
 export const tipoAusentismoService = {
   async getAll(): Promise<BodyListResponse<TipoAusentismo>> {
-    const response = await fetch(API_URL);
+    const response = await fetchWithAuth(API_URL);
     if (!response.ok) {
       const errorText = await response.text().catch(() => 'No body');
       let errorMessage = `Error ${response.status}: ${response.statusText}`;
@@ -23,7 +24,7 @@ export const tipoAusentismoService = {
   },
 
   async getById(codigo_tipo_ausentismo: number): Promise<BodyResponse<TipoAusentismo>> {
-    const response = await fetch(`${API_URL}/${codigo_tipo_ausentismo}`);
+    const response = await fetchWithAuth(`${API_URL}/${codigo_tipo_ausentismo}`);
     if (!response.ok) {
       const errorText = await response.text().catch(() => 'No body');
       let errorMessage = `Error ${response.status}: ${response.statusText}`;
@@ -39,7 +40,7 @@ export const tipoAusentismoService = {
   },
 
   async save(tipo: TipoAusentismo): Promise<BodyResponse<TipoAusentismo>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(tipo),
@@ -59,7 +60,7 @@ export const tipoAusentismoService = {
   },
 
   async delete(codigo_tipo_ausentismo: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_tipo_ausentismo}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_tipo_ausentismo}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });

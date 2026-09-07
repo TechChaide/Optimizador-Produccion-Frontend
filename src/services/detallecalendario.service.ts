@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { DetalleCalendario } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/detalle_calendario`;
 
 export const detalleCalendarioService = {
   async getAll(): Promise<BodyListResponse<DetalleCalendario>> {
-    const response = await fetch(API_URL);
+    const response = await fetchWithAuth(API_URL);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Error al obtener los Detalles de Calendario');
@@ -16,7 +17,7 @@ export const detalleCalendarioService = {
   },
 
   async getById(codigo_detalle: number): Promise<BodyResponse<DetalleCalendario>> {
-    const response = await fetch(`${API_URL}/${codigo_detalle}`);
+    const response = await fetchWithAuth(`${API_URL}/${codigo_detalle}`);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Detalle de Calendario no encontrado');
@@ -25,7 +26,7 @@ export const detalleCalendarioService = {
   },
 
   async save(detalle: DetalleCalendario): Promise<BodyResponse<DetalleCalendario>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detalle),
@@ -38,7 +39,7 @@ export const detalleCalendarioService = {
   },
 
   async saveBatch(detalles: DetalleCalendario[]): Promise<BodyListResponse<DetalleCalendario>> {
-    const response = await fetch(`${API_URL}/Batch`, {
+    const response = await fetchWithAuth(`${API_URL}/Batch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detalles),
@@ -51,7 +52,7 @@ export const detalleCalendarioService = {
   },
 
   async delete(codigo_detalle: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_detalle}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_detalle}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });

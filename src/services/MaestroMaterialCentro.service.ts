@@ -1,13 +1,14 @@
 import type { BodyListResponse } from "@/types/body-list-response";
 import { environment } from "@/environments/environments.prod";
 import { MaestroMaterialCentro } from "@/types/types";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/MaestroMaterialCentro`;
 
 export const maestroMaterialCentroService = {
 
   async getTotalMateriales(): Promise<BodyListResponse<number>> {
-    const response = await fetch(API_URL + '/total', {
+    const response = await fetchWithAuth(API_URL + '/total', {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -19,7 +20,7 @@ export const maestroMaterialCentroService = {
   },
 
   async getMaterialesPaginados(pagina: number,  numeroRegistros: number): Promise<BodyListResponse<MaestroMaterialCentro>> {
-    const response = await fetch(API_URL + '/dataMaterialesFull', {
+    const response = await fetchWithAuth(API_URL + '/dataMaterialesFull', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ page: pagina, rowsPerPage: numeroRegistros }),
@@ -32,7 +33,7 @@ export const maestroMaterialCentroService = {
   },
 
   async getMaterialPorCentroYMaterial(centro: string, material: string, pagina: number,  numeroRegistros: number): Promise<BodyListResponse<MaestroMaterialCentro>> {
-    const response = await fetch(API_URL + '/dataByCentroMaterial', {
+    const response = await fetchWithAuth(API_URL + '/dataByCentroMaterial', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ centro: centro, material: material, page: pagina, rowsPerPage: numeroRegistros }),

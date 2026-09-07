@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Detalles, DetallePlanSemanal } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/detalles`;
 
 export const detallesService = {
   async getAll(): Promise<BodyListResponse<Detalles>> {
-    const response = await fetch(API_URL);
+    const response = await fetchWithAuth(API_URL);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Error al obtener los Detalles');
@@ -16,7 +17,7 @@ export const detallesService = {
   },
 
   async getById(codigo_detalle: number): Promise<BodyResponse<Detalles>> {
-    const response = await fetch(`${API_URL}/${codigo_detalle}`);
+    const response = await fetchWithAuth(`${API_URL}/${codigo_detalle}`);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Detalle no encontrado');
@@ -25,7 +26,7 @@ export const detallesService = {
   },
 
   async save(detalle: Detalles): Promise<BodyResponse<Detalles>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detalle),
@@ -38,7 +39,7 @@ export const detallesService = {
   },
 
   async savePlanSemanal(detalle: DetallePlanSemanal): Promise<BodyResponse<DetallePlanSemanal>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detalle),
@@ -51,7 +52,7 @@ export const detallesService = {
   },
 
   async savePlanSemanalBulk(detalles: DetallePlanSemanal[]): Promise<BodyResponse<{ created: number; updated: number }>> {
-    const response = await fetch(`${API_URL}/bulk/createorupdate`, {
+    const response = await fetchWithAuth(`${API_URL}/bulk/createorupdate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detalles),
@@ -64,7 +65,7 @@ export const detallesService = {
   },
 
   async delete(codigo_detalle: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_detalle}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_detalle}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -82,7 +83,7 @@ export const detallesService = {
     // Convertir array de semanas a string separado por "&"
     const semanasFormato = Array.isArray(semanas) ? semanas.join('&') : semanas;
     
-    const response = await fetch(`${API_URL}/PlanPorCodigoPlanFamilia`, {
+    const response = await fetchWithAuth(`${API_URL}/PlanPorCodigoPlanFamilia`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ Codigo: codigo, nombreFamilia: nombreFamilia, semana: semanasFormato, page: page, rowsPerPage: rowsPerPage }),
@@ -95,7 +96,7 @@ export const detallesService = {
   },
 
   async getAllPlanDetalles(page: number, rowsPerPage: number): Promise<BodyListResponse<Detalles>> {
-    const response = await fetch(`${API_URL}?page=${page}&rowsPerPage=${rowsPerPage}`, {
+    const response = await fetchWithAuth(`${API_URL}?page=${page}&rowsPerPage=${rowsPerPage}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });

@@ -3,12 +3,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { PlanGrupo } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/plan_grupo`;
 
 export const planGrupoService = {
   async getAll(): Promise<BodyListResponse<PlanGrupo>> {
-    const response = await fetch(API_URL);
+    const response = await fetchWithAuth(API_URL);
     if (!response.ok) {
       const errorText = await response.text().catch(() => 'No body');
       let errorMessage = `Error ${response.status}: ${response.statusText}`;
@@ -22,7 +23,7 @@ export const planGrupoService = {
   },
 
   async getById(codigo_plan_grupo: number): Promise<BodyResponse<PlanGrupo>> {
-    const response = await fetch(`${API_URL}/${codigo_plan_grupo}`);
+    const response = await fetchWithAuth(`${API_URL}/${codigo_plan_grupo}`);
     if (!response.ok) {
       throw new Error(`Error ${response.status}: Plan de Grupo no encontrado`);
     }
@@ -30,7 +31,7 @@ export const planGrupoService = {
   },
 
   async save(plan: PlanGrupo): Promise<BodyResponse<PlanGrupo>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(plan),
@@ -43,7 +44,7 @@ export const planGrupoService = {
   },
 
   async delete(codigo_plan_grupo: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_plan_grupo}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_plan_grupo}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });

@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Restriccion } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/restriccion`;
 
 export const restriccionService = {
   async getAll(): Promise<BodyListResponse<Restriccion>> {
-    const response = await fetch(API_URL, {
+    const response = await fetchWithAuth(API_URL, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -26,7 +27,7 @@ export const restriccionService = {
   },
 
   async getById(codigo_restriccion: number): Promise<BodyResponse<Restriccion>> {
-    const response = await fetch(`${API_URL}/${codigo_restriccion}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_restriccion}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -45,7 +46,7 @@ export const restriccionService = {
   },
 
   async save(restriccion: Restriccion): Promise<BodyResponse<Restriccion>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(restriccion),
@@ -65,7 +66,7 @@ export const restriccionService = {
   },
 
   async delete(codigo_restriccion: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_restriccion}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_restriccion}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -84,7 +85,7 @@ export const restriccionService = {
   },
 
   async replicarRestriccion(restriccion: string): Promise<BodyListResponse<Restriccion>> {
-    const response = await fetch(`${API_URL}/Replicar`, {
+    const response = await fetchWithAuth(`${API_URL}/Replicar`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nombre_restriccion: restriccion }),

@@ -1,11 +1,12 @@
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/servicios`;
 
 export const serviciosService = {
   async getCuboHabilidadesOP(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/CuboHabilidadesOp", {
+    const response = await fetchWithAuth(API_URL + "/CuboHabilidadesOp", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -19,7 +20,7 @@ export const serviciosService = {
   },
 
   async getCuboInventarios(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/CuboInventarios", {
+    const response = await fetchWithAuth(API_URL + "/CuboInventarios", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
@@ -34,7 +35,7 @@ export const serviciosService = {
   },
 
   async getPresupuesto(page: number, rows: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/PresupuestoV", {
+    const response = await fetchWithAuth(API_URL + "/PresupuestoV", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page: page, rowsPerPage: rows }),
@@ -52,7 +53,7 @@ export const serviciosService = {
     page: number,
     rows: number,
   ): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/TiemposEnsamblado", {
+    const response = await fetchWithAuth(API_URL + "/TiemposEnsamblado", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page: page, rowsPerPage: rows }),
@@ -67,7 +68,7 @@ export const serviciosService = {
   },
 
   async getDiccionarioDeDatos(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/DiccionarioDeDatos", {
+    const response = await fetchWithAuth(API_URL + "/DiccionarioDeDatos", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -81,7 +82,7 @@ export const serviciosService = {
   },
 
   async getDiccionarioDeFuentes(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/DiccionarioDeFuentes", {
+    const response = await fetchWithAuth(API_URL + "/DiccionarioDeFuentes", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -95,7 +96,7 @@ export const serviciosService = {
   },
 
   async getCentros(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/Centros", {
+    const response = await fetchWithAuth(API_URL + "/Centros", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -109,7 +110,7 @@ export const serviciosService = {
   },
 
   async getMeses(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/Meses", {
+    const response = await fetchWithAuth(API_URL + "/Meses", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -123,7 +124,7 @@ export const serviciosService = {
   },
 
   async getYears(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/Years", {
+    const response = await fetchWithAuth(API_URL + "/Years", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -137,7 +138,7 @@ export const serviciosService = {
   },
 
   async getPresupuestoPorCentroAnio(anio: string, centro: string, meses: string, page: number, rows: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/PresupuestoPorCentroAnio", {
+    const response = await fetchWithAuth(API_URL + "/PresupuestoPorCentroAnio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ anio: anio, centro: centro, meses: meses, page: page, rowsPerPage: rows }),
@@ -152,7 +153,7 @@ export const serviciosService = {
   },
 
   async getPresupuestoPorMesesYAnio(anio: string, centro: string, meses: string, page: number, rows: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/PresupuestoPorMesesYAnio", {
+    const response = await fetchWithAuth(API_URL + "/PresupuestoPorMesesYAnio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ anio: anio, centro: centro, meses: meses, page: page, rowsPerPage: rows }),
@@ -167,7 +168,7 @@ export const serviciosService = {
   },
 
   async getMaestroPorMesesYAnio(anio: string, centro: string, meses: string, page: number, rows: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/MaestroPorMesesYAnio", {
+    const response = await fetchWithAuth(API_URL + "/MaestroPorMesesYAnio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ anio: anio, centro: centro, meses: meses, page: page, rowsPerPage: rows }),
@@ -182,7 +183,7 @@ export const serviciosService = {
   },
 
   async getMaestroPorCentroYAnio(anio: string, centro: string, meses: string, page: number, rows: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/MaestroPorCentroYAnio", {
+    const response = await fetchWithAuth(API_URL + "/MaestroPorCentroYAnio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ anio: anio, centro: centro, page: page, rowsPerPage: rows }),
@@ -197,7 +198,7 @@ export const serviciosService = {
   },
 
   async getTiempoMaximoDeFabricacionMaterial(CodigoMaterial: string, CentroFabricacion: string, LineaFabricacion: string, Categoria: string, Necesidad: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/TiempoEstimadoFabricacionNecesidad", {
+    const response = await fetchWithAuth(API_URL + "/TiempoEstimadoFabricacionNecesidad", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ CodigoMaterial: CodigoMaterial, CentroFabricacion: CentroFabricacion, LineaFabricacion: LineaFabricacion, Categoria: Categoria, Necesidad: Necesidad }),
@@ -212,7 +213,7 @@ export const serviciosService = {
   },
 
   async getTiemposCanonPorPuestoDeTrabajo(dias_laborales: string, dias_sabados: string): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/TiemposCanonTrabajoPorEstacion", {
+    const response = await fetchWithAuth(API_URL + "/TiemposCanonTrabajoPorEstacion", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dias_laborales: dias_laborales, dias_sabados: dias_sabados }),
@@ -227,7 +228,7 @@ export const serviciosService = {
   },
 
   async getTiempoCanonicoEnFuncionDelCuelloCanonico(CodigoMaterial: string, CentroFabricacion: string, LineaFabricacion: string, Categoria: string, Necesidad: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/TiempoEstimadoFabricacionNecesidad", {
+    const response = await fetchWithAuth(API_URL + "/TiempoEstimadoFabricacionNecesidad", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ CodigoMaterial: CodigoMaterial, CentroFabricacion: CentroFabricacion, LineaFabricacion: LineaFabricacion, Categoria: Categoria, Necesidad: Necesidad }),
@@ -247,7 +248,7 @@ export const serviciosService = {
   // se actualiza acá el único punto de llamada, sin tocar los 2 módulos que lo consumen (Venta Externa,
   // Corte Espuma).
   async getTiemposEnsambladobyCentroyCodigoGrupo(centro: string, codigoGrupo: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/tiemposEnsambladoByGrupoYCentro", {
+    const response = await fetchWithAuth(API_URL + "/tiemposEnsambladoByGrupoYCentro", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ Centro: String(centro), CodigoGrupo: Number(codigoGrupo) }),
@@ -260,7 +261,7 @@ export const serviciosService = {
   },
 
   async getHabilidadesOperadorPorEstacion(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/HabilidadesOperadorPorEstacion", {
+    const response = await fetchWithAuth(API_URL + "/HabilidadesOperadorPorEstacion", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -274,7 +275,7 @@ export const serviciosService = {
   },
 
   async getMaterialesBrutosPorMaterialMateriaPrima(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/MaterialesBrutosPorMaterialMateriaPrima", {
+    const response = await fetchWithAuth(API_URL + "/MaterialesBrutosPorMaterialMateriaPrima", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
@@ -289,7 +290,7 @@ export const serviciosService = {
   },
 
   async ListarMantenimientoPreventivosProgramados(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/ListarMantenimientosPreventivos", {
+    const response = await fetchWithAuth(API_URL + "/ListarMantenimientosPreventivos", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -304,7 +305,7 @@ export const serviciosService = {
 
   async OrdenesProvisionalesPaginados(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
     try {
-      const response = await fetch(API_URL + "/OrdenesProvisionalesPaginadas", {
+      const response = await fetchWithAuth(API_URL + "/OrdenesProvisionalesPaginadas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
@@ -320,7 +321,7 @@ export const serviciosService = {
 
   async getPendientesTotales(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
     try {
-      const response = await fetch(API_URL + "/CuboPendientesTotales", {
+      const response = await fetchWithAuth(API_URL + "/CuboPendientesTotales", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
@@ -335,7 +336,7 @@ export const serviciosService = {
   },
 
   async VersionesFabricacion(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/VersionesFabricacionMateriales", {
+    const response = await fetchWithAuth(API_URL + "/VersionesFabricacionMateriales", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
@@ -350,7 +351,7 @@ export const serviciosService = {
   },
 
   async versionsFabricacionPorCentroYCodigoMaterial(Centro: string, CodigoMaterial: string): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/versionesFabricacionMaterialPorCentro", {
+    const response = await fetchWithAuth(API_URL + "/versionesFabricacionMaterialPorCentro", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -367,7 +368,7 @@ export const serviciosService = {
 
   async getOrdenesFert(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
     try {
-      const response = await fetch(API_URL + "/OrdenesFertPaginadas", {
+      const response = await fetchWithAuth(API_URL + "/OrdenesFertPaginadas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
@@ -382,7 +383,7 @@ export const serviciosService = {
   },
 
   async getProduccionEstimadaPorIntervalo(anio: string, mes: string, semana: string): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/ProduccionEstimadaPorAnioMesSemana", {
+    const response = await fetchWithAuth(API_URL + "/ProduccionEstimadaPorAnioMesSemana", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ anio: anio, mes: mes, semana: semana }),
@@ -397,7 +398,7 @@ export const serviciosService = {
   },
 
   async getPlanesYSemanasActivasPorPlan(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/PlanesYSemanasActivasPorPlan", {
+    const response = await fetchWithAuth(API_URL + "/PlanesYSemanasActivasPorPlan", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -411,7 +412,7 @@ export const serviciosService = {
   },
 
   async getTiempoAprovisionamientoMateriasPrimas(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/TiempoAprovisionamientoMateriasPrimas", {
+    const response = await fetchWithAuth(API_URL + "/TiempoAprovisionamientoMateriasPrimas", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
@@ -426,7 +427,7 @@ export const serviciosService = {
   },
 
   async OrdenesProvisionalesAlphaPaginados(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/OrdenesProvisionalesAlphaPaginadas", {
+    const response = await fetchWithAuth(API_URL + "/OrdenesProvisionalesAlphaPaginadas", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
@@ -448,7 +449,7 @@ export const serviciosService = {
 
   async getMaestroMaterialesExplosion(centro: string, material: string, page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
     try {
-      const response = await fetch(API_URL + "/MaestroMaterialesExplosionPaginado", {
+      const response = await fetchWithAuth(API_URL + "/MaestroMaterialesExplosionPaginado", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -470,7 +471,7 @@ export const serviciosService = {
 
   async getTiemposCuradoBloqueFormulado(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
     try {
-      const response = await fetch(API_URL + "/tiemposCuradoBloqueFormulado", {
+      const response = await fetchWithAuth(API_URL + "/tiemposCuradoBloqueFormulado", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -489,7 +490,7 @@ export const serviciosService = {
   },
 
   async getKPIMaestroLooper(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/KPIMaestroLooper", {
+    const response = await fetchWithAuth(API_URL + "/KPIMaestroLooper", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -501,7 +502,7 @@ export const serviciosService = {
   },
 
   async getKPIMaestroForros(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/KPIMaestroForros", {
+    const response = await fetchWithAuth(API_URL + "/KPIMaestroForros", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -515,7 +516,7 @@ export const serviciosService = {
   },
 
   async ReporteExplosionMateriales(rows: number, rowsPerPage: number): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/ReporteExplosionMateriales", {
+    const response = await fetchWithAuth(API_URL + "/ReporteExplosionMateriales", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -533,7 +534,7 @@ export const serviciosService = {
   // Grupos: códigos de grupo concatenados por "&" (ej: "11&12&15")
   // FechaProgramacion: fecha del plan en formato "YYYY-MM-DD"
   async detallePlanTacticoPorGrupos(Grupos: string, FechaProgramacion: string): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/detallesPlanGrupo", {
+    const response = await fetchWithAuth(API_URL + "/detallesPlanGrupo", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -549,7 +550,7 @@ export const serviciosService = {
   },
 
   async getInventarioAñoActual(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/InventarioAnioActual", {
+    const response = await fetchWithAuth(API_URL + "/InventarioAnioActual", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -561,7 +562,7 @@ export const serviciosService = {
   },
 
   async getKPIMaestroCarruseles(): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/KPIMaestroCarruseles", {
+    const response = await fetchWithAuth(API_URL + "/KPIMaestroCarruseles", {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
@@ -573,7 +574,7 @@ export const serviciosService = {
   },
 
   async getConsumosFormulado(material: string): Promise<BodyResponse<any>> {
-    const response = await fetch(API_URL + "/Registros51Mb", {
+    const response = await fetchWithAuth(API_URL + "/Registros51Mb", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ Material: material }),
@@ -598,7 +599,7 @@ export const serviciosService = {
     const payload = typeof destinoOrPayload === 'string'
       ? { destino: destinoOrPayload, asunto: asunto!, cuerpo: cuerpo!, nota }
       : destinoOrPayload;
-    const response = await fetch(API_URL + "/enviarCorreo", {
+    const response = await fetchWithAuth(API_URL + "/enviarCorreo", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

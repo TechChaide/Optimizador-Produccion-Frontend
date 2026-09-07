@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Turno } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/turno`;
 
 export const turnoService = {
   async getAll(): Promise<BodyListResponse<Turno>> {
-    const response = await fetch(API_URL, {
+    const response = await fetchWithAuth(API_URL, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -26,7 +27,7 @@ export const turnoService = {
   },
 
   async getById(codigo_turno: number): Promise<BodyResponse<Turno>> {
-    const response = await fetch(`${API_URL}/${codigo_turno}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_turno}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -45,7 +46,7 @@ export const turnoService = {
   },
 
   async save(turno: Turno): Promise<BodyResponse<Turno>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(turno),
@@ -65,7 +66,7 @@ export const turnoService = {
   },
 
   async delete(codigo_turno: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_turno}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_turno}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });

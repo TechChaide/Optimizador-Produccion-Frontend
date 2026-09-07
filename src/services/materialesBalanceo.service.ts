@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { MaterialesBalanceo, PlanGlobal } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/materiales_balanceo`;
 
 export const materialesBalanceoService = {
   async getAll(): Promise<BodyListResponse<MaterialesBalanceo>> {
-    const response = await fetch(API_URL);
+    const response = await fetchWithAuth(API_URL);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Error al obtener los Materiales de Balanceo');
@@ -16,7 +17,7 @@ export const materialesBalanceoService = {
   },
 
   async getById(codigo_plan: number): Promise<BodyResponse<MaterialesBalanceo>> {
-    const response = await fetch(`${API_URL}/${codigo_plan}`);
+    const response = await fetchWithAuth(`${API_URL}/${codigo_plan}`);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Material de Balanceo no encontrado');
@@ -25,7 +26,7 @@ export const materialesBalanceoService = {
   },
 
   async save(plan: MaterialesBalanceo): Promise<BodyResponse<MaterialesBalanceo>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(plan),
@@ -38,7 +39,7 @@ export const materialesBalanceoService = {
   },
 
   async delete(codigo_plan: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_plan}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_plan}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });

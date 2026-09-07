@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { Estacion } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/estacion`;
 
 export const estacionService = {
   async getAll(): Promise<BodyListResponse<Estacion>> {
-    const response = await fetch(API_URL);
+    const response = await fetchWithAuth(API_URL);
     if (!response.ok) {
       const errorText = await response.text().catch(() => 'No body');
       let errorMessage = `Error ${response.status}: ${response.statusText}`;
@@ -23,7 +24,7 @@ export const estacionService = {
   },
 
   async getById(codigo_estacion: number): Promise<BodyResponse<Estacion>> {
-    const response = await fetch(`${API_URL}/${codigo_estacion}`);
+    const response = await fetchWithAuth(`${API_URL}/${codigo_estacion}`);
     if (!response.ok) {
       const errorText = await response.text().catch(() => 'No body');
       let errorMessage = `Error ${response.status}: ${response.statusText}`;
@@ -39,7 +40,7 @@ export const estacionService = {
   },
 
   async save(estacion: Estacion): Promise<BodyResponse<Estacion>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(estacion),
@@ -59,7 +60,7 @@ export const estacionService = {
   },
 
   async delete(codigo_estacion: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_estacion}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_estacion}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });

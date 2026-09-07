@@ -2,12 +2,13 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { FamiliaProductos } from "../types/interfaces";
+import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/familia_productos`;
 
 export const familiaProductosService = {
   async getAll(): Promise<BodyListResponse<FamiliaProductos>> {
-    const response = await fetch(API_URL);
+    const response = await fetchWithAuth(API_URL);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Error al obtener las Familias de Productos');
@@ -16,7 +17,7 @@ export const familiaProductosService = {
   },
 
   async getById(codigo_familia_producto: number): Promise<BodyResponse<FamiliaProductos>> {
-    const response = await fetch(`${API_URL}/${codigo_familia_producto}`);
+    const response = await fetchWithAuth(`${API_URL}/${codigo_familia_producto}`);
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: 'Error desconocido' }));
       throw new Error(errorBody.message || 'Familia de Productos no encontrada');
@@ -25,7 +26,7 @@ export const familiaProductosService = {
   },
 
   async save(familia: FamiliaProductos): Promise<BodyResponse<FamiliaProductos>> {
-    const response = await fetch(`${API_URL}`, {
+    const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(familia),
@@ -38,7 +39,7 @@ export const familiaProductosService = {
   },
 
   async delete(codigo_familia_producto: number): Promise<BodyResponse<void>> {
-    const response = await fetch(`${API_URL}/${codigo_familia_producto}`, {
+    const response = await fetchWithAuth(`${API_URL}/${codigo_familia_producto}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });
