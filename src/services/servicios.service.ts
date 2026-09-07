@@ -10,7 +10,10 @@ export const serviciosService = {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Habilidades OP`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Habilidades OP");
     }
     return response.json();
   },
@@ -22,7 +25,10 @@ export const serviciosService = {
       body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Inventarios`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Inventarios");
     }
     return response.json();
   },
@@ -34,7 +40,10 @@ export const serviciosService = {
       body: JSON.stringify({ page: page, rowsPerPage: rows }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Presupuesto`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Presupuesto");
     }
     return response.json();
   },
@@ -49,7 +58,10 @@ export const serviciosService = {
       body: JSON.stringify({ page: page, rowsPerPage: rows }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Tiempos Ensamblado`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Tiempos Ensamblado");
     }
     return response.json();
   },
@@ -60,7 +72,10 @@ export const serviciosService = {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Diccionario`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Diccionario");
     }
     return response.json();
   },
@@ -71,7 +86,10 @@ export const serviciosService = {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Fuentes`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Fuentes");
     }
     return response.json();
   },
@@ -82,7 +100,10 @@ export const serviciosService = {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Centros`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Centros");
     }
     return response.json();
   },
@@ -93,7 +114,10 @@ export const serviciosService = {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Meses`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Meses");
     }
     return response.json();
   },
@@ -104,7 +128,10 @@ export const serviciosService = {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Years`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Years");
     }
     return response.json();
   },
@@ -116,7 +143,10 @@ export const serviciosService = {
       body: JSON.stringify({ anio: anio, centro: centro, meses: meses, page: page, rowsPerPage: rows }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Presupuesto Filtrado`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Presupuesto Filtrado");
     }
     return response.json();
   },
@@ -128,7 +158,10 @@ export const serviciosService = {
       body: JSON.stringify({ anio: anio, centro: centro, meses: meses, page: page, rowsPerPage: rows }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Presupuesto Meses`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Presupuesto Meses");
     }
     return response.json();
   },
@@ -140,7 +173,10 @@ export const serviciosService = {
       body: JSON.stringify({ anio: anio, centro: centro, meses: meses, page: page, rowsPerPage: rows }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Maestro`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Maestro");
     }
     return response.json();
   },
@@ -152,7 +188,10 @@ export const serviciosService = {
       body: JSON.stringify({ anio: anio, centro: centro, page: page, rowsPerPage: rows }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Maestro Centro`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Maestro Centro");
     }
     return response.json();
   },
@@ -164,7 +203,10 @@ export const serviciosService = {
       body: JSON.stringify({ CodigoMaterial: CodigoMaterial, CentroFabricacion: CentroFabricacion, LineaFabricacion: LineaFabricacion, Categoria: Categoria, Necesidad: Necesidad }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Tiempo Max`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Tiempo Max");
     }
     return response.json();
   },
@@ -176,7 +218,25 @@ export const serviciosService = {
       body: JSON.stringify({ dias_laborales: dias_laborales, dias_sabados: dias_sabados }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Tiempos Canon`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Tiempos Canon");
+    }
+    return response.json();
+  },
+
+  async getTiempoCanonicoEnFuncionDelCuelloCanonico(CodigoMaterial: string, CentroFabricacion: string, LineaFabricacion: string, Categoria: string, Necesidad: number): Promise<BodyResponse<any>> {
+    const response = await fetch(API_URL + "/TiempoEstimadoFabricacionNecesidad", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ CodigoMaterial: CodigoMaterial, CentroFabricacion: CentroFabricacion, LineaFabricacion: LineaFabricacion, Categoria: Categoria, Necesidad: Necesidad }),
+    });
+    if (!response.ok) {
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Tiempo Estimado");
     }
     return response.json();
   },
@@ -205,7 +265,10 @@ export const serviciosService = {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Habilidades`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Habilidades");
     }
     return response.json();
   },
@@ -217,7 +280,10 @@ export const serviciosService = {
       body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Materiales Brutos`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Materiales Brutos");
     }
     return response.json();
   },
@@ -228,7 +294,10 @@ export const serviciosService = {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Mantenimientos`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Mantenimientos");
     }
     return response.json();
   },
@@ -272,7 +341,10 @@ export const serviciosService = {
       body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Versiones`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Versiones");
     }
     return response.json();
   },
@@ -316,7 +388,10 @@ export const serviciosService = {
       body: JSON.stringify({ anio: anio, mes: mes, semana: semana }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Produccion Estimada`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Produccion Estimada");
     }
     return response.json();
   },
@@ -357,9 +432,18 @@ export const serviciosService = {
       body: JSON.stringify({ page: page, rowsPerPage: rowsPerPage }),
     });
     if (!response.ok) {
-      throw new Error(`Error ${response.status}: Failed to fetch Ordenes Alpha`);
+      const errorBody = await response
+        .json()
+        .catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Ordenes Alpha");
     }
     return response.json();
+  },
+
+  // Alias de OrdenesProvisionalesAlphaPaginados (mismo endpoint) — algunas pantallas lo consumen
+  // con este nombre.
+  async getOrdenesProvisionalesAlphaPaginados(page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
+    return this.OrdenesProvisionalesAlphaPaginados(page, rowsPerPage);
   },
 
   async getMaestroMaterialesExplosion(centro: string, material: string, page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
@@ -503,7 +587,17 @@ export const serviciosService = {
 
   // "destino" es una sola cadena con los correos separados por coma (no un array) — así lo espera
   // el endpoint real, confirmado por el usuario con el contrato exacto.
-  async enviarCorreo(payload: { destino: string; asunto: string; cuerpo: string; nota?: string }): Promise<{ message: string; destinatarios: string[] }> {
+  // Acepta tanto el payload como objeto como los 4 argumentos posicionales (destino, asunto, cuerpo,
+  // nota) — distintas pantallas del sistema llaman a este método de una forma u otra.
+  async enviarCorreo(
+    destinoOrPayload: string | { destino: string; asunto: string; cuerpo: string; nota?: string },
+    asunto?: string,
+    cuerpo?: string,
+    nota?: string
+  ): Promise<{ message: string; destinatarios: string[] }> {
+    const payload = typeof destinoOrPayload === 'string'
+      ? { destino: destinoOrPayload, asunto: asunto!, cuerpo: cuerpo!, nota }
+      : destinoOrPayload;
     const response = await fetch(API_URL + "/enviarCorreo", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

@@ -21,7 +21,8 @@ import {
     Wind,
     ShoppingCart,
     Scissors,
-    FlaskConical
+    FlaskConical,
+    Layers,
 } from 'lucide-react';
 import { ProcessType, Holiday, HolidayScope } from '@/types/types'; 
 
@@ -52,6 +53,8 @@ export enum ActiveView {
   TACTICAL_SCHEDULING_VENTA_EXTERNA = 'TACTICAL_SCHEDULING_VENTA_EXTERNA',
   TACTICAL_SCHEDULING_CORTE_LAMINADO = 'TACTICAL_SCHEDULING_CORTE_LAMINADO',
   TACTICAL_SCHEDULING_FORROS = 'TACTICAL_SCHEDULING_FORROS',
+  TACTICAL_SCHEDULING_TALLER_CORTE = 'TACTICAL_SCHEDULING_TALLER_CORTE',
+  TACTICAL_SCHEDULING_PLANCHAS_MIXTAS = 'TACTICAL_SCHEDULING_PLANCHAS_MIXTAS',
   WORK_SHIFT_PLANNING = 'WORK_SHIFT_PLANNING',
   DICTIONARY = 'DICTIONARY',
   CUT_LAMINATION_PLAN = 'CUT_LAMINATION_PLAN',
@@ -141,6 +144,8 @@ const NAVIGATION_ITEMS = [
   { id: ActiveView.TACTICAL_SCHEDULING_VENTA_EXTERNA, label: 'Programación Táctica Venta Externa', icon: <ShoppingCart className="w-5 h-5" />, href: '/dashboard/opciones/tactica-venta-externa' },
   { id: ActiveView.TACTICAL_SCHEDULING_CORTE_LAMINADO, label: 'Programación Táctica Laminado', icon: <Scissors className="w-5 h-5" />, href: '/dashboard/opciones/tactica-corte-laminado' },
   { id: ActiveView.TACTICAL_SCHEDULING_FORROS, label: 'Programación Táctica Forros', icon: <TacticalSchedulingIcon />, href: '/dashboard/opciones/programacion-tactica-forros' },
+  { id: ActiveView.TACTICAL_SCHEDULING_TALLER_CORTE, label: 'Programación Táctica Taller de Corte', icon: <Scissors className="w-5 h-5" />, href: '/dashboard/opciones/programacion-tactica-taller-corte' },
+  { id: ActiveView.TACTICAL_SCHEDULING_PLANCHAS_MIXTAS, label: 'Programación Táctica Planchas Mixtas', icon: <Layers className="w-5 h-5" />, href: '/dashboard/opciones/programacion-tactica-planchas-mixtas' },
   { id: ActiveView.WORK_SHIFT_PLANNING, label: 'Planificación de Turnos', icon: <WorkShiftIcon />, href: '/dashboard/opciones/planificacion-turnos' },
   { id: ActiveView.GESTION_TURNO_OPERADORES, label: 'Gestión Turno - Operadores', icon: <PersonnelIcon />, href: '/dashboard/opciones/gestion-turno-operadores' },
   { id: ActiveView.DICTIONARY, label: 'Diccionario de Datos', icon: <RealDataIcon />, href: '/dashboard/opciones/diccionario-datos' },
@@ -181,6 +186,8 @@ export const OPCIONES_ITEMS: ActiveView[] = [
   ActiveView.TACTICAL_SCHEDULING_2,
   ActiveView.TACTICAL_SCHEDULING_MUEBLES,
   ActiveView.TACTICAL_SCHEDULING_FORROS,
+  ActiveView.TACTICAL_SCHEDULING_TALLER_CORTE,
+  ActiveView.TACTICAL_SCHEDULING_PLANCHAS_MIXTAS,
   ActiveView.WORK_SHIFT_PLANNING,
   ActiveView.GESTION_TURNO_OPERADORES,
   ActiveView.DICTIONARY,
@@ -188,6 +195,13 @@ export const OPCIONES_ITEMS: ActiveView[] = [
   ActiveView.CUT_LAMINATION_PLAN,
   ActiveView.PLAN_SEMANAL,
   ActiveView.PLANES_MEDIANO_PLAZO,
+];
+
+// Items que van dentro de la sección "Proyectos" (contraíble)
+export const PROYECTOS_ITEMS: ActiveView[] = [
+  ActiveView.TACTICAL_SCHEDULING_MUEBLES,
+  ActiveView.TACTICAL_SCHEDULING_TALLER_CORTE,
+  ActiveView.TACTICAL_SCHEDULING_PLANCHAS_MIXTAS,
 ];
 
 // Items que van dentro de la sección "Parámetros" (contraíble)

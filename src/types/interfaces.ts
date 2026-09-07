@@ -257,8 +257,10 @@ export interface FamiliaProductos {
 export interface Grupo {
     codigo_grupo: number;
     centro: string;
-    departamentos_mapea?: string;
     nombre_grupo: string;
+    // Descripción/alias del área a la que mapea el grupo (ej. "PRENSADO QUITO"), usada para buscar
+    // grupos por texto además de nombre_grupo
+    departamentos_mapea?: string;
     estado: string;
     fecha_modificacion: Date;
     usuario_modificacion: string;
@@ -383,4 +385,69 @@ export interface MaterialesBalanceoGrupo extends Grupo {
     estado: string;
     fecha_modificacion: Date;
     usuario_modificacion: string;
+}
+
+export interface OrdenFert {
+  CENTRO: string;
+  ORDEN: string;
+  MATERIAL: string;
+  SECTORDESC: string;
+  CATEGORIA: string;
+  NOMBRE: string;
+  CANTPROGRAMADA: number;
+  CANTENTREGADA: number;
+  CANTNOTIFICADA: number;
+  CANTRECHAZO: number;
+  UNIDAD: string;
+  FECHA: string;
+  ANIO: number;
+  MES: number;
+  DIA: number;
+  SEMANA: number;
+  RESPCTRLPROD: string;
+  PRIORIDAD: number;
+  ENLINEA: number;
+  MAQUINA: string;
+  PEDIDO: string;
+  CANTPROGPESONETO: number;
+  CANTENTREGPESONETO: number;
+  CANTNOTIFPESONETO: number;
+  CANTRECHAZOPESONETO: number;
+  POSICION: string;
+  PUESTOTRABAJO: string;
+  PUESTOTRABAJO2: string;
+  PUESTOTRABAJO3: string;
+  IDHOJARUTA: string;
+  FECHAORDEN: string;
+  CANTPENDIENTE: number;
+  TIEMPOPENDIENTE: number;
+}
+
+// Forma real de una orden previsional tal como la devuelve el backend (endpoint
+// OrdenesProvisionalesPaginadas) — distinta del ProvisionalOrder de @/types/types (que es el objeto
+// de entrada del optimizador, con muchos menos campos).
+export interface ProvisionalOrder {
+  ORDENPREVISIONAL: string;
+  MATERIAL: string;
+  NOMBRE: string;
+  CATEGORIA: string;
+  CANTIDAD: number;
+  UNIDAD: string;
+  FECHAINICIO: string;
+  FECHAFIN: string;
+  RESPCONTROLPROD: string;
+  Centro: string;
+  Almacen: string;
+  Maquina: string | null;
+  MAQUINA: string | null;
+  RECURSO: string | null;
+  ClaseOrden: string;
+  CodMaterial: string;
+  LINEA?: string;
+  Pedidoventas?: string;
+  PEDIDOVENTAS?: string;
+  POSICIONPEDIDO?: string;
+  PosicionPedido?: string;
+  PUESTOTRABAJO?: string;
+  [key: string]: any;
 }

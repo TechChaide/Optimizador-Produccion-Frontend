@@ -6,7 +6,11 @@ const Table = React.forwardRef<
   HTMLTableElement,
   React.HTMLAttributes<HTMLTableElement>
 >(({ className, ...props }, ref) => (
-  <div className="relative w-full overflow-auto">
+  // overflow-x-auto (no overflow-y): un overflow-auto aquí crearía un contenedor de scroll ANIDADO
+  // dentro del div externo que realmente scrollea (los `overflow-auto max-h-[...]` que envuelven a
+  // cada <Table>), lo que rompe `position: sticky` en TableHeader — el encabezado quedaría "pegado"
+  // al div interno (que nunca scrollea por sí mismo) en vez de al contenedor externo real.
+  <div className="relative w-full overflow-x-auto">
     <table
       ref={ref}
       className={cn("w-full caption-bottom text-sm", className)}
@@ -20,7 +24,11 @@ const TableHeader = React.forwardRef<
   HTMLTableSectionElement,
   React.HTMLAttributes<HTMLTableSectionElement>
 >(({ className, ...props }, ref) => (
-  <thead ref={ref} className={cn("[&_tr]:border-b", className)} {...props} />
+  // Sticky por defecto: toda tabla renderizada dentro de un contenedor con overflow-auto + max-height
+  // (el patrón ya usado en toda la app) obtiene fila de títulos fija al hacer scroll, sin tener que
+  // repetir "sticky top-0" manualmente en cada tabla. bg-white evita que el texto de las filas del
+  // body se transparente debajo del encabezado en las tablas que no fijan su propio color de fondo.
+  <thead ref={ref} className={cn("[&_tr]:border-b sticky top-0 z-10 bg-white", className)} {...props} />
 ))
 TableHeader.displayName = "TableHeader"
 

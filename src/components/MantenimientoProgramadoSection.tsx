@@ -1,13 +1,18 @@
 'use client';
 
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { serviciosService } from '@/services/servicios.service';
 import { Loader2, RefreshCw, Search, Wrench, Inbox, AlertTriangle, ChevronsLeft, ChevronLeft, ChevronRight, ChevronsRight } from 'lucide-react';
 import { useAppContext } from '@/context/AppProvider';
 import { humanizeLabel } from '@/lib/utils';
+import type { Restriccion } from '@/types/interfaces';
 
 interface MantenimientoProgramado {
   [key: string]: any;
+}
+
+interface MantenimientoProgramadoSectionProps {
+  restricciones?: Restriccion[];
 }
 
 const ROWS_PER_PAGE = 20;
@@ -57,15 +62,16 @@ function diasHastaSiguienteDiaHabil(fechaISO: string): number {
   return 0;
 }
 
-function recorrerFinDeSemana(dataArray: MantenimientoProgramado[]): { datos: MantenimientoProgramado[]; indicesReprogramados: Set<number> } {
-  const indicesReprogramados = new Set<number>();
-  const datos = dataArray.map((row, idx) => {
+// Marca cada fila reprogramada con `_fueReprogramado` (en vez de devolver un set de índices
+// separado) para que el indicador sobreviva a cualquier filtrado posterior del arreglo (por
+// restricciones de responsable, búsqueda, etc.) sin desalinearse.
+function recorrerFinDeSemana(dataArray: MantenimientoProgramado[]): MantenimientoProgramado[] {
+  return dataArray.map((row) => {
     const fechaPro = row['FECHA_PRO'];
     if (!fechaPro) return row;
     const dias = diasHastaSiguienteDiaHabil(fechaPro);
     if (dias === 0) return row;
-    indicesReprogramados.add(idx);
-    const filaAjustada = { ...row };
+    const filaAjustada: MantenimientoProgramado = { ...row, _fueReprogramado: true };
     CAMPOS_FECHA_A_RECORRER.forEach((campo) => {
       const valor = row[campo];
       if (!valor) return;
@@ -75,17 +81,75 @@ function recorrerFinDeSemana(dataArray: MantenimientoProgramado[]): { datos: Man
     });
     return filaAjustada;
   });
-  return { datos, indicesReprogramados };
 }
 
-export const MantenimientoProgramadoSection: React.FC = () => {
+export const MantenimientoProgramadoSection: React.FC<MantenimientoProgramadoSectionProps> = ({ restricciones = [] }) => {
   const { addNotification } = useAppContext();
-  const [mantenimientos, setMantenimientos] = useState<MantenimientoProgramado[]>([]);
+  const [mantenimientosRaw, setMantenimientosRaw] = useState<MantenimientoProgramado[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [columns, setColumns] = useState<string[]>([]);
-  const [filasReprogramadas, setFilasReprogramadas] = useState<Set<number>>(new Set());
   const [searchTerm, setSearchTerm] = useState('');
+
+  // Responsables de Control de Producción habilitados para Muebles (restricción "RespCtrlProd")
+  const validRespCodes = useMemo(() => {
+    const respRestriccion = restricciones.find(r => r.nombre_restriccion === 'RespCtrlProd');
+    if (!respRestriccion || !respRestriccion.valor_restriccion) return [];
+
+    return respRestriccion.valor_restriccion
+      .split(/[&,]/)
+      .map(code => String(code).trim())
+      .filter(Boolean);
+  }, [restricciones]);
+
+  // Máquinas excluidas por responsable (restricción "HRNP")
+  const forbiddenMachinesMap = useMemo(() => {
+    const hrnpRestriccion = restricciones.find(r => r.nombre_restriccion === 'HRNP');
+    if (!hrnpRestriccion || !hrnpRestriccion.valor_restriccion) return new Map<string, string[]>();
+
+    const map = new Map<string, string[]>();
+    const regex = /\[([^:]+):\{([^}]+)\}\]/g;
+    let match;
+
+    const rawValue = hrnpRestriccion.valor_restriccion;
+    while ((match = regex.exec(rawValue)) !== null) {
+      const respCode = match[1].trim();
+      const machines = match[2].split(',').map(m => m.trim()).filter(Boolean);
+      map.set(respCode, machines);
+    }
+    return map;
+  }, [restricciones]);
+
+  const mantenimientos = useMemo(() => {
+    return mantenimientosRaw.filter(row => {
+      const rowResp = String(row.RespCtrlProd || '').trim();
+
+      if (validRespCodes.length > 0 && !validRespCodes.includes(rowResp)) {
+        return false;
+      }
+
+      if (forbiddenMachinesMap.has(rowResp)) {
+        const rowMachine = String(row.MaquinaSismac || row.MAQUINA || '').trim();
+        const forbiddenOnes = forbiddenMachinesMap.get(rowResp);
+        if (forbiddenOnes?.includes(rowMachine)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [mantenimientosRaw, validRespCodes, forbiddenMachinesMap]);
+
+  const cantidadReprogramados = useMemo(
+    () => mantenimientos.reduce((count, row) => count + (row._fueReprogramado ? 1 : 0), 0),
+    [mantenimientos]
+  );
+
+  // Si el filtrado reduce la cantidad de páginas, evita quedar atrapado en una página vacía
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(mantenimientos.length / ROWS_PER_PAGE));
+    setCurrentPage(prev => Math.min(prev, maxPage));
+  }, [mantenimientos.length]);
 
   useEffect(() => {
     fetchMantenimientos();
@@ -98,24 +162,24 @@ export const MantenimientoProgramadoSection: React.FC = () => {
       const response = await serviciosService.ListarMantenimientoPreventivosProgramados();
       if (response && response.data) {
         const dataArrayCrudo = Array.isArray(response.data) ? response.data : [response.data];
-        const { datos: dataArray, indicesReprogramados } = recorrerFinDeSemana(dataArrayCrudo);
-        setMantenimientos(dataArray);
-        setFilasReprogramadas(indicesReprogramados);
-        if (indicesReprogramados.size > 0) {
-          addNotification('warning', `${indicesReprogramados.size} mantenimiento${indicesReprogramados.size === 1 ? '' : 's'} programado${indicesReprogramados.size === 1 ? '' : 's'} en fin de semana se movió al siguiente día hábil.`);
+        const dataArray = recorrerFinDeSemana(dataArrayCrudo);
+        setMantenimientosRaw(dataArray);
+
+        if (dataArrayCrudo.length > 0) {
+          setColumns(Object.keys(dataArrayCrudo[0]));
         }
-        if (dataArray.length > 0) {
-          setColumns(Object.keys(dataArray[0]));
+
+        const totalReprogramados = dataArray.reduce((count, row) => count + (row._fueReprogramado ? 1 : 0), 0);
+        if (totalReprogramados > 0) {
+          addNotification('warning', `${totalReprogramados} mantenimiento${totalReprogramados === 1 ? '' : 's'} programado${totalReprogramados === 1 ? '' : 's'} en fin de semana se movió al siguiente día hábil.`);
         }
       } else {
-        setMantenimientos([]);
-        setFilasReprogramadas(new Set());
+        setMantenimientosRaw([]);
         addNotification('warning', 'No se encontraron mantenimientos programados');
       }
     } catch (error) {
       addNotification('error', `Error al cargar mantenimientos: ${(error as Error).message}`);
-      setMantenimientos([]);
-      setFilasReprogramadas(new Set());
+      setMantenimientosRaw([]);
     } finally {
       setIsLoading(false);
     }
@@ -164,11 +228,11 @@ export const MantenimientoProgramadoSection: React.FC = () => {
         </button>
       </div>
 
-      {filasReprogramadas.size > 0 && (
+      {cantidadReprogramados > 0 && (
         <div className="flex items-center gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
           <AlertTriangle className="h-4 w-4 flex-shrink-0 text-amber-500" />
           <span>
-            {filasReprogramadas.size} registro{filasReprogramadas.size === 1 ? '' : 's'} programado{filasReprogramadas.size === 1 ? '' : 's'} originalmente en fin de semana — movido{filasReprogramadas.size === 1 ? '' : 's'} al siguiente día hábil (resaltado{filasReprogramadas.size === 1 ? '' : 's'} abajo).
+            {cantidadReprogramados} registro{cantidadReprogramados === 1 ? '' : 's'} programado{cantidadReprogramados === 1 ? '' : 's'} originalmente en fin de semana — movido{cantidadReprogramados === 1 ? '' : 's'} al siguiente día hábil (resaltado{cantidadReprogramados === 1 ? '' : 's'} abajo).
           </span>
         </div>
       )}
@@ -224,7 +288,7 @@ export const MantenimientoProgramadoSection: React.FC = () => {
                 </thead>
                 <tbody className="divide-y divide-gray-50">
                   {currentData.map(({ row, index: indiceGlobal }) => {
-                    const fueReprogramado = filasReprogramadas.has(indiceGlobal);
+                    const fueReprogramado = !!row._fueReprogramado;
                     const tiempo = calcularTiempoMantenimiento(row);
                     return (
                       <tr key={indiceGlobal} className={`transition-colors ${fueReprogramado ? 'bg-amber-50/70 hover:bg-amber-50' : 'hover:bg-indigo-50/40'}`}>

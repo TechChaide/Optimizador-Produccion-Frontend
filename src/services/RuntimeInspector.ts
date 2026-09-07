@@ -1,11 +1,8 @@
 
-import React from 'react';
-
 /**
  * RuntimeInspector: Sistema de observabilidad profunda para rastrear
  * variables, estados, operaciones y contexto de ejecución en tiempo real.
  */
-
 import { useMemo } from 'react';
 
 export interface VariableSnapshot {

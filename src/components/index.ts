@@ -40,6 +40,23 @@ export * from './RevCapacidadTabSection';
 export { PlanPropuestoTabSection } from './PlanPropuestoTabSection';
 export { MaterialBalanceoLineasTabSection } from './MaterialBalanceoLineasTabSection';
 export * from './CutLaminationPlanSection';
+export * from './TiemposEnsambladoTab';
+export * from './CuboInventariosTab';
+export * from './CuboInventariosTelasTab';
+export * from './CuboInventariosGeneralTab';
+export * from './HabilidadesMueblesTab';
+export * from './TacticalPlanPlanchasMixtasSection';
+export * from './PendientesTotalesTab';
+export * from './ProvisionalOrdersAlphaTab';
+export * from './ProvisionalOrdersPlanchasMixtasTab';
+export * from './PlanGrupoRecuperadoTab';
+export * from './TacticalPlanTallerCorteSection';
+export * from './TiemposTallerCorteTab';
+export * from './ProvisionalOrdersTallerCorteTab';
+export * from './PlanTallerCorteTab';
+export * from './PlanPlanchasMixtasTab';
+export * from './PlanMueblesTabSection';
+export * from './ProvisionalOrdersSummaryTab';
 
 // Widgets y paneles
 export { default as FloatingChatWidget } from './FloatingChatWidget';

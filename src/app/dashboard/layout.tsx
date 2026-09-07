@@ -28,6 +28,7 @@ import { serviciosService } from '@/services/seguridades/servicios.service';
 import { useToast } from '@/hooks/use-toast';
 import { environment } from '@/environments/environments.prod';
 import { User } from '@/types/interfaces';
+import { TacticalPlanMueblesSection, TacticalPlanTallerCorteSection, TacticalPlanPlanchasMixtasSection } from '@/components';
 // (LogoutButton preserved in repo but not used here; we implement custom panel UI)
 
 
@@ -532,6 +533,34 @@ export default function DashboardLayout({
     const [menuError, setMenuError] = useState<string | null>(null);
     const { toast } = useToast();
     const router = useRouter();
+    const pathname = usePathname();
+
+    // Rutas de los tres "Proyectos" cuyo estado se debe conservar al navegar entre ellos (y hacia/desde
+    // cualquier otra página). Se mantienen SIEMPRE montados (solo ocultos con CSS) una vez visitados, en
+    // vez de dejar que Next.js los desmonte al cambiar de ruta — así no se pierde el progreso de la
+    // planificación en curso de ninguno de los tres al ir y volver.
+    const MUEBLES_PATH = '/dashboard/opciones/programacion-tactica-muebles';
+    const TALLER_CORTE_PATH = '/dashboard/opciones/programacion-tactica-taller-corte';
+    const PLANCHAS_MIXTAS_PATH = '/dashboard/opciones/programacion-tactica-planchas-mixtas';
+
+    const isMueblesActive = pathname === MUEBLES_PATH;
+    const isTallerCorteActive = pathname === TALLER_CORTE_PATH;
+    const isPlanchasMixtasActive = pathname === PLANCHAS_MIXTAS_PATH;
+
+    // Una vez que el usuario visita cada Proyecto, se marca como "visitado" y a partir de ahí se
+    // mantiene montado (oculto con CSS si no es el activo) para toda la sesión. Antes de la primera
+    // visita no se monta, para no pagar el costo de descarga de datos de un Proyecto que nunca se abrió.
+    const [visitedMuebles, setVisitedMuebles] = useState(isMueblesActive);
+    const [visitedTallerCorte, setVisitedTallerCorte] = useState(isTallerCorteActive);
+    const [visitedPlanchasMixtas, setVisitedPlanchasMixtas] = useState(isPlanchasMixtasActive);
+
+    useEffect(() => {
+        if (isMueblesActive) setVisitedMuebles(true);
+        if (isTallerCorteActive) setVisitedTallerCorte(true);
+        if (isPlanchasMixtasActive) setVisitedPlanchasMixtas(true);
+    }, [isMueblesActive, isTallerCorteActive, isPlanchasMixtasActive]);
+
+    const isPersistedProjectRoute = isMueblesActive || isTallerCorteActive || isPlanchasMixtasActive;
 
     useEffect(() => {
         const loadMenus = async () => {
@@ -683,7 +712,22 @@ export default function DashboardLayout({
                     </Sidebar>
                     <div className="flex flex-col flex-1 relative h-full overflow-y-auto">
                         <MobileMenuButton />
-                        {children}
+                        {visitedMuebles && (
+                            <div className={isMueblesActive ? '' : 'hidden'}>
+                                <TacticalPlanMueblesSection />
+                            </div>
+                        )}
+                        {visitedTallerCorte && (
+                            <div className={isTallerCorteActive ? '' : 'hidden'}>
+                                <TacticalPlanTallerCorteSection />
+                            </div>
+                        )}
+                        {visitedPlanchasMixtas && (
+                            <div className={isPlanchasMixtasActive ? '' : 'hidden'}>
+                                <TacticalPlanPlanchasMixtasSection />
+                            </div>
+                        )}
+                        {!isPersistedProjectRoute && children}
                     </div>
                 </div>
             </SidebarProvider>
