@@ -2,6 +2,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   Scissors,
   Loader2,
@@ -51,7 +52,7 @@ import { serviciosService } from '@/services/servicios.service';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { cn } from '@/lib/utils';
-import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, fechaLocalEcuador, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, parseISO } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -355,16 +356,16 @@ const computeRespuestaSalidaRows = (
     .sort((a, b) => Number(a.tieneCorrida) - Number(b.tieneCorrida));
 };
 
-// Normaliza fecha_inicio_plan/fecha_fin_plan al mismo formato 'yyyy-MM-dd' que usa selectedDates.
-// Delega en fechaLocalEcuador (@/lib/dias-laborables): el sufijo horario NO siempre es "T00:00:00"
-// como asumía el comentario original — un plan grabado a las 17:00 o 22:00 hora Ecuador llega en UTC
-// con esa hora real, y recortar el ISO a lo bruto podía devolver el día calendario SIGUIENTE (ver
-// el mismo bug documentado en explotarPFFParaCentro de Corte Espuma). fechaLocalEcuador convierte
-// correctamente a hora de Ecuador, y deja intactas las fechas planas sin hora (Provisionales/FERT).
+// Normaliza fecha_inicio_plan/fecha_fin_plan/fecha_creacion (siempre de plan_grupo, escritos por
+// esta misma app) al formato 'yyyy-MM-dd'. Delega en fechaLocalPlana (@/lib/dias-laborables), NO en
+// fechaLocalEcuador: desde 2026-09-10 estos 3 campos se graban con la convención "naive Ecuador" (hora
+// literal, sin instante UTC real — ver ecuadorMidnightISO/ecuadorNowNaiveISO), así que restarles 5h
+// correría el día calendario hacia atrás. Para campos que SAP sí escribe en UTC real (FECHA_OT_PRG_INI
+// de Mantenimiento, etc.) se sigue usando fechaLocalEcuador directo, sin pasar por este helper.
 const soloFecha = (v: unknown): string => {
   const s = String(v ?? '').trim();
   if (!s || s === 'null' || s === 'undefined') return '';
-  return fechaLocalEcuador(s);
+  return fechaLocalPlana(s);
 };
 
 // Solo el plan "P3" es una respuesta real contra un P2 — "PFD" es una variante de salida que no debe
@@ -607,6 +608,7 @@ interface SnapshotCorteLaminado {
 
 export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const { addNotification } = useAppContext();
+  const router = useRouter();
 
   const [mounted, setMounted] = useState(false);
   const [activeTab, setActiveTab] = useState('resumen');
@@ -646,6 +648,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const [isProcessingResumen, setIsProcessingResumen] = useState(false);
   const [isSavingPlan, setIsSavingPlan] = useState(false);
   const [isValidandoExportTxt, setIsValidandoExportTxt] = useState(false);
+  const [exportTxtPreview, setExportTxtPreview] = useState<CorridaOutputRow[] | null>(null);
+  // Materiales de Venta Externa que bloquean "Exportar TXT" por no tener Respuesta P3 aprobada (ver
+  // validarAprobacionVentaExterna) — antes esto solo lanzaba una notificación de error y dejaba al
+  // usuario sin saber a dónde ir a resolverlo. Ahora se muestra en un diálogo con acceso directo al
+  // tab "Data Aprobada" de Venta Externa (mismo criterio que ya usa Corte Espuma para "Diferir →").
+  const [exportTxtBloqueado, setExportTxtBloqueado] = useState<string[] | null>(null);
   const [planPreview, setPlanPreview] = useState<PlanGrupoPreview | null>(null);
   const [isSavingPlanPFD, setIsSavingPlanPFD] = useState(false);
   const [planPreviewPFD, setPlanPreviewPFD] = useState<PlanGrupoPreview | null>(null);
@@ -1040,7 +1048,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         grouped[area].push({
           codigo_material: d.codigo_material,
           cantidad_produccion_neta: d.cantidad_produccion_neta,
-          fecha_inicio: plan?.fecha_inicio_plan ? fechaLocalEcuador(plan.fecha_inicio_plan) : '—',
+          fecha_inicio: plan?.fecha_inicio_plan ? soloFecha(plan.fecha_inicio_plan) : '—',
           codigo_plan_grupo: d.codigo_plan_grupo
         });
       });
@@ -1729,6 +1737,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     }
     if (filteredOrders.length === 0 && filteredFertOrders.length === 0) {
       setUnifiedNeeds([]);
+      // Antes quedaba en silencio (Resumen en cero sin explicación, indistinguible de una falla real
+      // de sincronización). No es un error: sencillamente no hay Órdenes FERT/Provisionales en SAP
+      // con fecha exacta = la(s) fecha(s) seleccionada(s) arriba (ver "Ver Todo el Plan" para quitar
+      // el filtro de fecha y confirmarlo).
+      const fechasTxt = selectedDates.size > 0 ? Array.from(selectedDates).sort().join(', ') : 'seleccionada';
+      addNotification('warning', `Datos a la fecha ${fechasTxt} no existen — sin Órdenes FERT/Provisionales en SAP para ese día. Prueba "Ver Todo el Plan" o cambia la fecha en el filtro.`);
       return;
     }
 
@@ -2551,12 +2565,15 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         // FK sobre plan_global, este guardado volverá a fallar con el mismo error.
         codigo_plan: null,
         valor: planPreview.valor,
-        fecha_inicio_plan: planPreview.fechaInicio,
-        fecha_fin_plan: planPreview.fechaFin,
+        fecha_inicio_plan: ecuadorMidnightISO(planPreview.fechaInicio),
+        fecha_fin_plan: ecuadorMidnightISO(planPreview.fechaFin),
         estado: 'A',
         usuario_creacion: usuario,
         // Faltaba en el payload — la columna quedaba NULL en BD (verificado con datos reales).
-        fecha_creacion: new Date(),
+        // ecuadorNowNaiveISO (no new Date()): misma convención "naive Ecuador" que
+        // fecha_inicio_plan/fecha_fin_plan (ver ecuadorMidnightISO) — hora literal de Ecuador, no el
+        // instante UTC real que da new Date().
+        fecha_creacion: ecuadorNowNaiveISO(),
       };
 
       const planResponse = await planGrupoService.save(planPayload as unknown as PlanGrupo);
@@ -2661,12 +2678,15 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         codigo_familia_grupo: null,
         codigo_plan: null,
         valor: planPreviewPFD.valor,
-        fecha_inicio_plan: planPreviewPFD.fechaInicio,
-        fecha_fin_plan: planPreviewPFD.fechaFin,
+        fecha_inicio_plan: ecuadorMidnightISO(planPreviewPFD.fechaInicio),
+        fecha_fin_plan: ecuadorMidnightISO(planPreviewPFD.fechaFin),
         estado: 'A',
         usuario_creacion: usuario,
         // Faltaba en el payload — la columna quedaba NULL en BD (verificado con datos reales).
-        fecha_creacion: new Date(),
+        // ecuadorNowNaiveISO (no new Date()): misma convención "naive Ecuador" que
+        // fecha_inicio_plan/fecha_fin_plan (ver ecuadorMidnightISO) — hora literal de Ecuador, no el
+        // instante UTC real que da new Date().
+        fecha_creacion: ecuadorNowNaiveISO(),
       };
 
       const planResponse = await planGrupoService.save(planPayload as unknown as PlanGrupo);
@@ -2787,8 +2807,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           fechaInicio = dates[0];
           fechaFin = dates[dates.length - 1];
         } else {
-          fechaInicio = planVigente.fecha_inicio_plan ? fechaLocalEcuador(planVigente.fecha_inicio_plan) : format(new Date(), 'yyyy-MM-dd');
-          fechaFin = planVigente.fecha_fin_plan ? fechaLocalEcuador(planVigente.fecha_fin_plan) : fechaInicio;
+          fechaInicio = planVigente.fecha_inicio_plan ? soloFecha(planVigente.fecha_inicio_plan) : format(new Date(), 'yyyy-MM-dd');
+          fechaFin = planVigente.fecha_fin_plan ? soloFecha(planVigente.fecha_fin_plan) : fechaInicio;
         }
       } else {
         fechaInicio = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
@@ -2880,8 +2900,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       // actualizaban los DetalleTactico y el plan se quedaba con la fecha vieja para siempre.
       await planGrupoService.save({
         ...editPlanPreview.planOriginal,
-        fecha_inicio_plan: editPlanPreview.fechaInicio,
-        fecha_fin_plan: editPlanPreview.fechaFin,
+        fecha_inicio_plan: ecuadorMidnightISO(editPlanPreview.fechaInicio),
+        fecha_fin_plan: ecuadorMidnightISO(editPlanPreview.fechaFin),
       } as unknown as PlanGrupo);
 
       const { actualizados, agregados, eliminados, fallidos } =
@@ -3507,25 +3527,33 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const materiales = Array.from(new Set(rows.map(r => r.material)));
       const noAprobados = await validarAprobacionVentaExterna(materiales);
       if (noAprobados.length > 0) {
-        addNotification('error', `Exportación bloqueada: ${noAprobados.length} material(es) con origen Venta Externa aún no tienen Respuesta P3 aprobada (fecha correcta) — ${noAprobados.join(', ')}. Genera/corrige el P3 antes de exportar.`);
+        setExportTxtBloqueado(noAprobados);
         return;
       }
+      // Vista previa antes de descargar: el TXT queda armado exactamente con las filas y fechas
+      // vigentes al momento de la validación — si el usuario deja el diálogo abierto y alguien edita
+      // una fecha de corrida detrás, el archivo generado sigue correspondiendo a lo que se mostró acá.
+      setExportTxtPreview(rows);
     } catch (e) {
       addNotification('error', `No se pudo validar la aprobación de Venta Externa: ${(e as Error).message}. Exportación cancelada por seguridad.`);
-      return;
     } finally {
       setIsValidandoExportTxt(false);
     }
+  }, [outputPlanRows, addNotification, validarAprobacionVentaExterna]);
 
-    // Estructura fija de carga SAP: Material, Centro, Clase de orden, Cantidad,
-    // Inicio programado, Clase de programación, Clave. Centro/Clase de orden/Clase de
-    // programación/Clave son siempre el mismo valor para esta línea de producción.
-    const lines = rows.map(r => {
-      const [y, m, d] = r.fecha.split('-');
-      const inicioProgramado = `${d}.${m}.${y}`;
-      return [r.material, '1000', 'ZMOQ', Math.round(r.planKg), inicioProgramado, '1', '000'].join('\t');
-    });
-    const content = lines.join('\n');
+  // Estructura fija de carga SAP: Material, Centro, Clase de orden, Cantidad,
+  // Inicio programado, Clase de programación, Clave. Centro/Clase de orden/Clase de
+  // programación/Clave son siempre el mismo valor para esta línea de producción.
+  const exportTxtLineaSap = (r: CorridaOutputRow): string[] => {
+    const [y, m, d] = r.fecha.split('-');
+    const inicioProgramado = `${d}.${m}.${y}`;
+    return [r.material, '1000', 'ZMOQ', String(Math.round(r.planKg)), inicioProgramado, '1', '000'];
+  };
+
+  const handleConfirmarExportTxt = useCallback(() => {
+    const rows = exportTxtPreview;
+    if (!rows || rows.length === 0) return;
+    const content = rows.map(r => exportTxtLineaSap(r).join('\t')).join('\n');
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -3535,7 +3563,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [outputPlanRows, addNotification, validarAprobacionVentaExterna]);
+    setExportTxtPreview(null);
+  }, [exportTxtPreview]);
 
   const renderTopConsolidation = () => {
     const isSaturated = totalsUnified.totalRuns > 6;
@@ -4811,6 +4840,96 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           </div>
         </TabsContent>
       </Tabs>
+
+      {/* Fuera de los <TabsContent>, a propósito: Radix desmonta el contenido de un tab inactivo por
+          defecto — si el usuario cambia de tab con el diálogo abierto, este debe seguir existiendo. */}
+      <Dialog open={exportTxtPreview !== null} onOpenChange={(open) => { if (!open) setExportTxtPreview(null); }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Confirmar exportación — Plan de Salida Laminado (TXT)</DialogTitle>
+            <DialogDescription>
+              Revisa las líneas exactas que se van a escribir en el archivo antes de descargarlo. Columnas en el orden real del TXT: Material, Centro, Clase de orden, Cantidad, Inicio programado, Clase de programación, Clave.
+            </DialogDescription>
+          </DialogHeader>
+          {exportTxtPreview && (
+            <div className="space-y-4 text-left text-sm">
+              <div>
+                <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Líneas a exportar ({exportTxtPreview.length})</span>
+                <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[400px] overflow-y-auto">
+                  <table className="w-full text-[11px] border-collapse">
+                    <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Material</th>
+                        <th className="px-3 py-2 text-left">Descripción</th>
+                        <th className="px-3 py-2 text-center">Centro</th>
+                        <th className="px-3 py-2 text-center">Clase Orden</th>
+                        <th className="px-3 py-2 text-right">Cantidad</th>
+                        <th className="px-3 py-2 text-center">Inicio Prog.</th>
+                        <th className="px-3 py-2 text-center">Clase Prog.</th>
+                        <th className="px-3 py-2 text-center">Clave</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50">
+                      {exportTxtPreview.map((row, i) => {
+                        const [material, centro, claseOrden, cantidad, inicioProgramado, clasePrograma, clave] = exportTxtLineaSap(row);
+                        return (
+                          <tr key={`${row.corridaId}-${material}-${i}`}>
+                            <td className="px-3 py-2 font-mono">{material}</td>
+                            <td className="px-3 py-2 truncate max-w-[200px]" title={row.descripcion}>{row.descripcion}</td>
+                            <td className="px-3 py-2 text-center font-mono">{centro}</td>
+                            <td className="px-3 py-2 text-center font-mono">{claseOrden}</td>
+                            <td className="px-3 py-2 text-right font-mono">{cantidad}</td>
+                            <td className="px-3 py-2 text-center font-mono">{inicioProgramado}</td>
+                            <td className="px-3 py-2 text-center font-mono">{clasePrograma}</td>
+                            <td className="px-3 py-2 text-center font-mono">{clave}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setExportTxtPreview(null)}>Cancelar</Button>
+            <Button onClick={handleConfirmarExportTxt} className="bg-emerald-600 hover:bg-emerald-700 text-white">
+              <Download className="w-4 h-4 mr-2" /> Confirmar y Descargar TXT
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={exportTxtBloqueado !== null} onOpenChange={(open) => { if (!open) setExportTxtBloqueado(null); }}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-amber-700"><AlertCircle className="w-5 h-5" /> Exportación bloqueada — falta Respuesta P3 aprobada</DialogTitle>
+            <DialogDescription>
+              {exportTxtBloqueado?.length} material(es) con origen Venta Externa todavía no tienen una Respuesta P3 de Laminado aprobada (revisión hoy, devolución mañana — mismo criterio que &quot;Data Aprobada&quot; en Venta Externa). No se puede continuar con la exportación hasta resolverlo.
+            </DialogDescription>
+          </DialogHeader>
+          {exportTxtBloqueado && (
+            <div className="flex flex-wrap gap-1.5 max-h-[160px] overflow-y-auto p-3 bg-amber-50 border border-amber-100 rounded-xl">
+              {exportTxtBloqueado.map(m => (
+                <span key={m} className="font-mono text-[11px] font-black text-amber-800 bg-white border border-amber-200 rounded-lg px-2 py-1">{m}</span>
+              ))}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setExportTxtBloqueado(null)}>Cerrar</Button>
+            <Button
+              onClick={() => {
+                const materiales = exportTxtBloqueado?.join(',') || '';
+                setExportTxtBloqueado(null);
+                router.push(`/dashboard/opciones/tactica-venta-externa?tab=dataAprobada&materiales=${materiales}`);
+              }}
+              className="bg-amber-600 hover:bg-amber-700 text-white"
+            >
+              Ir a Aprobar Data (Venta Externa) →
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

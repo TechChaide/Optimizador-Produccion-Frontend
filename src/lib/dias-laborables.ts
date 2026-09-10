@@ -217,6 +217,71 @@ const ZONA_HORARIA_NEGOCIO = 'America/Guayaquil';
  * es un reemplazo directo tanto de `String(v).split('T')[0]` como del `soloFecha` que ya existía en
  * Corte y Laminado.
  */
+/**
+ * Convierte una fecha calendario 'yyyy-MM-dd' (fecha de negocio, sin hora) al string que se envía
+ * como `fecha_inicio_plan`/`fecha_fin_plan` — ej. "2026-09-05" -> "2026-09-05T00:00:00.000Z".
+ *
+ * Convención "naive Ecuador" (cambiada 2026-09-10, decisión explícita del usuario, ver
+ * [[plan_grupo_fecha_zona_horaria_escritura]]): estos campos son de nuestra propia app de punta a
+ * punta (los escribimos Y los leemos nosotros) — a diferencia de campos que SAP escribe directamente
+ * (FECHA_ENTREGA, FECHA_OT_PRG_INI/FIN), esos SÍ siguen siendo UTC real. Antes esta función devolvía
+ * "...T05:00:00.000Z" (medianoche
+ * Ecuador expresada correctamente en UTC real) porque el backend, al recibir un string de fecha plano,
+ * lo guardaba como medianoche UTC -- eso SÍ era matemáticamente correcto para un timestamp UTC
+ * genuino, pero el usuario pidió que el dato crudo en base de datos se lea directamente como hora de
+ * Ecuador sin tener que restarle 5 horas al mirarlo en SQL/Excel. Por eso ahora se manda el string
+ * "Z" pero con la hora LITERAL de Ecuador (no un instante UTC real) -- el símbolo "Z" es una
+ * convención de formato para que el backend lo acepte, no una afirmación de que es UTC genuino. La
+ * lectura correspondiente es `fechaLocalPlana` (NO `fechaLocalEcuador`, que sí resta 5h y correría el
+ * día un día hacia atrás sobre este nuevo formato).
+ */
+export const ecuadorMidnightISO = (dateStr: string): string => {
+  const s = String(dateStr ?? '').trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return dateStr;
+  return `${s}T00:00:00.000Z`;
+};
+
+/**
+ * Instante "ahora" para `fecha_creacion` de plan_grupo, en la misma convención "naive Ecuador" que
+ * `ecuadorMidnightISO` (ver su comentario) — la hora LITERAL de Ecuador en este momento, no el
+ * instante UTC real que da `new Date()`. Reemplaza `fecha_creacion: new Date()` en los puntos que
+ * graban P2/P3/PFD.
+ */
+export const ecuadorNowNaiveISO = (): string => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: ZONA_HORARIA_NEGOCIO,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const get = (type: string) => {
+    const v = parts.find(p => p.type === type)?.value ?? '00';
+    // Intl con hour12:false a veces da "24" para la medianoche en vez de "00" (quirk documentado del
+    // motor ICU) -- normalizado acá para no producir una hora inválida en el ISO resultante.
+    return type === 'hour' && v === '24' ? '00' : v;
+  };
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:${get('second')}.000Z`;
+};
+
+/**
+ * Lee `fecha_inicio_plan`/`fecha_fin_plan`/`fecha_creacion` bajo la convención "naive Ecuador" (ver
+ * `ecuadorMidnightISO`) — sin restar zona horaria, porque el valor guardado YA es la hora literal de
+ * Ecuador, no un instante UTC real. Es la lectura que corresponde a `ecuadorMidnightISO`/
+ * `ecuadorNowNaiveISO`. NO usar para campos que SAP escribe directamente (FECHA_ENTREGA,
+ * FECHA_OT_PRG_INI/FIN, fecha_modificacion cuando la genera el backend) -- esos siguen siendo UTC
+ * real y deben seguir leyéndose con `fechaLocalEcuador`.
+ */
+export const fechaLocalPlana = (v: unknown): string => {
+  if (v === null || v === undefined || v === '') return '';
+  if (v instanceof Date) {
+    // Un objeto Date real es un instante genuino (no un string ya escrito en la convención naive) --
+    // sigue necesitando la conversión real de fechaLocalEcuador para dar el día calendario correcto.
+    if (isNaN(v.getTime())) return '';
+    return new Intl.DateTimeFormat('en-CA', { timeZone: ZONA_HORARIA_NEGOCIO, year: 'numeric', month: '2-digit', day: '2-digit' }).format(v);
+  }
+  return String(v).trim().slice(0, 10);
+};
+
 export const fechaLocalEcuador = (v: unknown): string => {
   if (v === null || v === undefined || v === '') return '';
   if (v instanceof Date) {

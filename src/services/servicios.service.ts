@@ -242,13 +242,16 @@ export const serviciosService = {
     return response.json();
   },
 
-  // Endpoint nuevo (tiemposEnsambladoByGrupoYCentro) — reemplaza a TiemposEnsambladoPorCentroYCodigoGrupo:
-  // mismo payload {Centro, CodigoGrupo} y misma forma de respuesta, verificado en vivo (1138 vs 1137
-  // filas para Centro 1000/Grupo 8, 1 material adicional en el nuevo, sin diferencias en el resto) —
-  // se actualiza acá el único punto de llamada, sin tocar los 2 módulos que lo consumen (Venta Externa,
-  // Corte Espuma).
+  // Endpoint nuevo (tiemposEnsambladoByGrupoYCentroPR2) — reemplaza a tiemposEnsambladoByGrupoYCentro
+  // (2026-09-10, compartido por el usuario): mismo payload {Centro, CodigoGrupo} y misma forma de
+  // respuesta, verificado en vivo (1197 vs 1138 filas para Centro 1000/Grupo 8) — cubre materiales que
+  // el anterior no traía (los 10 que bloqueaban "Exportar TXT" en Corte y Laminado por falta de
+  // PuestoTrabajo/VersionFabricacion_Manual, ver [[corte_laminado_exportar_txt_reemplazado_por_sap_insert]]
+  // ahora los 10 traen ambos campos). Se actualiza acá el único punto de llamada, sin tocar los 3
+  // módulos que lo consumen (Corte y Laminado, Venta Externa, Corte Espuma) — mismo criterio que la
+  // migración anterior (TiemposEnsambladoPorCentroYCodigoGrupo -> tiemposEnsambladoByGrupoYCentro).
   async getTiemposEnsambladobyCentroyCodigoGrupo(centro: string, codigoGrupo: number): Promise<BodyResponse<any>> {
-    const response = await fetchWithAuth(API_URL + "/tiemposEnsambladoByGrupoYCentro", {
+    const response = await fetchWithAuth(API_URL + "/tiemposEnsambladoByGrupoYCentroPR2", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ Centro: String(centro), CodigoGrupo: Number(codigoGrupo) }),

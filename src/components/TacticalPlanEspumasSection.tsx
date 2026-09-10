@@ -48,7 +48,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, PlanGrupo, DetalleTactico, Restriccion } from '@/types/interfaces';
 import type { BodyResponse } from '@/types/body-response';
 import { cn } from '@/lib/utils';
-import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, fechaLocalEcuador, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -2711,14 +2711,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // fechaLocalEcuador, NO split('T')[0]: fecha_inicio_plan es UTC — mismo bug de zona horaria
       // que en explotarPFFParaCentro (ver su comentario). Un P2 grabado tarde en el día cruzaba a
       // la fecha calendario siguiente en UTC y dejaba de coincidir con fechaObjetivoP2 (local).
-      const conFechaExacta = candidatosBase.filter((pg) => !esEspumaVentaExterna(pg) && fechaLocalEcuador(pg.fecha_inicio_plan) === fechaObjetivoP2);
+      const conFechaExacta = candidatosBase.filter((pg) => !esEspumaVentaExterna(pg) && fechaLocalPlana(pg.fecha_inicio_plan) === fechaObjetivoP2);
 
       const masRecienteEspumaVEPorGrupo = new Map<number, PlanGrupo>();
       candidatosBase.filter(esEspumaVentaExterna).forEach((pg) => {
         const actual = masRecienteEspumaVEPorGrupo.get(pg.codigo_grupo);
         if (!actual) { masRecienteEspumaVEPorGrupo.set(pg.codigo_grupo, pg); return; }
-        const fechaNueva = fechaLocalEcuador(pg.fecha_inicio_plan);
-        const fechaActual = fechaLocalEcuador(actual.fecha_inicio_plan);
+        const fechaNueva = fechaLocalPlana(pg.fecha_inicio_plan);
+        const fechaActual = fechaLocalPlana(actual.fecha_inicio_plan);
         if (fechaNueva > fechaActual || (fechaNueva === fechaActual && pg.codigo_plan_grupo > actual.codigo_plan_grupo)) {
           masRecienteEspumaVEPorGrupo.set(pg.codigo_grupo, pg);
         }
@@ -2750,8 +2750,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           // fechaLocalEcuador: estas fechas alimentan fechasP2PorMaterialPorCentro, que decide si
           // una orden Provisional/FERT "responde" a esta necesidad — un desfase de un día aquí
           // rechazaba coberturas reales (mismo bug que en explotarPFFParaCentro).
-          fecha_inicio: plan?.fecha_inicio_plan ? fechaLocalEcuador(plan.fecha_inicio_plan) : '—',
-          fecha_fin: plan?.fecha_fin_plan ? fechaLocalEcuador(plan.fecha_fin_plan) : '—',
+          fecha_inicio: plan?.fecha_inicio_plan ? fechaLocalPlana(plan.fecha_inicio_plan) : '—',
+          fecha_fin: plan?.fecha_fin_plan ? fechaLocalPlana(plan.fecha_fin_plan) : '—',
           codigo_grupo: plan?.codigo_grupo ?? 0,
           codigo_plan_grupo: d.codigo_plan_grupo,
           centro: String(grupo?.centro || '')
@@ -2823,7 +2823,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // a las 17:00 (UTC 22:00, mismo día) coincidía por casualidad; el PFF #292 que lo reemplazó,
       // grabado a las 22:00 (UTC 03:00 del día SIGUIENTE), dejaba de coincidir con la ventana
       // esperada y el módulo reportaba "no hay ningún Plan Grupo P1/PFF activo" aunque sí existiera.
-      return fechaLocalEcuador(p.fecha_inicio_plan) === fechaObjetivoPFF;
+      return fechaLocalPlana(p.fecha_inicio_plan) === fechaObjetivoPFF;
     });
     // Solo el plan PFF MÁS RECIENTE del grupo — red de seguridad secundaria para el caso (menos común
     // ahora que planesPFFCrudo ya exige fecha_inicio_plan = hoy+3 días hábiles) de que el origen
@@ -2967,8 +2967,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const plan = planPorCodigo.get(codigoPlanGrupo);
       // fechaLocalEcuador: igual que en fetchNecesidadesPlanta, esta fecha termina en
       // fechasP2PorMaterialPorCentro y decide si una orden real cubre esta necesidad del PFF.
-      const fechaInicio = plan?.fecha_inicio_plan ? fechaLocalEcuador(plan.fecha_inicio_plan) : '—';
-      const fechaFin = plan?.fecha_fin_plan ? fechaLocalEcuador(plan.fecha_fin_plan) : fechaInicio;
+      const fechaInicio = plan?.fecha_inicio_plan ? fechaLocalPlana(plan.fecha_inicio_plan) : '—';
+      const fechaFin = plan?.fecha_fin_plan ? fechaLocalPlana(plan.fecha_fin_plan) : fechaInicio;
       porLamina.forEach((cantidad, codigoLamina) => {
         filas.push({
           codigo_material: Number(codigoLamina),
@@ -3156,7 +3156,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         // fechaLocalEcuador: fechaNuevoPlan es una fecha LOCAL (siguienteDiaHabil); comparar contra
         // el recorte crudo de un fecha_inicio_plan (UTC) podía fallar la superación de planes justo
         // en el filo del día.
-        const inicio = fechaLocalEcuador(p.fecha_inicio_plan);
+        const inicio = fechaLocalPlana(p.fecha_inicio_plan);
         return inicio !== '' && inicio <= fechaNuevoPlan;
       });
       for (const plan of superados) {
@@ -3399,8 +3399,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
       await planGrupoService.save({
         ...editPlanPreview.planOriginal,
-        fecha_inicio_plan: editPlanPreview.fechaInicio,
-        fecha_fin_plan: editPlanPreview.fechaFin,
+        fecha_inicio_plan: ecuadorMidnightISO(editPlanPreview.fechaInicio),
+        fecha_fin_plan: ecuadorMidnightISO(editPlanPreview.fechaFin),
       } as unknown as PlanGrupo);
 
       const { actualizados, agregados, eliminados, fallidos } =
@@ -3448,13 +3448,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             codigo_familia_grupo: null,
             codigo_plan: null,
             valor: preview.valor,
-            fecha_inicio_plan: preview.fechaInicio,
-            fecha_fin_plan: preview.fechaFin,
+            fecha_inicio_plan: ecuadorMidnightISO(preview.fechaInicio),
+            fecha_fin_plan: ecuadorMidnightISO(preview.fechaFin),
             estado: 'A',
             usuario_creacion: usuario,
             // Faltaba en el payload — la columna quedaba NULL en BD (verificado con datos reales).
-            // Mismo patrón ya usado en grupo-operadores/components/form.tsx.
-            fecha_creacion: new Date(),
+            // ecuadorNowNaiveISO (no new Date()): convención "naive Ecuador", ver ecuadorMidnightISO.
+            fecha_creacion: ecuadorNowNaiveISO(),
           };
 
           const planResponse = await planGrupoService.save(planPayload as unknown as PlanGrupo);
@@ -3579,13 +3579,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             codigo_familia_grupo: null,
             codigo_plan: null,
             valor: preview.valor,
-            fecha_inicio_plan: preview.fechaInicio,
-            fecha_fin_plan: preview.fechaFin,
+            fecha_inicio_plan: ecuadorMidnightISO(preview.fechaInicio),
+            fecha_fin_plan: ecuadorMidnightISO(preview.fechaFin),
             estado: 'A',
             usuario_creacion: usuario,
             // Faltaba en el payload — la columna quedaba NULL en BD (verificado con datos reales).
-            // Mismo patrón ya usado en grupo-operadores/components/form.tsx.
-            fecha_creacion: new Date(),
+            // ecuadorNowNaiveISO (no new Date()): convención "naive Ecuador", ver ecuadorMidnightISO.
+            fecha_creacion: ecuadorNowNaiveISO(),
           };
 
           const planResponse = await planGrupoService.save(planPayload as unknown as PlanGrupo);
@@ -5297,8 +5297,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                         #{p.codigo_plan_grupo}{idx === 0 && <span className="ml-2 text-[8px] font-black uppercase text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5 py-0.5">Último guardado</span>}
                       </td>
                       <td className="px-3 py-2">{p.valor}</td>
-                      <td className="px-3 py-2 font-mono">{fechaLocalEcuador(p.fecha_inicio_plan) || '—'}</td>
-                      <td className="px-3 py-2 font-mono">{fechaLocalEcuador(p.fecha_fin_plan) || '—'}</td>
+                      <td className="px-3 py-2 font-mono">{fechaLocalPlana(p.fecha_inicio_plan) || '—'}</td>
+                      <td className="px-3 py-2 font-mono">{fechaLocalPlana(p.fecha_fin_plan) || '—'}</td>
                     </tr>
                   ))}
                 </tbody>

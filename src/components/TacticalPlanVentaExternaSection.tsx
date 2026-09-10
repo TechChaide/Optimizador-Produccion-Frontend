@@ -16,7 +16,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, fechaLocalEcuador, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, parseISO, addMonths, subMonths, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -82,15 +82,15 @@ const parseQty = (val: unknown): number => {
   return isNaN(n) ? 0 : n;
 };
 
-// Normaliza fecha_inicio_plan/fecha_fin_plan/fecha_modificacion a 'yyyy-MM-dd'. Delega en
-// fechaLocalEcuador (@/lib/dias-laborables): el sufijo horario NO siempre es "T00:00:00" — un plan
-// grabado a media tarde/noche en Ecuador llega en UTC con esa hora real, y recortar el ISO a lo
-// bruto podía devolver el día calendario SIGUIENTE (mismo bug documentado en Corte Espuma,
-// explotarPFFParaCentro). Mismo criterio que usa Corte y Laminado.
+// Normaliza fecha_inicio_plan/fecha_fin_plan (siempre de plan_grupo, escritos por esta misma app) a
+// 'yyyy-MM-dd'. Delega en fechaLocalPlana (@/lib/dias-laborables), NO en fechaLocalEcuador: desde
+// 2026-09-10 estos campos se graban con la convención "naive Ecuador" (hora literal, sin instante UTC
+// real — ver ecuadorMidnightISO). fecha_modificacion NO usa este helper: lo genera el backend en cada
+// UPDATE, sigue siendo UTC real, y se lee con fechaLocalEcuador directo (ver sus 2 usos más abajo).
 const soloFecha = (v: unknown): string => {
   const s = String(v ?? '').trim();
   if (!s || s === 'null' || s === 'undefined') return '';
-  return fechaLocalEcuador(s);
+  return fechaLocalPlana(s);
 };
 
 // Solo el plan "P3" es una respuesta real de Corte y Laminado contra el P2 — "PFD" es una
@@ -223,10 +223,20 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     const tab = searchParams.get('tab');
     const fecha = searchParams.get('fecha');
     const material = searchParams.get('material');
+    const materiales = searchParams.get('materiales');
     if (tab === 'p2') setActiveTab('planP2');
     if (fecha) setSelectedDates([fecha]);
     if (material) {
       addNotification('info', `Vienes de Corte Espuma para diferir el material ${material}: confirma la fecha en "Ventana de Producción" (ya preseleccionada) y genera el P2 de Espumas para aplicarla.`);
+    }
+    // Vienes de Corte y Laminado ("Exportar TXT" bloqueado, ver handleExportTxt allá): esos
+    // materiales necesitan una Respuesta P3 activa que aparezca acá como "completo" antes de que
+    // Laminado pueda reintentar la exportación.
+    if (tab === 'dataAprobada') {
+      setActiveTab('dataAprobada');
+      if (materiales) {
+        addNotification('info', `Vienes de Corte y Laminado: ${materiales.split(',').length} material(es) sin Respuesta P3 aprobada — ${materiales.split(',').join(', ')}. Revisa su estado acá antes de reintentar el "Exportar TXT".`);
+      }
     }
   }, []);
 
@@ -269,6 +279,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const [pfdVentaBomProgress, setPfdVentaBomProgress] = useState<Record<string, { current: number; total: number }>>({});
   const [savingPfdVenta, setSavingPfdVenta] = useState<Record<string, boolean>>({});
   const [pfdVentaGenerado, setPfdVentaGenerado] = useState<Record<string, number>>({});
+  // Acción única "Generar y Guardar PFD-VENTA" (ver handleGenerarYGuardarPfdVenta): reemplaza los 2
+  // clics manuales (Generar PFD-VENTA + Guardar PFD-VENTA) por centro — corre la secuencia completa
+  // para Centro 1000 y luego Centro 2000, saltando el que no tenga materiales en Data Aprobada con
+  // estado Parcial o Completo.
+  const [isRunningPfdVentaSecuencia, setIsRunningPfdVentaSecuencia] = useState(false);
 
   // Data Aprobada (P3): recupera, por cada P2 propio activo, la respuesta del plan consumidor
   // (P3) — sus DetalleTactico cuyo codigo_plan_grupo_padre apunta a nuestro P2.
@@ -1005,7 +1020,33 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     ).filter(l => l.cantidad > 0);
 
     if (lineas.length === 0) {
-      return { centro, tipo, status: 'sin-datos', mensaje: `No hay necesidad de ${TIPO_TAG[tipo]} calculada para el Centro ${centro}.` };
+      // Antes esto cortaba sin tocar nada: un P2 real de un día anterior se quedaba en 'A' para
+      // siempre si la necesidad bajaba a 0 al día siguiente (ya resuelto por su propia respuesta
+      // P3/PFD). No rompía la necesidad recuperada por fecha exacta (fetchNecesidadesPlanta filtra
+      // por fecha_inicio_plan == hoy+1, así que un plan viejo deja de aparecer ahí solo por su fecha)
+      // pero SÍ distorsionaba cualquier otro chequeo que buscara "el plan activo" de este centro+tipo
+      // sin filtrar por fecha (ver verificarPlanP2Activo) — reportado por el usuario (2026-09-09):
+      // encontrar un plan activo desactualizado seguía "recuperándose" y generaba resultados
+      // distorsionados. Ahora se desactivan explícitamente los P2 activos de este centro+tipo cuando
+      // la necesidad calculada hoy es 0 — mismo criterio y patrón (`estado -> 'I'`, sin tocar
+      // DetalleTactico) que el resto del flujo.
+      setSavingPlanP2(prev => ({ ...prev, [key]: true }));
+      try {
+        const { planesActivos } = await verificarPlanP2Activo(centro, tipo);
+        const planesDesactivados: number[] = [];
+        for (const pg of planesActivos) {
+          await planGrupoService.save({ ...pg, estado: 'I' } as unknown as PlanGrupo);
+          planesDesactivados.push(pg.codigo_plan_grupo);
+        }
+        const sufijo = planesDesactivados.length > 0
+          ? ` Plan(es) anterior(es) #${planesDesactivados.join(', #')} desactivado(s) por falta de necesidad vigente.`
+          : '';
+        return { centro, tipo, status: 'sin-datos', mensaje: `No hay necesidad de ${TIPO_TAG[tipo]} calculada para el Centro ${centro}.${sufijo}` };
+      } catch (error) {
+        return { centro, tipo, status: 'error', mensaje: `${TIPO_TAG[tipo]} Centro ${centro}: sin necesidad hoy, pero falló al desactivar plan(es) anterior(es) — ${(error as Error).message}` };
+      } finally {
+        setSavingPlanP2(prev => ({ ...prev, [key]: false }));
+      }
     }
 
     setSavingPlanP2(prev => ({ ...prev, [key]: true }));
@@ -1109,14 +1150,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           codigo_familia_grupo: null,
           codigo_plan: null,
           valor: `Plan Táctico - Centro ${centro} - P2 - ${TIPO_TAG[tipo]}`,
-          fecha_inicio_plan: fechaPlanP2,
-          fecha_fin_plan: fechaPlanP2,
+          fecha_inicio_plan: ecuadorMidnightISO(fechaPlanP2),
+          fecha_fin_plan: ecuadorMidnightISO(fechaPlanP2),
           estado: 'A',
           usuario_creacion: usuario,
           // Faltaba en el payload — la columna quedaba NULL en BD (verificado con datos reales,
-          // ver [[plan_grupo_fecha_creacion_faltante]]). Mismo patrón ya usado en
-          // grupo-operadores/components/form.tsx (fecha_creacion: new Date()).
-          fecha_creacion: new Date(),
+          // ver [[plan_grupo_fecha_creacion_faltante]]). ecuadorNowNaiveISO (no new Date()):
+          // convención "naive Ecuador", ver ecuadorMidnightISO.
+          fecha_creacion: ecuadorNowNaiveISO(),
         };
         const planResponse = await planGrupoService.save(planPayload as unknown as PlanGrupo);
         codigoPlanGrupo = planResponse.data.codigo_plan_grupo;
@@ -1189,10 +1230,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // codigo_plan_grupo_padre = el P2 activo del que se deriva (a diferencia del P2, que no se
   // auto-referencia — ver el comentario en generarPlanP2Core). Requiere haber generado la vista previa
   // primero (pfdVentaPreview, ver generarPfdVentaPreview) — solo Espumas, un plan por centro.
-  const guardarPfdVentaCore = useCallback(async (centro: '1000' | '2000'): Promise<ResultadoGeneracionP2> => {
+  // lineasOverride: usado por handleGenerarYGuardarPfdVenta para encadenar el guardado justo detrás
+  // de generarPfdVentaPreview en la misma corrida, con las líneas recién calculadas — sin depender de
+  // pfdVentaPreview del estado, que todavía no refleja el setState de ese mismo ciclo.
+  const guardarPfdVentaCore = useCallback(async (centro: '1000' | '2000', lineasOverride?: PfdVentaLinea[]): Promise<ResultadoGeneracionP2> => {
     const tipo = 'ESPUMAS' as const;
     const key = `PFD-${centro}`;
-    const lineas = pfdVentaPreview[centro]?.lineas || [];
+    const lineas = lineasOverride ?? (pfdVentaPreview[centro]?.lineas || []);
     if (lineas.length === 0) {
       return { centro, tipo, status: 'sin-datos', mensaje: `No hay materiales PFD-VENTA generados para el Centro ${centro} — pulsa "Generar PFD-VENTA" primero.` };
     }
@@ -1227,11 +1271,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         valor: `Plan Táctico - Centro ${centro} - PFD-VENTA - ${TIPO_TAG[tipo]}`,
         // Misma ventana que el P2 del que deriva — PFD-VENTA no tiene fecha propia, hereda la del
         // ciclo que lo originó.
-        fecha_inicio_plan: soloFecha(p2Activo.fecha_inicio_plan) || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd'),
-        fecha_fin_plan: soloFecha(p2Activo.fecha_fin_plan) || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd'),
+        fecha_inicio_plan: ecuadorMidnightISO(soloFecha(p2Activo.fecha_inicio_plan) || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd')),
+        fecha_fin_plan: ecuadorMidnightISO(soloFecha(p2Activo.fecha_fin_plan) || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd')),
         estado: 'A',
         usuario_creacion: usuario,
-        fecha_creacion: new Date(),
+        fecha_creacion: ecuadorNowNaiveISO(),
       };
       const planResponse = await planGrupoService.save(planPayload as unknown as PlanGrupo);
       const codigoPlanGrupo = planResponse.data.codigo_plan_grupo;
@@ -1400,10 +1444,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           // Regla de negocio: "revisión hoy, devolución mañana" — la respuesta debe haberse guardado
           // EXACTAMENTE un día después de la última vez que se guardó/refrescó nuestra línea del P2.
           let fechasOk: boolean | null = null;
-          const fechaLineaP2 = soloFecha(linea.fecha_modificacion);
+          // fechaLocalEcuador directo (NO soloFecha, que ahora es naive para fecha_inicio/fin_plan):
+          // fecha_modificacion la genera el backend, sigue siendo un instante UTC real.
+          const fechaLineaP2 = fechaLocalEcuador(linea.fecha_modificacion);
           if (respuestas.length > 0) {
             fechasOk = !!fechaLineaP2 && respuestas.every(r => {
-              const fechaLineaP3 = soloFecha(r.fecha_modificacion);
+              const fechaLineaP3 = fechaLocalEcuador(r.fecha_modificacion);
               if (!fechaLineaP3) return false;
               const fechaEsperada = format(addDays(parseISO(fechaLineaP2), 1), 'yyyy-MM-dd');
               return fechaLineaP3 === fechaEsperada;
@@ -1513,19 +1559,23 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // originó este P2, no lo que el calendario muestre en este instante.
   // Solo Espumas: Rollos no tiene Data Aprobada con datos reales hoy (las corridas se aplazan a
   // propósito hasta resolver stock, ver captura real de esta sesión).
-  const generarPfdVentaPreview = async (centro: '1000' | '2000') => {
+  // Devuelve el preview recién generado (o null si no se pudo) — necesario para encadenarlo
+  // directamente con guardarPfdVentaCore (ver handleGenerarYGuardarPfdVenta) sin depender de leer
+  // pfdVentaPreview del estado justo después de setearlo: dentro de la misma función async, ese
+  // closure sigue viendo el valor de ANTES del render, no el que se acaba de guardar.
+  const generarPfdVentaPreview = async (centro: '1000' | '2000'): Promise<PfdVentaPreview | null> => {
     const rows = dataAprobada[`${centro}-ESPUMAS`] || [];
 
     const { planActivo: p2Activo } = await verificarPlanP2Activo(centro, 'ESPUMAS');
     if (!p2Activo) {
       addNotification('warning', `No hay un P2 activo de Espumas para el Centro ${centro} — genera el P2 primero.`);
-      return;
+      return null;
     }
     const fechaP2 = soloFecha(p2Activo.fecha_inicio_plan);
     const fertOrigen = filterData(ordenesFert, centro, true, [fechaP2]);
     if (fertOrigen.length === 0) {
       addNotification('warning', `No hay Órdenes FERT fechadas exacto ${fechaP2} (fecha del P2 #${p2Activo.codigo_plan_grupo}) para el Centro ${centro}.`);
-      return;
+      return null;
     }
 
     setIsGeneratingPfdVenta(prev => ({ ...prev, [centro]: true }));
@@ -1571,18 +1621,54 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         entry.tiempoHoras += tiempoHoras;
       });
 
-      setPfdVentaPreview(prev => ({
-        ...prev,
-        [centro]: {
-          sinTrazabilidad,
-          ptCubiertos,
-          lineas: Array.from(porMaterial.values()).sort((a, b) => a.material.localeCompare(b.material)),
-        },
-      }));
+      const preview: PfdVentaPreview = {
+        sinTrazabilidad,
+        ptCubiertos,
+        lineas: Array.from(porMaterial.values()).sort((a, b) => a.material.localeCompare(b.material)),
+      };
+      setPfdVentaPreview(prev => ({ ...prev, [centro]: preview }));
+      return preview;
     } catch (error) {
       addNotification('error', `Error al generar PFD-VENTA Centro ${centro}: ${(error as Error).message}`);
+      return null;
     } finally {
       setIsGeneratingPfdVenta(prev => ({ ...prev, [centro]: false }));
+    }
+  };
+
+  // Gate para habilitar la secuencia automática (ver handleGenerarYGuardarPfdVenta): solo tiene
+  // sentido generar/guardar PFD-VENTA de un centro si Data Aprobada (arriba) ya tiene, para ese
+  // centro, al menos un material en 'parcial' o 'completo' — 'pendiente' (respuestaCant <= 0) no
+  // aporta nada todavía. No cambia qué se GRABA (generarPfdVentaPreview sigue tomando solo
+  // 'completo' para la trazabilidad real hacia FERT/PT) — es solo la condición para intentarlo.
+  const centroConDataAprobadaLista = (centro: '1000' | '2000'): boolean =>
+    (dataAprobada[`${centro}-ESPUMAS`] || []).some(r => estadoDataAprobada(r) !== 'pendiente');
+
+  // Reemplaza los 2 clics manuales por centro (Generar PFD-VENTA, luego Guardar PFD-VENTA) por una
+  // sola acción: recorre Centro 1000 y 2000 en secuencia, y para cada uno que tenga data aprobada
+  // (parcial o completa) genera el preview y, si trajo materiales, guarda el plan de inmediato —
+  // usando las líneas recién calculadas (lineasOverride), no el estado pfdVentaPreview, que todavía
+  // no reflejaría el setState de este mismo ciclo. Un centro sin data aprobada, o cuyo preview salga
+  // vacío, se omite con una notificación informativa y el loop sigue con el siguiente centro.
+  const handleGenerarYGuardarPfdVenta = async () => {
+    setIsRunningPfdVentaSecuencia(true);
+    try {
+      for (const centro of ['1000', '2000'] as const) {
+        if (!centroConDataAprobadaLista(centro)) {
+          addNotification('info', `Centro ${centro}: sin materiales en estado Parcial/Completo en Data Aprobada — se omite.`);
+          continue;
+        }
+        const preview = await generarPfdVentaPreview(centro);
+        if (!preview) continue; // generarPfdVentaPreview ya notificó el motivo puntual (sin P2 activo, sin FERT, error)
+        if (preview.lineas.length === 0) {
+          addNotification('warning', `Centro ${centro}: PFD-VENTA generado sin materiales FERT/PT cubiertos — no se guarda ningún plan.`);
+          continue;
+        }
+        const resultado = await guardarPfdVentaCore(centro, preview.lineas);
+        addNotification(resultado.status === 'ok' ? 'success' : resultado.status === 'sin-datos' ? 'warning' : 'error', resultado.mensaje);
+      }
+    } finally {
+      setIsRunningPfdVentaSecuencia(false);
     }
   };
 
@@ -2401,10 +2487,21 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               FERT/PT padre — dirección opuesta a como se explota el BOM para generar la Necesidad P2
               (ver generarPfdVentaPreview). Solo Espumas: Rollos no tiene Data Aprobada con datos reales hoy. */}
           <div className="pt-6 mt-6 border-t-2 border-dashed border-gray-100 space-y-6">
-            <div className="bg-indigo-50/40 p-4 rounded-2xl border border-indigo-100 text-left">
-              <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-wider">Siguiente paso</p>
-              <h3 className="text-sm font-black text-gray-700 uppercase">PFD - Venta (FERT/PT listos)</h3>
-              <p className="text-[10px] text-gray-400 mt-1">Por cada componente en estado &quot;completo&quot; arriba, sube al FERT/PT que depende de él (mismo BOM de la Necesidad P2, en sentido inverso) y agrupa por categoría — igual que &quot;Resumen Necesidades&quot;, con el tiempo real de plastificado.</p>
+            <div className="bg-indigo-50/40 p-4 rounded-2xl border border-indigo-100 text-left flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-wider">Siguiente paso</p>
+                <h3 className="text-sm font-black text-gray-700 uppercase">PFD - Venta (FERT/PT listos)</h3>
+                <p className="text-[10px] text-gray-400 mt-1">Por cada componente en estado &quot;completo&quot; arriba, sube al FERT/PT que depende de él (mismo BOM de la Necesidad P2, en sentido inverso) y agrupa por categoría — igual que &quot;Resumen Necesidades&quot;, con el tiempo real de plastificado.</p>
+              </div>
+              <Button
+                onClick={handleGenerarYGuardarPfdVenta}
+                disabled={isRunningPfdVentaSecuencia || (!centroConDataAprobadaLista('1000') && !centroConDataAprobadaLista('2000'))}
+                title="Genera y guarda el plan PFD-VENTA en secuencia: primero Centro 1000, luego Centro 2000 — se omite el centro que no tenga materiales en estado Parcial o Completo en Data Aprobada."
+                className="h-11 px-6 rounded-2xl gap-2 font-bold text-[11px] uppercase bg-indigo-600 text-white hover:bg-indigo-700 shrink-0"
+              >
+                {isRunningPfdVentaSecuencia ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardCheck className="w-4 h-4" />}
+                {isRunningPfdVentaSecuencia ? 'Generando y guardando…' : 'Generar y Guardar PFD-VENTA (1000 y 2000)'}
+              </Button>
             </div>
 
             {(['1000', '2000'] as const).map(centro => {
@@ -2418,30 +2515,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                       {pfdVentaGenerado[keySave] && (
                         <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 text-[8px] font-bold uppercase">Plan #{pfdVentaGenerado[keySave]}</Badge>
                       )}
-                    </h3>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        onClick={() => generarPfdVentaPreview(centro)}
-                        disabled={isGeneratingPfdVenta[centro]}
-                        variant="outline" size="sm"
-                        className="h-9 px-4 rounded-2xl gap-2 font-bold text-[10px] uppercase border-indigo-200 text-indigo-700 hover:bg-indigo-50"
-                      >
-                        {isGeneratingPfdVenta[centro] ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Generar PFD-VENTA
-                      </Button>
-                      {preview && preview.lineas.length > 0 && (
-                        <Button
-                          onClick={async () => {
-                            const resultado = await guardarPfdVentaCore(centro);
-                            addNotification(resultado.status === 'ok' ? 'success' : resultado.status === 'sin-datos' ? 'warning' : 'error', resultado.mensaje);
-                          }}
-                          disabled={savingPfdVenta[keySave]}
-                          size="sm"
-                          className="h-9 px-4 rounded-2xl gap-2 font-bold text-[10px] uppercase bg-indigo-600 text-white hover:bg-indigo-700"
-                        >
-                          {savingPfdVenta[keySave] ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ClipboardCheck className="w-3.5 h-3.5" />} Guardar PFD-VENTA
-                        </Button>
+                      {savingPfdVenta[keySave] && (
+                        <Badge className="bg-indigo-50 text-indigo-700 border-indigo-200 text-[8px] font-bold uppercase gap-1"><Loader2 className="w-2.5 h-2.5 animate-spin" /> Guardando plan…</Badge>
                       )}
-                    </div>
+                      {!preview && !isGeneratingPfdVenta[centro] && !centroConDataAprobadaLista(centro) && (
+                        <Badge className="bg-gray-50 text-gray-400 border-gray-200 text-[8px] font-bold uppercase">Sin data aprobada (Parcial/Completo)</Badge>
+                      )}
+                    </h3>
                   </div>
 
                   {isGeneratingPfdVenta[centro] && (
@@ -2460,7 +2540,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
                   {!preview ? (
                     <Card className="rounded-2xl border border-dashed border-gray-200 py-10 text-center text-gray-300 font-bold uppercase tracking-widest text-xs">
-                      {isGeneratingPfdVenta[centro] ? 'Explotando BOM...' : <>Pulsa &quot;Generar PFD-VENTA&quot; para ver los materiales FERT/PT listos.</>}
+                      {isGeneratingPfdVenta[centro] ? 'Explotando BOM...' : <>Pulsa &quot;Generar y Guardar PFD-VENTA&quot; arriba para generar y guardar este centro.</>}
                     </Card>
                   ) : (
                     <>
