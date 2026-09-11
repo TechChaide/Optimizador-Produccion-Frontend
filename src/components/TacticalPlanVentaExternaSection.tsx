@@ -188,6 +188,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // sigue disponible aparte, a diferencia de Laminado/Espuma — acá el paso intermedio de elegir fecha
   // es obligatorio, no opcional). Mismo patrón general que [[modulos_tacticos_sincronizar_y_generar_combinado]].
   const [autoGenerarPendiente, setAutoGenerarPendiente] = useState(false);
+  // Tercera fase de "Sincronizar" (ver el efecto que dispara handleGenerarTodosPlanesP2, después de
+  // su declaración): antes, un P2 vencido (nadie lo regeneró para hoy) se quedaba en estado "A"
+  // indefinidamente porque desactivarlo dependía 100% de que alguien pulsara "Generar Todos los P2" a
+  // mano — generarPlanP2Core ya sabía desactivar planes viejos/sin necesidad, pero nada lo disparaba
+  // solo. Confirmado con datos reales: el plan grupo 18 (Centro 1000 - P2 - Rollos) siguió "A" desde
+  // el 10/9 porque nadie generó Rollos de nuevo, mientras Espumas sí se regeneró y su plan anterior
+  // se desactivó como corresponde.
+  const [autoGenerarP2Pendiente, setAutoGenerarP2Pendiente] = useState(false);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
   const [grupos, setGrupos] = useState<Grupo[]>([]);
   const [restricciones, setRestricciones] = useState<Restriccion[]>([]);
@@ -943,11 +951,17 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     if (!autoGenerarPendiente) return;
     setAutoGenerarPendiente(false);
     if (selectedDates.length === 0) {
+      // Sin Ventana de Producción elegida no se calculó necesidad fresca — encadenar la generación de
+      // P2 acá usaría necesidad vieja (o vacía) para decidir qué desactivar, así que se deja tal como
+      // antes: el usuario elige fecha y dispara "Generar Todos los P2" a mano.
       setSyncStep('idle');
       return;
     }
     setSyncStep('generando');
-    handleCalcularNecesidadRollos().finally(() => setSyncStep('idle'));
+    handleCalcularNecesidadRollos().finally(() => {
+      setSyncStep('idle');
+      setAutoGenerarP2Pendiente(true);
+    });
   }, [autoGenerarPendiente, handleCalcularNecesidadRollos, selectedDates]);
 
   // Consulta inversa: antes de (re)generar un P2, revisa si ya existe uno activo para ese centro+tipo
@@ -1383,6 +1397,19 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       setIsSavingAllPlanP2(false);
     }
   }, [generarPlanP2Core, addNotification]);
+
+  // Tercera fase de "Sincronizar" (ver el efecto de handleCalcularNecesidadRollos más arriba, y el
+  // comentario de autoGenerarP2Pendiente en su declaración): dispara "Generar Todos los P2"
+  // automáticamente en cuanto la necesidad recién calculada ya se reflejó en el estado — así un plan
+  // vencido (nadie lo regeneró para hoy) queda desactivado solo, en vez de depender exclusivamente de
+  // que alguien pulse el botón manual. Declarado después de handleGenerarTodosPlanesP2 para que la
+  // referencia ya sea la versión fresca (sus dependencias, necesidadEspumas/Rollos 1000/2000, ya se
+  // recalcularon con handleCalcularNecesidadRollos) — mismo patrón que la fase anterior.
+  useEffect(() => {
+    if (!autoGenerarP2Pendiente) return;
+    setAutoGenerarP2Pendiente(false);
+    handleGenerarTodosPlanesP2();
+  }, [autoGenerarP2Pendiente, handleGenerarTodosPlanesP2]);
 
   // "Data Aprobada": por cada P2 propio activo (Espumas/Rollos por centro), recupera qué respondió
   // el plan consumidor "P3" (nunca "PFD" — ver esPlanP3) — un DetalleTactico con

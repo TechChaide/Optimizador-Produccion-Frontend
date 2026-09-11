@@ -20,12 +20,12 @@ import {
   Filter,
   AlertCircle,
   ClipboardList,
-  Download,
   Boxes,
   Pencil,
   Trash2,
   CheckCircle2,
-  Mail
+  Mail,
+  Send
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -48,7 +48,7 @@ import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
-import { serviciosService } from '@/services/servicios.service';
+import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { cn } from '@/lib/utils';
@@ -654,6 +654,14 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // usuario sin saber a dónde ir a resolverlo. Ahora se muestra en un diálogo con acceso directo al
   // tab "Data Aprobada" de Venta Externa (mismo criterio que ya usa Corte Espuma para "Diferir →").
   const [exportTxtBloqueado, setExportTxtBloqueado] = useState<string[] | null>(null);
+  // Materiales sin PuestoTrabajo o VersionFabricacion resuelto (ver puestoTrabajoPorMaterial/
+  // fetchVersionesFabricacionLaminado) — bloquea el envío a SAP en vez de mandar esos campos vacíos a
+  // InsertarSolicitudProduccionHB, que crearía una orden de fabricación real mal formada.
+  const [exportTxtFaltanCampos, setExportTxtFaltanCampos] = useState<{ material: string; descripcion: string; faltantes: string[] }[] | null>(null);
+  // Resultado de fetchVersionesFabricacionLaminado para los materiales del plan actual — se llena en
+  // handleExportTxt (justo antes de la vista previa) y lo consume buildSolicitudProduccion.
+  const [versionesFabricacion, setVersionesFabricacion] = useState<Map<string, { version: string; ambiguo: boolean }>>(new Map());
+  const [isEnviandoSap, setIsEnviandoSap] = useState(false);
   const [planPreview, setPlanPreview] = useState<PlanGrupoPreview | null>(null);
   const [isSavingPlanPFD, setIsSavingPlanPFD] = useState(false);
   const [planPreviewPFD, setPlanPreviewPFD] = useState<PlanGrupoPreview | null>(null);
@@ -894,6 +902,72 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     });
     return map;
   }, [tiemposEnsambladoData]);
+
+  // PuestoTrabajo (código real, ej. "PT01" — distinto de PuestoTrabajoLinea, que es el nombre humano
+  // "Carruseles - LINEA 1"), por material, para armar el payload de InsertarSolicitudProduccionHB
+  // (ver buildSolicitudProduccion más abajo, [[corte_laminado_exportar_txt_reemplazado_por_sap_insert]]).
+  const puestoTrabajoPorMaterial = useMemo(() => {
+    const map = new Map<string, string>();
+    tiemposEnsambladoData.forEach((t) => {
+      const code = cleanCode(getProp(t, ['CodMaterial', 'MATERIAL', 'Material']));
+      const puesto = getProp(t, ['PuestoTrabajo']);
+      if (code && puesto && !map.has(code)) map.set(code, puesto);
+    });
+    return map;
+  }, [tiemposEnsambladoData]);
+
+  // VersionFabricacion NO sale de tiemposEnsambladoByGrupoYCentroPR2 (ese endpoint no la trae; se
+  // confirmó revisando cada consumidor existente sin encontrarla en ningún lado) — sale de un
+  // endpoint dedicado, `versionsFabricacionPorCentroYCodigoMaterial(Centro, Material)`, ya probado en
+  // producción por Forros (ver TacticalPlanForrosSection.tsx, fetchVersionConReintentos/
+  // fetchVersionesPorMaterial): devuelve un array con una fila por Hoja de Ruta del material, campos
+  // GRUPOHOJARUTA (ej. "HR-CTBSC") y VERSION (texto exacto de SAP, ej. "1" o "01"). Un material puede
+  // tener más de una Hoja de Ruta (más de una fila) — en Forros se decide cuál usar cruzando
+  // GRUPOHOJARUTA contra el PuestoTrabajo elegido, vía una tabla de equivalencias específica de sus
+  // propias máquinas que no aplica acá (Laminado tiene otro juego de puestos). Con un solo candidato
+  // no hay ambigüedad y se usa directo; con más de uno, se marca "ambiguo" en vez de adivinar cuál
+  // corresponde — ver fetchVersionesFabricacionLaminado/handleExportTxt.
+  const fetchVersionConReintentos = useCallback(async (material: string, intentos = 3): Promise<RawApiRow[]> => {
+    for (let intento = 1; intento <= intentos; intento++) {
+      try {
+        const response = await serviciosService.versionsFabricacionPorCentroYCodigoMaterial('1000', material);
+        return response.data || [];
+      } catch (error) {
+        if (intento === intentos) throw error;
+        await new Promise(resolve => setTimeout(resolve, 500 * intento));
+      }
+    }
+    return [];
+  }, []);
+
+  // Igual patrón que Forros (fetchVersionesPorMaterial): en lotes pequeños en paralelo, no todo de
+  // una sola vez (satura la conexión) ni uno por uno (demasiado lento para un plan con muchos
+  // materiales).
+  const fetchVersionesFabricacionLaminado = useCallback(async (materiales: string[]): Promise<Map<string, { version: string; ambiguo: boolean }>> => {
+    const resultado = new Map<string, { version: string; ambiguo: boolean }>();
+    const CHUNK_SIZE = 5;
+    for (let i = 0; i < materiales.length; i += CHUNK_SIZE) {
+      const lote = materiales.slice(i, i + CHUNK_SIZE);
+      const respuestas = await Promise.allSettled(lote.map(m => fetchVersionConReintentos(m)));
+      respuestas.forEach((r, idx) => {
+        const material = lote[idx];
+        const filas = r.status === 'fulfilled' ? r.value : [];
+        if (filas.length === 0) return;
+        if (filas.length === 1) {
+          const version = getProp(filas[0], ['VERSION']);
+          if (version) resultado.set(material, { version, ambiguo: false });
+          return;
+        }
+        // Más de una Hoja de Ruta: intenta cruzar GRUPOHOJARUTA contra el PuestoTrabajo ya resuelto
+        // para este material (sin tabla de equivalencias — compara directo, sin el prefijo "HR-").
+        const puesto = puestoTrabajoPorMaterial.get(material)?.toUpperCase().trim() || '';
+        const match = filas.find(f => getProp(f, ['GRUPOHOJARUTA']).toUpperCase().replace(/^HR-/, '') === puesto.replace(/^HR-/, ''));
+        const version = getProp(match || filas[0], ['VERSION']);
+        if (version) resultado.set(material, { version, ambiguo: !match });
+      });
+    }
+    return resultado;
+  }, [fetchVersionConReintentos, puestoTrabajoPorMaterial]);
 
   const initData = useCallback(async () => {
     try {
@@ -3530,41 +3604,107 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         setExportTxtBloqueado(noAprobados);
         return;
       }
-      // Vista previa antes de descargar: el TXT queda armado exactamente con las filas y fechas
-      // vigentes al momento de la validación — si el usuario deja el diálogo abierto y alguien edita
-      // una fecha de corrida detrás, el archivo generado sigue correspondiendo a lo que se mostró acá.
+      // Segunda validación, previa a armar el payload de InsertarSolicitudProduccionHB: PuestoTrabajo
+      // y VersionFabricacion son obligatorios en ese endpoint. VersionFabricacion se consulta recién
+      // acá (no en initData) porque es un endpoint por-material (ver fetchVersionesFabricacionLaminado)
+      // — pedirla para todo el maestro de una sola vez sería desperdicio; solo hace falta para los
+      // materiales que realmente van a exportarse.
+      const versiones = await fetchVersionesFabricacionLaminado(materiales);
+      setVersionesFabricacion(versiones);
+      const faltantes: { material: string; descripcion: string; faltantes: string[] }[] = [];
+      materiales.forEach((mat) => {
+        const camposFaltantes: string[] = [];
+        if (!puestoTrabajoPorMaterial.get(mat)) camposFaltantes.push('Puesto de Trabajo');
+        const version = versiones.get(mat);
+        if (!version) camposFaltantes.push('Versión de Fabricación');
+        else if (version.ambiguo) camposFaltantes.push('Versión de Fabricación (ambigua — más de una Hoja de Ruta, no se pudo determinar cuál corresponde al Puesto de Trabajo)');
+        if (camposFaltantes.length > 0) {
+          const fila = rows.find(r => r.material === mat);
+          faltantes.push({ material: mat, descripcion: fila?.descripcion || '—', faltantes: camposFaltantes });
+        }
+      });
+      if (faltantes.length > 0) {
+        setExportTxtFaltanCampos(faltantes);
+        return;
+      }
+      // Vista previa antes de enviar a SAP: el payload queda armado exactamente con las filas y
+      // fechas vigentes al momento de la validación — si el usuario deja el diálogo abierto y alguien
+      // edita una fecha de corrida detrás, lo que se envía sigue correspondiendo a lo que se mostró acá.
       setExportTxtPreview(rows);
     } catch (e) {
-      addNotification('error', `No se pudo validar la aprobación de Venta Externa: ${(e as Error).message}. Exportación cancelada por seguridad.`);
+      addNotification('error', `No se pudo completar la validación previa al envío: ${(e as Error).message}. Envío cancelado por seguridad.`);
     } finally {
       setIsValidandoExportTxt(false);
     }
-  }, [outputPlanRows, addNotification, validarAprobacionVentaExterna]);
+  }, [outputPlanRows, addNotification, validarAprobacionVentaExterna, puestoTrabajoPorMaterial, fetchVersionesFabricacionLaminado]);
 
-  // Estructura fija de carga SAP: Material, Centro, Clase de orden, Cantidad,
-  // Inicio programado, Clase de programación, Clave. Centro/Clase de orden/Clase de
-  // programación/Clave son siempre el mismo valor para esta línea de producción.
-  const exportTxtLineaSap = (r: CorridaOutputRow): string[] => {
+  // Payload de InsertarSolicitudProduccionHB por fila (reemplaza a la línea de TXT que se descargaba
+  // antes — ver [[corte_laminado_exportar_txt_reemplazado_por_sap_insert]]). Supuestos pendientes de
+  // confirmar contra el comportamiento real de SAP para la clase ZMOQ (documentados acá para no
+  // perderlos si algo se rechaza en la primera prueba real):
+  //  - Programación "hacia adelante": se manda FechaInicioProgramada/HoraInicioProgramada (hora fija
+  //    08:00:00, igual que el ejemplo compartido) y se deja vacío FechaFinProgramada/HoraFinProgramada
+  //    — el TXT anterior solo tenía UN campo de fecha ("Inicio programado"), consistente con esto.
+  //  - PedidoComercial/PosicionPedido quedan vacíos: este módulo no maneja pedido comercial por
+  //    material. El instructivo marca ambos como obligatorios "si la clase de orden es MTO", y ZMOQ
+  //    es justamente "Orden de fab. MTO Muebles Otros" — si SAP rechaza por esto, hace falta ubicar de
+  //    dónde sacar el pedido comercial antes de reintentar.
+  //  - CodigoOrdenExterna: referencia externa libre, se arma como T + MMddHHmmss + índice de fila para
+  //    que dos filas generadas en el mismo segundo no choquen.
+  const buildSolicitudProduccion = useCallback((r: CorridaOutputRow, indexEnLote: number): SolicitudProduccionHBPayload => {
     const [y, m, d] = r.fecha.split('-');
-    const inicioProgramado = `${d}.${m}.${y}`;
-    return [r.material, '1000', 'ZMOQ', String(Math.round(r.planKg)), inicioProgramado, '1', '000'];
-  };
+    const fechaSap = `${y}${m}${d}`;
+    return {
+      Mandante: '300',
+      CodigoOrdenExterna: `T${format(new Date(), 'MMddHHmmss')}${String(indexEnLote).padStart(2, '0')}`,
+      ClaseOrden: 'ZMOQ',
+      Centro: '1000',
+      CodigoMaterial: r.material,
+      CantidadPlanificada: r.planKg,
+      VersionFabricacion: versionesFabricacion.get(r.material)?.version || '',
+      PuestoTrabajo: puestoTrabajoPorMaterial.get(r.material) || '',
+      FechaInicioProgramada: fechaSap,
+      HoraInicioProgramada: '080000',
+      EstadoRegistro: 'A',
+      Observaciones: 'Generado automático — Plan Táctico Corte y Laminado',
+      EstadoCarga: '',
+      NumeroOrdenSap: '',
+      FechaProceso: '',
+      HoraProceso: '',
+      UsuarioProceso: 'APIUSR',
+    };
+  }, [versionesFabricacion, puestoTrabajoPorMaterial]);
 
-  const handleConfirmarExportTxt = useCallback(() => {
+  const handleConfirmarExportTxt = useCallback(async () => {
     const rows = exportTxtPreview;
     if (!rows || rows.length === 0) return;
-    const content = rows.map(r => exportTxtLineaSap(r).join('\t')).join('\n');
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `PlanSalidaLaminado_${format(new Date(), 'yyyyMMdd_HHmm')}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    setExportTxtPreview(null);
-  }, [exportTxtPreview]);
+    setIsEnviandoSap(true);
+    try {
+      const resultados: { material: string; ok: boolean; mensaje: string }[] = [];
+      // Secuencial, no en paralelo: cada línea crea una orden real en SAP/HANA — correrlas en
+      // paralelo dificultaría rastrear cuál falló si el backend responde fuera de orden.
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        try {
+          const payload = buildSolicitudProduccion(row, i);
+          const res = await serviciosService.insertarSolicitudProduccionHB(payload);
+          resultados.push({ material: row.material, ok: !!res.data?.success, mensaje: res.data?.message || 'Sin mensaje' });
+        } catch (e) {
+          resultados.push({ material: row.material, ok: false, mensaje: (e as Error).message });
+        }
+      }
+      const ok = resultados.filter(r => r.ok);
+      const fallidos = resultados.filter(r => !r.ok);
+      if (fallidos.length === 0) {
+        addNotification('success', `${ok.length} orden(es) de producción enviada(s) a SAP correctamente.`);
+      } else {
+        addNotification('warning', `${ok.length} orden(es) ok, ${fallidos.length} con error: ${fallidos.map(f => `${f.material} (${f.mensaje})`).join(' | ')}`);
+      }
+      setExportTxtPreview(null);
+    } finally {
+      setIsEnviandoSap(false);
+    }
+  }, [exportTxtPreview, addNotification, buildSolicitudProduccion]);
 
   const renderTopConsolidation = () => {
     const isSaturated = totalsUnified.totalRuns > 6;
@@ -4730,7 +4870,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             </div>
             <div className="flex items-center gap-3">
               <Button onClick={handleExportTxt} disabled={isValidandoExportTxt} className="bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2">
-                {isValidandoExportTxt ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />} {isValidandoExportTxt ? 'Validando P3…' : 'Exportar TXT'}
+                {isValidandoExportTxt ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} {isValidandoExportTxt ? 'Validando…' : 'Enviar a SAP'}
               </Button>
             </div>
           </div>
@@ -4844,17 +4984,17 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       {/* Fuera de los <TabsContent>, a propósito: Radix desmonta el contenido de un tab inactivo por
           defecto — si el usuario cambia de tab con el diálogo abierto, este debe seguir existiendo. */}
       <Dialog open={exportTxtPreview !== null} onOpenChange={(open) => { if (!open) setExportTxtPreview(null); }}>
-        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Confirmar exportación — Plan de Salida Laminado (TXT)</DialogTitle>
+            <DialogTitle>Confirmar envío a SAP — Plan de Salida Laminado</DialogTitle>
             <DialogDescription>
-              Revisa las líneas exactas que se van a escribir en el archivo antes de descargarlo. Columnas en el orden real del TXT: Material, Centro, Clase de orden, Cantidad, Inicio programado, Clase de programación, Clave.
+              Revisa las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — esta acción no se puede deshacer desde acá.
             </DialogDescription>
           </DialogHeader>
           {exportTxtPreview && (
             <div className="space-y-4 text-left text-sm">
               <div>
-                <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Líneas a exportar ({exportTxtPreview.length})</span>
+                <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Órdenes a crear ({exportTxtPreview.length})</span>
                 <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[400px] overflow-y-auto">
                   <table className="w-full text-[11px] border-collapse">
                     <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
@@ -4863,25 +5003,25 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                         <th className="px-3 py-2 text-left">Descripción</th>
                         <th className="px-3 py-2 text-center">Centro</th>
                         <th className="px-3 py-2 text-center">Clase Orden</th>
-                        <th className="px-3 py-2 text-right">Cantidad</th>
-                        <th className="px-3 py-2 text-center">Inicio Prog.</th>
-                        <th className="px-3 py-2 text-center">Clase Prog.</th>
-                        <th className="px-3 py-2 text-center">Clave</th>
+                        <th className="px-3 py-2 text-center">Puesto Trabajo</th>
+                        <th className="px-3 py-2 text-center">Versión Fabr.</th>
+                        <th className="px-3 py-2 text-right">Cant. Planificada (Kg)</th>
+                        <th className="px-3 py-2 text-center">Inicio Programado</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-50">
                       {exportTxtPreview.map((row, i) => {
-                        const [material, centro, claseOrden, cantidad, inicioProgramado, clasePrograma, clave] = exportTxtLineaSap(row);
+                        const payload = buildSolicitudProduccion(row, i);
                         return (
-                          <tr key={`${row.corridaId}-${material}-${i}`}>
-                            <td className="px-3 py-2 font-mono">{material}</td>
+                          <tr key={`${row.corridaId}-${payload.CodigoMaterial}-${i}`}>
+                            <td className="px-3 py-2 font-mono">{payload.CodigoMaterial}</td>
                             <td className="px-3 py-2 truncate max-w-[200px]" title={row.descripcion}>{row.descripcion}</td>
-                            <td className="px-3 py-2 text-center font-mono">{centro}</td>
-                            <td className="px-3 py-2 text-center font-mono">{claseOrden}</td>
-                            <td className="px-3 py-2 text-right font-mono">{cantidad}</td>
-                            <td className="px-3 py-2 text-center font-mono">{inicioProgramado}</td>
-                            <td className="px-3 py-2 text-center font-mono">{clasePrograma}</td>
-                            <td className="px-3 py-2 text-center font-mono">{clave}</td>
+                            <td className="px-3 py-2 text-center font-mono">{payload.Centro}</td>
+                            <td className="px-3 py-2 text-center font-mono">{payload.ClaseOrden}</td>
+                            <td className="px-3 py-2 text-center font-mono">{payload.PuestoTrabajo}</td>
+                            <td className="px-3 py-2 text-center font-mono">{payload.VersionFabricacion}</td>
+                            <td className="px-3 py-2 text-right font-mono">{formatNum(payload.CantidadPlanificada, 1)}</td>
+                            <td className="px-3 py-2 text-center font-mono">{payload.FechaInicioProgramada}</td>
                           </tr>
                         );
                       })}
@@ -4892,10 +5032,35 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setExportTxtPreview(null)}>Cancelar</Button>
-            <Button onClick={handleConfirmarExportTxt} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-              <Download className="w-4 h-4 mr-2" /> Confirmar y Descargar TXT
+            <Button variant="outline" onClick={() => setExportTxtPreview(null)} disabled={isEnviandoSap}>Cancelar</Button>
+            <Button onClick={handleConfirmarExportTxt} disabled={isEnviandoSap} className="bg-emerald-600 hover:bg-emerald-700 text-white">
+              {isEnviandoSap ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Send className="w-4 h-4 mr-2" />} {isEnviandoSap ? 'Enviando…' : 'Confirmar y Enviar a SAP'}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={exportTxtFaltanCampos !== null} onOpenChange={(open) => { if (!open) setExportTxtFaltanCampos(null); }}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-amber-700"><AlertCircle className="w-5 h-5" /> Envío bloqueado — falta Puesto de Trabajo o Versión de Fabricación</DialogTitle>
+            <DialogDescription>
+              {exportTxtFaltanCampos?.length} material(es) no resuelven Puesto de Trabajo (tiemposEnsambladoByGrupoYCentroPR2) y/o Versión de Fabricación (versionsFabricacionPorCentroYCodigoMaterial) de forma confiable. Enviarlos igual crearía una orden de fabricación mal formada en SAP — revisa la Hoja de Ruta de estos materiales antes de reintentar.
+            </DialogDescription>
+          </DialogHeader>
+          {exportTxtFaltanCampos && (
+            <div className="flex flex-col gap-1.5 max-h-[220px] overflow-y-auto p-3 bg-amber-50 border border-amber-100 rounded-xl">
+              {exportTxtFaltanCampos.map(f => (
+                <div key={f.material} className="flex items-center justify-between gap-2 text-[11px] bg-white border border-amber-200 rounded-lg px-3 py-1.5">
+                  <span className="font-mono font-black text-amber-800">{f.material}</span>
+                  <span className="text-slate-500 truncate max-w-[200px]">{f.descripcion}</span>
+                  <span className="font-bold text-amber-700 uppercase">{f.faltantes.join(', ')}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setExportTxtFaltanCampos(null)}>Cerrar</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -4903,9 +5068,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       <Dialog open={exportTxtBloqueado !== null} onOpenChange={(open) => { if (!open) setExportTxtBloqueado(null); }}>
         <DialogContent className="max-w-xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-amber-700"><AlertCircle className="w-5 h-5" /> Exportación bloqueada — falta Respuesta P3 aprobada</DialogTitle>
+            <DialogTitle className="flex items-center gap-2 text-amber-700"><AlertCircle className="w-5 h-5" /> Exportación bloqueada — falta Respuesta P3</DialogTitle>
             <DialogDescription>
-              {exportTxtBloqueado?.length} material(es) con origen Venta Externa todavía no tienen una Respuesta P3 de Laminado aprobada (revisión hoy, devolución mañana — mismo criterio que &quot;Data Aprobada&quot; en Venta Externa). No se puede continuar con la exportación hasta resolverlo.
+              {exportTxtBloqueado?.length} material(es) con origen Venta Externa todavía no tienen una Respuesta P3 de Laminado registrada (revisión hoy, devolución mañana — mismo criterio que &quot;Data Aprobada&quot; en Venta Externa). Esa respuesta se genera ACÁ, en el tab &quot;Resumen Necesidades&quot; de este mismo módulo (botón &quot;Generar Respuestas · P3 - Rollos&quot;) — Venta Externa solo refleja el estado, no permite generarla.
             </DialogDescription>
           </DialogHeader>
           {exportTxtBloqueado && (
@@ -4915,17 +5080,27 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               ))}
             </div>
           )}
-          <DialogFooter>
+          <DialogFooter className="flex-wrap gap-2">
             <Button variant="outline" onClick={() => setExportTxtBloqueado(null)}>Cerrar</Button>
             <Button
+              variant="outline"
               onClick={() => {
                 const materiales = exportTxtBloqueado?.join(',') || '';
                 setExportTxtBloqueado(null);
                 router.push(`/dashboard/opciones/tactica-venta-externa?tab=dataAprobada&materiales=${materiales}`);
               }}
+              className="border-amber-200 text-amber-700 hover:bg-amber-50"
+            >
+              Ver estado en Venta Externa (solo lectura) →
+            </Button>
+            <Button
+              onClick={() => {
+                setExportTxtBloqueado(null);
+                setActiveTab('resumen');
+              }}
               className="bg-amber-600 hover:bg-amber-700 text-white"
             >
-              Ir a Aprobar Data (Venta Externa) →
+              Ir a Generar Respuestas P3 (este módulo) →
             </Button>
           </DialogFooter>
         </DialogContent>

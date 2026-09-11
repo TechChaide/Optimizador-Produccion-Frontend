@@ -4,6 +4,36 @@ import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/servicios`;
 
+// Payload de InsertarSolicitudProduccionHB (SAP/HANA) — compartido por el usuario 2026-09-11 junto
+// con un ejemplo de payload y de respuesta exitosa. Los campos marcados "IF" en ese ejemplo dependen
+// del tipo de programación de ClaseOrden ("hacia adelante" pide FechaInicioProgramada/
+// HoraInicioProgramada; "hacia atrás" pide FechaFinProgramada/HoraFinProgramada) o de si la orden
+// trae Pedido Comercial (PedidoComercial + PosicionPedido van juntos) — por eso van opcionales acá,
+// no obligatorios en el tipo.
+export interface SolicitudProduccionHBPayload {
+  Mandante: string;
+  CodigoOrdenExterna: string;
+  ClaseOrden: string;
+  Centro: string;
+  CodigoMaterial: string;
+  CantidadPlanificada: number;
+  VersionFabricacion: string;
+  PuestoTrabajo: string;
+  FechaFinProgramada?: string;
+  HoraFinProgramada?: string;
+  FechaInicioProgramada?: string;
+  HoraInicioProgramada?: string;
+  PedidoComercial?: string;
+  PosicionPedido?: string;
+  EstadoRegistro?: string;
+  Observaciones?: string;
+  EstadoCarga?: string;
+  NumeroOrdenSap?: string;
+  FechaProceso?: string;
+  HoraProceso?: string;
+  UsuarioProceso?: string;
+}
+
 export const serviciosService = {
   async getCuboHabilidadesOP(): Promise<BodyResponse<any>> {
     const response = await fetchWithAuth(API_URL + "/CuboHabilidadesOp", {
@@ -262,7 +292,38 @@ export const serviciosService = {
     }
     return response.json();
   },
+ async tiemposEnsambladoByGrupoYCentroPR2(centro: string, codigoGrupo: number): Promise<BodyResponse<any>> {
+    const response = await fetchWithAuth(API_URL + "/tiemposEnsambladoByGrupoYCentroPR2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ Centro: String(centro), CodigoGrupo: Number(codigoGrupo) }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Tiempos Ensamblado");
+    }
+    return response.json();
+  },
 
+  // Crea una orden de producción real en SAP/HANA (compartido por el usuario 2026-09-11). Reemplaza
+  // en concepto al TXT manual de Corte y Laminado ("Exportar TXT" en Plan de Salida — Corridas
+  // Looper, ver [[corte_laminado_exportar_txt_reemplazado_por_sap_insert]]): antes el archivo se
+  // descargaba y alguien lo cargaba a mano en SAP, ahora este endpoint la inserta directo. Todos los
+  // campos van como string salvo CantidadPlanificada (number) — confirmado con el payload de ejemplo
+  // del usuario. Los opcionales sin valor real se mandan como "" (no se omiten), mismo criterio que
+  // ya usa el ejemplo compartido para EstadoCarga/NumeroOrdenSap/FechaProceso/HoraProceso.
+  async insertarSolicitudProduccionHB(payload: SolicitudProduccionHBPayload): Promise<BodyResponse<{ success: boolean; message: string }>> {
+    const response = await fetchWithAuth(API_URL + "/InsertarSolicitudProduccionHB", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to insert Solicitud Producción HB");
+    }
+    return response.json();
+  },
   async getHabilidadesOperadorPorEstacion(): Promise<BodyResponse<any>> {
     const response = await fetchWithAuth(API_URL + "/HabilidadesOperadorPorEstacion", {
       method: "GET",
