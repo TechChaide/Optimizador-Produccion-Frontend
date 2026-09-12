@@ -156,6 +156,7 @@ interface SnapshotVentaExterna {
   ordenesFert: Record<string, unknown>[];
   tiemposEnsamblado: Record<string, unknown>[];
   diasNoLaborables: string[];
+  diasLaborablesExtra: string[];
   // Resultado YA CALCULADO del tab "Data Aprobada" (ver fetchDataAprobada) — a diferencia del resto
   // de este snapshot (datos crudos), esto es el resultado de un cálculo disparado por el botón
   // "Actualizar" de ese tab; sin cachearlo aparte, volvía a quedar vacío al navegar a otro módulo y
@@ -206,7 +207,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Días NO laborables (feriados + días que la planta decide no trabajar) del calendario configurado.
   // Vacío = solo se saltan fines de semana. Se carga en el init de abajo.
   const [diasNoLaborables, setDiasNoLaborables] = useState<DiasNoLaborables>(new Set<string>());
-  const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDayCal(d, diasNoLaborables), [diasNoLaborables]);
+  // Excepciones "Jornada" del mismo calendario: días que SÍ se trabajan aunque caigan en fin de
+  // semana — el sábado habilitado puntualmente para cubrir excedente de capacidad (mismo criterio
+  // que Corte y Laminado/Corte Espuma, ver [[sabado_dia_habil_condicional]]).
+  const [diasLaborablesExtra, setDiasLaborablesExtra] = useState<DiasNoLaborables>(new Set<string>());
+  const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDayCal(d, diasNoLaborables, diasLaborablesExtra), [diasNoLaborables, diasLaborablesExtra]);
   const [selectedDates, setSelectedDates] = useState<string[]>([]);
   const [viewDate, setViewDate] = useState(new Date());
   // Fecha(s) de "Resumen Necesidades" — selector PROPIO de este tab, deliberadamente separado de
@@ -386,7 +391,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     setIsLoading(true);
     setSyncStep('sincronizando');
     try {
-      const [groups, dias] = await Promise.all([
+      const [groups, { noLaborables, laborablesExtra }] = await Promise.all([
         fetchGrupos(),
         cargarDiasNoLaborables(),
       ]);
@@ -396,7 +401,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         fetchOrdenes(),
         fetchTiemposEnsamblado(groups),
       ]);
-      setDiasNoLaborables(dias);
+      setDiasNoLaborables(noLaborables);
+      setDiasLaborablesExtra(laborablesExtra);
       setDatosCargados(true);
       guardarEnCache<SnapshotVentaExterna>(CACHE_VENTA_EXTERNA, {
         grupos: groups,
@@ -404,7 +410,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         ordenes: ordenesRes.ordenes,
         ordenesFert: ordenesRes.ordenesFert,
         tiemposEnsamblado: tiempos,
-        diasNoLaborables: [...dias],
+        diasNoLaborables: [...noLaborables],
+        diasLaborablesExtra: [...laborablesExtra],
         // Data Aprobada y la Necesidad BOM se sincronizan aparte (ver fetchDataAprobada y
         // handleCalcularNecesidadRollos) — acá se preserva lo que ya hubiera, en vez de resetearlo,
         // por si el usuario vuelve a sincronizar sin haber navegado fuera del módulo.
@@ -438,6 +445,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       setOrdersFert(snap.ordenesFert);
       setTiemposEnsamblado(snap.tiemposEnsamblado);
       setDiasNoLaborables(new Set(snap.diasNoLaborables));
+      setDiasLaborablesExtra(new Set(snap.diasLaborablesExtra || []));
       setDataAprobada(snap.dataAprobada || {});
       setNecesidadEspumas1000(snap.necesidadEspumas1000 || []);
       setNecesidadEspumas2000(snap.necesidadEspumas2000 || []);

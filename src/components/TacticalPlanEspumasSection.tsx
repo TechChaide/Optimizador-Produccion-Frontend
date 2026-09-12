@@ -48,7 +48,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, PlanGrupo, DetalleTactico, Restriccion } from '@/types/interfaces';
 import type { BodyResponse } from '@/types/body-response';
 import { cn } from '@/lib/utils';
-import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -779,6 +779,7 @@ interface SnapshotCorteEspuma {
   operadoresCorte: RawApiRow[];
   restriccionesCorte: Restriccion[];
   diasNoLaborables: string[];
+  diasLaborablesExtra: string[];
   necesidadesPlantaData: Record<string, NecesidadPlantaRow[]>;
   necesidadPFFData: Record<'1000' | '2000', NecesidadPlantaRow[]>;
   // Nivel 2 de Capacidad Planificada (hoy+2 días hábiles, ver calcularNecesidadPFF) — se calcula junto
@@ -834,11 +835,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Días NO laborables (feriados + días que la planta decide no trabajar) del calendario configurado.
   // Vacío = solo se saltan fines de semana, igual que antes. Se carga en fetchDataAsync.
   const [diasNoLaborables, setDiasNoLaborables] = useState<DiasNoLaborables>(new Set<string>());
-  const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDayCal(d, diasNoLaborables), [diasNoLaborables]);
-  const sumarDiasHabiles = useCallback((d: Date, n: number) => addBusinessDaysCal(d, n, diasNoLaborables), [diasNoLaborables]);
+  // Excepciones "Jornada" del mismo calendario: días que SÍ se trabajan aunque caigan en fin de
+  // semana — el sábado habilitado puntualmente para cubrir excedente de capacidad (mismo criterio
+  // que Corte y Laminado, ver [[sabado_dia_habil_condicional]]).
+  const [diasLaborablesExtra, setDiasLaborablesExtra] = useState<DiasNoLaborables>(new Set<string>());
+  const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDayCal(d, diasNoLaborables, diasLaborablesExtra), [diasNoLaborables, diasLaborablesExtra]);
+  const sumarDiasHabiles = useCallback((d: Date, n: number) => addBusinessDaysCal(d, n, diasNoLaborables, diasLaborablesExtra), [diasNoLaborables, diasLaborablesExtra]);
   // Fecha de PAREO de Capacidad Planificada (Nivel 1/2): la producción del PT en fecha X requiere que
   // su componente (lámina) esté firme un día hábil ANTES — restarDiasHabiles(X, 1).
-  const restarDiasHabiles = useCallback((d: Date, n: number) => addBusinessDaysCal(d, -n, diasNoLaborables), [diasNoLaborables]);
+  const restarDiasHabiles = useCallback((d: Date, n: number) => addBusinessDaysCal(d, -n, diasNoLaborables, diasLaborablesExtra), [diasNoLaborables, diasLaborablesExtra]);
 
   // Restricciones crudas del grupo Corte y Laminado de cada centro (se cargan en fetchDataAsync).
   const [restriccionesCorte, setRestriccionesCorte] = useState<Restriccion[]>([]);
@@ -1038,6 +1043,19 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // aquí). Por planta, igual que otros selectores del módulo. Vacío = sin evaluar nada todavía.
   const [selectedDatesCapacidad, setSelectedDatesCapacidad] = useState<{ UIO: Set<string>; GYE: Set<string> }>({ UIO: new Set(), GYE: new Set() });
   const [viewDateCapacidad, setViewDateCapacidad] = useState<Date>(new Date());
+  const [marcandoSabadoJornada, setMarcandoSabadoJornada] = useState<{ UIO: boolean; GYE: boolean }>({ UIO: false, GYE: false });
+  const handleMarcarSabadoJornada = useCallback(async (planta: 'UIO' | 'GYE', fecha: string) => {
+    setMarcandoSabadoJornada(prev => ({ ...prev, [planta]: true }));
+    try {
+      await marcarDiaComoJornada(fecha, `Turno Sábado habilitado — Corte Espuma ${planta === 'UIO' ? 'Quito' : 'Guayaquil'}`);
+      setDiasLaborablesExtra(prev => new Set(prev).add(fecha));
+      addNotification('success', `Sábado ${fecha} marcado como Jornada en el calendario — las fechas de P2/P3 ya lo consideran hábil.`);
+    } catch (e) {
+      addNotification('error', `No se pudo marcar el sábado como Jornada: ${(e as Error).message}`);
+    } finally {
+      setMarcandoSabadoJornada(prev => ({ ...prev, [planta]: false }));
+    }
+  }, [addNotification]);
   const todayStr = format(new Date(), 'yyyy-MM-dd');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
@@ -2626,6 +2644,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         operadoresCorte: operadores,
         restriccionesCorte: previo?.restriccionesCorte || [],
         diasNoLaborables: previo?.diasNoLaborables || [],
+        diasLaborablesExtra: previo?.diasLaborablesExtra || [],
         necesidadesPlantaData: previo?.necesidadesPlantaData || {},
         necesidadPFFData: previo?.necesidadPFFData || { '1000': [], '2000': [] },
         necesidadPFFNivel2Data: previo?.necesidadPFFNivel2Data || { '1000': [], '2000': [] },
@@ -2639,7 +2658,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     }
   }, [fetchTiemposCorteYLaminado]);
 
-  const fetchNecesidadesPlanta = useCallback(async (diasOverride?: DiasNoLaborables) => {
+  const fetchNecesidadesPlanta = useCallback(async (diasOverride?: DiasNoLaborables, laborablesExtraOverride?: DiasNoLaborables) => {
     setNecesidadesPlantaLoading(true);
     try {
       const [restrsRes, gruposRes] = await Promise.all([
@@ -2693,7 +2712,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // diasOverride: al sincronizar, el calendario de feriados se acaba de cargar y el estado
       // `diasNoLaborables` todavía no se refleja en este closure — se recibe el Set directo para no
       // calcular la fecha objetivo con feriados vacíos (ver handleSincronizarYGenerar).
-      const fechaObjetivoP2 = format(nextBusinessDayCal(new Date(), diasOverride ?? diasNoLaborables), 'yyyy-MM-dd');
+      const fechaObjetivoP2 = format(nextBusinessDayCal(new Date(), diasOverride ?? diasNoLaborables, laborablesExtraOverride ?? diasLaborablesExtra), 'yyyy-MM-dd');
 
       const planGruposRes = await planGrupoService.getAll();
       const esEspumaVentaExterna = (pg: PlanGrupo) =>
@@ -2766,7 +2785,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     } finally {
       setNecesidadesPlantaLoading(false);
     }
-  }, [diasNoLaborables]);
+  }, [diasNoLaborables, diasLaborablesExtra]);
 
   // Carga perezosa de "Pendientes Totales" (ver estado más arriba) — se dispara una sola vez desde
   // el useEffect de activeTab==='necesidadesPlanta', igual que Programación Táctica Venta Externa
@@ -3676,6 +3695,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       setOperadoresCorte(snap.operadoresCorte);
       setRestriccionesCorte(snap.restriccionesCorte);
       setDiasNoLaborables(new Set(snap.diasNoLaborables));
+      setDiasLaborablesExtra(new Set(snap.diasLaborablesExtra || []));
       setNecesidadesPlantaData(snap.necesidadesPlantaData);
       setNecesidadPFFData(snap.necesidadPFFData);
       setNecesidadPFFNivel2Data(snap.necesidadPFFNivel2Data || { '1000': [], '2000': [] });
@@ -3694,9 +3714,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const handleSincronizarYGenerar = useCallback(async () => {
     setSyncStep('sincronizando');
     try {
-      const dias = await cargarDiasNoLaborables();
-      setDiasNoLaborables(dias);
-      await Promise.all([fetchDataAsync(), fetchNecesidadesPlanta(dias)]);
+      const { noLaborables, laborablesExtra } = await cargarDiasNoLaborables();
+      setDiasNoLaborables(noLaborables);
+      setDiasLaborablesExtra(laborablesExtra);
+      await Promise.all([fetchDataAsync(), fetchNecesidadesPlanta(noLaborables, laborablesExtra)]);
       // calcularNecesidadPFF hace su propia consulta fresca a planGrupoService/detalleTacticoService
       // (no depende de closures de fetchDataAsync), pero SÍ depende de materialDescMap/inventarioSAP
       // ya reflejados en el render — se dispara desde el efecto de más abajo (declarado después de
@@ -4305,6 +4326,41 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             </div>
           </div>
         </div>
+        {/* Aviso de calendario para el Turno Sábado (ver marcarDiaComoJornada en @/lib/dias-laborables):
+            si alguna máquina de esta planta ya tiene Sábado activo, pero el sábado relevante (el
+            elegido en "Evaluar Capacidad", o si no el próximo) no está marcado como Jornada en el
+            calendario, P2/P3 lo seguirían tratando como no hábil pese a que aquí sí se le asignó
+            capacidad -- mismo criterio que Corte y Laminado, ver [[sabado_dia_habil_condicional]]. */}
+        {(() => {
+          const algunaMaquinaConSabado = machines.some(m => {
+            const s = config.shifts[m.id]?.saturday;
+            return s && s !== 'EMPTY';
+          });
+          if (!algunaMaquinaConSabado) return null;
+          const sabadosSeleccionados = fechasSel.filter(f => parseFechaLocal(f).getDay() === 6);
+          const proximoSabado = (() => {
+            const d = new Date();
+            d.setDate(d.getDate() + ((6 - d.getDay() + 7) % 7));
+            return format(d, 'yyyy-MM-dd');
+          })();
+          const sabadoObjetivo = sabadosSeleccionados.sort()[0] || proximoSabado;
+          if (diasLaborablesExtra.has(sabadoObjetivo)) return null;
+          return (
+            <div className="mx-8 mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+              <span className="text-[8px] font-bold text-amber-700 flex-1">
+                El sábado {sabadoObjetivo} no está marcado como Jornada en el calendario — las fechas de P2/P3 lo seguirán saltando.
+              </span>
+              <button
+                type="button"
+                onClick={() => handleMarcarSabadoJornada(planta, sabadoObjetivo)}
+                disabled={marcandoSabadoJornada[planta]}
+                className="text-[8px] font-black uppercase bg-amber-600 text-white rounded-md px-2 py-1 whitespace-nowrap hover:bg-amber-700 disabled:opacity-50 cursor-pointer"
+              >
+                {marcandoSabadoJornada[planta] ? 'Marcando…' : 'Marcar como Jornada'}
+              </button>
+            </div>
+          );
+        })()}
         {/* Turnos Día/Noche/Sábado + Paro: antes en una sola fila horizontal -- con 3 turnos ya no
             entraba bien, se veía apretado y confuso (el usuario lo marcó tras agregar Sábado).
             Apilados verticalmente, uno por línea, misma info. */}
