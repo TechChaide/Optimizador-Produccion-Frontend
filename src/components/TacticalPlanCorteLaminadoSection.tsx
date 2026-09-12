@@ -384,13 +384,24 @@ const parseQty = (val: unknown): number => {
 // Misma lógica que el useMemo de respuestaSalidaRows, en función pura: permite invocarla desde
 // handleProcessResumen con el finalArray recién calculado (aún no reflejado en el estado
 // unifiedNeeds), evitando depender de un re-render para reconciliar el plan automáticamente.
+//
+// Universo: materiales que otra área pidió como necesidad (necesidadesPlantaMap) O QUE YA TIENEN
+// corrida propia (planUn > 0) -- caso real 2026-09-14: materiales co-producidos en el mismo bloque
+// (variantes CONV, u otros cortes que salen de la misma corrida sin ser en sí la necesidad de nadie
+// más, ej. 30017862/30004574/30012660/30024556) quedaban fuera de esta lista aunque sí forman parte
+// de outputPlanRows/la Salida de Datos real a SAP -- nunca entraban al P3, nunca tenían
+// codigo_detalle_tactico propio, y por eso el TXT los mandaba sin CodigoOrdenExterna. No hacía falta
+// tocar nada más: getOrigenesProrrateo YA maneja el caso "sin ningún origen externo" auto-
+// referenciando el propio Plan Grupo P3 como codigo_plan_grupo_padre (ver su comentario) -- ese
+// fallback simplemente nunca se alcanzaba para estos materiales porque el filtro de entrada los
+// descartaba antes.
 const computeRespuestaSalidaRows = (
   needs: UnifiedNeedRow[],
   necesidadesPlantaMap: Map<string, number>,
   origenesPlantaMap: Map<string, Map<number, number>>
 ): RespuestaSalidaRow[] => {
   return needs
-    .filter(u => necesidadesPlantaMap.has(String(Number(u.material))))
+    .filter(u => necesidadesPlantaMap.has(String(Number(u.material))) || u.planUn > 0)
     .map((u): RespuestaSalidaRow => {
       const tieneCorrida = u.planUn > 0;
       const origenesMap = origenesPlantaMap.get(String(Number(u.material)));
@@ -1422,6 +1433,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // mismo criterio que el aviso agregado "N material(es) PFF sin lámina cortada" de Corte Espuma, en
   // vez de un toast por material.
   const faltanteInternoRef = useRef<{ material: string; rollosFaltantes: number }[]>([]);
+  // Espejo por ref de outputPlanRows (declarado más abajo) para que handleConfirmGuardarPlan/
+  // handleConfirmGuardarPlanPFD (declarados ANTES en el archivo) puedan leer su valor más reciente
+  // sin listarlo como dependencia de useCallback -- listarlo ahí da error de compilación ("used
+  // before its declaration"), porque el arreglo de dependencias se evalúa en el momento en que se
+  // llama a useCallback, no en el momento en que el callback se ejecuta.
+  const outputPlanRowsRef = useRef<CorridaOutputRow[]>([]);
   const flushFaltanteInternoNotification = useCallback(() => {
     const items = faltanteInternoRef.current;
     faltanteInternoRef.current = [];
@@ -2663,14 +2680,15 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
   // Sección dos del tab Resumen — "Simulación Salida de Datos por Respuesta": toma como universo
   // los materiales que "Necesidades Planta" referencia (match por código contra Resumen Necesidades
-  // — materialNecesidadesPlantaMap), y responde por cada uno con lo que YA está planificado en
-  // corrida (planKg/planUn) MÁS el stock disponible (totalStockKg/totalStockUN, que ya incluye
-  // bodegas + Producción Diaria) — la corrida no reemplaza el stock ya existente, se suma a él,
-  // porque ambos van a estar físicamente disponibles. Sin corrida prevista, la respuesta es solo el
-  // stock (mismo criterio de computeRespuestaSalidaRows, la versión en función pura de este cálculo).
+  // — materialNecesidadesPlantaMap) O QUE YA TIENEN corrida propia (planUn > 0, ver
+  // computeRespuestaSalidaRows para el porqué de este OR), y responde por cada uno con lo que YA está
+  // planificado en corrida (planKg/planUn) MÁS el stock disponible (totalStockKg/totalStockUN, que ya
+  // incluye bodegas + Producción Diaria) — la corrida no reemplaza el stock ya existente, se suma a
+  // él, porque ambos van a estar físicamente disponibles. Sin corrida prevista, la respuesta es solo
+  // el stock (mismo criterio de computeRespuestaSalidaRows, la versión en función pura de este cálculo).
   const respuestaSalidaRows = useMemo((): RespuestaSalidaRow[] => {
     return unifiedNeeds
-      .filter(u => materialNecesidadesPlantaMap.has(String(Number(u.material))))
+      .filter(u => materialNecesidadesPlantaMap.has(String(Number(u.material))) || u.planUn > 0)
       .map((u): RespuestaSalidaRow => {
         const tieneCorrida = u.planUn > 0;
         const origenesMap = materialOrigenesPlantaMap.get(String(Number(u.material)));
@@ -2764,29 +2782,58 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       let fallidos = 0;
 
       faltanteInternoRef.current = [];
+
+      // Corridas propias de cada material (ver outputPlanRows) — un material con 2+ corridas del
+      // mismo apertura/densidad (ej. una corrida no alcanzó y se abrió una adicional) grababa antes
+      // UNA sola fila de DetalleTactico con la cantidad sumada de todas sus corridas: comparten un
+      // único codigo_detalle_tactico, y al exportar a SAP, la segunda corrida terminaba mandando el
+      // MISMO CodigoOrdenExterna que la primera — SAP rechaza esa segunda orden como duplicada ("Ya
+      // existe una orden registrada con el codigo..."). Ahora se graba UNA fila por corrida física
+      // (cada una con su propio codigo_detalle_tactico real), y el stock que sobra por encima de lo
+      // que ya cubren las corridas (si lo hay) se graba aparte, en una fila sin corrida asociada —
+      // esa fila de stock no se manda a SAP como orden, solo alimenta "Necesidades Planta" de otras
+      // áreas, igual que antes.
+      const corridasPorMaterial = new Map<string, CorridaOutputRow[]>();
+      outputPlanRowsRef.current.forEach(r => {
+        const key = cleanCode(r.material);
+        if (!corridasPorMaterial.has(key)) corridasPorMaterial.set(key, []);
+        corridasPorMaterial.get(key)!.push(r);
+      });
+
       for (const row of planPreview.rows) {
-        const splits = getOrigenesProrrateo(row.material, row.cantidadKg, nuevoCodigoPlanGrupo);
-        for (const split of splits) {
-          if (split.cantidadKg <= 0) continue;
-          try {
-            const detallePayload = {
-              codigo_detalle_tactico: 0,
-              codigo_material: Number(row.material),
-              cantidad_produccion_neta: Math.round(split.cantidadKg).toFixed(0),
-              resp_ctrl_prod: '',
-              clase_aprovisionamiento: 'E',
-              cantidad_aprovisionamiento: 0,
-              estado: 'A',
-              codigo_plan_grupo: nuevoCodigoPlanGrupo,
-              codigo_plan_grupo_padre: split.codigoPadre,
-              usuario_modificacion: usuario,
-              linea_produccion: puestoTrabajoLineaPorMaterial.get(cleanCode(row.material)) || '',
-            };
-            await detalleTacticoService.save(detallePayload as unknown as DetalleTactico);
-            exitosos++;
-          } catch (e) {
-            console.warn(`[Guardar Plan] Falló material ${row.material} (padre ${split.codigoPadre}):`, (e as Error).message);
-            fallidos++;
+        const corridasDelMaterial = row.tieneCorrida ? (corridasPorMaterial.get(cleanCode(row.material)) || []) : [];
+        const cantidadEnCorridas = corridasDelMaterial.reduce((s, c) => s + c.planKg, 0);
+        const stockSobrante = row.cantidadKg - cantidadEnCorridas;
+
+        // Sin corridas propias detectadas (material solo con stock, o corrida no encontrada por
+        // alguna razón): comportamiento anterior, una sola fila con la cantidad completa.
+        const bloques = corridasDelMaterial.length > 0 ? corridasDelMaterial.map(c => c.planKg) : [row.cantidadKg];
+        if (corridasDelMaterial.length > 0 && stockSobrante > 0.01) bloques.push(stockSobrante);
+
+        for (const cantidadBloque of bloques) {
+          const splits = getOrigenesProrrateo(row.material, cantidadBloque, nuevoCodigoPlanGrupo);
+          for (const split of splits) {
+            if (split.cantidadKg <= 0) continue;
+            try {
+              const detallePayload = {
+                codigo_detalle_tactico: 0,
+                codigo_material: Number(row.material),
+                cantidad_produccion_neta: Math.round(split.cantidadKg).toFixed(0),
+                resp_ctrl_prod: '',
+                clase_aprovisionamiento: 'E',
+                cantidad_aprovisionamiento: 0,
+                estado: 'A',
+                codigo_plan_grupo: nuevoCodigoPlanGrupo,
+                codigo_plan_grupo_padre: split.codigoPadre,
+                usuario_modificacion: usuario,
+                linea_produccion: puestoTrabajoLineaPorMaterial.get(cleanCode(row.material)) || '',
+              };
+              await detalleTacticoService.save(detallePayload as unknown as DetalleTactico);
+              exitosos++;
+            } catch (e) {
+              console.warn(`[Guardar Plan] Falló material ${row.material} (padre ${split.codigoPadre}):`, (e as Error).message);
+              fallidos++;
+            }
           }
         }
       }
@@ -2877,29 +2924,49 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       let fallidos = 0;
 
       faltanteInternoRef.current = [];
+
+      // Mismo criterio que "Guardar Plan" (ver handleConfirmGuardarPlan): una fila de DetalleTactico
+      // POR CORRIDA física, no una sola con la cantidad de todas sumada -- si no, dos corridas del
+      // mismo material terminan compartiendo un único codigo_detalle_tactico y SAP rechaza la segunda
+      // orden como duplicada al exportar.
+      const corridasPorMaterial = new Map<string, CorridaOutputRow[]>();
+      outputPlanRowsRef.current.forEach(r => {
+        const key = cleanCode(r.material);
+        if (!corridasPorMaterial.has(key)) corridasPorMaterial.set(key, []);
+        corridasPorMaterial.get(key)!.push(r);
+      });
+
       for (const row of planPreviewPFD.rows) {
-        const splits = getOrigenesProrrateo(row.material, row.cantidadKg, nuevoCodigoPlanGrupo);
-        for (const split of splits) {
-          if (row.tieneCorrida && split.cantidadKg <= 0) continue;
-          try {
-            const detallePayload = {
-              codigo_detalle_tactico: 0,
-              codigo_material: Number(row.material),
-              cantidad_produccion_neta: Math.round(split.cantidadKg).toFixed(0),
-              resp_ctrl_prod: '',
-              clase_aprovisionamiento: 'E',
-              cantidad_aprovisionamiento: 0,
-              estado: 'A',
-              codigo_plan_grupo: nuevoCodigoPlanGrupo,
-              codigo_plan_grupo_padre: split.codigoPadre,
-              usuario_modificacion: usuario,
-              linea_produccion: puestoTrabajoLineaPorMaterial.get(cleanCode(row.material)) || '',
-            };
-            await detalleTacticoService.save(detallePayload as unknown as DetalleTactico);
-            exitosos++;
-          } catch (e) {
-            console.warn(`[Guardar Plan PFD] Falló material ${row.material} (padre ${split.codigoPadre}):`, (e as Error).message);
-            fallidos++;
+        const corridasDelMaterial = row.tieneCorrida ? (corridasPorMaterial.get(cleanCode(row.material)) || []) : [];
+        const cantidadEnCorridas = corridasDelMaterial.reduce((s, c) => s + c.planKg, 0);
+        const stockSobrante = row.cantidadKg - cantidadEnCorridas;
+        const bloques = corridasDelMaterial.length > 0 ? corridasDelMaterial.map(c => c.planKg) : [row.cantidadKg];
+        if (corridasDelMaterial.length > 0 && stockSobrante > 0.01) bloques.push(stockSobrante);
+
+        for (const cantidadBloque of bloques) {
+          const splits = getOrigenesProrrateo(row.material, cantidadBloque, nuevoCodigoPlanGrupo);
+          for (const split of splits) {
+            if (row.tieneCorrida && split.cantidadKg <= 0) continue;
+            try {
+              const detallePayload = {
+                codigo_detalle_tactico: 0,
+                codigo_material: Number(row.material),
+                cantidad_produccion_neta: Math.round(split.cantidadKg).toFixed(0),
+                resp_ctrl_prod: '',
+                clase_aprovisionamiento: 'E',
+                cantidad_aprovisionamiento: 0,
+                estado: 'A',
+                codigo_plan_grupo: nuevoCodigoPlanGrupo,
+                codigo_plan_grupo_padre: split.codigoPadre,
+                usuario_modificacion: usuario,
+                linea_produccion: puestoTrabajoLineaPorMaterial.get(cleanCode(row.material)) || '',
+              };
+              await detalleTacticoService.save(detallePayload as unknown as DetalleTactico);
+              exitosos++;
+            } catch (e) {
+              console.warn(`[Guardar Plan PFD] Falló material ${row.material} (padre ${split.codigoPadre}):`, (e as Error).message);
+              fallidos++;
+            }
           }
         }
       }
@@ -3678,6 +3745,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return rows;
   }, [groupedNeeds, corridaFechas, siguienteDiaHabil]);
 
+  useEffect(() => { outputPlanRowsRef.current = outputPlanRows; }, [outputPlanRows]);
+
   const handleUpdateCorridaFecha = (corridaId: string, fecha: string) => {
     setCorridaFechas(prev => ({ ...prev, [corridaId]: fecha }));
   };
@@ -3759,25 +3828,65 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // (tab "Resumen Necesidades"); la corrida que arma outputPlanRows es una simulación en memoria que
   // no trae codigo_detalle_tactico propio. Si un material no aparece en esa Respuesta P3 (todavía no
   // se generó, o cambió desde entonces), el campo queda en '' y se corrige a mano en la vista previa.
-  const fetchCodigoDetalleTacticoPorMaterial = useCallback(async (): Promise<Map<string, number>> => {
+  const fetchCodigoDetalleTacticoPorMaterial = useCallback(async (): Promise<Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>> => {
     const [planesRes, detallesRes] = await Promise.all([planGrupoService.getAll(), detalleTacticoService.getAll()]);
     const planesP3Laminado = (planesRes.data || []).filter(pg =>
       pg.codigo_grupo === CODIGO_GRUPO_LAMINADO && pg.estado === 'A' && esPlanP3(pg.valor)
     );
-    const planP3Reciente = planesP3Laminado.reduce<PlanGrupo | undefined>((mas, actual) =>
-      (!mas || soloFecha(actual.fecha_inicio_plan) > soloFecha(mas.fecha_inicio_plan)) ? actual : mas
-    , undefined);
+    // Desempate por codigo_plan_grupo (autoincremental, mayor = creado más recientemente) cuando dos
+    // P3 comparten la misma fecha_inicio_plan -- pasa seguido, porque esa fecha es "próximo día
+    // hábil desde hoy" (siguienteDiaHabil) y varios días de creación consecutivos antes de un fin de
+    // semana/feriado resuelven al MISMO lunes. Caso real 2026-09-12: un P3 generado hoy (sábado)
+    // compitió por fecha_inicio_plan=14-sep contra uno más viejo con la misma fecha de liberación: sin
+    // desempate por ID, el reduce se quedaba con el que apareciera primero en el arreglo (no
+    // necesariamente el más nuevo), y el cruce de CodigoOrdenExterna por codigo_material fallaba
+    // porque apuntaba al Plan Grupo equivocado.
+    const planP3Reciente = planesP3Laminado.reduce<PlanGrupo | undefined>((mas, actual) => {
+      if (!mas) return actual;
+      const fechaActual = soloFecha(actual.fecha_inicio_plan);
+      const fechaMas = soloFecha(mas.fecha_inicio_plan);
+      if (fechaActual !== fechaMas) return fechaActual > fechaMas ? actual : mas;
+      return actual.codigo_plan_grupo > mas.codigo_plan_grupo ? actual : mas;
+    }, undefined);
 
-    const map = new Map<string, number>();
+    // Un material puede traer VARIOS candidatos (2+ corridas del mismo material desde el fix de "una
+    // fila de DetalleTactico por corrida", ver handleConfirmGuardarPlan) -- se guardan todos, con su
+    // cantidad, para que buildSolicitudProduccion empareje cada fila de outputPlanRows contra el
+    // candidato de cantidad más parecida (ver consumirCodigoDetalleTactico) en vez de quedarse
+    // siempre con "el primero que encuentre" para todas las corridas de ese material.
+    const map = new Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>();
     if (!planP3Reciente) return map;
     (detallesRes.data || [])
       .filter(d => d.codigo_plan_grupo === planP3Reciente.codigo_plan_grupo && d.estado === 'A')
       .forEach(d => {
         const key = cleanCode(d.codigo_material);
-        if (!map.has(key)) map.set(key, d.codigo_detalle_tactico);
+        if (!map.has(key)) map.set(key, []);
+        map.get(key)!.push({ codigo_detalle_tactico: d.codigo_detalle_tactico, cantidad: Number(d.cantidad_produccion_neta) || 0 });
       });
     return map;
   }, []);
+
+  // Consume (quita del pool) el codigo_detalle_tactico cuya cantidad grabada más se acerque a la de
+  // esta fila de outputPlanRows -- necesario porque un material con 2+ corridas trae varios
+  // candidatos (ver fetchCodigoDetalleTacticoPorMaterial); sin este emparejamiento por cantidad,
+  // todas las corridas del mismo material volvían a compartir el primer candidato que encontraran, y
+  // SAP rechazaba la segunda orden como duplicada ("Ya existe una orden registrada con el codigo...").
+  const consumirCodigoDetalleTactico = (
+    pool: Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>,
+    material: string,
+    cantidadObjetivo: number
+  ): number | undefined => {
+    const candidatos = pool.get(cleanCode(material));
+    if (!candidatos || candidatos.length === 0) return undefined;
+    let mejorIdx = 0;
+    let mejorDiff = Math.abs(candidatos[0].cantidad - cantidadObjetivo);
+    for (let i = 1; i < candidatos.length; i++) {
+      const diff = Math.abs(candidatos[i].cantidad - cantidadObjetivo);
+      if (diff < mejorDiff) { mejorDiff = diff; mejorIdx = i; }
+    }
+    const [elegido] = candidatos.splice(mejorIdx, 1);
+    return elegido.codigo_detalle_tactico;
+  };
 
   // Payload de InsertarSolicitudProduccionHB por fila (reemplaza a la línea de TXT que se descargaba
   // antes — ver [[corte_laminado_exportar_txt_reemplazado_por_sap_insert]]). Siempre devuelve TODOS
@@ -3792,10 +3901,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   //    cada fila suma looperTRolloMin × planUn y la siguiente sigue donde esa terminó) — ver el
   //    comentario en esa useMemo. Antes solo se mandaba Inicio (asumiendo programación "hacia
   //    adelante" y dejando Fin vacío); ahora se llenan ambos con el horario real calculado.
-  //  - PedidoComercial/PosicionPedido quedan vacíos: este módulo no maneja pedido comercial por
-  //    material. El instructivo marca ambos como obligatorios "si la clase de orden es MTO", y ZMOQ
-  //    es justamente "Orden de fab. MTO Muebles Otros" — si SAP rechaza por esto, hace falta ubicar de
-  //    dónde sacar el pedido comercial antes de reintentar (o cargarlo a mano en la vista previa).
+  //  - PedidoComercial/PosicionPedido: confirmado con SAP real (2026-09-12) que quedar vacíos rechaza
+  //    el insert con "Faltan campos requeridos". Este módulo planifica materiales MTS (make-to-stock,
+  //    sin pedido comercial real que reportar) — decisión de negocio: enviar '0' como valor de relleno
+  //    para pasar la validación obligatoria de SAP, no un pedido comercial real. Si a futuro este
+  //    módulo llegara a planificar material MTO con pedido comercial genuino, esto debe reemplazarse
+  //    por el valor real en vez del placeholder.
   //  - CodigoOrdenExterna: se llena con el codigo_detalle_tactico de la Respuesta P3 ya persistida
   //    para ese material (ver fetchCodigoDetalleTacticoPorMaterial). Versiones/codigoDetalleTactico se
   //    reciben como parámetro (no por closure sobre estado) porque se acaban de resolver segundos
@@ -3804,9 +3915,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const buildSolicitudProduccion = useCallback((
     r: CorridaOutputRow,
     versiones: Map<string, { version: string; ambiguo: boolean }>,
-    codigoDetalleTacticoPorMaterial: Map<string, number>
+    codigoDetalleTacticoPorMaterial: Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>
   ): SolicitudProduccionHBPayload => {
-    const codigoDetalleTactico = codigoDetalleTacticoPorMaterial.get(cleanCode(r.material));
+    const codigoDetalleTactico = consumirCodigoDetalleTactico(codigoDetalleTacticoPorMaterial, r.material, r.planKg);
     return {
       Mandante: '300',
       CodigoOrdenExterna: codigoDetalleTactico ? String(codigoDetalleTactico) : '',
@@ -3820,8 +3931,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       HoraFinProgramada: r.horaFinProgramada,
       FechaInicioProgramada: r.fechaInicioProgramada.replace(/-/g, ''),
       HoraInicioProgramada: r.horaInicioProgramada,
-      PedidoComercial: '',
-      PosicionPedido: '',
+      PedidoComercial: '0',
+      PosicionPedido: '0',
       EstadoRegistro: '1',
       Observaciones: 'Generado automático — Plan Táctico Corte y Laminado',
       EstadoCarga: '',
