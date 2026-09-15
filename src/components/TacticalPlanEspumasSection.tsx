@@ -2836,13 +2836,17 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // un ciclo que no correspondía al de hoy.
     const planesPFFCrudo = planesTodos.filter(p => {
       if (p.codigo_grupo !== codigoGrupoEnsamblado || p.estado !== 'A' || !ES_PLAN_ENSAMBLADO_FIRME(p.valor)) return false;
-      // fechaLocalEcuador, NO split('T')[0]: la API graba fecha_inicio_plan en UTC. Un plan guardado
-      // tarde en el día en Ecuador (ej. 22:00) cruza a la fecha calendario SIGUIENTE en UTC — el
-      // recorte ingenuo del ISO devolvía un día de más. Caso real que lo destapó: el P1 #279 grabado
-      // a las 17:00 (UTC 22:00, mismo día) coincidía por casualidad; el PFF #292 que lo reemplazó,
-      // grabado a las 22:00 (UTC 03:00 del día SIGUIENTE), dejaba de coincidir con la ventana
-      // esperada y el módulo reportaba "no hay ningún Plan Grupo P1/PFF activo" aunque sí existiera.
-      return fechaLocalPlana(p.fecha_inicio_plan) === fechaObjetivoPFF;
+      // fechaLocalEcuador, NO fechaLocalPlana: a diferencia del P2/P3/PFD que graba esta misma app (ver
+      // convención "naive Ecuador" en dias-laborables.ts), el PlanGrupo "P1"/"PFF" lo graba el proceso
+      // EXTERNO de Ensamblado con timestamp UTC real — la migración del 2026-09-10 (commit 13c4f84)
+      // cambió esta línea a fechaLocalPlana por error (reemplazo masivo) y resucitó el bug original que
+      // este mismo comentario describe: un plan guardado tarde en el día en Ecuador (ej. 22:00) cruza a
+      // la fecha calendario SIGUIENTE en UTC — el recorte ingenuo del ISO (lo que hace fechaLocalPlana)
+      // devuelve un día de más. Caso real que lo destapó originalmente: el P1 #279 grabado a las 17:00
+      // (UTC 22:00, mismo día) coincidía por casualidad; el PFF #292 que lo reemplazó, grabado a las
+      // 22:00 (UTC 03:00 del día SIGUIENTE), dejaba de coincidir con la ventana esperada y el módulo
+      // reportaba "no hay ningún Plan Grupo P1/PFF activo" aunque sí existiera.
+      return fechaLocalEcuador(p.fecha_inicio_plan) === fechaObjetivoPFF;
     });
     // Solo el plan PFF MÁS RECIENTE del grupo — red de seguridad secundaria para el caso (menos común
     // ahora que planesPFFCrudo ya exige fecha_inicio_plan = hoy+3 días hábiles) de que el origen
@@ -2984,10 +2988,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const filas: NecesidadPlantaRow[] = [];
     resultadoPorPlan.forEach((porLamina, codigoPlanGrupo) => {
       const plan = planPorCodigo.get(codigoPlanGrupo);
-      // fechaLocalEcuador: igual que en fetchNecesidadesPlanta, esta fecha termina en
-      // fechasP2PorMaterialPorCentro y decide si una orden real cubre esta necesidad del PFF.
-      const fechaInicio = plan?.fecha_inicio_plan ? fechaLocalPlana(plan.fecha_inicio_plan) : '—';
-      const fechaFin = plan?.fecha_fin_plan ? fechaLocalPlana(plan.fecha_fin_plan) : fechaInicio;
+      // fechaLocalEcuador, NO fechaLocalPlana: `plan` acá es el PlanGrupo "P1"/"PFF" de Ensamblado
+      // (externo, timestamp UTC real — ver el comentario en planesPFFCrudo más arriba), no un P2/P3/PFD
+      // propio en convención naive. Esta fecha termina en fechasP2PorMaterialPorCentro y decide si una
+      // orden real cubre esta necesidad del PFF.
+      const fechaInicio = plan?.fecha_inicio_plan ? fechaLocalEcuador(plan.fecha_inicio_plan) : '—';
+      const fechaFin = plan?.fecha_fin_plan ? fechaLocalEcuador(plan.fecha_fin_plan) : fechaInicio;
       porLamina.forEach((cantidad, codigoLamina) => {
         filas.push({
           codigo_material: Number(codigoLamina),
