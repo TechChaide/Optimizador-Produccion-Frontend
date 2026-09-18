@@ -227,14 +227,38 @@ const ALMACENES_STOCK_POR_CENTRO: Record<'1000' | '2000', string[]> = {
 // GYE → HR-VAGYE (46). Mientras no se agreguen con su horario, la ocupación de Verticales no tiene
 // contra qué medirse y se muestra como "sin capacidad configurada" en vez de un porcentaje inventado.
 type ProcesoCorte = 'carrusel' | 'vertical' | 'cnc';
+// Resultado de cruzar la carga real (filasSeleccion) contra el código SAP de una máquina física
+// (ver MACHINE_SAP_CODES_UIO) para la fecha elegida en "Evaluar Capacidad" — 'sin-fecha' y
+// 'sin-mapeo' son estados informativos, no ceros: evitan que "no hay dato" se lea como "máquina libre".
+type OcupacionMaquinaInfo =
+  | { estado: 'ok'; horas: number; capNeta: number; pct: number | null }
+  | { estado: 'sin-mapeo' }
+  | { estado: 'sin-fecha' };
 // Código real de puesto de trabajo SAP para la Cortadora CNC (HR-CTCNC) — verificado con el maestro
 // MaquinaSim/PuestoTrabajo/RespCtrlProd que compartió el usuario y con la restricción real
 // "Hojas_Rutas_ PuestoTrabajo" (codigo_restriccion 554, grupo 8, ver hojaRutaPuestoTrabajoPorCentro).
-// Es el ÚNICO código de este maestro sin ambigüedad entre máquinas (a diferencia de HR-CAR03, que
-// comparten CR03 y CR04, o HR-TACOS, que comparten CR04 y la Vertical 3) — por eso CNC se puede
-// separar de forma confiable hoy; CR01/CR03/CR04 individuales, no todavía.
 const CODIGO_MAQUINA_CNC = 'HR-CTCNC';
 const esFilaCNC = (maquina: unknown): boolean => String(maquina || '').trim().toUpperCase() === CODIGO_MAQUINA_CNC;
+const normalizarCodigoMaquina = (maquina: unknown): string => String(maquina || '').trim().toUpperCase();
+
+// Mapeo real SAP (Hoja de Ruta / Puesto de Trabajo, columna "Hoja Ruta / P. Trabajo" de Provisionales/
+// FERT) → máquina física de Corte Espuma Quito (Centro 1000), confirmado por el usuario 2026-09-18:
+// CR04→HR-CAR04, CR03→HR-CAR03, CR01→HR-CAR01, CNC01→HR-CTCNC, V02→HR_V02(+variantes), V03→HR_V03_1/
+// 2/3 y V03_MBL. Antes se creía que HR-CAR03 lo compartían CR03/CR04 (dato viejo, ya corregido).
+// HR-TACOS queda FUERA a propósito de CR04 y de V03: el usuario confirmó que sigue siendo ambiguo
+// entre esas dos (lo corta CR04 o la Vertical 3 según el caso) — asignarlo a una sola inventaría un
+// dato que no existe; sus horas quedan en la reconciliación "sin atribuir a máquina" (ver
+// renderProcesoConfig). HR-CAR02 puede seguir apareciendo en data histórica (máquina ya
+// retirada/replanificada, no vigente en la planificación nueva) y por eso tampoco mapea a nada.
+// Solo cubre Quito (UIO) — Guayaquil (GYE) todavía no tiene su propio mapeo confirmado.
+const MACHINE_SAP_CODES_UIO: Record<string, (codigoNormalizado: string) => boolean> = {
+  CR04: (c) => c === 'HR-CAR04',
+  CR03: (c) => c === 'HR-CAR03',
+  CR01: (c) => c === 'HR-CAR01',
+  CNC01: (c) => c === CODIGO_MAQUINA_CNC,
+  V02: (c) => c.startsWith('HR_V02') || c.startsWith('HR-V02'),
+  V03: (c) => c.startsWith('HR_V03') || c.startsWith('HR-V03') || c.includes('V03_MBL'),
+};
 const MACHINES_BY_PLANTA: Record<'UIO' | 'GYE', { id: string; n: string; proceso: ProcesoCorte }[]> = {
   UIO: [
     { id: 'CR04', n: 'CARRUSEL 4 FECKEN', proceso: 'carrusel' },
@@ -2596,6 +2620,18 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           const restrs = (res.data || []).filter(r => Object.values(CODIGO_GRUPO_CORTE_POR_CENTRO).includes(r.codigo_grupo));
           setRestriccionesCorte(restrs);
           actualizarEnCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA, { restriccionesCorte: restrs });
+
+          // Destinatarios del "Enviar Reporte" (Gestión de Tiempos): se precargan desde la
+          // restricción Grupo_correos_Laminado (codigo_grupo 8, Centro 1000/Quito, mismo grupo SAP
+          // que comparte con Corte y Laminado) en vez de quedar en blanco. Sigue editable en pantalla
+          // -- solo se autocompleta si el usuario todavía no escribió nada.
+          const correosGrupo = (res.data || [])
+            .filter(r => r.nombre_restriccion === 'Grupo_correos_Laminado' && r.codigo_grupo === CODIGO_GRUPO_LAMINADO)
+            .flatMap(r => String(r.valor_restriccion || '').split(/[,&]/).map(v => v.trim()))
+            .filter(Boolean);
+          if (correosGrupo.length > 0) {
+            setDestinatariosReporte(prev => prev.trim() ? prev : correosGrupo.join(', '));
+          }
         })
         .catch(e => console.warn('[Corte Espuma] No se pudieron cargar las restricciones de responsables:', (e as Error).message));
 
@@ -3769,16 +3805,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     addNotification('success', `Turno ${nombreCampo} → ${etiqueta} en todas las máquinas de ${planta}. Capacidad y ocupación recalculadas.`);
   }, [addNotification, shiftOptions, nightShiftOptions]);
 
-  const renderMachineCol = (id: string, name: string, planta: 'UIO' | 'GYE') => {
+  const renderMachineCol = (id: string, name: string, planta: 'UIO' | 'GYE', ocupacion: OcupacionMaquinaInfo) => {
     const config = planta === 'UIO' ? uioConfig.shifts[id] : gyeConfig.shifts[id];
 
-    // Se quitó "Ocupación Recurso" (ocupación por máquina). Cruzaba la carga con la máquina usando
-    // `r.maquina === id || r.maquina.includes(id)`, pero los IDs de esta configuración (CR04, CR03,
-    // CNC01…) son un modelo manual del planificador y NO son los códigos de máquina de SAP
-    // (HR-CAR01/02/03, HR-CARG1, HR_V02, HR_V03_1…). Resultado: mostraba 0.0% en casi todas las
-    // columnas —lo que se leía como "esta máquina está libre" cuando en realidad era "no encontré
-    // nada que cruzar"— y solo acertaba por casualidad en V02/V03, donde 'HR_V02'.includes('V02').
-    // Para devolverla hace falta un mapeo explícito ID de configuración → código(s) SAP.
+    // "Ocupación Recurso" (ocupación por máquina): se había quitado porque cruzaba la carga con la
+    // máquina usando `r.maquina === id || r.maquina.includes(id)`, y los IDs de esta configuración
+    // (CR04, CR03, CNC01…) no son los códigos de máquina de SAP (HR-CAR01/03/04, HR-CTCNC, HR_V02,
+    // HR_V03_1…) — mostraba 0.0% en casi todas las columnas. Ahora vuelve con el mapeo explícito
+    // MACHINE_SAP_CODES_UIO (confirmado por el usuario 2026-09-18), calculado en renderDashboard y
+    // recibido acá ya resuelto (ocupacion) porque este helper no tiene acceso a filasSeleccion.
     //
     // MTTO PREVENTIVO: antes usaba los selectores de fecha de Provisionales/FERT (getMttoTime, ya
     // eliminada) — mostraba 0.00h casi siempre porque esos selectores no tienen por qué coincidir
@@ -3818,6 +3853,27 @@ export const TacticalPlanEspumasSection: React.FC = () => {
              <div className="bg-indigo-50 border border-indigo-200 rounded p-1.5 text-center">
                 <span className="text-[10px] font-black text-indigo-700">{mttoHours.toFixed(2)}H</span>
              </div>
+          </div>
+          <div className="space-y-1">
+             <p className="text-[9px] font-black text-slate-500 uppercase mb-1 tracking-wide">Ocupación Recurso</p>
+             {ocupacion.estado === 'sin-fecha' ? (
+               <div className="bg-gray-50 border border-gray-200 rounded p-1.5 text-center" title="Elige una fecha en 'Evaluar Capacidad' para calcular la ocupación real de este recurso.">
+                 <span className="text-[8px] font-bold text-gray-400 uppercase">Sin fecha</span>
+               </div>
+             ) : ocupacion.estado === 'sin-mapeo' ? (
+               <div className="bg-gray-50 border border-gray-200 rounded p-1.5 text-center" title="Guayaquil todavía no tiene un mapeo confirmado de Hoja de Ruta/Puesto de Trabajo → máquina.">
+                 <span className="text-[8px] font-bold text-gray-400 uppercase">Sin mapeo SAP</span>
+               </div>
+             ) : (
+               <div
+                 className={cn("border rounded p-1.5 text-center", ocupacion.pct !== null && ocupacion.pct > 100 ? "bg-red-50 border-red-200" : "bg-emerald-50 border-emerald-200")}
+                 title={`Suma real de tTotal de las órdenes cuya Hoja de Ruta/Puesto de Trabajo coincide con esta máquina (ver MACHINE_SAP_CODES_UIO), para la fecha elegida en "Evaluar Capacidad". ${ocupacion.pct !== null ? `Contra ${ocupacion.capNeta.toFixed(2)}h de capacidad neta de este recurso.` : 'Sin capacidad neta configurada para comparar.'}`}
+               >
+                 <span className={cn("text-[10px] font-black", ocupacion.pct !== null && ocupacion.pct > 100 ? "text-red-700" : "text-emerald-700")}>
+                   {ocupacion.horas.toFixed(2)}H{ocupacion.pct !== null && ` (${ocupacion.pct.toFixed(0)}%)`}
+                 </span>
+               </div>
+             )}
           </div>
           <div className="space-y-2">
             <p className="text-[9px] font-black text-slate-500 uppercase tracking-wide">Turno Día</p>
@@ -4112,6 +4168,19 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const capSeleccionProceso = Math.max(0, cap * fechasSel.length - mttoProceso);
       const ocupacionPctProceso = capSeleccionProceso > 0 ? (ocupadoProceso / capSeleccionProceso) * 100 : null;
 
+      // Reconciliación contra el desglose por máquina (ver ocupacionInfoMaquina/MACHINE_SAP_CODES_UIO):
+      // la diferencia entre el total del proceso (por RESPONSABLE, siempre confiable) y la suma de lo
+      // atribuido a máquinas específicas es horas con código de Hoja de Ruta ambiguo (HR-TACOS, que
+      // comparte CR04/Vertical 3) o sin mapear (HR-CAR02 histórico, u orden sin campo MAQUINA) — no
+      // desaparecen del total, solo no se pueden repartir por columna con certeza.
+      const ocupadoAtribuidoMaquina = planta === 'UIO'
+        ? machines.filter(m => m.proceso === proceso).reduce((s, m) => {
+            const info = ocupacionInfoMaquina(m.id);
+            return s + (info.estado === 'ok' ? info.horas : 0);
+          }, 0)
+        : 0;
+      const sinAtribuirProceso = planta === 'UIO' ? Math.max(0, ocupadoProceso - ocupadoAtribuidoMaquina) : 0;
+
       return (
         <div
           key={proceso}
@@ -4180,6 +4249,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                   <span className="text-[10px] font-black text-slate-500 uppercase">h</span>
                   {ocupacionPctProceso !== null && (
                     <span className={cn("text-[11px] font-black tabular-nums", ocupacionPctProceso > 100 ? "text-red-600" : "text-slate-500")}>({ocupacionPctProceso.toFixed(0)}%)</span>
+                  )}
+                  {sinAtribuirProceso > 0.05 && (
+                    <span className="inline-flex cursor-help shrink-0" title={`${sinAtribuirProceso.toFixed(2)}h de estas están en el total del proceso pero NO se pudieron atribuir a una máquina específica en las columnas de arriba (código de Hoja de Ruta ambiguo como HR-TACOS, compartido CR04/Vertical 3, o sin mapear como HR-CAR02 histórico).`}>
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                    </span>
                   )}
                 </div>
                 <p className="text-[8px] font-bold text-slate-400 mt-0.5">de {capSeleccionProceso.toFixed(1)}h · {label.toLowerCase()}</p>
@@ -4255,6 +4329,22 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const fechasSel = Array.from(selectedDatesCapacidad[planta]).sort();
     const backlogSeleccion = fechasSel.length > 0 ? calcularBacklogAntesDe(fechasSel[0]) : [];
     const filasSeleccion = [...backlogSeleccion, ...fechasSel.flatMap(f => resolverFecha(f).map(x => ({ ...x, fecha: f })))];
+
+    // Ocupación real por máquina física (ver MACHINE_SAP_CODES_UIO) para la tarjeta de cada recurso
+    // en renderMachineCol — mismo dataset (filasSeleccion) y misma métrica (tTotal) que ya usa
+    // renderProcesoConfig para el % agregado por proceso, solo que acá se filtra por código de
+    // máquina en vez de por responsable. Sin fecha seleccionada no hay nada que sumar todavía.
+    const ocupacionInfoMaquina = (id: string): OcupacionMaquinaInfo => {
+      if (fechasSel.length === 0) return { estado: 'sin-fecha' };
+      const matcher = planta === 'UIO' ? MACHINE_SAP_CODES_UIO[id] : undefined;
+      if (!matcher) return { estado: 'sin-mapeo' };
+      const horas = filasSeleccion
+        .filter(x => matcher(normalizarCodigoMaquina(x.row.maquina)))
+        .reduce((s, x) => s + x.row.tTotal, 0);
+      const capNeta = horasDeMaquina(id);
+      const pct = capNeta > 0 ? (horas / capNeta) * 100 : null;
+      return { estado: 'ok', horas, capNeta, pct };
+    };
     // Selector de UNA sola fecha a la vez (antes multi-select): elegir una fecha reemplaza la
     // anterior, no se acumulan — el usuario pidió simplificar, comparar varios días combinados en
     // un solo % confundía más de lo que ayudaba. Con esto, capacidadSeleccion (más abajo) queda
@@ -4308,6 +4398,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                     placeholder="correo1@chaideychaide.com, correo2@chaideychaide.com"
                     className="w-full h-20 text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-red-400"
                   />
+                  <p className="text-[9px] text-slate-400 -mt-1">Precargado desde el grupo de correos configurado (Grupo_correos_Laminado) — editable antes de enviar.</p>
                   <Button
                     onClick={() => handleEnviarReporteEspuma(planta)}
                     disabled={isSendingReporte[planta] || !destinatariosReporte.trim()}
@@ -4432,17 +4523,17 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         <div className="flex">
           {machinesCarrusel.length > 0 && (
             <div className="grid" style={{ flex: `${machinesCarrusel.length} 1 0%`, gridTemplateColumns: `repeat(${machinesCarrusel.length}, minmax(0, 1fr))` }}>
-              {machinesCarrusel.map(m => renderMachineCol(m.id, m.n, planta))}
+              {machinesCarrusel.map(m => renderMachineCol(m.id, m.n, planta, ocupacionInfoMaquina(m.id)))}
             </div>
           )}
           {machinesCnc.length > 0 && (
             <div className="grid border-l-2 border-amber-200" style={{ flex: `${machinesCnc.length} 1 0%`, gridTemplateColumns: `repeat(${machinesCnc.length}, minmax(0, 1fr))` }}>
-              {machinesCnc.map(m => renderMachineCol(m.id, m.n, planta))}
+              {machinesCnc.map(m => renderMachineCol(m.id, m.n, planta, ocupacionInfoMaquina(m.id)))}
             </div>
           )}
           {machinesVertical.length > 0 && (
             <div className="grid border-l-2 border-fuchsia-200" style={{ flex: `${flexVertical} 1 0%`, gridTemplateColumns: `repeat(${machinesVertical.length}, minmax(0, 1fr))` }}>
-              {machinesVertical.map(m => renderMachineCol(m.id, m.n, planta))}
+              {machinesVertical.map(m => renderMachineCol(m.id, m.n, planta, ocupacionInfoMaquina(m.id)))}
             </div>
           )}
         </div>
@@ -4642,6 +4733,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                   </th>
                   <th className="px-3 py-4 border-r border-gray-100 uppercase">Planta/ALM</th>
                   <th className="px-3 py-4 border-r border-gray-100">Resp CP</th>
+                  <th
+                    className="px-3 py-4 border-r border-gray-100 bg-cyan-50/50 text-cyan-700 uppercase"
+                    title="Puesto de trabajo / Hoja de Ruta real de la orden (MAQUINA/RECURSO en SAP) — es el mismo dato que separa la capacidad por máquina en Capacidad Operativa (ver esFilaCNC/MACHINES_BY_PLANTA)."
+                  >
+                    Hoja Ruta / P. Trabajo
+                  </th>
                   <th className="px-3 py-4 border-r border-gray-100">{ordenLabel}</th>
                   <th className={cn("px-3 py-4 uppercase", (showOrigen || showEntregaVentaExterna) ? "border-r border-gray-100" : "")}>Fecha</th>
                   {showOrigen && <th className={cn("px-3 py-4 uppercase text-left bg-gray-100/50", showEntregaVentaExterna ? "border-r border-gray-100" : "")}>{origenLabel}</th>}
@@ -4674,7 +4771,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                         <td colSpan={2}></td>
                         <td className="px-4 py-3 bg-indigo-50 text-indigo-700 font-black">{tH.toFixed(2)}h</td>
                         <td className="px-3 py-3 bg-amber-50 text-amber-700 font-black">{tBatches}</td>
-                        <td colSpan={7 + (showOrigen ? 1 : 0) + (showEntregaVentaExterna ? 2 : 0)}></td>
+                        <td colSpan={8 + (showOrigen ? 1 : 0) + (showEntregaVentaExterna ? 2 : 0)}></td>
                       </tr>
                       {isExp && items.map((row, idx) => (
                         <tr key={idx} className="hover:bg-gray-50/50 transition-colors font-mono text-[9px]">
@@ -4728,6 +4825,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                           </td>
                           <td className="px-3 py-2 border-r border-slate-50 text-slate-600 font-black">{row.centro}/{row.almacen}</td>
                           <td className="px-3 py-2 border-r border-slate-50">{row.responsable}</td>
+                          <td className="px-3 py-2 border-r border-slate-50 bg-cyan-50/30 text-cyan-700 font-black">{row.maquina || '—'}</td>
                           <td className="px-3 py-2 border-r border-slate-50 text-slate-600">{row.orden}</td>
                           <td
                             className={cn("px-3 py-2 text-slate-600 font-bold", (showOrigen || showEntregaVentaExterna) ? "border-r border-slate-50" : "")}
