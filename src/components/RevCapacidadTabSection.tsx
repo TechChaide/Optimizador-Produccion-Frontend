@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from '@/lib/utils';
 import * as XLSX from 'xlsx';
-import { useTiempoFinalPorPuesto, useCantidadFinalPorPuesto, useTiempoInicialPorPuesto, useCantidadInicialPorPuesto } from '@/hooks/useProgTiemposCapacidad';
+import { useTiempoFinalPorPuesto, useCantidadFinalPorPuesto, useTiempoInicialPorPuesto, useCantidadInicialPorPuesto, publishOcupacionPorCentroLinea, publishResumenCapacidad } from '@/hooks/useProgTiemposCapacidad';
 
 interface SummaryRow {
   linea: string;
@@ -187,13 +187,13 @@ export const RevCapacidadTabSection: React.FC = () => {
   const currentHorasT2 = horasT2ByCenter[selectedCenter] ?? 8.75;
   const currentRends = rendimientosByCenter[selectedCenter] || { L1: 1.05, L2: 1.08, L3: 1.05, L5: 1.05 };
 
-  const fertSumMap = useMemo(() => {
+  const computeFertSumMap = useCallback((center: string, targetDate: string) => {
     const map = new Map<string, number>();
-    const targetDateISO = normalizeDateISO(programmingDate);
-    if (!targetDateISO || !selectedCenter) return map;
+    const targetDateISO = normalizeDateISO(targetDate);
+    if (!targetDateISO || !center) return map;
 
     fertOrders.forEach(o => {
-      if (normalizeDateISO(o.FECHA || o.fecha) === targetDateISO && String(o.CENTRO || '').trim() === selectedCenter) {
+      if (normalizeDateISO(o.FECHA || o.fecha) === targetDateISO && String(o.CENTRO || '').trim() === center) {
         const maquina = String(o.MAQUINA || o.Maquina || o.maquina || '').trim().toUpperCase();
         const linea = MAQUINA_LINEA_MAP[maquina] || '';
 
@@ -203,15 +203,15 @@ export const RevCapacidadTabSection: React.FC = () => {
       }
     });
     return map;
-  }, [fertOrders, programmingDate, selectedCenter]);
+  }, [fertOrders]);
 
-  const prevSumMap = useMemo(() => {
+  const computePrevSumMap = useCallback((center: string, targetDate: string) => {
     const map = new Map<string, number>();
-    const targetDateISO = normalizeDateISO(programmingDate);
-    if (!targetDateISO || !selectedCenter) return map;
+    const targetDateISO = normalizeDateISO(targetDate);
+    if (!targetDateISO || !center) return map;
 
     provisionalOrders.forEach(o => {
-      if (normalizeDateISO(o.FECHAINICIO || o.fecha_inicio) === targetDateISO && String(o.Centro || '').trim() === selectedCenter) {
+      if (normalizeDateISO(o.FECHAINICIO || o.fecha_inicio) === targetDateISO && String(o.Centro || '').trim() === center) {
         const maquina = String(o.Maquina || o.MAQUINA || o.maquina || '').trim().toUpperCase();
         const linea = MAQUINA_LINEA_MAP[maquina] || '';
 
@@ -221,11 +221,21 @@ export const RevCapacidadTabSection: React.FC = () => {
       }
     });
     return map;
-  }, [provisionalOrders, programmingDate, selectedCenter]);
+  }, [provisionalOrders]);
 
-  const summaryData = useMemo((): SummaryRow[] => {
+  // Calcula el SummaryRow[] para UN Centro puntual (parametrizado, ya no depende de "selectedCenter")
+  // — necesario para poder publicar "Resumen de Capacidad" de AMBOS centros a la vez hacia "Resumen
+  // Plan Final" (RevCapacidadTabSection ahora vive forceMount en segundo plano, pero antes solo
+  // calculaba/publicaba el Centro visible en su propio selector interno, dejando el otro Centro sin
+  // datos hasta que el usuario lo visitara manualmente aquí).
+  const computeSummaryForCenter = useCallback((center: string): SummaryRow[] => {
+    const targetDate = progDates[center] || new Date().toISOString().split('T')[0];
+    const rends = rendimientosByCenter[center] || { L1: 1.05, L2: 1.08, L3: 1.05, L5: 1.05 };
+    const fertMap = computeFertSumMap(center, targetDate);
+    const prevMap = computePrevSumMap(center, targetDate);
+
     const map = new Map<string, SummaryRow>();
-    const base = technicalData.filter(d => String(d.Centro || '').trim() === selectedCenter);
+    const base = technicalData.filter(d => String(d.Centro || '').trim() === center);
     const allowedLines = ['LINEA 1', 'LINEA 2', 'LINEA 3', 'LINEA 5'];
     const allowedWstations = ['Armado', 'Cerrado L1', 'Cerrado1 L2', 'Cerrado2 L2', 'Cerrado L3'];
 
@@ -233,7 +243,7 @@ export const RevCapacidadTabSection: React.FC = () => {
       const lineRaw = String(row.Linea || '').trim();
       const lineNormalized = normalizeKey(lineRaw);
       const puestoRaw = String(row.PuestoTrabajo || '').trim();
-      
+
       if (!allowedLines.some(l => lineNormalized.includes(l))) return;
       if (!allowedWstations.includes(puestoRaw)) return;
 
@@ -252,15 +262,15 @@ export const RevCapacidadTabSection: React.FC = () => {
       }
 
       const entry = map.get(key)!;
-      const qFab = fertSumMap.get(matKey) || 0;
-      const qPrev = prevSumMap.get(matKey) || 0;
+      const qFab = fertMap.get(matKey) || 0;
+      const qPrev = prevMap.get(matKey) || 0;
       const tUnit = Number(row.Tiempo_Min || 0);
 
       let rendFactor = 1;
-      if (lineNormalized.includes('1')) rendFactor = currentRends.L1;
-      else if (lineNormalized.includes('2')) rendFactor = currentRends.L2;
-      else if (lineNormalized.includes('3')) rendFactor = currentRends.L3;
-      else if (lineNormalized.includes('5')) rendFactor = currentRends.L5;
+      if (lineNormalized.includes('1')) rendFactor = rends.L1;
+      else if (lineNormalized.includes('2')) rendFactor = rends.L2;
+      else if (lineNormalized.includes('3')) rendFactor = rends.L3;
+      else if (lineNormalized.includes('5')) rendFactor = rends.L5;
 
       entry.cantOrdFab += qFab;
       entry.tiempoOrdFab += ((qFab * tUnit) / 60) * rendFactor;
@@ -284,7 +294,7 @@ export const RevCapacidadTabSection: React.FC = () => {
     // Total" de Prog Tiempos SIN el ajuste de Cant Reprog: la foto de la demanda original.
     result.forEach(entry => {
       const puestoNorm = entry.puesto.trim().toUpperCase().replace(/\s+/g, ' ');
-      const key = `${selectedCenter}|${entry.linea}|${puestoNorm}`;
+      const key = `${center}|${entry.linea}|${puestoNorm}`;
       const tiempoPublicado = tiempoFinalPorPuesto[key];
       if (tiempoPublicado !== undefined) entry.totalTiempo = tiempoPublicado;
       const cantidadPublicada = cantidadFinalPorPuesto[key];
@@ -296,7 +306,47 @@ export const RevCapacidadTabSection: React.FC = () => {
     });
 
     return result.sort((a, b) => a.linea.localeCompare(b.linea) || a.puesto.localeCompare(b.puesto));
-  }, [technicalData, selectedCenter, fertSumMap, prevSumMap, currentRends, tiempoFinalPorPuesto, cantidadFinalPorPuesto, tiempoInicialPorPuesto, cantidadInicialPorPuesto]);
+  }, [technicalData, progDates, rendimientosByCenter, computeFertSumMap, computePrevSumMap, tiempoFinalPorPuesto, cantidadFinalPorPuesto, tiempoInicialPorPuesto, cantidadInicialPorPuesto]);
+
+  const summaryDataByCenter = useMemo(() => {
+    const centers = availableCenters.length > 0 ? availableCenters : ['1000', '2000'];
+    const result: Record<string, SummaryRow[]> = {};
+    centers.forEach(center => { result[center] = computeSummaryForCenter(center); });
+    return result;
+  }, [availableCenters, computeSummaryForCenter]);
+
+  const summaryData = summaryDataByCenter[selectedCenter] || [];
+
+  useEffect(() => {
+    const lineOccupancy: Record<string, number> = {};
+    const resumenRows = Object.entries(summaryDataByCenter).flatMap(([center, rows]) => {
+      const horasT1 = horasT1ByCenter[center] ?? 8.75;
+      const horasT2 = horasT2ByCenter[center] ?? 8.75;
+      const rends = rendimientosByCenter[center] || { L1: 1.05, L2: 1.08, L3: 1.05, L5: 1.05 };
+      return rows.map(row => {
+        const key = `${center}|${row.linea}|${row.puesto}`;
+        const puestosT1 = editablePuestosT1[key] ?? row.puestosObjetivo;
+        const puestosT2 = editablePuestosT2[key] ?? 0;
+        const tiempoDisponible = ((puestosT1 * horasT1) + (puestosT2 * horasT2)) * getRendFactor(row.linea, rends);
+        const ocupacion = tiempoDisponible > 0 ? (row.totalTiempo / tiempoDisponible) * 100 : 0;
+
+        const lineKey = `${center}|${row.linea}`;
+        lineOccupancy[lineKey] = Math.max(lineOccupancy[lineKey] ?? 0, ocupacion);
+
+        return {
+          centro: center,
+          linea: row.linea,
+          puesto: row.puesto,
+          totalCantidad: row.totalCantidad,
+          puestosT1,
+          puestosT2,
+          ocupacion,
+        };
+      });
+    });
+    publishResumenCapacidad(resumenRows);
+    publishOcupacionPorCentroLinea(lineOccupancy);
+  }, [summaryDataByCenter, editablePuestosT1, editablePuestosT2, horasT1ByCenter, horasT2ByCenter, rendimientosByCenter]);
 
   // Sincronizar y guardar en localStorage
   useEffect(() => {
@@ -310,14 +360,17 @@ export const RevCapacidadTabSection: React.FC = () => {
     }
   }, [editablePuestosT1, editablePuestosT2, horasT1ByCenter, horasT2ByCenter, progDates, rendimientosByCenter, isMounted]);
 
-  // Inicializar puestos vacíos
+  // Inicializar puestos vacíos — para AMBOS centros (no solo el visible en el selector), así el
+  // Centro no visitado también arranca con sus Puestos T1 objetivo en vez de quedar en 0/undefined
+  // al publicarse hacia "Resumen Plan Final".
   useEffect(() => {
-    if (summaryData.length === 0) return;
+    const allRows = Object.entries(summaryDataByCenter).flatMap(([center, rows]) => rows.map(r => ({ center, r })));
+    if (allRows.length === 0) return;
     setEditablePuestosT1(prev => {
       const next = { ...prev };
       let changed = false;
-      summaryData.forEach(r => {
-        const key = `${selectedCenter}|${r.linea}|${r.puesto}`;
+      allRows.forEach(({ center, r }) => {
+        const key = `${center}|${r.linea}|${r.puesto}`;
         if (next[key] === undefined) {
           next[key] = r.puestosObjetivo;
           changed = true;
@@ -328,8 +381,8 @@ export const RevCapacidadTabSection: React.FC = () => {
     setEditablePuestosT2(prev => {
       const next = { ...prev };
       let changed = false;
-      summaryData.forEach(r => {
-        const key = `${selectedCenter}|${r.linea}|${r.puesto}`;
+      allRows.forEach(({ center, r }) => {
+        const key = `${center}|${r.linea}|${r.puesto}`;
         if (next[key] === undefined) {
           next[key] = 0;
           changed = true;
@@ -337,7 +390,7 @@ export const RevCapacidadTabSection: React.FC = () => {
       });
       return changed ? next : prev;
     });
-  }, [summaryData, selectedCenter]);
+  }, [summaryDataByCenter]);
 
   const grandTotals = useMemo(() => {
     return summaryData.reduce((acc, r) => {

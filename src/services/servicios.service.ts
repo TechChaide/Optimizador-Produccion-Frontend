@@ -9,7 +9,7 @@ const API_URL = `${environment.apiURL}/api/servicios`;
 // del tipo de programación de ClaseOrden ("hacia adelante" pide FechaInicioProgramada/
 // HoraInicioProgramada; "hacia atrás" pide FechaFinProgramada/HoraFinProgramada) o de si la orden
 // trae Pedido Comercial (PedidoComercial + PosicionPedido van juntos) — por eso van opcionales acá,
-// no obligatorios en el tipo.
+// no obligatorios en el tipo. Compartida entre Corte y Laminado y Programación Táctica (Ensamblado).
 export interface SolicitudProduccionHBPayload {
   Mandante: string;
   CodigoOrdenExterna: string;
