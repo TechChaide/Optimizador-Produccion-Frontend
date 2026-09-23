@@ -25,7 +25,8 @@ import {
   Trash2,
   CheckCircle2,
   Mail,
-  Send
+  Send,
+  X
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -691,6 +692,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const [inventarioSAP, setInventarioSAP] = useState<InventarioSapRow[]>([]);
   const [operadoresLaminado, setOperadoresLaminado] = useState<RawApiRow[]>([]);
   const [mantenimientosSAP, setMantenimientosSAP] = useState<RawApiRow[]>([]);
+  // Filtro de material para el tab "Validar PR2" (solo lectura, sin efecto en el plan) — ver
+  // TabsContent value="debugPR2" más abajo, pensado para inspeccionar la data cruda de
+  // tiemposEnsambladoByGrupoYCentroPR2 tal cual la trae el endpoint (PuestoTrabajo/PuestoTrabajoLinea)
+  // sin pasar por resolvePuestoTrabajo, útil para casos como 30004576/30006695 (ver comentario en
+  // buildSolicitudProduccion).
+  const [debugPR2Query, setDebugPR2Query] = useState('');
   // El módulo YA NO sincroniza solo al abrirse — ver handleSincronizarYGenerar. `isLoading` cubre
   // toda la duración de "Sincronizar y Generar Necesidades" (ambas fases); el botón del encabezado
   // usa `syncStep` para el disabled/spinner (mismo patrón que los otros 3 módulos tácticos), pero
@@ -712,7 +719,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   
   const [unifiedNeeds, setUnifiedNeeds] = useState<UnifiedNeedRow[]>([]);
   const [isProcessingResumen, setIsProcessingResumen] = useState(false);
-  const [isSavingPlan, setIsSavingPlan] = useState(false);
   const [isValidandoExportTxt, setIsValidandoExportTxt] = useState(false);
   const [exportTxtPreview, setExportTxtPreview] = useState<CorridaOutputRow[] | null>(null);
   // Payload real (uno por fila de exportTxtPreview, mismo índice) que se muestra y edita en la tabla
@@ -727,9 +733,14 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // tab "Data Aprobada" de Venta Externa (mismo criterio que ya usa Corte Espuma para "Diferir →").
   const [exportTxtBloqueado, setExportTxtBloqueado] = useState<string[] | null>(null);
   const [isEnviandoSap, setIsEnviandoSap] = useState(false);
-  const [planPreview, setPlanPreview] = useState<PlanGrupoPreview | null>(null);
-  const [isSavingPlanPFD, setIsSavingPlanPFD] = useState(false);
-  const [planPreviewPFD, setPlanPreviewPFD] = useState<PlanGrupoPreview | null>(null);
+  // P3 y PFD ya no son dos botones/diálogos separados (decisión de negocio 2026-09-22, mismo cambio
+  // que ya se aplicó en Corte Espuma — ver guardarPlanGrupoLaminado/handleConfirmarRespuestaP3PFD):
+  // un solo botón "Generar Respuestas P3/PFD" calcula y previsualiza AMBOS de una vez (misma fuente
+  // en vivo, respuestaSalidaRows) y un solo "Confirmar y Guardar" crea los DOS PlanGrupo. Siguen
+  // siendo dos filas distintas en BD (valor "- P3 -" / "- PFD -", igual que antes — Editar Plan sigue
+  // listándolas por separado) — el cambio es solo de secuencia de botones/clics.
+  const [planPreviewP3PFD, setPlanPreviewP3PFD] = useState<{ p3: PlanGrupoPreview; pfd: PlanGrupoPreview | null } | null>(null);
+  const [isSavingPlanP3PFD, setIsSavingPlanP3PFD] = useState(false);
   const [editPlanPreview, setEditPlanPreview] = useState<EditPlanPreview | null>(null);
   const [isLoadingEditPlan, setIsLoadingEditPlan] = useState(false);
   const [planesGrupoDisponibles, setPlanesGrupoDisponibles] = useState<PlanGrupo[] | null>(null);
@@ -1433,8 +1444,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // mismo criterio que el aviso agregado "N material(es) PFF sin lámina cortada" de Corte Espuma, en
   // vez de un toast por material.
   const faltanteInternoRef = useRef<{ material: string; rollosFaltantes: number }[]>([]);
-  // Espejo por ref de outputPlanRows (declarado más abajo) para que handleConfirmGuardarPlan/
-  // handleConfirmGuardarPlanPFD (declarados ANTES en el archivo) puedan leer su valor más reciente
+  // Espejo por ref de outputPlanRows (declarado más abajo) para que guardarPlanGrupoLaminado
+  // (declarada ANTES en el archivo) pueda leer su valor más reciente
   // sin listarlo como dependencia de useCallback -- listarlo ahí da error de compilación ("used
   // before its declaration"), porque el arreglo de dependencias se evalúa en el momento en que se
   // llama a useCallback, no en el momento en que el callback se ejecuta.
@@ -2705,24 +2716,26 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       .sort((a, b) => Number(a.tieneCorrida) - Number(b.tieneCorrida));
   }, [unifiedNeeds, materialNecesidadesPlantaMap, materialOrigenesPlantaMap]);
 
-  // Paso 1: arma la vista previa de lo que se va a grabar (PlanGrupo + materiales) y abre el
-  // diálogo de confirmación. No llama a ningún servicio todavía. Los materiales a guardar salen de
-  // la sección dos del tab Resumen — "Simulación Salida de Datos por Respuesta" (respuestaSalidaRows):
-  // con corrida = cantidad planificada, sin corrida = stock disponible.
-  const handleOpenGuardarPlan = useCallback(() => {
-    const rowsToSave = respuestaSalidaRows.filter(row => row.cantidadKg > 0);
-    if (rowsToSave.length === 0) {
+  // Paso 1 combinado (P3 + PFD en un solo clic, decisión de negocio 2026-09-22, mismo cambio que
+  // Corte Espuma): arma la vista previa de AMBOS a la vez y abre un solo diálogo de confirmación. No
+  // llama a ningún servicio todavía. Los materiales a guardar salen de la sección dos del tab Resumen
+  // — "Simulación Salida de Datos por Respuesta" (respuestaSalidaRows): con corrida = cantidad
+  // planificada, sin corrida = stock disponible (P3) o forzado a 0 (PFD, ver más abajo). Si no hay
+  // NADA con cantidad real (plan o stock), se bloquea el paso completo — un PFD todo en 0 no aporta.
+  const handleAbrirRespuestaP3PFD = useCallback(() => {
+    const p3Rows = respuestaSalidaRows.filter(row => row.cantidadKg > 0);
+    if (p3Rows.length === 0) {
       addNotification('warning', 'No hay materiales con cantidad (plan o stock) para guardar.');
       return;
     }
 
-    // El P3 es la RESPUESTA del día siguiente HÁBIL a la revisión: sin importar qué fechas estén
+    // El P3/PFD es la RESPUESTA del día siguiente HÁBIL a la revisión: sin importar qué fechas estén
     // marcadas en el calendario del módulo (esas son el rango de producción, no la fecha de la
     // respuesta), su fecha_inicio_plan/fecha_fin_plan se fuerza siempre al próximo día laborable (no
     // simplemente hoy+1 calendario, que caía en sábado/domingo si hoy era viernes/sábado).
     const fechaRespuesta = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
 
-    setPlanPreview({
+    const p3: PlanGrupoPreview = {
       codigo_grupo: CODIGO_GRUPO_LAMINADO,
       nombreGrupo: 'Corte y Laminado (Centro 1000)',
       // Sufijo "Rollos" — igual que el P2 ya distingue "P2 - Rollos" de "P2 - Espumas", y necesario
@@ -2733,26 +2746,61 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       valor: 'Plan Táctico - Centro 1000 - P3 - Rollos',
       fechaInicio: fechaRespuesta,
       fechaFin: fechaRespuesta,
-      rows: rowsToSave,
-    });
+      rows: p3Rows,
+    };
+
+    // Variante "PFD": mismo universo de materiales que P3, pero los materiales sin corrida ("No —
+    // stock", tieneCorrida === false) se fuerzan a cantidad 0 en vez de usar el stock disponible como
+    // fallback. Es un PlanGrupo independiente (valor "...- PFD"), no reemplaza ni modifica el plan
+    // P3; sirve solo para dejar constancia de qué material quedó sin planificar. A diferencia de P3
+    // no se filtran los materiales en 0: todos entran porque el objetivo es persistirlos igual.
+    const pfdRows = respuestaSalidaRows.map(row => row.tieneCorrida ? row : { ...row, cantidadKg: 0, cantidadUn: 0 });
+    const pfd: PlanGrupoPreview | null = pfdRows.length === 0 ? null : {
+      codigo_grupo: CODIGO_GRUPO_LAMINADO,
+      nombreGrupo: 'Corte y Laminado (Centro 1000)',
+      // Mismo sufijo "Rollos" que el P3 — necesario para no confundirse con el PFD de Corte Espuma,
+      // que comparte codigo_grupo=8.
+      valor: 'Plan Táctico - Centro 1000 - PFD - Rollos',
+      fechaInicio: fechaRespuesta,
+      fechaFin: fechaRespuesta,
+      rows: pfdRows,
+    };
+
+    setPlanPreviewP3PFD({ p3, pfd });
   }, [respuestaSalidaRows, addNotification, siguienteDiaHabil]);
 
-  // Paso 2: el usuario confirmó en el diálogo. Crea un único PlanGrupo (grupo 8 = Corte y Laminado
-  // Centro 1000) y, por cada material con plan asignado, uno o más DetalleTactico: codigo_plan_grupo
-  // es siempre el nuevo plan de Laminado (dueño del registro), pero codigo_plan_grupo_padre es el
-  // plan ORIGEN de la necesidad (la otra área que la generó, según "Necesidades Planta"). Si un
-  // material tiene necesidad de varias áreas, el planKg se prorratea entre esos orígenes y se
-  // genera una fila por cada uno (ver getOrigenesProrrateo).
-  const handleConfirmGuardarPlan = useCallback(async () => {
-    if (!planPreview) return;
-    setIsSavingPlan(true);
+  // Paso 2: el usuario confirmó en el diálogo. Guarda un PlanGrupo (grupo 8 = Corte y Laminado Centro
+  // 1000) + sus DetalleTactico — lógica compartida entre P3 y PFD (antes duplicada en
+  // handleConfirmGuardarPlan/handleConfirmGuardarPlanPFD, ahora fusionadas en
+  // handleConfirmarRespuestaP3PFD). codigo_plan_grupo es siempre el nuevo plan (dueño del registro),
+  // pero codigo_plan_grupo_padre es el plan ORIGEN de la necesidad (la otra área que la generó, según
+  // "Necesidades Planta"). Si un material tiene necesidad de varias áreas, la cantidad se prorratea
+  // entre esos orígenes y se genera una fila por cada uno (ver getOrigenesProrrateo).
+  //
+  // Corridas propias de cada material (ver outputPlanRows) — un material con 2+ corridas del mismo
+  // apertura/densidad (ej. una corrida no alcanzó y se abrió una adicional) grababa antes UNA sola
+  // fila de DetalleTactico con la cantidad sumada de todas sus corridas: comparten un único
+  // codigo_detalle_tactico, y al exportar a SAP, la segunda corrida terminaba mandando el MISMO
+  // CodigoOrdenExterna que la primera — SAP rechaza esa segunda orden como duplicada ("Ya existe una
+  // orden registrada con el codigo..."). Se graba UNA fila por corrida física (cada una con su propio
+  // codigo_detalle_tactico real), y el stock que sobra por encima de lo que ya cubren las corridas
+  // (si lo hay) se graba aparte, en una fila sin corrida asociada — esa fila de stock no se manda a
+  // SAP como orden, solo alimenta "Necesidades Planta" de otras áreas.
+  //
+  // Único punto real de diferencia entre P3 y PFD: qué splits en 0 se omiten. P3 siempre omite
+  // splits en 0 (`split.cantidadKg <= 0`); PFD solo los omite en materiales CON corrida — los
+  // materiales "No — stock" (tieneCorrida===false) SÍ se guardan en 0 a propósito, para que el
+  // material aparezca en la salida de datos como constancia de que quedó sin planificar.
+  const guardarPlanGrupoLaminado = useCallback(async (
+    preview: PlanGrupoPreview,
+    usuario: string,
+    esPFD: boolean
+  ): Promise<{ mensaje: string; huboError: boolean }> => {
+    const etiqueta = esPFD ? 'PFD' : 'P3';
     try {
-      const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
-      const usuario = user?.name || 'admin';
-
       const planPayload = {
         codigo_plan_grupo: 0,
-        codigo_grupo: planPreview.codigo_grupo,
+        codigo_grupo: preview.codigo_grupo,
         // No existe ninguna FamiliaProductos para el grupo 8 (Corte y Laminado) en la tabla
         // familia_productos, así que no hay un codigo_familia_producto real que asignar. Se envía
         // null explícito (a diferencia de undefined, que JSON.stringify omite del payload) para
@@ -2763,9 +2811,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         // "Foreign key constraint violation" al crear el PlanGrupo. Si el backend todavía exige esa
         // FK sobre plan_global, este guardado volverá a fallar con el mismo error.
         codigo_plan: null,
-        valor: planPreview.valor,
-        fecha_inicio_plan: ecuadorMidnightISO(planPreview.fechaInicio),
-        fecha_fin_plan: ecuadorMidnightISO(planPreview.fechaFin),
+        valor: preview.valor,
+        fecha_inicio_plan: ecuadorMidnightISO(preview.fechaInicio),
+        fecha_fin_plan: ecuadorMidnightISO(preview.fechaFin),
         estado: 'A',
         usuario_creacion: usuario,
         // Faltaba en el payload — la columna quedaba NULL en BD (verificado con datos reales).
@@ -2783,16 +2831,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
       faltanteInternoRef.current = [];
 
-      // Corridas propias de cada material (ver outputPlanRows) — un material con 2+ corridas del
-      // mismo apertura/densidad (ej. una corrida no alcanzó y se abrió una adicional) grababa antes
-      // UNA sola fila de DetalleTactico con la cantidad sumada de todas sus corridas: comparten un
-      // único codigo_detalle_tactico, y al exportar a SAP, la segunda corrida terminaba mandando el
-      // MISMO CodigoOrdenExterna que la primera — SAP rechaza esa segunda orden como duplicada ("Ya
-      // existe una orden registrada con el codigo..."). Ahora se graba UNA fila por corrida física
-      // (cada una con su propio codigo_detalle_tactico real), y el stock que sobra por encima de lo
-      // que ya cubren las corridas (si lo hay) se graba aparte, en una fila sin corrida asociada —
-      // esa fila de stock no se manda a SAP como orden, solo alimenta "Necesidades Planta" de otras
-      // áreas, igual que antes.
       const corridasPorMaterial = new Map<string, CorridaOutputRow[]>();
       outputPlanRowsRef.current.forEach(r => {
         const key = cleanCode(r.material);
@@ -2800,7 +2838,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         corridasPorMaterial.get(key)!.push(r);
       });
 
-      for (const row of planPreview.rows) {
+      for (const row of preview.rows) {
         const corridasDelMaterial = row.tieneCorrida ? (corridasPorMaterial.get(cleanCode(row.material)) || []) : [];
         const cantidadEnCorridas = corridasDelMaterial.reduce((s, c) => s + c.planKg, 0);
         const stockSobrante = row.cantidadKg - cantidadEnCorridas;
@@ -2813,7 +2851,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         for (const cantidadBloque of bloques) {
           const splits = getOrigenesProrrateo(row.material, cantidadBloque, nuevoCodigoPlanGrupo);
           for (const split of splits) {
-            if (split.cantidadKg <= 0) continue;
+            // P3: siempre omite splits en 0. PFD: solo los omite si el material tiene corrida propia
+            // — "No — stock" se guarda en 0 a propósito (ver comentario arriba de esta función).
+            if ((!esPFD || row.tieneCorrida) && split.cantidadKg <= 0) continue;
             try {
               const detallePayload = {
                 codigo_detalle_tactico: 0,
@@ -2831,7 +2871,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               await detalleTacticoService.save(detallePayload as unknown as DetalleTactico);
               exitosos++;
             } catch (e) {
-              console.warn(`[Guardar Plan] Falló material ${row.material} (padre ${split.codigoPadre}):`, (e as Error).message);
+              console.warn(`[Guardar Plan ${etiqueta}] Falló material ${row.material} (padre ${split.codigoPadre}):`, (e as Error).message);
               fallidos++;
             }
           }
@@ -2839,155 +2879,48 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       }
       flushFaltanteInternoNotification();
 
-      const superados = await desactivarPlanesLaminadoSuperados(CODIGO_GRUPO_LAMINADO, planPreview.fechaInicio, nuevoCodigoPlanGrupo, false);
+      const superados = await desactivarPlanesLaminadoSuperados(CODIGO_GRUPO_LAMINADO, preview.fechaInicio, nuevoCodigoPlanGrupo, esPFD);
       const sufijoSuperados = superados > 0 ? ` ${superados} Plan Grupo previo(s) del mismo día o anterior fueron desactivados.` : '';
 
       if (fallidos === 0) {
-        addNotification('success', `Plan guardado: ${exitosos} materiales registrados en el Plan Grupo #${nuevoCodigoPlanGrupo}.${sufijoSuperados}`);
-      } else {
-        addNotification('warning', `Plan Grupo #${nuevoCodigoPlanGrupo} creado. ${exitosos} materiales guardados, ${fallidos} fallaron.${sufijoSuperados}`);
+        return { mensaje: `${etiqueta}: ${exitosos} materiales en Plan Grupo #${nuevoCodigoPlanGrupo}.${sufijoSuperados}`, huboError: false };
       }
-      fetchNecesidadesPlanta();
-      setPlanPreview(null);
+      return { mensaje: `${etiqueta}: ${exitosos} guardados, ${fallidos} fallaron (Plan Grupo #${nuevoCodigoPlanGrupo}).${sufijoSuperados}`, huboError: true };
     } catch (e) {
-      addNotification('error', `Error al guardar el plan: ${(e as Error).message}`);
-    } finally {
-      setIsSavingPlan(false);
+      return { mensaje: `${etiqueta}: error al crear el Plan Grupo — ${(e as Error).message}`, huboError: true };
     }
-  }, [planPreview, addNotification, fetchNecesidadesPlanta, getOrigenesProrrateo, flushFaltanteInternoNotification, desactivarPlanesLaminadoSuperados, puestoTrabajoLineaPorMaterial]);
+  }, [getOrigenesProrrateo, flushFaltanteInternoNotification, desactivarPlanesLaminadoSuperados, puestoTrabajoLineaPorMaterial]);
 
-  // Variante "PFD" del Paso 1: mismo universo de materiales que "Guardar Plan" (P3), pero los
-  // materiales sin corrida ("No — stock", tieneCorrida === false) se fuerzan a cantidad 0 en vez de
-  // usar el stock disponible como fallback. Es un PlanGrupo independiente (valor "...- PFD"), no
-  // reemplaza ni modifica el plan P3; sirve solo para dejar constancia de qué material quedó sin
-  // planificar. A diferencia de "Guardar Plan" no se filtran los materiales en 0: todos entran a la
-  // vista previa porque el objetivo es persistirlos igual.
-  const handleOpenGuardarPlanPFD = useCallback(() => {
-    const rowsToSave = respuestaSalidaRows.map(row => row.tieneCorrida ? row : { ...row, cantidadKg: 0, cantidadUn: 0 });
-    if (rowsToSave.length === 0) {
-      addNotification('warning', 'No hay materiales para guardar en el Plan PFD.');
-      return;
-    }
-
-    // Igual que "Guardar Plan" (P3, ver handleOpenGuardarPlan): el PFD es la respuesta del día
-    // siguiente HÁBIL a la revisión, no el rango de producción marcado en el calendario del módulo
-    // (selectedDates). Antes caía en hoy (o en el rango seleccionado) en vez de hoy+1 día hábil.
-    const fechaRespuesta = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
-
-    setPlanPreviewPFD({
-      codigo_grupo: CODIGO_GRUPO_LAMINADO,
-      nombreGrupo: 'Corte y Laminado (Centro 1000)',
-      // Mismo sufijo "Rollos" que el P3 (ver handleOpenGuardarPlan) — necesario para no confundirse
-      // con el PFD de Corte Espuma, que ahora comparte codigo_grupo=8.
-      valor: 'Plan Táctico - Centro 1000 - PFD - Rollos',
-      fechaInicio: fechaRespuesta,
-      fechaFin: fechaRespuesta,
-      rows: rowsToSave,
-    });
-  }, [respuestaSalidaRows, addNotification, siguienteDiaHabil]);
-
-  // Paso 2 del plan PFD: mismo PlanGrupo + DetalleTactico que "Guardar Plan", incluyendo el mismo
-  // codigo_plan_grupo_padre (origen real vía getOrigenesProrrateo) que usa el flujo P3 — los
-  // materiales "No — stock" solo difieren en que su cantidad ya viene forzada a 0 desde
-  // handleOpenGuardarPlanPFD, pero el padre reportado debe ser el origen real, no el propio plan PFD
-  // (auto-referenciarlo rompía la trazabilidad contra la necesidad que lo generó). A diferencia del
-  // guardado normal, aquí SÍ se guarda el registro aunque la cantidad sea 0, ya que el propósito es
-  // que el material aparezca en la salida de datos para visualización.
-  const handleConfirmGuardarPlanPFD = useCallback(async () => {
-    if (!planPreviewPFD) return;
-    setIsSavingPlanPFD(true);
+  // Confirmación del paso combinado: guarda el P3 y (si existe) el PFD en secuencia.
+  const handleConfirmarRespuestaP3PFD = useCallback(async () => {
+    if (!planPreviewP3PFD) return;
+    setIsSavingPlanP3PFD(true);
     try {
       const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
       const usuario = user?.name || 'admin';
 
-      const planPayload = {
-        codigo_plan_grupo: 0,
-        codigo_grupo: planPreviewPFD.codigo_grupo,
-        codigo_familia_grupo: null,
-        codigo_plan: null,
-        valor: planPreviewPFD.valor,
-        fecha_inicio_plan: ecuadorMidnightISO(planPreviewPFD.fechaInicio),
-        fecha_fin_plan: ecuadorMidnightISO(planPreviewPFD.fechaFin),
-        estado: 'A',
-        usuario_creacion: usuario,
-        // Faltaba en el payload — la columna quedaba NULL en BD (verificado con datos reales).
-        // ecuadorNowNaiveISO (no new Date()): misma convención "naive Ecuador" que
-        // fecha_inicio_plan/fecha_fin_plan (ver ecuadorMidnightISO) — hora literal de Ecuador, no el
-        // instante UTC real que da new Date().
-        fecha_creacion: ecuadorNowNaiveISO(),
-      };
+      const resultados: string[] = [];
+      let huboError = false;
 
-      const planResponse = await planGrupoService.save(planPayload as unknown as PlanGrupo);
-      const nuevoCodigoPlanGrupo = planResponse.data.codigo_plan_grupo;
+      const resP3 = await guardarPlanGrupoLaminado(planPreviewP3PFD.p3, usuario, false);
+      resultados.push(resP3.mensaje);
+      if (resP3.huboError) huboError = true;
 
-      let exitosos = 0;
-      let fallidos = 0;
-
-      faltanteInternoRef.current = [];
-
-      // Mismo criterio que "Guardar Plan" (ver handleConfirmGuardarPlan): una fila de DetalleTactico
-      // POR CORRIDA física, no una sola con la cantidad de todas sumada -- si no, dos corridas del
-      // mismo material terminan compartiendo un único codigo_detalle_tactico y SAP rechaza la segunda
-      // orden como duplicada al exportar.
-      const corridasPorMaterial = new Map<string, CorridaOutputRow[]>();
-      outputPlanRowsRef.current.forEach(r => {
-        const key = cleanCode(r.material);
-        if (!corridasPorMaterial.has(key)) corridasPorMaterial.set(key, []);
-        corridasPorMaterial.get(key)!.push(r);
-      });
-
-      for (const row of planPreviewPFD.rows) {
-        const corridasDelMaterial = row.tieneCorrida ? (corridasPorMaterial.get(cleanCode(row.material)) || []) : [];
-        const cantidadEnCorridas = corridasDelMaterial.reduce((s, c) => s + c.planKg, 0);
-        const stockSobrante = row.cantidadKg - cantidadEnCorridas;
-        const bloques = corridasDelMaterial.length > 0 ? corridasDelMaterial.map(c => c.planKg) : [row.cantidadKg];
-        if (corridasDelMaterial.length > 0 && stockSobrante > 0.01) bloques.push(stockSobrante);
-
-        for (const cantidadBloque of bloques) {
-          const splits = getOrigenesProrrateo(row.material, cantidadBloque, nuevoCodigoPlanGrupo);
-          for (const split of splits) {
-            if (row.tieneCorrida && split.cantidadKg <= 0) continue;
-            try {
-              const detallePayload = {
-                codigo_detalle_tactico: 0,
-                codigo_material: Number(row.material),
-                cantidad_produccion_neta: Math.round(split.cantidadKg).toFixed(0),
-                resp_ctrl_prod: '',
-                clase_aprovisionamiento: 'E',
-                cantidad_aprovisionamiento: 0,
-                estado: 'A',
-                codigo_plan_grupo: nuevoCodigoPlanGrupo,
-                codigo_plan_grupo_padre: split.codigoPadre,
-                usuario_modificacion: usuario,
-                linea_produccion: puestoTrabajoLineaPorMaterial.get(cleanCode(row.material)) || '',
-              };
-              await detalleTacticoService.save(detallePayload as unknown as DetalleTactico);
-              exitosos++;
-            } catch (e) {
-              console.warn(`[Guardar Plan PFD] Falló material ${row.material} (padre ${split.codigoPadre}):`, (e as Error).message);
-              fallidos++;
-            }
-          }
-        }
+      if (planPreviewP3PFD.pfd) {
+        const resPfd = await guardarPlanGrupoLaminado(planPreviewP3PFD.pfd, usuario, true);
+        resultados.push(resPfd.mensaje);
+        if (resPfd.huboError) huboError = true;
       }
-      flushFaltanteInternoNotification();
 
-      const superados = await desactivarPlanesLaminadoSuperados(CODIGO_GRUPO_LAMINADO, planPreviewPFD.fechaInicio, nuevoCodigoPlanGrupo, true);
-      const sufijoSuperados = superados > 0 ? ` ${superados} Plan Grupo previo(s) del mismo día o anterior fueron desactivados.` : '';
-
-      if (fallidos === 0) {
-        addNotification('success', `Plan PFD guardado: ${exitosos} materiales registrados en el Plan Grupo #${nuevoCodigoPlanGrupo}.${sufijoSuperados}`);
-      } else {
-        addNotification('warning', `Plan Grupo PFD #${nuevoCodigoPlanGrupo} creado. ${exitosos} materiales guardados, ${fallidos} fallaron.${sufijoSuperados}`);
-      }
+      addNotification(huboError ? 'warning' : 'success', `Respuesta P3/PFD guardada. ${resultados.join(' | ')}`);
       fetchNecesidadesPlanta();
-      setPlanPreviewPFD(null);
+      setPlanPreviewP3PFD(null);
     } catch (e) {
-      addNotification('error', `Error al guardar el plan PFD: ${(e as Error).message}`);
+      addNotification('error', `Error al guardar la Respuesta P3/PFD: ${(e as Error).message}`);
     } finally {
-      setIsSavingPlanPFD(false);
+      setIsSavingPlanP3PFD(false);
     }
-  }, [planPreviewPFD, addNotification, fetchNecesidadesPlanta, getOrigenesProrrateo, flushFaltanteInternoNotification, desactivarPlanesLaminadoSuperados, puestoTrabajoLineaPorMaterial]);
+  }, [planPreviewP3PFD, addNotification, fetchNecesidadesPlanta, guardarPlanGrupoLaminado]);
 
   // Paso 1 de edición: busca los PlanGrupo activos de Corte y Laminado directo por codigo_grupo
   // (CODIGO_GRUPO_LAMINADO) en planGrupoService.getAll(), NO a través de "Necesidades Planta"
@@ -3604,7 +3537,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // round-robin para no dejar todas las corridas de un mismo grupo consecutivas.
   const outputPlanRows = useMemo(() => {
     // Antes caía a la "Ventana de Producción" seleccionada (o a hoy) — pero el guardado real del P3
-    // (ver handleOpenGuardarPlan) SIEMPRE fecha la respuesta al día hábil siguiente a la revisión, sin
+    // (ver handleAbrirRespuestaP3PFD) SIEMPRE fecha la respuesta al día hábil siguiente a la revisión, sin
     // importar qué esté marcado en el calendario (esas fechas son el rango de producción, no la
     // respuesta). La vista previa de "Plan de Salida" mostraba entonces una fecha distinta a la que
     // terminaba grabándose — se alinea al mismo criterio, editable igual por fila si hace falta.
@@ -3830,8 +3763,14 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // se generó, o cambió desde entonces), el campo queda en '' y se corrige a mano en la vista previa.
   const fetchCodigoDetalleTacticoPorMaterial = useCallback(async (): Promise<Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>> => {
     const [planesRes, detallesRes] = await Promise.all([planGrupoService.getAll(), detalleTacticoService.getAll()]);
+    // codigo_grupo=8 es compartido con la Respuesta P3/PFD de Corte Espuma (mismo grupo SAP, ver
+    // handleAbrirRespuestaP3PFD) -- sin el filtro "Rollos" acá, un P3 de Espuma más reciente que el de
+    // Laminado ganaba el desempate de abajo y el map salía armado con los DetalleTactico de Espuma,
+    // dejando CodigoOrdenExterna vacío para TODOS los materiales de Laminado (el mismo filtro que ya
+    // usan desactivarPlanesLaminadoSuperados y handleOpenEditarPlan, que faltaba acá).
     const planesP3Laminado = (planesRes.data || []).filter(pg =>
-      pg.codigo_grupo === CODIGO_GRUPO_LAMINADO && pg.estado === 'A' && esPlanP3(pg.valor)
+      pg.codigo_grupo === CODIGO_GRUPO_LAMINADO && pg.estado === 'A' && esPlanP3(pg.valor) &&
+      /rollo/i.test(String(pg.valor || ''))
     );
     // Desempate por codigo_plan_grupo (autoincremental, mayor = creado más recientemente) cuando dos
     // P3 comparten la misma fecha_inicio_plan -- pasa seguido, porque esa fecha es "próximo día
@@ -3850,7 +3789,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     }, undefined);
 
     // Un material puede traer VARIOS candidatos (2+ corridas del mismo material desde el fix de "una
-    // fila de DetalleTactico por corrida", ver handleConfirmGuardarPlan) -- se guardan todos, con su
+    // fila de DetalleTactico por corrida", ver guardarPlanGrupoLaminado) -- se guardan todos, con su
     // cantidad, para que buildSolicitudProduccion empareje cada fila de outputPlanRows contra el
     // candidato de cantidad más parecida (ver consumirCodigoDetalleTactico) en vez de quedarse
     // siempre con "el primero que encuentre" para todas las corridas de ese material.
@@ -3894,19 +3833,24 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // HoraFinProgramada, PedidoComercial, PosicionPedido) como string vacío en vez de omitirlos — la
   // vista previa (exportTxtPayloads) edita este objeto tal cual, así que su forma debe calzar 1:1 con
   // el body real que recibe el endpoint. Supuestos pendientes de confirmar contra el comportamiento
-  // real de SAP para la clase ZMOQ (documentados acá para no perderlos si algo se rechaza en la
+  // real de SAP para la clase ZCSQ (documentados acá para no perderlos si algo se rechaza en la
   // primera prueba real):
   //  - FechaInicioProgramada/HoraInicioProgramada/FechaFinProgramada/HoraFinProgramada: los 4 salen
   //    del reloj acumulado de producción por fecha que ya calculó outputPlanRows (arranca 07:00,
   //    cada fila suma looperTRolloMin × planUn y la siguiente sigue donde esa terminó) — ver el
   //    comentario en esa useMemo. Antes solo se mandaba Inicio (asumiendo programación "hacia
   //    adelante" y dejando Fin vacío); ahora se llenan ambos con el horario real calculado.
-  //  - PedidoComercial/PosicionPedido: confirmado con SAP real (2026-09-12) que quedar vacíos rechaza
-  //    el insert con "Faltan campos requeridos". Este módulo planifica materiales MTS (make-to-stock,
-  //    sin pedido comercial real que reportar) — decisión de negocio: enviar '0' como valor de relleno
-  //    para pasar la validación obligatoria de SAP, no un pedido comercial real. Si a futuro este
-  //    módulo llegara a planificar material MTO con pedido comercial genuino, esto debe reemplazarse
-  //    por el valor real en vez del placeholder.
+  //  - PedidoComercial/PosicionPedido: rectificado por el usuario (2026-09-16) — van vacíos (''), no
+  //    '0'. Este módulo planifica materiales MTS (make-to-stock, sin pedido comercial real que
+  //    reportar), así que no hay valor real que enviar. Si a futuro este módulo llegara a planificar
+  //    material MTO con pedido comercial genuino, esto debe reemplazarse por el valor real.
+  //  - PuestoTrabajo en filas CONV (isConvNested): se fuerza vacío en vez de usar resolvePuestoTrabajo.
+  //    Las variantes CONV se producen en otra máquina (work center "CILIN-02"), que todavía no tiene
+  //    Hoja de Ruta registrada en PR2 — la búsqueda por CodMaterial encuentra igual una fila para el
+  //    material CONV, pero con el PuestoTrabajo de Looper (dato viejo/incorrecto para este caso:
+  //    confirmado con el usuario 2026-09-16 con materiales 30004576/30006695). Enviar "Looper" sería
+  //    física y operativamente incorrecto, así que por decisión de negocio se deja vacío hasta que
+  //    CILIN-02 exista en PR2, en vez de inventar o reutilizar un puesto que no aplica.
   //  - CodigoOrdenExterna: se llena con el codigo_detalle_tactico de la Respuesta P3 ya persistida
   //    para ese material (ver fetchCodigoDetalleTacticoPorMaterial). Versiones/codigoDetalleTactico se
   //    reciben como parámetro (no por closure sobre estado) porque se acaban de resolver segundos
@@ -3921,18 +3865,18 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return {
       Mandante: '300',
       CodigoOrdenExterna: codigoDetalleTactico ? String(codigoDetalleTactico) : '',
-      ClaseOrden: 'ZMOQ',
+      ClaseOrden: 'ZCSQ',
       Centro: '1000',
       CodigoMaterial: r.material,
       CantidadPlanificada: r.planKg,
       VersionFabricacion: versiones.get(r.material)?.version || '',
-      PuestoTrabajo: resolvePuestoTrabajo(r.material),
+      PuestoTrabajo: r.isConvNested ? '' : resolvePuestoTrabajo(r.material),
       FechaFinProgramada: r.fechaFinProgramada.replace(/-/g, ''),
       HoraFinProgramada: r.horaFinProgramada,
       FechaInicioProgramada: r.fechaInicioProgramada.replace(/-/g, ''),
       HoraInicioProgramada: r.horaInicioProgramada,
-      PedidoComercial: '0',
-      PosicionPedido: '0',
+      PedidoComercial: '',
+      PosicionPedido: '',
       EstadoRegistro: '1',
       Observaciones: 'Generado automático — Plan Táctico Corte y Laminado',
       EstadoCarga: '',
@@ -3991,6 +3935,15 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       next[index] = { ...next[index], [field]: value };
       return next;
     });
+  }, []);
+
+  // Quita una fila de la vista previa de envío a SAP (botón X) cuando esa orden no hace falta enviarla.
+  // Solo afecta a este envío: el plan de salida (outputPlanRows) no se toca, y al volver a "Enviar a
+  // SAP" la fila reaparece. Se borra en exportTxtPreview Y exportTxtPayloads a la vez porque van
+  // alineados por índice.
+  const removeExportTxtRow = useCallback((index: number) => {
+    setExportTxtPreview(prev => prev ? prev.filter((_, i) => i !== index) : prev);
+    setExportTxtPayloads(prev => prev ? prev.filter((_, i) => i !== index) : prev);
   }, []);
 
   const handleConfirmarExportTxt = useCallback(async () => {
@@ -4394,7 +4347,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid grid-cols-5 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
+        <TabsList className="grid grid-cols-6 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
           {[
             { v: 'resumen', l: 'Resumen Necesidades', i: LayoutDashboard },
             { v: 'necesidadesPlanta', l: 'Necesidades Planta', i: Boxes },
@@ -4405,7 +4358,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             // handleProcessResumen.
             { v: 'ordenesFert', l: 'Órdenes FERT', i: ShoppingCart },
             { v: 'inventario', l: 'Inventarios SAP', i: Database },
-            { v: 'salida', l: 'Salida de Datos', i: ClipboardList }
+            { v: 'salida', l: 'Salida de Datos', i: ClipboardList },
+            // Tab de solo validación/auditoría — no participa del cálculo del plan. Muestra la data
+            // cruda tal cual la devuelve tiemposEnsambladoByGrupoYCentroPR2, sin pasar por
+            // resolvePuestoTrabajo, para poder confirmar contra el origen casos como PuestoTrabajo
+            // "Looper" en materiales CONV (30004576/30006695, ver buildSolicitudProduccion).
+            { v: 'debugPR2', l: 'Validar PR2', i: Info }
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[10px] font-black uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-lg data-[state=active]:text-red-600 rounded-xl">
               <tab.i className="w-4 h-4" /> {tab.l}
@@ -4422,27 +4380,18 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               mismo patrón que "Generar Necesidades · P1/PFF" en Corte Espuma (vive dentro del tab
               "Necesidades Planta", no en el header). Se acepta el trade-off de tener que volver
               arriba (al inicio de este tab, no de la página) para generar la respuesta tras
-              revisar/ajustar filas más abajo. Colores unificados con Corte Espuma (única fuente ya
-              consistente): P3 = negro sólido (es la respuesta real que se envía, el commit de más
-              peso); PFD = índigo outline, mismo peso que "Generar Necesidades"/"Editar Plan" (es un
-              reporte de faltante, no la respuesta final). */}
+              revisar/ajustar filas más abajo. P3 y PFD se fusionaron en un solo botón/diálogo
+              2026-09-22 (mismo cambio que Corte Espuma, ver handleAbrirRespuestaP3PFD) — "Editar
+              Plan" queda como acción secundaria (outline), no forma parte del flujo de generación. */}
           <div className="flex items-center gap-3 flex-wrap justify-end">
             <Button
-              onClick={handleOpenGuardarPlan}
-              disabled={isSavingPlan || respuestaSalidaRows.every(r => r.cantidadKg <= 0)}
+              onClick={handleAbrirRespuestaP3PFD}
+              disabled={isSavingPlanP3PFD || respuestaSalidaRows.every(r => r.cantidadKg <= 0)}
               className="rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white shadow-lg"
+              title="Genera y previsualiza en un solo paso la Respuesta P3 (plan real) y el PFD (faltante sin planificar) — antes eran dos botones/diálogos separados."
             >
-              {isSavingPlan ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardList className="w-4 h-4" />}
-              {isSavingPlan ? 'Guardando...' : 'Generar Respuestas · P3 - Rollos'}
-            </Button>
-            <Button
-              onClick={handleOpenGuardarPlanPFD}
-              disabled={isSavingPlanPFD || respuestaSalidaRows.length === 0}
-              variant="outline"
-              className="rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 border-indigo-200 text-indigo-700 hover:bg-indigo-50"
-            >
-              {isSavingPlanPFD ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardList className="w-4 h-4" />}
-              {isSavingPlanPFD ? 'Guardando...' : 'Generar Respuestas · PFD - Rollos'}
+              {isSavingPlanP3PFD ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardList className="w-4 h-4" />}
+              {isSavingPlanP3PFD ? 'Guardando...' : 'Generar Respuestas · P3/PFD - Rollos'}
             </Button>
             <Button
               onClick={handleOpenEditarPlan}
@@ -4780,111 +4729,98 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             </div>
           )}
 
-          <Dialog open={planPreview !== null} onOpenChange={(open) => { if (!open && !isSavingPlan) setPlanPreview(null); }}>
-            <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          <Dialog open={planPreviewP3PFD !== null} onOpenChange={(open) => { if (!open && !isSavingPlanP3PFD) setPlanPreviewP3PFD(null); }}>
+            <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
               <DialogHeader>
-                <DialogTitle>Confirmar creación de Plan Grupo</DialogTitle>
+                <DialogTitle>Confirmar Respuesta P3/PFD — Corte y Laminado</DialogTitle>
                 <DialogDescription>
-                  Revisa los datos que se van a grabar antes de continuar. Esta acción crea registros nuevos en producción.
+                  Revisa los datos que se van a grabar antes de continuar — se crean DOS registros: la Respuesta P3 (plan real) y el PFD (faltante sin planificar, los materiales &quot;No — stock&quot; se guardan en 0). Esta acción crea registros nuevos en producción.
                 </DialogDescription>
               </DialogHeader>
-              {planPreview && (
-                <div className="space-y-4 text-left text-sm">
-                  <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
-                    <div><span className="font-black text-slate-500 text-[10px] uppercase block">Grupo</span>{planPreview.nombreGrupo} (código {planPreview.codigo_grupo})</div>
-                    <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{planPreview.valor}</div>
-                    <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Inicio</span>{planPreview.fechaInicio}</div>
-                    <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Fin</span>{planPreview.fechaFin}</div>
-                  </div>
+              {planPreviewP3PFD && (
+                <div className="space-y-8 text-left text-sm">
                   <div>
-                    <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales a guardar ({planPreview.rows.length})</span>
-                    <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[260px] overflow-y-auto">
-                      <table className="w-full text-[11px] border-collapse">
-                        <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
-                          <tr>
-                            <th className="px-3 py-2 text-left">Material</th>
-                            <th className="px-3 py-2 text-left">Descripción</th>
-                            <th className="px-3 py-2 text-center">¿Corrida?</th>
-                            <th className="px-3 py-2 text-right">Cantidad Un</th>
-                            <th className="px-3 py-2 text-right">Cantidad Kg</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-50">
-                          {planPreview.rows.map(row => (
-                            <tr key={row.material}>
-                              <td className="px-3 py-2 font-mono">{row.material}</td>
-                              <td className="px-3 py-2 truncate max-w-[220px]">{row.descripcion}</td>
-                              <td className="px-3 py-2 text-center">{row.tieneCorrida ? 'Sí' : 'Stock'}</td>
-                              <td className="px-3 py-2 text-right font-mono">{Math.round(row.cantidadUn)}</td>
-                              <td className="px-3 py-2 text-right font-mono">{row.cantidadKg.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                    <span className="inline-block text-[9px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 rounded-full px-3 py-1 mb-3">P3 — Plan real</span>
+                    <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
+                      <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{planPreviewP3PFD.p3.valor}</div>
+                      <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Respuesta</span>{planPreviewP3PFD.p3.fechaInicio}</div>
+                    </div>
+                    <div className="mt-3">
+                      <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales a guardar ({planPreviewP3PFD.p3.rows.length})</span>
+                      <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
+                        <table className="w-full text-[11px] border-collapse">
+                          <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
+                            <tr>
+                              <th className="px-3 py-2 text-left">Material</th>
+                              <th className="px-3 py-2 text-left">Descripción</th>
+                              <th className="px-3 py-2 text-center">¿Corrida?</th>
+                              <th className="px-3 py-2 text-right">Cantidad Un</th>
+                              <th className="px-3 py-2 text-right">Cantidad Kg</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody className="divide-y divide-gray-50">
+                            {planPreviewP3PFD.p3.rows.map(row => (
+                              <tr key={row.material}>
+                                <td className="px-3 py-2 font-mono">{row.material}</td>
+                                <td className="px-3 py-2 truncate max-w-[220px]">{row.descripcion}</td>
+                                <td className="px-3 py-2 text-center">{row.tieneCorrida ? 'Sí' : 'Stock'}</td>
+                                <td className="px-3 py-2 text-right font-mono">{Math.round(row.cantidadUn)}</td>
+                                <td className="px-3 py-2 text-right font-mono">{row.cantidadKg.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setPlanPreview(null)} disabled={isSavingPlan}>Cancelar</Button>
-                <Button onClick={handleConfirmGuardarPlan} disabled={isSavingPlan} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-                  {isSavingPlan ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-                  {isSavingPlan ? 'Guardando...' : 'Confirmar y Guardar'}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
 
-          <Dialog open={planPreviewPFD !== null} onOpenChange={(open) => { if (!open && !isSavingPlanPFD) setPlanPreviewPFD(null); }}>
-            <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle>Confirmar creación de Plan Grupo PFD</DialogTitle>
-                <DialogDescription>
-                  Revisa los datos que se van a grabar antes de continuar. Los materiales &quot;No — stock&quot; se guardan con cantidad 0. Esta acción crea registros nuevos en producción.
-                </DialogDescription>
-              </DialogHeader>
-              {planPreviewPFD && (
-                <div className="space-y-4 text-left text-sm">
-                  <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
-                    <div><span className="font-black text-slate-500 text-[10px] uppercase block">Grupo</span>{planPreviewPFD.nombreGrupo} (código {planPreviewPFD.codigo_grupo})</div>
-                    <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{planPreviewPFD.valor}</div>
-                    <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Inicio</span>{planPreviewPFD.fechaInicio}</div>
-                    <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Fin</span>{planPreviewPFD.fechaFin}</div>
-                  </div>
                   <div>
-                    <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales a guardar ({planPreviewPFD.rows.length})</span>
-                    <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[260px] overflow-y-auto">
-                      <table className="w-full text-[11px] border-collapse">
-                        <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
-                          <tr>
-                            <th className="px-3 py-2 text-left">Material</th>
-                            <th className="px-3 py-2 text-left">Descripción</th>
-                            <th className="px-3 py-2 text-center">¿Corrida?</th>
-                            <th className="px-3 py-2 text-right">Cantidad Un</th>
-                            <th className="px-3 py-2 text-right">Cantidad Kg</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-50">
-                          {planPreviewPFD.rows.map(row => (
-                            <tr key={row.material}>
-                              <td className="px-3 py-2 font-mono">{row.material}</td>
-                              <td className="px-3 py-2 truncate max-w-[220px]">{row.descripcion}</td>
-                              <td className="px-3 py-2 text-center">{row.tieneCorrida ? 'Sí — plan' : 'No — stock'}</td>
-                              <td className="px-3 py-2 text-right font-mono">{Math.round(row.cantidadUn)}</td>
-                              <td className="px-3 py-2 text-right font-mono">{row.cantidadKg.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    <span className="inline-block text-[9px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 rounded-full px-3 py-1 mb-3">PFD — Faltante sin planificar</span>
+                    {planPreviewP3PFD.pfd ? (
+                      <>
+                        <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
+                          <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{planPreviewP3PFD.pfd.valor}</div>
+                          <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Respuesta</span>{planPreviewP3PFD.pfd.fechaInicio}</div>
+                        </div>
+                        <div className="mt-3">
+                          <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales a guardar ({planPreviewP3PFD.pfd.rows.length})</span>
+                          <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
+                            <table className="w-full text-[11px] border-collapse">
+                              <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
+                                <tr>
+                                  <th className="px-3 py-2 text-left">Material</th>
+                                  <th className="px-3 py-2 text-left">Descripción</th>
+                                  <th className="px-3 py-2 text-center">¿Corrida?</th>
+                                  <th className="px-3 py-2 text-right">Cantidad Un</th>
+                                  <th className="px-3 py-2 text-right">Cantidad Kg</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-50">
+                                {planPreviewP3PFD.pfd.rows.map(row => (
+                                  <tr key={row.material}>
+                                    <td className="px-3 py-2 font-mono">{row.material}</td>
+                                    <td className="px-3 py-2 truncate max-w-[220px]">{row.descripcion}</td>
+                                    <td className="px-3 py-2 text-center">{row.tieneCorrida ? 'Sí — plan' : 'No — stock'}</td>
+                                    <td className="px-3 py-2 text-right font-mono">{Math.round(row.cantidadUn)}</td>
+                                    <td className="px-3 py-2 text-right font-mono">{row.cantidadKg.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="text-[11px] text-slate-400 italic px-1">Sin materiales para el PFD — no se crea Plan Grupo PFD.</p>
+                    )}
                   </div>
                 </div>
               )}
               <DialogFooter>
-                <Button variant="outline" onClick={() => setPlanPreviewPFD(null)} disabled={isSavingPlanPFD}>Cancelar</Button>
-                <Button onClick={handleConfirmGuardarPlanPFD} disabled={isSavingPlanPFD} className="bg-amber-600 hover:bg-amber-700 text-white">
-                  {isSavingPlanPFD ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-                  {isSavingPlanPFD ? 'Guardando...' : 'Confirmar y Guardar'}
+                <Button variant="outline" onClick={() => setPlanPreviewP3PFD(null)} disabled={isSavingPlanP3PFD}>Cancelar</Button>
+                <Button onClick={handleConfirmarRespuestaP3PFD} disabled={isSavingPlanP3PFD} className="bg-emerald-600 hover:bg-emerald-700 text-white">
+                  {isSavingPlanP3PFD ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                  {isSavingPlanP3PFD ? 'Guardando...' : 'Confirmar y Guardar'}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -5314,6 +5250,61 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             </div>
           </div>
         </TabsContent>
+
+        <TabsContent value="debugPR2" className="animate-in fade-in duration-300 space-y-4 text-left">
+          <div className="flex items-center justify-between px-2">
+            <div className="flex items-center gap-3 text-left">
+              <div className="p-2 bg-slate-600 rounded-xl text-white shadow-lg"><Info className="w-4 h-4" /></div>
+              <div>
+                <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Validar PR2 — Data Cruda</h3>
+                <p className="text-[10px] font-bold text-slate-400">Tal cual la devuelve tiemposEnsambladoByGrupoYCentroPR2, sin pasar por resolvePuestoTrabajo. Solo lectura/auditoría — no afecta el plan.</p>
+              </div>
+            </div>
+            <Input
+              value={debugPR2Query}
+              onChange={(e) => setDebugPR2Query(e.target.value)}
+              placeholder="Buscar por material..."
+              className="max-w-[240px] h-9 text-xs"
+            />
+          </div>
+          <Card className="rounded-2xl border border-slate-200 shadow-sm overflow-hidden bg-white">
+            <div className="overflow-x-auto max-h-[600px] relative text-center">
+              <table className="w-full border-collapse text-center font-sans text-[10px]">
+                <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[8px] text-gray-400 sticky top-0 z-10">
+                  <tr>
+                    <th className="px-4 py-5 border-r border-gray-100">Material (limpio)</th>
+                    <th className="px-4 py-5 border-r border-gray-100">CodMaterial / Material (crudo)</th>
+                    <th className="px-4 py-5 border-r border-gray-100 bg-amber-50 text-amber-700">PuestoTrabajo</th>
+                    <th className="px-4 py-5 border-r border-gray-100">PuestoTrabajoLinea</th>
+                    <th className="px-6 py-5 text-left">Fila completa (JSON)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50 text-[11px] font-black text-slate-700">
+                  {(() => {
+                    const q = cleanCode(debugPR2Query) || debugPR2Query.trim().toUpperCase();
+                    const rows = tiemposEnsambladoData.filter((t) => {
+                      if (!q) return true;
+                      const codigo = getProp(t, ['CodMaterial', 'MATERIAL', 'Material']);
+                      return cleanCode(codigo).includes(q) || codigo.toUpperCase().includes(q);
+                    });
+                    if (rows.length === 0) {
+                      return <tr><td colSpan={5} className="py-24 text-slate-300 font-black uppercase tracking-widest italic text-center">Sin filas en tiemposEnsambladoData{q ? ` para "${debugPR2Query}"` : ''}</td></tr>;
+                    }
+                    return rows.map((t, i) => (
+                      <tr key={i} className="hover:bg-slate-50/40 transition-colors">
+                        <td className="px-4 py-3 border-r border-dashed border-gray-100 font-mono text-blue-700 text-center font-black">{cleanCode(getProp(t, ['CodMaterial', 'MATERIAL', 'Material']))}</td>
+                        <td className="px-4 py-3 border-r border-dashed border-gray-100 font-mono text-slate-500 text-center">{getProp(t, ['CodMaterial', 'MATERIAL', 'Material']) || '—'}</td>
+                        <td className="px-4 py-3 border-r border-dashed border-gray-100 font-mono text-amber-700 bg-amber-50/30 text-center font-black">{getProp(t, ['PuestoTrabajo']) || '—'}</td>
+                        <td className="px-4 py-3 border-r border-dashed border-gray-100 font-mono text-slate-600 text-center">{getProp(t, ['PuestoTrabajoLinea']) || '—'}</td>
+                        <td className="px-6 py-3 text-left font-mono text-[9px] text-slate-400 whitespace-pre-wrap break-all">{JSON.stringify(t)}</td>
+                      </tr>
+                    ));
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </TabsContent>
       </Tabs>
 
       {/* Fuera de los <TabsContent>, a propósito: Radix desmonta el contenido de un tab inactivo por
@@ -5334,6 +5325,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                   <table className="text-[11px] border-collapse">
                     <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0 z-10">
                       <tr>
+                        <th className="px-2 py-2 w-8" aria-label="Quitar" />
                         <th className="px-2 py-2 text-left whitespace-nowrap">Descripción</th>
                         {SOLICITUD_PRODUCCION_FIELDS.map(f => (
                           <th key={f.key} className="px-2 py-2 text-left whitespace-nowrap">{f.label}</th>
@@ -5342,7 +5334,19 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                     </thead>
                     <tbody className="divide-y divide-gray-50">
                       {exportTxtPayloads.map((payload, i) => (
-                        <tr key={`${exportTxtPreview[i]?.corridaId}-${i}`}>
+                        <tr key={`${exportTxtPreview[i]?.corridaId}-${exportTxtPreview[i]?.material}-${i}`}>
+                          <td className="px-1 py-1 text-center">
+                            <button
+                              type="button"
+                              onClick={() => removeExportTxtRow(i)}
+                              disabled={isEnviandoSap}
+                              title="Quitar esta orden del envío a SAP"
+                              aria-label={`Quitar ${payload.CodigoMaterial} del envío`}
+                              className="inline-flex items-center justify-center w-6 h-6 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:pointer-events-none"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
                           <td className="px-2 py-1 truncate max-w-[180px]" title={exportTxtPreview[i]?.descripcion}>{exportTxtPreview[i]?.descripcion}</td>
                           {SOLICITUD_PRODUCCION_FIELDS.map(f => (
                             <td key={f.key} className="px-1 py-1">
@@ -5365,7 +5369,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => { setExportTxtPreview(null); setExportTxtPayloads(null); }} disabled={isEnviandoSap}>Cancelar</Button>
-            <Button onClick={handleConfirmarExportTxt} disabled={isEnviandoSap} className="bg-emerald-600 hover:bg-emerald-700 text-white">
+            <Button onClick={handleConfirmarExportTxt} disabled={isEnviandoSap || !exportTxtPayloads || exportTxtPayloads.length === 0} className="bg-emerald-600 hover:bg-emerald-700 text-white">
               {isEnviandoSap ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Send className="w-4 h-4 mr-2" />} {isEnviandoSap ? 'Enviando…' : 'Confirmar y Enviar a SAP'}
             </Button>
           </DialogFooter>

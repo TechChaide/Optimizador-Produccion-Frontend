@@ -292,7 +292,7 @@ export const serviciosService = {
     }
     return response.json();
   },
- async tiemposEnsambladoByGrupoYCentroPR2(centro: string, codigoGrupo: number): Promise<BodyResponse<any>> {
+  async tiemposEnsambladoByGrupoYCentroPR2(centro: string, codigoGrupo: number): Promise<BodyResponse<any>> {
     const response = await fetchWithAuth(API_URL + "/tiemposEnsambladoByGrupoYCentroPR2", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

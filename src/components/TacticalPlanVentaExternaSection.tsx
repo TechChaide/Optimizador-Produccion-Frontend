@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { ShoppingCart, Package, Loader2, LayoutDashboard, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Filter, TrendingUp, Box, X, Layers, Wand2, Save, ClipboardCheck, RefreshCw, Clock, Search } from 'lucide-react';
+import { ShoppingCart, Package, Loader2, LayoutDashboard, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Filter, TrendingUp, Box, X, Layers, Wand2, Save, ClipboardCheck, RefreshCw, Clock, Search, Mail, AlertCircle } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -38,6 +38,34 @@ const PACKING_TIME_PER_UNIT_SECONDS = 15;
 const DESCRIPCION_ROLLO = 'LAMINA CILINDRICA';
 
 const TIPO_TAG: Record<'ESPUMAS' | 'ROLLOS', string> = { ESPUMAS: 'Espumas', ROLLOS: 'Rollos' };
+
+// --- Capacidad Operativa · Empaque (máquina empacadora + operadores) ---
+// Mismo patrón de config editable que ya usa Corte Espuma (PlantaConfig/MachineShiftConfig,
+// TacticalPlanEspumasSection) para Carruseles/CNC/Verticales: turnos Día/Noche/Sábado elegidos de un
+// catálogo de horarios fijo, % de paro editable, operadores por turno (informativo — no multiplica la
+// capacidad, mismo criterio que ya aplica ese módulo) y mantenimiento preventivo real, restado de la
+// capacidad. Config solo en memoria (useState, no persiste al backend), igual que uioConfig/gyeConfig
+// en Corte Espuma.
+interface EmpaqueShiftConfig {
+  day: string;
+  night: string;
+  saturday: string;
+  paroDay: number;
+  paroNight: number;
+  paroSaturday: number;
+  operadoresDay: number;
+  operadoresNight: number;
+  operadoresSaturday: number;
+  mttoPreventivoHoras: number;
+  activa: boolean;
+}
+
+// Solo Centro 1000 (Quito) tiene una empacadora registrada hoy — se agrega aquí la de Guayaquil el
+// día que exista, sin tocar el resto del cálculo (ya está escrito por centro).
+const EMPAQUE_MACHINES_BY_CENTRO: Record<'1000' | '2000', { id: string; nombre: string }[]> = {
+  '1000': [{ id: 'EMPACADORA_ELECTROTECKS', nombre: 'Empacadora Electrotecks' }],
+  '2000': [],
+};
 
 interface NecesidadMaterial {
   material: string;
@@ -302,6 +330,67 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // (P3) — sus DetalleTactico cuyo codigo_plan_grupo_padre apunta a nuestro P2.
   const [dataAprobada, setDataAprobada] = useState<Record<string, DataAprobadaRow[]>>({});
   const [isLoadingDataAprobada, setIsLoadingDataAprobada] = useState(false);
+  // Sello de hora del último "Actualizar" exitoso EN ESTA SESIÓN (ver fetchDataAprobada) — a
+  // propósito null al restaurar desde caché (leerDeCache, ver el efecto de montaje) y al cargar el
+  // módulo por primera vez: "PFD-VENTA" lee de `dataAprobada` en memoria, así que si el usuario nunca
+  // pulsó "Actualizar" en esta sesión (o solo tiene lo que quedó cacheado de una visita anterior),
+  // ese PFD-VENTA puede estar generándose contra una respuesta de Corte Espuma/Laminado ya vieja sin
+  // que se note. Solo alimenta el aviso visible en la sección "PFD-VENTA" (ver más abajo) — no
+  // bloquea el botón, decisión explícita del usuario (2026-09-22): "un aviso o warning visible", no
+  // una restricción dura.
+  const [dataAprobadaFetchedAt, setDataAprobadaFetchedAt] = useState<Date | null>(null);
+
+  // Reporte por correo "Gestión de tiempos y capacidad de Empaque Venta Externa / Muebles" — mismo
+  // patrón ya aprobado en Corte Espuma/Corte y Laminado (ver construirReporteHtmlEspuma /
+  // construirReporteHtml), pero la fuente es Data Aprobada (respuesta YA VERIFICADA de Corte
+  // Espuma/Laminado, estado Parcial/Completo), NO el PFD-VENTA: se puede enviar sin esperar a que se
+  // genere/guarde el PFD (confirmado por el usuario — Data Aprobada y PFD-VENTA son pasos
+  // independientes, "es indistinto" el orden).
+  const [destinatariosReporteEmpaque, setDestinatariosReporteEmpaque] = useState('');
+  const [isSendingReporteEmpaque, setIsSendingReporteEmpaque] = useState<{ '1000': boolean; '2000': boolean }>({ '1000': false, '2000': false });
+
+  // Destinatarios del "Enviar Reporte" (Empaque): se precargan desde la restricción
+  // Grupo_correos_VentaExterna (mismo patrón que Grupo_correos_Laminado en Corte Espuma/Corte y
+  // Laminado) — se espera una fila por centro (codigo_grupo 18=Centro 1000, 19=Centro 2000, ambas ya
+  // vienen en `restricciones`, que se carga filtrada a los grupos de este módulo, ver
+  // fetchRestricciones). Sigue editable en pantalla — solo autocompleta si el usuario no escribió nada.
+  useEffect(() => {
+    const correosGrupo = restricciones
+      .filter(r => r.nombre_restriccion === 'Grupo_correos_VentaExterna')
+      .flatMap(r => String(r.valor_restriccion || '').split(/[,&]/).map(v => v.trim()))
+      .filter(Boolean);
+    const unicos = Array.from(new Set(correosGrupo));
+    if (unicos.length > 0) {
+      setDestinatariosReporteEmpaque(prev => prev.trim() ? prev : unicos.join(', '));
+    }
+  }, [restricciones]);
+
+  // Catálogo de horarios de Empaque — mismos valores/horas que ya usa Corte Espuma (H3=07:00-18:00,
+  // B21=21:00-05:30, H5=07:00-13:00 sábado corto), reutilizados aquí como consts locales porque
+  // TacticalPlanEspumasSection no las exporta.
+  const shiftOptionsEmpaque = useMemo(() => [
+    { v: 'EMPTY', l: 'VACÍO', h: 0 },
+    { v: 'H1', l: '07:00 - 15:45', h: 8.75 },
+    { v: 'H2', l: '07:00 - 17:00', h: 10 },
+    { v: 'H3', l: '07:00 - 18:00', h: 11 },
+    { v: 'H4', l: '07:00 - 19:00', h: 12 },
+    { v: 'H5', l: '07:00 - 13:00', h: 6 },
+  ], []);
+  const nightShiftOptionsEmpaque = useMemo(() => [
+    { v: 'EMPTY', l: 'VACÍO', h: 0 },
+    { v: 'A19', l: '19:00 - 05:30', h: 10.5 },
+    { v: 'B21', l: '21:00 - 05:30', h: 8.5 },
+  ], []);
+
+  const [empaqueConfig, setEmpaqueConfig] = useState<Record<string, EmpaqueShiftConfig>>({
+    EMPACADORA_ELECTROTECKS: {
+      day: 'H3', night: 'B21', saturday: 'H5',
+      paroDay: 0, paroNight: 0, paroSaturday: 0,
+      operadoresDay: 4, operadoresNight: 4, operadoresSaturday: 4,
+      mttoPreventivoHoras: 0,
+      activa: true,
+    },
+  });
 
   // Calendario "abierto": sin tope de rango entre la fecha más antigua y la más nueva seleccionada
   // (antes limitado a 3 días). El usuario confirmó liberar esta restricción a propósito — el filtro
@@ -1171,7 +1260,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           codigo_grupo: grupoCentro.codigo_grupo,
           codigo_familia_grupo: null,
           codigo_plan: null,
-          valor: `Plan Táctico - Centro ${centro} - P2 - ${TIPO_TAG[tipo]}`,
+          valor: `Plan Táctico - Centro ${centro} - P2 - Venta - ${TIPO_TAG[tipo]}`,
           fecha_inicio_plan: ecuadorMidnightISO(fechaPlanP2),
           fecha_fin_plan: ecuadorMidnightISO(fechaPlanP2),
           estado: 'A',
@@ -1503,6 +1592,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       }
 
       setDataAprobada(resultado);
+      setDataAprobadaFetchedAt(new Date());
       // Mantiene el snapshot en sync — si el usuario navega a otro módulo y vuelve, este tab ya no
       // aparece vacío (ver SnapshotVentaExterna.dataAprobada). No-op si todavía no se sincronizó
       // ningún dato base (actualizarEnCache no escribe sobre un snapshot inexistente).
@@ -1513,6 +1603,285 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       setIsLoadingDataAprobada(false);
     }
   }, [grupos, necesidadEspumas1000, necesidadEspumas2000, necesidadRollos1000, necesidadRollos2000, addNotification]);
+
+  // Capacidad de Empaque en horas, por centro — suma de sus máquinas activas (Día+Noche+Sábado según
+  // config, menos % de paro y mantenimiento preventivo real). Operadores por turno son informativos
+  // (no multiplican la capacidad), mismo criterio que Corte Espuma ya aplica a su propio campo de
+  // operador (ver comentario "el campo ni se muestra ni ocupa espacio" en ese módulo).
+  const capacidadEmpaquePorCentro = useMemo(() => {
+    const calcular = (centro: '1000' | '2000') => EMPAQUE_MACHINES_BY_CENTRO[centro].reduce((total, m) => {
+      const c = empaqueConfig[m.id];
+      if (!c || !c.activa) return total;
+      const hDay = shiftOptionsEmpaque.find(o => o.v === c.day)?.h || 0;
+      const hNight = nightShiftOptionsEmpaque.find(o => o.v === c.night)?.h || 0;
+      const hSat = shiftOptionsEmpaque.find(o => o.v === c.saturday)?.h || 0;
+      const bruto = hDay * (1 - c.paroDay / 100) + hNight * (1 - c.paroNight / 100) + hSat * (1 - c.paroSaturday / 100);
+      return total + Math.max(0, bruto - c.mttoPreventivoHoras);
+    }, 0);
+    return { '1000': calcular('1000'), '2000': calcular('2000') };
+  }, [empaqueConfig, shiftOptionsEmpaque, nightShiftOptionsEmpaque]);
+
+  // Bloque Espumas del resumen de Empaque: nivel FERT/PT (producto TERMINADO que de verdad se empaca),
+  // no el componente/semi-elaborado — sube desde Data Aprobada "completo" hasta su FERT/PT padre
+  // (misma trazabilidad de generarPfdVentaPreview/pfdVentaPreview, reutilizada tal cual en vez de
+  // duplicarla). Agrupado por categoría (no por material individual) para que el correo no salga muy
+  // extenso — mismo criterio que ya usa "Resumen Necesidades" (calculateSummary) para su propia tabla
+  // compacta por categoría/densidad.
+  const bloqueEspumasEmpaque = (preview: PfdVentaPreview | undefined | null) => {
+    if (!preview || preview.lineas.length === 0) return null;
+    const map = new Map<string, { categoria: string; materiales: number; cantidad: number; horas: number }>();
+    preview.lineas.forEach(l => {
+      const cat = l.categoria || '—';
+      if (!map.has(cat)) map.set(cat, { categoria: cat, materiales: 0, cantidad: 0, horas: 0 });
+      const e = map.get(cat)!;
+      e.materiales += 1;
+      e.cantidad += l.cantidad;
+      e.horas += l.tiempoHoras;
+    });
+    const filas = Array.from(map.values()).sort((a, b) => b.horas - a.horas);
+    return { filas, totalCantidad: filas.reduce((s, f) => s + f.cantidad, 0), totalHoras: filas.reduce((s, f) => s + f.horas, 0) };
+  };
+
+  // Bloque Rollos: se queda a nivel COMPONENTE (Data Aprobada directo, cantidad verificada × tiempo
+  // estándar por material) porque hoy no existe trazabilidad componente→FERT/PT para Rollos (mismo
+  // límite ya documentado en generarPfdVentaPreview: "Rollos no tiene Data Aprobada con datos reales
+  // hoy") — se muestra igual, marcado aparte, en vez de omitirlo silenciosamente.
+  const bloqueRollosEmpaque = (centro: '1000' | '2000') => {
+    if (centro !== '1000') return null;
+    const lookup = tiempoLookup1000;
+    const rows = dataAprobada['1000-ROLLOS'] || [];
+    const verificadas = rows.filter(r => r.respuestaCant > 0);
+    if (verificadas.length === 0) return null;
+    const filas = verificadas.map(r => {
+      const tiempoEstandarMin = matchTiempoEstandar(r.material, '', lookup);
+      const horas = tiempoEstandarMin !== null ? (r.respuestaCant * tiempoEstandarMin) / 60 : (r.respuestaCant * PACKING_TIME_PER_UNIT_SECONDS) / 3600;
+      return { ...r, estado: estadoDataAprobada(r), horas };
+    }).sort((a, b) => a.material.localeCompare(b.material));
+    return { filas, totalCantidad: filas.reduce((s, f) => s + f.cantidad, 0), totalHoras: filas.reduce((s, f) => s + f.horas, 0) };
+  };
+
+  // Resumen reactivo para el DASHBOARD en pantalla — usa lo que ya haya en `pfdVentaPreview` (última
+  // vez que se generó, en esta sesión o antes); no dispara la explosión BOM en cada render, eso solo
+  // ocurre al pulsar "Generar" o "Enviar Reporte" (ver handleEnviarReporteEmpaque, que refresca la
+  // trazabilidad justo antes de armar el correo para no depender de un preview desactualizado).
+  const resumenEmpaquePorCentro = useMemo(() => {
+    const calcularCentro = (centro: '1000' | '2000') => {
+      const espumas = bloqueEspumasEmpaque(pfdVentaPreview[centro]);
+      const rollos = bloqueRollosEmpaque(centro);
+      const totalHoras = (espumas?.totalHoras || 0) + (rollos?.totalHoras || 0);
+      const capacidadHoras = capacidadEmpaquePorCentro[centro];
+      const ocupacionPct = capacidadHoras > 0 ? (totalHoras / capacidadHoras) * 100 : null;
+      return { espumas, rollos, totalHoras, capacidadHoras, ocupacionPct };
+    };
+    return { '1000': calcularCentro('1000'), '2000': calcularCentro('2000') };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pfdVentaPreview, dataAprobada, tiempoLookup1000, tiempoLookup2000, capacidadEmpaquePorCentro]);
+
+  // Cuerpo del correo — mismo formato ya aprobado en Corte Espuma/Corte y Laminado (banner CHAIDE Y
+  // CHAIDE, tarjetas de totales, tabla de detalle, nota final). `previewEspumas` se recibe como
+  // parámetro (no se lee de `pfdVentaPreview`/resumenEmpaquePorCentro acá dentro) porque
+  // handleEnviarReporteEmpaque ya lo refrescó con `await generarPfdVentaPreview(centro)` en la MISMA
+  // corrida — leer el estado en vez del valor devuelto vería la versión vieja por el cierre del
+  // render anterior (mismo problema ya documentado en generarPfdVentaPreview).
+  const construirReporteHtmlEmpaque = (centro: '1000' | '2000', previewEspumas: PfdVentaPreview | null) => {
+    const fechaLabel = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
+    const espumas = bloqueEspumasEmpaque(previewEspumas);
+    const rollos = bloqueRollosEmpaque(centro);
+    const totalHoras = (espumas?.totalHoras || 0) + (rollos?.totalHoras || 0);
+    const capacidadHoras = capacidadEmpaquePorCentro[centro];
+    const ocupacionPct = capacidadHoras > 0 ? (totalHoras / capacidadHoras) * 100 : null;
+    const ocupacionColor = ocupacionPct !== null && ocupacionPct > 100 ? '#b91c1c' : '#047857';
+
+    const bloqueCategoriaHtml = (titulo: string, b: { filas: { categoria: string; materiales: number; cantidad: number; horas: number }[]; totalHoras: number } | null) => !b ? '' : `
+  <tr>
+    <td style="padding:18px 28px 4px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
+        <tr>
+          <td style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">${titulo}</td>
+          <td align="right" style="font-size:10px;font-weight:700;color:#b45309;">${b.totalHoras.toFixed(2)} h</td>
+        </tr>
+      </table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
+        <tr style="background:#f9fafb;">
+          <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Categoría</td>
+          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Materiales</td>
+          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Cantidad</td>
+          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Horas Empaque</td>
+        </tr>${b.filas.map((f, i) => `
+        <tr style="background:${i % 2 === 0 ? '#ffffff' : '#fafafa'};">
+          <td style="padding:7px 10px;font-size:11px;font-weight:600;color:#111827;border-bottom:1px solid #f3f4f6;">${f.categoria}</td>
+          <td align="right" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.materiales}</td>
+          <td align="right" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.cantidad.toLocaleString()}</td>
+          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.horas.toFixed(2)}</td>
+        </tr>`).join('')}
+      </table>
+    </td>
+  </tr>`;
+
+    const bloqueRollosHtml = !rollos ? '' : `
+  <tr>
+    <td style="padding:18px 28px 4px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
+        <tr>
+          <td style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Detalle por material — Rollos (nivel componente, sin trazabilidad FERT/PT todavía)</td>
+          <td align="right" style="font-size:10px;font-weight:700;color:#b45309;">${rollos.totalHoras.toFixed(2)} h</td>
+        </tr>
+      </table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
+        <tr style="background:#f9fafb;">
+          <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Material</td>
+          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Verificado</td>
+          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Horas Empaque</td>
+        </tr>${rollos.filas.map((f, i) => `
+        <tr style="background:${i % 2 === 0 ? '#ffffff' : '#fafafa'};">
+          <td style="padding:7px 10px;font-size:11px;color:#4338ca;font-family:ui-monospace,Consolas,monospace;border-bottom:1px solid #f3f4f6;">${f.material}</td>
+          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#1d4ed8;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.respuestaCant.toLocaleString()}</td>
+          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.horas.toFixed(2)}</td>
+        </tr>`).join('')}
+      </table>
+    </td>
+  </tr>`;
+
+    // Turnos/operadores de Empaque — mismo esquema ya aprobado (imagen compartida): Día/Noche/Sábado,
+    // operadores por turno (informativo) y mantenimiento preventivo real.
+    const turnosHtml = EMPAQUE_MACHINES_BY_CENTRO[centro].map(m => {
+      const c = empaqueConfig[m.id];
+      if (!c) return '';
+      const filaTurno = (label: string, horarioLabel: string, operadores: number, color: string) => `
+        <tr>
+          <td style="padding:7px 10px;font-size:11px;font-weight:700;color:${color};border-bottom:1px solid #f3f4f6;">${label}</td>
+          <td style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;">${horarioLabel}</td>
+          <td align="center" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;">${operadores}</td>
+        </tr>`;
+      return `
+  <tr>
+    <td style="padding:18px 28px 4px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
+        <tr><td style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">${m.nombre} — turnos y operadores</td></tr>
+      </table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
+        <tr style="background:#f9fafb;">
+          <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Turno</td>
+          <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Horario</td>
+          <td align="center" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Operadores</td>
+        </tr>
+        ${filaTurno('Día', shiftOptionsEmpaque.find(o => o.v === c.day)?.l || '—', c.operadoresDay, '#047857')}
+        ${filaTurno('Noche', nightShiftOptionsEmpaque.find(o => o.v === c.night)?.l || '—', c.operadoresNight, '#4338ca')}
+        ${c.saturday === 'EMPTY' ? '' : filaTurno('Sábado', shiftOptionsEmpaque.find(o => o.v === c.saturday)?.l || '—', c.operadoresSaturday, '#b45309')}
+        <tr style="background:#fffbeb;">
+          <td colspan="2" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;">Mantenimiento Preventivo</td>
+          <td align="center" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;">${c.mttoPreventivoHoras.toFixed(2)} h</td>
+        </tr>
+      </table>
+    </td>
+  </tr>`;
+    }).join('');
+
+    return `
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#ffffff;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td style="background:#0891b2;padding:22px 28px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td style="font-size:15px;font-weight:700;color:#ffffff;letter-spacing:0.02em;">CHAIDE Y CHAIDE</td>
+          <td align="right" style="font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#a5f3fc;">Planificación de Producción</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:26px 28px 6px;">
+      <p style="margin:0;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Venta Externa / Muebles · Centro ${centro} · Producto Terminado de Empaque</p>
+      <h1 style="margin:4px 0 0;font-size:20px;font-weight:700;color:#111827;">Gestión de tiempos y capacidad de Empaque Venta Externa / Muebles</h1>
+      <p style="margin:6px 0 0;font-size:12px;color:#6b7280;text-transform:capitalize;">${fechaLabel} · Correo automático, no responder</p>
+    </td>
+  </tr>${bloqueCategoriaHtml('Detalle por categoría — Espumas (FERT/PT)', espumas)}${bloqueRollosHtml}${turnosHtml}
+  ${!espumas && !rollos ? `
+  <tr>
+    <td style="padding:10px 28px 4px;">
+      <p style="margin:0;font-size:11px;color:#b45309;">Sin materiales verificados en Data Aprobada para este centro todavía.</p>
+    </td>
+  </tr>` : ''}
+  <tr>
+    <td style="padding:18px 28px 4px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td width="25%" style="padding-right:6px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#111827;border-radius:10px;">
+              <tr><td style="padding:14px 12px;">
+                <p style="margin:0;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#9ca3af;">Horas necesarias</p>
+                <p style="margin:4px 0 0;font-size:20px;font-weight:700;color:#ffffff;font-variant-numeric:tabular-nums;">${totalHoras.toFixed(2)}</p>
+              </td></tr>
+            </table>
+          </td>
+          <td width="25%" style="padding:0 6px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#111827;border-radius:10px;">
+              <tr><td style="padding:14px 12px;">
+                <p style="margin:0;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#9ca3af;">Capacidad disponible</p>
+                <p style="margin:4px 0 0;font-size:20px;font-weight:700;color:#ffffff;font-variant-numeric:tabular-nums;">${capacidadHoras.toFixed(2)}</p>
+              </td></tr>
+            </table>
+          </td>
+          <td width="25%" style="padding:0 6px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${ocupacionColor};border-radius:10px;">
+              <tr><td style="padding:14px 12px;">
+                <p style="margin:0;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#fecaca;">% Ocupación</p>
+                <p style="margin:4px 0 0;font-size:20px;font-weight:700;color:#ffffff;font-variant-numeric:tabular-nums;">${ocupacionPct !== null ? ocupacionPct.toFixed(0) + '%' : '—'}</p>
+              </td></tr>
+            </table>
+          </td>
+          <td width="25%" style="padding-left:6px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ecfeff;border:1px solid #e5e7eb;border-radius:10px;">
+              <tr><td style="padding:14px 12px;">
+                <p style="margin:0;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#6b7280;">Materiales</p>
+                <p style="margin:4px 0 0;font-size:20px;font-weight:700;color:#0891b2;font-variant-numeric:tabular-nums;">${(espumas?.filas.reduce((s, f) => s + f.materiales, 0) || 0) + (rollos?.filas.length || 0)}</p>
+              </td></tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:0 28px 28px;">
+      <p style="margin:16px 0 0;font-size:11px;line-height:1.6;color:#9ca3af;border-top:1px solid #e5e7eb;padding-top:16px;">
+        Espumas a nivel FERT/PT (trazabilidad desde Data Aprobada verificada); Rollos todavía a nivel componente (ver nota en su tabla).
+        Este correo fue generado automáticamente por el Optimizador de Producción, favor no responder.
+        Para dudas sobre estos datos, contacta a Planificación Táctica.
+      </p>
+    </td>
+  </tr>
+</table>`;
+  };
+
+  const handleEnviarReporteEmpaque = async (centro: '1000' | '2000') => {
+    const destino = destinatariosReporteEmpaque.trim();
+    if (!destino) {
+      addNotification('warning', 'Escribe al menos un correo destinatario antes de enviar.');
+      return;
+    }
+    setIsSendingReporteEmpaque(prev => ({ ...prev, [centro]: true }));
+    try {
+      // Refresca la trazabilidad FERT/PT de Espumas antes de armar el correo — no depende de que el
+      // usuario ya haya visitado "PFD-VENTA" en esta sesión (Data Aprobada/FERT-PT y PFD-VENTA son
+      // pasos independientes, confirmado por el usuario). Si no hay P2/FERT activos,
+      // generarPfdVentaPreview ya notifica el motivo puntual y el correo sigue con lo que haya en
+      // Rollos. Se usa el valor DEVUELTO, no el estado `pfdVentaPreview` (que por el cierre de este
+      // render seguiría viendo la versión vieja hasta el próximo render).
+      const previewFresco = await generarPfdVentaPreview(centro);
+      const resultado = await serviciosService.enviarCorreo({
+        destino,
+        asunto: `Reporte de producción — Empaque Venta Externa / Muebles [Centro ${centro}]`,
+        cuerpo: construirReporteHtmlEmpaque(centro, previewFresco),
+        nota: 'Este correo fue generado automáticamente, favor no responder.',
+      });
+      addNotification('success', `${resultado.message} — ${resultado.destinatarios.join(', ')}`);
+    } catch (error) {
+      addNotification('error', `Error al enviar el reporte: ${(error as Error).message}`);
+    } finally {
+      setIsSendingReporteEmpaque(prev => ({ ...prev, [centro]: false }));
+    }
+  };
 
   const calculateSummary = (data: Record<string, unknown>[], centroId: string) => {
     const lookup = centroId === '1000' ? tiempoLookup1000 : tiempoLookup2000;
@@ -2440,10 +2809,51 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               <h3 className="text-sm font-black text-gray-700 uppercase">Respuesta del Plan Consumidor</h3>
               <p className="text-[10px] text-gray-400 mt-1">Por cada material que enviamos en nuestro P2, busca si algún Plan P3 (consumidor real, no PFD) ya respondió — un DetalleTactico cuyo <span className="font-mono">codigo_plan_grupo_padre</span> apunta a nuestro plan. La columna &quot;Fechas&quot; avisa si esa respuesta NO se guardó exactamente un día después de nuestra línea (regla &quot;revisión hoy, devolución mañana&quot;).</p>
             </div>
-            <Button onClick={fetchDataAprobada} disabled={isLoadingDataAprobada} variant="outline" className="h-10 px-6 rounded-2xl gap-2 font-bold text-xs uppercase shrink-0 border-indigo-200 text-indigo-700 hover:bg-indigo-50">
-              {isLoadingDataAprobada ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-              Actualizar
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex items-center gap-1.5 rounded-2xl border border-cyan-200 bg-white px-4 py-2.5 text-xs font-bold uppercase tracking-wide text-cyan-700 hover:bg-cyan-50"
+                  >
+                    <Mail className="w-3.5 h-3.5" /> Enviar Reporte
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent className="w-80 p-4 space-y-3" align="end">
+                  <div>
+                    <p className="text-xs font-black uppercase tracking-widest text-slate-700">Gestión de tiempos y capacidad de Empaque</p>
+                    <p className="text-[10px] text-slate-400 mt-1">Venta Externa / Muebles — datos de Data Aprobada (respuesta ya verificada), no del PFD-VENTA.</p>
+                  </div>
+                  <textarea
+                    value={destinatariosReporteEmpaque}
+                    onChange={(e) => setDestinatariosReporteEmpaque(e.target.value)}
+                    placeholder="correo1@chaideychaide.com, correo2@chaideychaide.com"
+                    className="w-full h-20 text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-cyan-400"
+                  />
+                  <p className="text-[9px] text-slate-400 -mt-1">Precargado desde el grupo de correos configurado (Grupo_correos_VentaExterna) — editable antes de enviar.</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      onClick={() => handleEnviarReporteEmpaque('1000')}
+                      disabled={isSendingReporteEmpaque['1000'] || !destinatariosReporteEmpaque.trim()}
+                      className="w-full bg-cyan-600 hover:bg-cyan-700 text-white text-[10px] font-black uppercase tracking-widest h-9"
+                    >
+                      {isSendingReporteEmpaque['1000'] ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Centro 1000
+                    </Button>
+                    <Button
+                      onClick={() => handleEnviarReporteEmpaque('2000')}
+                      disabled={isSendingReporteEmpaque['2000'] || !destinatariosReporteEmpaque.trim()}
+                      className="w-full bg-cyan-600 hover:bg-cyan-700 text-white text-[10px] font-black uppercase tracking-widest h-9"
+                    >
+                      {isSendingReporteEmpaque['2000'] ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Centro 2000
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+              <Button onClick={fetchDataAprobada} disabled={isLoadingDataAprobada} variant="outline" className="h-10 px-6 rounded-2xl gap-2 font-bold text-xs uppercase shrink-0 border-indigo-200 text-indigo-700 hover:bg-indigo-50">
+                {isLoadingDataAprobada ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                Actualizar
+              </Button>
+            </div>
           </div>
 
           {[
@@ -2518,6 +2928,136 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             );
           })}
 
+          {/* Capacidad Operativa · Empaque: máquina(s) de empaque con turnos/operadores editables (mismo
+              patrón que Capacidad Operativa en Corte Espuma), capacidad en horas y % Ocupación contra
+              las horas necesarias (Espumas a nivel FERT/PT + Rollos a nivel componente, ver
+              resumenEmpaquePorCentro). Config solo en memoria — no persiste al recargar.
+              Reestilizado 2026-09-22 para calzar con el lenguaje visual "industrial/ejecutivo" que ya
+              usa Corte Espuma (ver renderMachineCol en TacticalPlanEspumasSection): cabecera
+              slate-50/70 con el nombre del centro grande + "Gestión de Tiempos", métricas en chips con
+              borde en vez de texto suelto, botón de encendido/apagado de máquina (no checkbox) y
+              turnos en tarjetas con select coloreado (ámbar Día/Sábado, morado Noche) — mismos colores
+              que usa esa función. Sin cambios de lógica/cálculo, solo de piel. */}
+          <div className="pt-6 mt-6 border-t-2 border-dashed border-gray-100 space-y-4">
+            <div>
+              <p className="text-[10px] font-bold uppercase text-cyan-500 tracking-wider">Capacidad vs. Necesidad</p>
+              <h3 className="text-sm font-black text-gray-700 uppercase">Capacidad Operativa · Empaque</h3>
+              <p className="text-[10px] text-gray-400 mt-1">Turnos, operadores y mantenimiento de cada máquina de empaque — junto con las horas necesarias (mismo dato que sale en el correo), da el % de ocupación.</p>
+            </div>
+            {(['1000', '2000'] as const).map(centro => {
+              const r = resumenEmpaquePorCentro[centro];
+              const maquinas = EMPAQUE_MACHINES_BY_CENTRO[centro];
+              const sobreCapacidad = r.ocupacionPct !== null && r.ocupacionPct > 100;
+              return (
+                <div key={centro} className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
+                  <div className="px-6 py-4 bg-slate-50/70 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-baseline gap-3">
+                      <h4 className="text-lg font-black tracking-tighter text-gray-800">CENTRO {centro}</h4>
+                      <p className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Gestión de Tiempos · Empaque</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="text-center px-3 py-1.5 rounded-lg border border-gray-200 bg-white min-w-[92px]">
+                        <p className="text-[8px] font-black uppercase text-slate-400 tracking-widest">Horas Necesarias</p>
+                        <p className="text-sm font-black text-slate-800 tabular-nums">{r.totalHoras.toFixed(2)} h</p>
+                      </div>
+                      <div className="text-center px-3 py-1.5 rounded-lg border border-gray-200 bg-white min-w-[92px]">
+                        <p className="text-[8px] font-black uppercase text-slate-400 tracking-widest">Capacidad</p>
+                        <p className="text-sm font-black text-slate-800 tabular-nums">{r.capacidadHoras.toFixed(2)} h</p>
+                      </div>
+                      <div className={cn("text-center px-3 py-1.5 rounded-lg border min-w-[92px]", sobreCapacidad ? "border-red-200 bg-red-50" : "border-emerald-200 bg-emerald-50")}>
+                        <p className={cn("text-[8px] font-black uppercase tracking-widest", sobreCapacidad ? "text-red-700" : "text-emerald-700")}>% Ocupación</p>
+                        <p className={cn("text-sm font-black tabular-nums", sobreCapacidad ? "text-red-700" : "text-emerald-700")}>
+                          {r.ocupacionPct !== null ? `${r.ocupacionPct.toFixed(0)}%` : '—'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-4 space-y-4">
+                    {maquinas.length === 0 ? (
+                      <p className="text-[10px] text-gray-300 font-bold uppercase tracking-widest text-center py-6">Sin máquina de empaque registrada en este centro</p>
+                    ) : maquinas.map(m => {
+                      const c = empaqueConfig[m.id];
+                      if (!c) return null;
+                      const setC = (patch: Partial<EmpaqueShiftConfig>) => setEmpaqueConfig(prev => ({ ...prev, [m.id]: { ...prev[m.id], ...patch } }));
+                      return (
+                        <div key={m.id} className={cn("rounded-xl border border-gray-100 p-4 space-y-3", !c.activa && "bg-slate-50/80")}>
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className={cn("text-xs font-black uppercase tracking-tight", c.activa ? "text-slate-800" : "text-slate-400 line-through")}>{m.nombre}</p>
+                              <p className={cn("text-[9px] font-bold uppercase", c.activa ? "text-slate-400" : "text-slate-300")}>{m.id}</p>
+                            </div>
+                            {/* Botón de encendido/apagado (no checkbox) — mismo patrón que "En servicio"/
+                                "Fuera de servicio" en renderMachineCol de Corte Espuma: apagar la máquina
+                                cuando no hay demanda que la justifique, sin borrar sus turnos. */}
+                            <button
+                              type="button"
+                              onClick={() => setC({ activa: !c.activa })}
+                              className={cn(
+                                "rounded-md px-3 py-1.5 text-[9px] font-black uppercase tracking-wider transition-colors border shrink-0",
+                                c.activa
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                                  : "bg-slate-100 text-slate-400 border-slate-200 hover:bg-slate-200"
+                              )}
+                              title={c.activa ? 'Máquina en servicio: sus horas suman a la capacidad. Click para apagarla.' : 'Máquina fuera de servicio: no aporta capacidad. Click para encenderla.'}
+                            >
+                              {c.activa ? 'En servicio' : 'Fuera de servicio'}
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            {([
+                              { key: 'day' as const, paroKey: 'paroDay' as const, opKey: 'operadoresDay' as const, label: 'Día', opts: shiftOptionsEmpaque, color: 'text-amber-700' },
+                              { key: 'night' as const, paroKey: 'paroNight' as const, opKey: 'operadoresNight' as const, label: 'Noche', opts: nightShiftOptionsEmpaque, color: 'text-purple-700' },
+                              { key: 'saturday' as const, paroKey: 'paroSaturday' as const, opKey: 'operadoresSaturday' as const, label: 'Sábado', opts: shiftOptionsEmpaque, color: 'text-amber-700' },
+                            ]).map(turno => (
+                              <div key={turno.key} className="border border-gray-200 rounded-lg p-2.5 space-y-1.5 bg-slate-50/40">
+                                <p className={cn("text-[9px] font-black uppercase tracking-wide", turno.color)}>{turno.label}</p>
+                                <select
+                                  value={c[turno.key]}
+                                  onChange={(e) => setC({ [turno.key]: e.target.value } as Partial<EmpaqueShiftConfig>)}
+                                  className={cn("w-full bg-white font-black text-[11px] rounded px-2 py-1.5 outline-none border border-gray-200", turno.color)}
+                                >
+                                  {turno.opts.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                                </select>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wide">Paro %</span>
+                                  <input
+                                    type="number" min={0} max={100} value={c[turno.paroKey]}
+                                    onChange={(e) => setC({ [turno.paroKey]: Number(e.target.value) || 0 } as Partial<EmpaqueShiftConfig>)}
+                                    className="w-14 bg-white border border-gray-200 rounded px-1.5 py-1 text-[9px] font-bold text-slate-700 outline-none text-right"
+                                  />
+                                </div>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wide">Operadores</span>
+                                  <input
+                                    type="number" min={0} value={c[turno.opKey]}
+                                    onChange={(e) => setC({ [turno.opKey]: Number(e.target.value) || 0 } as Partial<EmpaqueShiftConfig>)}
+                                    className="w-14 bg-white border border-gray-200 rounded px-1.5 py-1 text-[9px] font-bold text-slate-700 outline-none text-right"
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="flex items-center justify-between gap-2 border-t border-gray-100 pt-2.5">
+                            <span className="text-[9px] font-black text-slate-500 uppercase tracking-wide">Mantenimiento Preventivo</span>
+                            <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">
+                              <input
+                                type="number" min={0} step={0.25} value={c.mttoPreventivoHoras}
+                                onChange={(e) => setC({ mttoPreventivoHoras: Number(e.target.value) || 0 })}
+                                className="w-14 bg-transparent text-[10px] font-black text-indigo-700 outline-none text-right"
+                              />
+                              <span className="text-[9px] font-black text-indigo-700">h</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
           {/* "PFD - VENTA": sube desde el componente YA RESPONDIDO (estado "completo" arriba) hacia su
               FERT/PT padre — dirección opuesta a como se explota el BOM para generar la Necesidad P2
               (ver generarPfdVentaPreview). Solo Espumas: Rollos no tiene Data Aprobada con datos reales hoy. */}
@@ -2538,6 +3078,24 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                 {isRunningPfdVentaSecuencia ? 'Generando y guardando…' : 'Generar y Guardar PFD-VENTA (1000 y 2000)'}
               </Button>
             </div>
+
+            {/* Aviso de Data Aprobada desactualizada — PFD-VENTA lee `dataAprobada` en memoria, no
+                vuelve a consultarla por su cuenta (ver dataAprobadaFetchedAt). No bloquea el botón de
+                arriba a propósito (pedido explícito del usuario: "un aviso o warning visible", no una
+                restricción dura) — solo hace explícito el riesgo de generar contra una respuesta de
+                Corte Espuma/Laminado que ya no es la más reciente. */}
+            {!dataAprobadaFetchedAt ? (
+              <div className="flex items-center gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-left">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                <p className="text-[11px] font-bold text-amber-700">
+                  Todavía no actualizaste Data Aprobada en esta sesión — el PFD-VENTA podría generarse con una respuesta desactualizada. Pulsa &quot;Actualizar&quot; arriba antes de continuar.
+                </p>
+              </div>
+            ) : (
+              <p className="text-[10px] text-gray-400 px-1">
+                Data Aprobada actualizada por última vez hoy a las {dataAprobadaFetchedAt.toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' })}.
+              </p>
+            )}
 
             {(['1000', '2000'] as const).map(centro => {
               const preview = pfdVentaPreview[centro];

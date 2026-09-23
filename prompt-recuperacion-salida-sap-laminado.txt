@@ -1,0 +1,223 @@
+PROMPT — Replicar "Recuperación de datos + Salida a SAP" (Programación Táctica Laminado)
+=========================================================================================
+
+CONTEXTO
+--------
+En el módulo de Programación Táctica de Corte y Laminado (Next.js/React/TypeScript,
+archivo de referencia: src/components/TacticalPlanCorteLaminadoSection.tsx) existe un
+flujo que, a partir del plan de salida calculado en memoria (outputPlanRows), arma y
+envía órdenes de producción a SAP/HANA a través del endpoint InsertarSolicitudProduccionHB.
+El flujo tiene dos partes: (1) recuperación de datos complementarios que el plan en
+memoria no trae (Versión de Fabricación, Puesto de Trabajo, Código de Orden Externa) y
+(2) construcción + envío del payload a SAP. Este documento describe el patrón completo
+para poder implementarlo igual en otro ambiente/módulo.
+
+TIPO DE PAYLOAD (SolicitudProduccionHBPayload)
+-----------------------------------------------
+Todos los campos se envían siempre como string (salvo CantidadPlanificada, number).
+Los opcionales sin valor real se mandan como "" (nunca se omiten del body):
+
+  Mandante              string   — fijo "300"
+  CodigoOrdenExterna     string   — ver "Recuperación 3" abajo
+  ClaseOrden             string   — fijo "ZCSQ" (constante de negocio; confirmar con el
+                                    usuario el valor correcto para el ambiente destino,
+                                    antes era "ZMOQ" y se unificó a "ZCSQ" el 2026-09-16)
+  Centro                 string   — fijo "1000"
+  CodigoMaterial          string   — código del material de la fila
+  CantidadPlanificada     number   — cantidad planificada (Kg) de la fila
+  VersionFabricacion      string   — ver "Recuperación 1" abajo
+  PuestoTrabajo           string   — ver "Recuperación 2" abajo
+  FechaFinProgramada      string   — "YYYYMMDD" (sin guiones), del reloj de producción
+  HoraFinProgramada       string   — "HHMMSS"
+  FechaInicioProgramada   string   — "YYYYMMDD"
+  HoraInicioProgramada    string   — "HHMMSS"
+  PedidoComercial         string   — "" (material MTS, sin pedido comercial real;
+                                    rectificado 2026-09-16 — antes se mandaba "0")
+  PosicionPedido          string   — "" (idem)
+  EstadoRegistro          string   — fijo "1"
+  Observaciones           string   — texto libre descriptivo, ej.
+                                    "Generado automático — Plan Táctico Corte y Laminado"
+  EstadoCarga             string   — "" (lo llena SAP)
+  NumeroOrdenSap          string   — "" (lo llena SAP)
+  FechaProceso            string   — "" (lo llena SAP)
+  HoraProceso             string   — "" (lo llena SAP)
+  UsuarioProceso           string   — fijo "APIUSR"
+
+RECUPERACIÓN 1 — VersionFabricacion
+------------------------------------
+No sale del plan en memoria ni del endpoint de tiempos de ensamblado. Sale de un
+endpoint dedicado de Hoja de Ruta SAP:
+
+  serviciosService.versionsFabricacionPorCentroYCodigoMaterial(Centro, CodigoMaterial)
+
+Devuelve un array (una fila por Hoja de Ruta del material) con campos GRUPOHOJARUTA
+(ej. "HR-CTBSC") y VERSION (texto exacto de SAP, ej. "1" o "01").
+
+Lógica de resolución por material:
+  - 0 filas -> sin versión, queda "" (se corrige a mano en la vista previa).
+  - 1 fila -> se usa directo, sin ambigüedad.
+  - 2+ filas -> cruzar GRUPOHOJARUTA (sin el prefijo "HR-") contra el PuestoTrabajo ya
+    resuelto para ese material (ver Recuperación 2). Si hay match, se usa esa fila y no
+    es ambiguo. Si no hay match, se usa la primera fila igual, pero se marca
+    ambiguo=true (usar esa marca para resaltar la fila en la UI de revisión, no bloquea
+    el envío).
+
+Se consulta en lotes pequeños en paralelo (chunks de 5 materiales, Promise.allSettled),
+no todos a la vez (satura la conexión) ni uno por uno (muy lento). Con reintentos (3
+intentos, backoff 500ms * intento) por si el endpoint falla transitoriamente.
+
+Se pide solo para los materiales que realmente se van a exportar (no en la carga
+inicial del módulo) — es un endpoint por-material, pedirlo para todo el maestro sería
+desperdicio.
+
+RECUPERACIÓN 2 — PuestoTrabajo
+--------------------------------
+Sale de un endpoint distinto (tiempos de ensamblado), consultado UNA vez al sincronizar
+el módulo (no por-material como la versión):
+
+  serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(Centro, codigoGrupo)
+  (mismo endpoint real: tiemposEnsambladoByGrupoYCentroPR2)
+
+Se arma un Map<CodigoMaterial, PuestoTrabajo> tomando el campo PuestoTrabajo de la
+primera fila que matchea ese material (por CodMaterial/MATERIAL/Material, normalizado
+con una función tipo cleanCode). PuestoTrabajo es el código real de work center (en
+este negocio puede ser un nombre como "Looper", no necesariamente un código corto tipo
+"PT01" — verificar convención real del ambiente destino).
+
+Regla de negocio importante — si el material no tiene PuestoTrabajo registrado en el
+endpoint, se deja "" (string vacío). NO se inventa ni se reutiliza el puesto de otro
+material "parecido". Excepción documentada abajo para variantes derivadas (CONV).
+
+CASO ESPECIAL — variantes derivadas de otro material (ej. "CONV" en este negocio):
+  Cuando el plan tiene filas que son variantes de otro material base, producidas en OTRA
+  máquina distinta a la del material base (en este caso: variantes "CONV", producidas
+  en un work center nuevo "CILIN-02" que todavía no tiene Hoja de Ruta cargada en el
+  endpoint de tiempos de ensamblado), el lookup exacto por CodigoMaterial puede
+  encontrar igual una fila en el endpoint — pero con el PuestoTrabajo del material base
+  o de un proceso viejo (en este caso, "Looper"), que es física y operativamente
+  incorrecto para la variante. Confirmado con el usuario con 2 materiales reales
+  (30004576, 30006695: LAMINA CILINDRICA ... CONV).
+  Decisión de negocio: para esas filas, se fuerza PuestoTrabajo="" en vez de usar el
+  valor que devuelve el lookup normal, hasta que el work center correcto exista
+  registrado en el endpoint. Replicar este mismo criterio: identificar la condición que
+  marca una fila como "variante en otra máquina" (en este código es el flag booleano
+  isConvNested del row) y, si es true, no llamar al resolver normal — mandar "".
+
+RECUPERACIÓN 3 — CodigoOrdenExterna
+--------------------------------------
+Se llena con el codigo_detalle_tactico ya persistido en base de datos (no un ID
+generado en cliente), tomado de la Respuesta P3 (plan grupo tipo "respuesta") más
+reciente y activa para el grupo/módulo correspondiente:
+
+  1. Traer todos los Plan Grupo (planGrupoService.getAll()) y Detalle Táctico
+     (detalleTacticoService.getAll()).
+  2. Filtrar Plan Grupo por: código de grupo correcto, estado='A', que sea un plan tipo
+     "P3/Respuesta" (regla propia del negocio para distinguir P1/P2/P3), Y que
+     corresponda específicamente al submódulo correcto (en este caso, se filtró
+     además por texto "Rollo" en el campo valor, porque el mismo codigo_grupo se
+     comparte con otro submódulo hermano — verificar si aplica un filtro equivalente en
+     el ambiente destino).
+  3. De los que queden, elegir el más reciente por fecha_inicio_plan; en empate de
+     fecha, desempatar por codigo_plan_grupo más alto (autoincremental = más nuevo).
+  4. Tomar todos los Detalle Táctico con ese codigo_plan_grupo y estado='A'; agrupar por
+     material — PUEDE haber más de un candidato por material (2+ corridas del mismo
+     material en el plan).
+  5. Al armar el payload de cada fila, hacer "consumo" del candidato cuya cantidad
+     grabada esté más cerca de la cantidad de esa fila específica (y sacarlo del pool
+     para que la siguiente fila del mismo material no lo reutilice) — evita que SAP
+     rechace la segunda orden del mismo material como duplicada.
+  6. Si el material no aparece en esa Respuesta P3, CodigoOrdenExterna queda "" (se
+     corrige a mano en la vista previa; no bloquea el envío).
+
+FECHAS/HORAS DE PROGRAMACIÓN
+------------------------------
+FechaInicioProgramada/HoraInicioProgramada/FechaFinProgramada/HoraFinProgramada salen
+de un "reloj acumulado" de producción por fecha, calculado al armar el plan de salida:
+arranca a las 07:00 de cada fecha, cada fila suma su tiempo de proceso (minutos por
+unidad × cantidad planificada) y la siguiente fila de la misma fecha continúa donde
+terminó la anterior. Replicar esa misma mecánica de reloj encadenado si el ambiente
+destino también necesita programar "hacia adelante" fila por fila.
+
+FLUJO COMPLETO DE ARMADO Y ENVÍO
+-----------------------------------
+1. Validación previa de negocio (en este caso: validarAprobacionVentaExterna) sobre los
+   materiales a exportar — si hay materiales no aprobados, se bloquea el envío y se
+   muestra la lista al usuario ANTES de seguir.
+2. Recuperar en paralelo (Promise.all): Versiones de Fabricación (Recuperación 1) y
+   mapa de CodigoOrdenExterna (Recuperación 3) — solo para los materiales del plan
+   actual.
+3. Congelar la "vista previa": por cada fila del plan, construir el payload completo
+   (todos los campos del tipo, incluidos los opcionales vacíos) y guardarlo en un
+   estado editable. A partir de este punto, lo que se muestra/edita en la vista previa
+   es exactamente lo que se va a enviar — no se recalcula nada aunque cambien datos
+   detrás en pantalla.
+4. Mostrar un diálogo de confirmación con una tabla editable (una fila por payload, una
+   columna por campo del tipo, en el mismo orden que la interfaz) para que el usuario
+   pueda corregir a mano cualquier campo que haya quedado vacío (típicamente Versión,
+   Puesto de Trabajo o CodigoOrdenExterna) antes de enviar.
+5. Al confirmar, enviar cada payload SECUENCIALMENTE (no en paralelo) contra
+   InsertarSolicitudProduccionHB — importante para poder rastrear cuál orden falló si
+   el backend responde fuera de orden, ya que cada línea crea una orden real en
+   SAP/HANA.
+6. Acumular resultados (ok/fallido por material) y mostrar un resumen final al usuario
+   (cuántas ok, cuántas con error y el mensaje de cada una).
+
+ENDPOINT DE ENVÍO
+--------------------
+  POST {API_URL}/InsertarSolicitudProduccionHB
+  Body: JSON.stringify(payload)  — el objeto SolicitudProduccionHBPayload completo,
+  con TODOS los campos presentes (los vacíos como "", nunca omitidos).
+  Respuesta esperada: { success: boolean; message: string }
+
+HERRAMIENTA DE VALIDACIÓN (OPCIONAL PERO RECOMENDADA)
+--------------------------------------------------------
+Para poder auditar por qué un material resuelve tal o cual PuestoTrabajo/Versión sin
+adivinar, se agregó un tab de solo lectura ("Validar PR2") que muestra la data cruda tal
+cual la devuelve el endpoint de tiempos de ensamblado (sin pasar por la lógica de
+resolución), con buscador por código de material y el JSON completo de cada fila.
+Replicar un tab equivalente en el ambiente destino agiliza mucho la depuración de casos
+similares al de las variantes CONV.
+
+CHECKLIST PARA REPLICAR EN OTRO AMBIENTE/MÓDULO
+----------------------------------------------------
+[ ] Confirmar el valor real de ClaseOrden a usar en el ambiente destino (no asumir
+    "ZCSQ" — puede variar por tipo de módulo/material).
+[ ] Confirmar Mandante/Centro fijos correctos para ese ambiente.
+[ ] Confirmar si el material planifica MTS (sin pedido comercial -> PedidoComercial y
+    PosicionPedido van "") o MTO (con pedido comercial real -> deben llevar el valor
+    real, NO "").
+[ ] Identificar el endpoint de Hoja de Ruta equivalente para VersionFabricacion y su
+    lógica de desambiguación (cruce contra PuestoTrabajo).
+[ ] Identificar el endpoint de tiempos de ensamblado / work center equivalente para
+    PuestoTrabajo y confirmar si existen variantes derivadas (tipo CONV) que deban
+    forzarse a "" en vez de heredar el puesto de otro material.
+[ ] Confirmar el criterio real para ubicar el Plan Grupo "Respuesta" (P3) correcto del
+    que sale CodigoOrdenExterna, incluyendo cualquier filtro adicional necesario para no
+    cruzar con un submódulo hermano que comparta el mismo codigo_grupo.
+[ ] Replicar el patrón de emparejamiento por cantidad más cercana cuando un material
+    tiene más de una corrida/candidato de CodigoOrdenExterna, para evitar duplicados
+    rechazados por SAP.
+[ ] Replicar el reloj acumulado de fechas/horas si aplica programación "hacia
+    adelante" fila por fila.
+[ ] Enviar los payloads a SAP SECUENCIALMENTE, no en paralelo.
+[ ] Congelar la vista previa antes de enviar y permitir edición manual de los campos
+    que puedan quedar vacíos, antes del envío real.
+[ ] (Opcional) Agregar un tab de solo lectura para inspeccionar la data cruda del
+    endpoint de work center/tiempos, útil para depurar casos de PuestoTrabajo
+    inesperado.
+
+REFERENCIA DE ARCHIVOS (proyecto original)
+---------------------------------------------
+  src/components/TacticalPlanCorteLaminadoSection.tsx
+    - resolvePuestoTrabajo / puestoTrabajoPorMaterial
+    - fetchVersionConReintentos / fetchVersionesFabricacionLaminado
+    - fetchCodigoDetalleTacticoPorMaterial / consumirCodigoDetalleTactico
+    - buildSolicitudProduccion (arma el payload)
+    - handleExportTxt (dispara la recuperación + congela la vista previa)
+    - handleConfirmarExportTxt (envío secuencial a SAP)
+    - TabsContent value="debugPR2" (tab de validación)
+  src/services/servicios.service.ts
+    - SolicitudProduccionHBPayload (tipo del payload)
+    - versionsFabricacionPorCentroYCodigoMaterial
+    - getTiemposEnsambladobyCentroyCodigoGrupo / tiemposEnsambladoByGrupoYCentroPR2
+    - insertarSolicitudProduccionHB
