@@ -320,8 +320,12 @@ export interface PlanGrupo {
     codigo_grupo: number;
     codigo_familia_grupo: number;
     valor: string;
-    fecha_inicio_plan: Date;
-    fecha_fin_plan: Date;
+    // Día calendario del plan (sin hora) — se guarda como string naive 'YYYY-MM-DDT00:00:00'
+    // (ver toDatetime2Medianoche en @/lib/fecha-ecuador) para que el backend no le aplique
+    // ninguna conversión de huso horario. Sigue aceptando Date para no romper lecturas ya
+    // existentes que construyen un Date a partir de lo que devuelve la API.
+    fecha_inicio_plan: Date | string;
+    fecha_fin_plan: Date | string;
     estado: string;
     fecha_creacion: Date;
     usuario_creacion: string;

@@ -46,7 +46,9 @@ import {
   Download,
   RefreshCw,
   Gauge,
-  Mail
+  Mail,
+  Send,
+  Eye
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -64,6 +66,7 @@ import {
   AlertDialogCancel,
 } from '@/components/ui/alert-dialog';
 import { Progress } from "@/components/ui/progress";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Calendar as DatePickerCalendar } from '@/components/ui/calendar';
 import { 
@@ -75,13 +78,13 @@ import {
 } from "@/components/ui/select";
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
-import { serviciosService } from '@/services/servicios.service';
+import { serviciosService, SolicitudProduccionHB } from '@/services/servicios.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { maestroMaterialCentroService } from '@/services/MaestroMaterialCentro.service';
 import { materialesBalanceoService } from '@/services/materialesBalanceo.service';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
-import { toFechaEcuador } from '@/lib/fecha-ecuador';
+import { toFechaEcuador, toDatetime2Medianoche } from '@/lib/fecha-ecuador';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico, MaterialesBalanceo } from '@/types/interfaces';
 import type { MaestroMaterialCentro } from '@/types/types';
 import { cn } from '@/lib/utils';
@@ -120,7 +123,27 @@ const FERIADO_OPTIONS = [
 
 // Intentos por material en las explosiones de niveles. Una sola llamada fallida no puede tumbar
 // toda la explosión (antes el catch envolvía el bucle completo y se perdía TODO lo acumulado).
-const EXPLOSION_MAX_INTENTOS = 3;
+// Con 3 intentos y backoff de 400ms el margen total era de ~1.2s: un corte de red real (VPN, WiFi,
+// el propio backend recompilando) suele durar más que eso, así que casi cualquier corte tumbaba el
+// material igual pese al reintento. Con 5 intentos y 700ms de base el margen total sube a ~7s.
+const EXPLOSION_MAX_INTENTOS = 5;
+const EXPLOSION_BACKOFF_MS = 700;
+
+// Pide UNA página de un endpoint paginado reintentando ante fallos de red ("Failed to fetch"). Las
+// cargas que encadenan varias páginas (órdenes previsionales, FERT) descartan todo lo acumulado si
+// una sola página falla, así que un parpadeo de red no puede tumbarlas sin reintento.
+const fetchPaginaConReintentos = async <T,>(pedirPagina: () => Promise<T>): Promise<T> => {
+  let ultimoError: any = null;
+  for (let intento = 1; intento <= EXPLOSION_MAX_INTENTOS; intento++) {
+    try {
+      return await pedirPagina();
+    } catch (error) {
+      ultimoError = error;
+      if (intento < EXPLOSION_MAX_INTENTOS) await new Promise(r => setTimeout(r, EXPLOSION_BACKOFF_MS * intento));
+    }
+  }
+  throw ultimoError;
+};
 
 // Tamaño de página al cargar el maestro de materiales (~85.000 filas totales). Pedirlo completo en
 // una sola llamada pesa ~58 MB y tarda ~17 s — demasiado frágil ante cualquier corte de red.
@@ -165,7 +188,9 @@ const workstationGroups = [
     items: [
       "ACOLCHADORA02", "COSEDORA-ACH02",
       "ACOLCHADORA06", "COSEDORA-ACH06",
-      "ACOLCHADORA07", "COSEDORA-ACH07",
+      // COSEDORA-ACH07 se quitó a pedido del usuario: físicamente no existe y no tiene hoja de ruta
+      // en SAP — mismo caso que COSEDORA-ACH13.
+      "ACOLCHADORA07",
       "ACOLCHADORA08", "COSEDORA-ACH08",
       "ACOLCHADORA09", "COSEDORA-ACH09",
       "ACOLCHADORA10", "COSEDORA-ACH10",
@@ -348,6 +373,8 @@ const MachineCard = React.memo(({
   blockedOrderKeys,
   onToggleBlock,
   qtyOverrideByKey,
+  qtyEditable = false,
+  onQtyEdit,
 }: {
   puestoName: string;
   small?: boolean;
@@ -372,6 +399,11 @@ const MachineCard = React.memo(({
   // capacidad refleja el descuento. No se toca la CANTIDAD original de la orden a propósito:
   // las keys de bloqueo se construyen con ella y dejarían de coincidir si se mutara.
   qtyOverrideByKey?: Map<string, number>;
+  // Habilita el input editable de CANTIDAD en la tabla (Ajuste de Producción, todas las secciones
+  // EXCEPTO Acolchado & Tapas). `onQtyEdit` recibe la orden cruda (para construir su key estable) y
+  // la cantidad nueva.
+  qtyEditable?: boolean;
+  onQtyEdit?: (order: any, nuevaCantidad: number) => void;
 }) => {
   const hrCode = mapToHojaRuta(puestoName).trim().toUpperCase();
   // El sábado aporta capacidad solo si el puesto lo tiene marcado Y la Jornada Fin de Semana está
@@ -726,7 +758,20 @@ const MachineCard = React.memo(({
                         </span>
                       )}
                     </td>
-                    <td className={cn('px-4 py-3 text-right font-mono font-black', textColor)}>{qty.toLocaleString()}</td>
+                    <td className={cn('px-4 py-3 text-right font-mono font-black', textColor)}>
+                      {qtyEditable && onQtyEdit && !isBlocked ? (
+                        <input
+                          type="number"
+                          min={0}
+                          value={qty}
+                          onChange={(e) => onQtyEdit(o, Number(e.target.value))}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-20 text-right font-mono font-black bg-white border border-slate-200 rounded-lg px-1.5 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                        />
+                      ) : (
+                        qty.toLocaleString()
+                      )}
+                    </td>
                     <td className={cn('px-4 py-3 text-right font-mono font-black bg-indigo-50/10', isBlocked ? 'text-slate-400 line-through' : isAdjusted ? 'text-red-600' : isSplitRemainder ? 'text-violet-600' : isExcess ? 'text-amber-700' : 'text-indigo-600')}>{tHours.toFixed(2)}</td>
                     {onToggleBlock && (
                       <td className="px-4 py-3 text-center">
@@ -798,6 +843,8 @@ const MachineCard = React.memo(({
     prevProps.splitRemainderOrders === nextProps.splitRemainderOrders &&
     prevProps.blockedOrderKeys === nextProps.blockedOrderKeys &&
     prevProps.qtyOverrideByKey === nextProps.qtyOverrideByKey &&
+    prevProps.qtyEditable === nextProps.qtyEditable &&
+    prevProps.onQtyEdit === nextProps.onQtyEdit &&
     prevProps.onToggleBlock === nextProps.onToggleBlock;
 });
 
@@ -872,6 +919,25 @@ function sumarDiasHabiles(fechaBase: string, dias: number, feriados: Set<string>
     restantes--;
   }
   return fecha.toISOString().split('T')[0];
+}
+
+// FECHA_CARGA/HORA_CARGA de la interfaz SAP (doc ZPPT_ORDER_INT): momento real en que este
+// aplicativo carga el registro, en formato AAAAMMDD/HHMMSS. Se calcula con `Intl.DateTimeFormat`
+// fijado a 'America/Guayaquil' (no con `new Date().getHours()` etc.) para que el valor sea
+// correcto sin importar en qué huso horario esté corriendo el navegador o el servidor — mismo
+// motivo que llevó a `toDatetime2Medianoche` en @/lib/fecha-ecuador.
+function getFechaHoraCargaEcuador(): { fecha: string; hora: string } {
+  const partes = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Guayaquil',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(new Date());
+  const valor = (tipo: string) => partes.find(p => p.type === tipo)?.value || '00';
+  const hora = valor('hour') === '24' ? '00' : valor('hour'); // ICU: medianoche puede salir "24"
+  return {
+    fecha: `${valor('year')}${valor('month')}${valor('day')}`,
+    hora: `${hora}${valor('minute')}${valor('second')}`,
+  };
 }
 
 // Tabla pivote: filas = línea de producción, columnas = centro (1000/2000) del que proviene
@@ -1190,10 +1256,10 @@ const RecuperacionPasoPanel: React.FC<{
             pg.fecha_inicio_plan &&
             regex.test(String(pg.valor || ''))
           ) {
-            // Fecha LOCAL (no toISOString/UTC): fecha_inicio_plan no siempre llega en medianoche
-            // UTC exacta y compararlo en UTC puede correrse un día respecto a la fecha real.
-            const d = new Date(pg.fecha_inicio_plan);
-            fechas.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+            // Fecha en hora de Ecuador (toFechaEcuador, ver src/lib/fecha-ecuador.ts): usar getters
+            // locales del sistema en vez de esto corre la fecha un día si la máquina que ejecuta el
+            // código no está en huso horario de Ecuador.
+            fechas.add(toFechaEcuador(pg.fecha_inicio_plan));
           }
         });
         if (!cancelled) {
@@ -1911,8 +1977,8 @@ const CapacidadComparacionPanel: React.FC<{
             codigo_grupo: codigoGrupo,
             codigo_familia_grupo: codigoFamiliaGrupo,
             valor: `Plan Táctico - Centro ${centro} - PFM - N1`,
-            fecha_inicio_plan: new Date(fechaN1),
-            fecha_fin_plan: new Date(fechaN1),
+            fecha_inicio_plan: toDatetime2Medianoche(fechaN1),
+            fecha_fin_plan: toDatetime2Medianoche(fechaN1),
             estado: 'A',
             fecha_creacion: new Date(),
             usuario_creacion: 'admin',
@@ -1941,8 +2007,8 @@ const CapacidadComparacionPanel: React.FC<{
             codigo_grupo: codigoGrupo,
             codigo_familia_grupo: codigoFamiliaGrupo,
             valor: `Plan Táctico - Centro ${centro} - PFM - N2N3`,
-            fecha_inicio_plan: new Date(fechaN2N3),
-            fecha_fin_plan: new Date(fechaN2N3),
+            fecha_inicio_plan: toDatetime2Medianoche(fechaN2N3),
+            fecha_fin_plan: toDatetime2Medianoche(fechaN2N3),
             estado: 'A',
             fecha_creacion: new Date(),
             usuario_creacion: 'admin',
@@ -2835,6 +2901,32 @@ export const TacticalPlanForrosSection: React.FC = () => {
   const [kpiMaestroData, setKpiMaestroData] = useState<any[]>([]);
   const [mantenimientosData, setMantenimientosData] = useState<any[]>([]);
   const [isLoadingMantenimientos, setIsLoadingMantenimientos] = useState(false);
+
+  // Cantidad editada a mano en Ajuste de Producción — en TODAS las secciones EXCEPTO Acolchado &
+  // Tapas (Célula Twin, que no recibe `qtyEditable` en su MachineCard). La key es la misma que ya
+  // usa `MachineCard` internamente (ORDEN|MATERIAL|CANTIDAD original) — nunca se muta la orden, así
+  // que la key queda estable aunque el valor visible cambie. Se reutiliza el prop `qtyOverrideByKey`
+  // de MachineCard (antes solo lo usaba el descuento de Tapa bloqueada en Acolchado) para que el
+  // total/horas/% de ocupación de cada tarjeta se recalculen solos; cada handler de "Aceptar Plan"
+  // de esas secciones aplica este mismo mapa al armar la cantidad final que va a Plan Final.
+  const [manualQtyOverridePorOrden, setManualQtyOverridePorOrden] = useState<Map<string, number>>(new Map());
+  const handleManualQtyEdit = useCallback((order: any, nuevaCantidad: number) => {
+    const key = `${order['ORDEN'] || order['ORDENPREVISIONAL'] || ''}|${String(order['MATERIAL'] || order['CodMaterial'] || '')}|${String(order['CANTIDAD'] || order['CANTPROGRAMADA'] || '')}`;
+    setManualQtyOverridePorOrden(prev => {
+      const next = new Map(prev);
+      next.set(key, Math.max(0, nuevaCantidad));
+      return next;
+    });
+  }, []);
+  // Aplica la cantidad editada a mano (si existe) a una orden justo antes de que se arme la fila
+  // final de Plan Final — misma key que usa MachineCard, así que siempre encuentra el override
+  // aunque la orden en sí nunca se mute. Se usa en TODOS los "Aceptar Plan"/resync de las secciones
+  // que reciben `qtyEditable` en su MachineCard (todas menos Acolchado & Tapas).
+  const aplicarCantidadManual = useCallback((o: any) => {
+    const key = `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
+    const nueva = manualQtyOverridePorOrden.get(key);
+    return nueva === undefined ? o : { ...o, CANTIDAD: nueva, CANTPROGRAMADA: nueva };
+  }, [manualQtyOverridePorOrden]);
   const [hasFetchedMantenimientos, setHasFetchedMantenimientos] = useState(false);
   const mantenimientosForrosData = useMemo(
     () => mantenimientosData.filter(m => String(m.AREA || '').toUpperCase().trim() === 'FORROS'),
@@ -3138,8 +3230,7 @@ export const TacticalPlanForrosSection: React.FC = () => {
     mantenimientosForrosData.forEach(m => {
       const rawFecha = m.FECHA_OT_PRG_INI || m.FECHA_PRO;
       if (!rawFecha) return;
-      const d = new Date(rawFecha);
-      const fechaStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const fechaStr = toFechaEcuador(rawFecha);
       if (fechaStr !== planningDate) return;
       const hrCode = String(m.PuestoTrabajo || '').trim().toUpperCase();
       if (!hrCode) return;
@@ -3215,7 +3306,7 @@ export const TacticalPlanForrosSection: React.FC = () => {
             ok = true;
           } catch (error) {
             ultimoError = error;
-            if (intento < EXPLOSION_MAX_INTENTOS) await new Promise(r => setTimeout(r, 400 * intento));
+            if (intento < EXPLOSION_MAX_INTENTOS) await new Promise(r => setTimeout(r, EXPLOSION_BACKOFF_MS * intento));
           }
         }
         if (!ok) throw ultimoError;
@@ -3321,8 +3412,17 @@ export const TacticalPlanForrosSection: React.FC = () => {
   const fetchOrdenesFert = useCallback(async () => {
     setIsLoadingFert(true);
     try {
-      const response = await serviciosService.getOrdenesFert(1, 10000);
-      setOrdenesFert(response.data || []);
+      const rowsPerPage = 10000;
+      const firstResponse = await fetchPaginaConReintentos(() => serviciosService.getOrdenesFert(1, rowsPerPage));
+      const firstData = firstResponse.data || [];
+      const total = firstResponse.totalRegistros || firstResponse.totalRecords || firstResponse.totalRows || 0;
+      let allData = [...firstData];
+      const totalPages = Math.ceil(total / rowsPerPage);
+      for (let p = 2; p <= totalPages; p++) {
+        const nextResponse = await fetchPaginaConReintentos(() => serviciosService.getOrdenesFert(p, rowsPerPage));
+        if (nextResponse.data) allData = [...allData, ...nextResponse.data];
+      }
+      setOrdenesFert(allData);
     } catch (error: any) {
       console.error('Error fetching Fert orders:', error);
       addNotification('error', `Error al cargar órdenes FERT: ${error.message}`);
@@ -3362,8 +3462,17 @@ export const TacticalPlanForrosSection: React.FC = () => {
   const fetchOrdenesPrevisionales = useCallback(async () => {
     setIsLoadingPrevisionales(true);
     try {
-      const response = await serviciosService.OrdenesProvisionalesPaginados(1, 5000);
-      setOrdenesPrevisionalesData(response.data || []);
+      const rowsPerPage = 5000;
+      const firstResponse = await fetchPaginaConReintentos(() => serviciosService.OrdenesProvisionalesPaginados(1, rowsPerPage));
+      const firstData = firstResponse.data || [];
+      const total = firstResponse.totalRegistros || firstResponse.totalRecords || firstResponse.totalRows || 0;
+      let allData = [...firstData];
+      const totalPages = Math.ceil(total / rowsPerPage);
+      for (let p = 2; p <= totalPages; p++) {
+        const nextResponse = await fetchPaginaConReintentos(() => serviciosService.OrdenesProvisionalesPaginados(p, rowsPerPage));
+        if (nextResponse.data) allData = [...allData, ...nextResponse.data];
+      }
+      setOrdenesPrevisionalesData(allData);
     } catch (error: any) {
       console.error('Error fetching Provisional orders:', error);
       addNotification('error', `Error al cargar órdenes previsionales: ${error.message}`);
@@ -3540,9 +3649,8 @@ useEffect(() => {
             pg.fecha_inicio_plan &&
             PLAN_GRUPO_VALOR_REGEX.test(String(pg.valor || ''))
           ) {
-            // Fecha LOCAL (no toISOString/UTC) — mismo motivo que en RecuperacionPasoPanel.
-            const d = new Date(pg.fecha_inicio_plan);
-            fechas.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+            // Fecha en hora de Ecuador — mismo motivo que en RecuperacionPasoPanel.
+            fechas.add(toFechaEcuador(pg.fecha_inicio_plan));
           }
         });
         if (!cancelled) {
@@ -3578,25 +3686,21 @@ useEffect(() => {
         // fecha_inicio_plan no siempre llega en medianoche UTC exacta (se han visto valores como
         // "...T03:00:00.000Z"), así que compararlo con toISOString() (UTC) puede correrse un día
         // respecto a la fecha local (Ecuador, UTC-5) que el usuario realmente seleccionó — mismo
-        // tipo de desfase ya conocido en fecha_creacion. Se compara por fecha LOCAL, no UTC.
-        const fechaLocal = (fecha: Date | string) => {
-          const d = new Date(fecha);
-          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-        };
+        // tipo de desfase ya conocido en fecha_creacion. Se compara por fecha de Ecuador
+        // (toFechaEcuador), nunca con getters del sistema ni con UTC.
         const planesP1 = (response.data || []).filter((pg: PlanGrupo) =>
           codigosGrupoP1.has(pg.codigo_grupo) &&
           pg.estado === 'A' &&
           pg.fecha_inicio_plan &&
           PLAN_GRUPO_VALOR_REGEX_P1_O_PFF.test(String(pg.valor || '')) &&
-          fechaLocal(pg.fecha_inicio_plan) === recuperacionPasoFecha
+          toFechaEcuador(pg.fecha_inicio_plan) === recuperacionPasoFecha
         );
         if (planesP1.length === 0 || !planesP1[0].fecha_creacion) {
           if (!cancelled) setRecuperacionFechasCalculadas(null);
           return;
         }
 
-        const generacion = new Date(planesP1[0].fecha_creacion);
-        const fechaGeneracion = `${generacion.getFullYear()}-${String(generacion.getMonth() + 1).padStart(2, '0')}-${String(generacion.getDate()).padStart(2, '0')}`;
+        const fechaGeneracion = toFechaEcuador(planesP1[0].fecha_creacion);
 
         const forroGroupCodes = new Set(forrosGruposList.map(g => g.codigo_grupo));
         const buscarRestriccion = (nombre: string) => restricciones.find(r =>
@@ -4400,8 +4504,8 @@ useEffect(() => {
           codigo_grupo: grupo.codigo_grupo,
           codigo_familia_grupo: 0,
           valor: `Plan Táctico - Centro ${grupo.centro} - P1.5 - ${bloque.distintivo}`,
-          fecha_inicio_plan: new Date(bloque.fecha),
-          fecha_fin_plan: new Date(bloque.fecha),
+          fecha_inicio_plan: toDatetime2Medianoche(bloque.fecha),
+          fecha_fin_plan: toDatetime2Medianoche(bloque.fecha),
           estado: 'A',
           fecha_creacion: new Date(),
           usuario_creacion: 'admin',
@@ -4440,8 +4544,8 @@ useEffect(() => {
         codigo_grupo: grupo.codigo_grupo,
         codigo_familia_grupo: 0,
         valor: `Plan Táctico - Centro ${grupo.centro} - P2`,
-        fecha_inicio_plan: new Date(fechaP2),
-        fecha_fin_plan: new Date(fechaP2),
+        fecha_inicio_plan: toDatetime2Medianoche(fechaP2),
+        fecha_fin_plan: toDatetime2Medianoche(fechaP2),
         estado: 'A',
         fecha_creacion: new Date(),
         usuario_creacion: 'admin',
@@ -4520,8 +4624,7 @@ useEffect(() => {
       const diasFechaN1 = Math.max(1, parseInt(buscarRestriccion('FECHA_N1')?.valor_restriccion || '2', 10) || 2);
       const diasFechaN2N3 = Math.max(1, parseInt(buscarRestriccion('FECHA_N2N3')?.valor_restriccion || '1', 10) || 1);
       const maxDias = Math.max(diasFechaP2, diasFechaN1, diasFechaN2N3);
-      const hoy = new Date();
-      const fechaGeneracion = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}-${String(hoy.getDate()).padStart(2, '0')}`;
+      const fechaGeneracion = getFechaLocalHoy();
       const inicioRango = new Date(fechaGeneracion);
       const finRango = new Date(fechaGeneracion);
       finRango.setUTCDate(finRango.getUTCDate() + maxDias + 14);
@@ -4536,12 +4639,12 @@ useEffect(() => {
       // pide confirmar (un solo diálogo) antes de desactivar los existentes y crear los nuevos.
       const todosPlanesResp = await planGrupoService.getAll();
       const todosPlanes = todosPlanesResp.data || [];
-      // Fecha LOCAL (no toISOString/UTC): fecha_inicio_plan no siempre llega en medianoche UTC
-      // exacta, así que compararla en UTC puede correrse un día y dejar pasar un duplicado real.
+      // Fecha en hora de Ecuador: fecha_inicio_plan no siempre llega en medianoche UTC exacta, así
+      // que compararla en UTC (o con getters del sistema) puede correrse un día y dejar pasar un
+      // duplicado real.
       const coincideFecha = (pg: PlanGrupo, fecha: string) => {
         if (!pg.fecha_inicio_plan) return false;
-        const d = new Date(pg.fecha_inicio_plan);
-        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` === fecha;
+        return toFechaEcuador(pg.fecha_inicio_plan) === fecha;
       };
 
       const existentesN1: PlanGrupo[] = [];
@@ -4756,7 +4859,7 @@ useEffect(() => {
             ok = true;
           } catch (error) {
             ultimoError = error;
-            if (intento < EXPLOSION_MAX_INTENTOS) await new Promise(r => setTimeout(r, 400 * intento));
+            if (intento < EXPLOSION_MAX_INTENTOS) await new Promise(r => setTimeout(r, EXPLOSION_BACKOFF_MS * intento));
           }
         }
         if (!ok) throw ultimoError;
@@ -6516,6 +6619,13 @@ useEffect(() => {
     uniquePuestos.find(p => p.includes(`PEF${suffix}`) || p.includes(`COSEDORA-ACH${suffix}`) || p.includes(`PEGADORA${suffix}`))
   ), [uniquePuestos]);
 
+  // Misma idea que `getPefDeCelula` pero para el lado Acolchadora — la usa el motor de
+  // "Reasignación por Avería" (ver más abajo) para resolver el puesto real de origen/destino a
+  // partir del sufijo de célula que trae cada regla.
+  const getAchDeCelula = useCallback((suffix: string): string | undefined => (
+    uniquePuestos.find(p => !p.includes('COSEDORA') && (p.includes(`ACH${suffix}`) || p.includes(`ACOLCHADORA${suffix}`)))
+  ), [uniquePuestos]);
+
   // ─── Objetivo de Acolchado DERIVADO de la Tapa real (no de la orden de Acolchado de SAP) ──────
   // Confirmado con el usuario con un caso real: si en la ACH06 hay 100 Tapas (orden real de su
   // Cosedora pareja, siempre entera) que consumen 1.06 de este Acolchado por unidad, la orden de
@@ -6713,7 +6823,21 @@ useEffect(() => {
     if (ajustePrevisionalAcolchadoData.size === 0) return [];
     const getCapacidad = (puesto: string) => {
       const cfg = workstationConfigs[puesto] || { machine: puesto, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
-      const capacidad = capacidadPuesto(puesto, cfg, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
+      let capacidad = capacidadPuesto(puesto, cfg, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
+      // La Tapa de una célula SIEMPRE se fabrica en su Cosedora pareja — mismo número de célula,
+      // atadas 1 a 1 por la lista de materiales (ver `getSuffixCelula`/`getPefDeCelula`, el mismo
+      // mapeo que ya usa `tapaCascadaDesdeAcolchado`). Si esa Cosedora está apagada o sin capacidad,
+      // producir Acolchado en la Acolchadora pareja no sirve de nada aunque ELLA sí tenga capacidad
+      // libre: nadie puede coser la Tapa resultante ahí. Se anula la capacidad de este candidato para
+      // que Fase 1/Fase 2 lo traten como si no cupiera y lo cascadeen a otra célula cuya Cosedora sí
+      // pueda recibirlo — la Tapa lo sigue automáticamente por la cascada ya existente.
+      const suffix = getSuffixCelula(puesto);
+      const pefPuesto = suffix ? getPefDeCelula(suffix) : undefined;
+      if (pefPuesto) {
+        const cfgPef = workstationConfigs[pefPuesto] || { machine: pefPuesto, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
+        const capacidadPef = capacidadPuesto(pefPuesto, cfgPef, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
+        if (capacidadPef <= 0) capacidad = 0;
+      }
       return { cfg, capacidad };
     };
     const out: MaterialAcolchado[] = [];
@@ -6737,7 +6861,7 @@ useEffect(() => {
       });
     });
     return out;
-  }, [ajustePrevisionalAcolchadoData, workstationConfigs, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, materialNombrePorCodigo, esPuestoAcolchado]);
+  }, [ajustePrevisionalAcolchadoData, workstationConfigs, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, materialNombrePorCodigo, esPuestoAcolchado, getSuffixCelula, getPefDeCelula]);
 
   // Versión de Fabricación propia para este universo de materiales (el de las órdenes previsionales,
   // que puede incluir referencias fuera de la explosión en vivo de Ensamblado — ej. reparaciones de
@@ -7072,6 +7196,195 @@ useEffect(() => {
   const acolchadoAdjustedInPorPuesto = acolchadoMapasAsignacion.adjustedInPorPuesto;
   const acolchadoSplitRemaindersPorPuesto = acolchadoMapasAsignacion.splitRemaindersPorPuesto;
 
+  // ─── REASIGNACIÓN POR AVERÍA (caso ACH08) ─────────────────────────────────
+  // A diferencia del motor de "Ajustar por Versión de Fabricación" (que decide destino por
+  // capacidad + Versión SAP), esto es un mapa FIJO de "si esta máquina está averiada, esta familia
+  // de referencias va a esta otra máquina" — decidido por el planificador según qué molde/materia
+  // prima puede correr cada máquina, no por optimización. Se activa con un botón propio,
+  // independiente del toggle "Ajustar por Versión" de cada célula (son mecanismos distintos que
+  // conviven: una célula puede tener su ajuste normal apagado y aun así recibir/perder producción
+  // por esta reasignación).
+  // Reglas configurables sin tocar código, mismo patrón que MAT_MOVIBLE_ACH09: una restricción del
+  // grupo Forros con una lista de reglas separadas por "&", cada una "ORIGEN|FAMILIA|MEDIDA|DESTINO"
+  // (sufijo de célula sin "ACH", ej. "08"; MEDIDA vacía si no aplica). Ej.:
+  //   "08|CONTINENTAL|190|02&08|ORTOPEDICO|190|02&08|GRAND HOTEL||09"
+  interface ReglaAveria { origenSuffix: string; familia: string; medida?: string; destinoSuffix: string; raw: string }
+  const parseReglasAveria = useCallback((valor: string): ReglaAveria[] => (
+    valor.split('&').map(r => {
+      const [origen, familia, medida, destino] = r.split('|').map(s => (s || '').trim());
+      return { origenSuffix: origen, familia: normalizeText(familia), medida: medida || undefined, destinoSuffix: destino, raw: r.trim() };
+    }).filter(r => r.origenSuffix && r.familia && r.destinoSuffix)
+  ), []);
+
+  const reglasAveriaAcolchado = useMemo(() => {
+    const codigoGrupoForros = forrosGruposList[0]?.codigo_grupo;
+    if (codigoGrupoForros === undefined) return [];
+    const restr = restricciones.find(r => r.codigo_grupo === codigoGrupoForros && r.nombre_restriccion.toUpperCase().trim() === 'AVERIA_ACH08_ACOLCHADO');
+    return restr ? parseReglasAveria(restr.valor_restriccion) : [];
+  }, [restricciones, forrosGruposList, parseReglasAveria]);
+
+  const reglasAveriaTapa = useMemo(() => {
+    const codigoGrupoForros = forrosGruposList[0]?.codigo_grupo;
+    if (codigoGrupoForros === undefined) return [];
+    const restr = restricciones.find(r => r.codigo_grupo === codigoGrupoForros && r.nombre_restriccion.toUpperCase().trim() === 'AVERIA_ACH08_TAPA');
+    return restr ? parseReglasAveria(restr.valor_restriccion) : [];
+  }, [restricciones, forrosGruposList, parseReglasAveria]);
+
+  const [averiaAch08Activa, setAveriaAch08Activa] = useState(false);
+
+  // Motor genérico: mueve ÓRDENES ENTERAS (nunca las parte) de la célula origen a la célula destino
+  // de cada regla, siempre que quepan completas en la capacidad libre del destino — lo que no cabe
+  // entero se reporta como pendiente, nunca se fracciona. "Capacidad libre" ya descuenta lo que el
+  // destino produce naturalmente Y lo que reglas anteriores de esta misma pasada ya le reservaron
+  // (varias reglas pueden apuntar al mismo destino, ej. varias familias hacia la ACH09).
+  const calcularAveriaReasignacion = useCallback((
+    reglas: ReglaAveria[],
+    ordenesOrigen: any[],
+    getPuestoDeCelula: (suffix: string) => string | undefined,
+    bloqueadasPorPuesto: Map<string, Set<string>>,
+    // Acolchado se mide en METROS (unidad continua): si el destino no tiene espacio para la orden
+    // completa, se corta al largo que sí cabe y el remanente se queda en origen — verificado contra
+    // un caso real (Zafiro TR27 190, una sola orden de SAP de 1418.32 m, terminó repartida 328.62 m
+    // en su máquina original + 1089.70 m en la de respaldo). La Tapa NUNCA se parte (unidad
+    // discreta — no existe "media tapa"): con `permitirSplit=false` una orden que no cabe entera
+    // simplemente no se mueve, se reporta como pendiente.
+    permitirSplit: boolean,
+  ) => {
+    const excludeKeysPorPuesto = new Map<string, Set<string>>();
+    const adjustedInPorPuesto = new Map<string, any[]>();
+    const splitRemaindersPorPuesto = new Map<string, any[]>();
+    const cantidadMovidaPorRegla = new Map<string, number>();
+    const pendientes: { regla: ReglaAveria; orders: any[]; motivo: string }[] = [];
+    if (!averiaAch08Activa || reglas.length === 0) return { excludeKeysPorPuesto, adjustedInPorPuesto, splitRemaindersPorPuesto, pendientes, cantidadMovidaPorRegla };
+
+    const mk = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
+    const capacidadRestantePorPuesto = new Map<string, number>();
+    // Lo bloqueado con el candado ya NO es parte de la capacidad — ni ocupa al destino (si el
+    // bloqueo es ahí) ni cuenta como "capacidad natural ya usada" al calcular cuánto le queda libre
+    // al destino. Antes esto se ignoraba y el motor veía menos espacio del que en realidad hay.
+    const getCapacidadRestante = (puesto: string) => {
+      if (!capacidadRestantePorPuesto.has(puesto)) {
+        const cfg = workstationConfigs[puesto] || { machine: puesto, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
+        const capacidadTotal = capacidadPuesto(puesto, cfg, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
+        const hrPuesto = mapToHojaRutaInternal(puesto).trim().toUpperCase();
+        const bloqueadasDestino = bloqueadasPorPuesto.get(puesto) || new Set<string>();
+        const horasNaturales = ordenesOrigen
+          .filter(o => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hrPuesto && !bloqueadasDestino.has(mk(o)))
+          .reduce((s, o) => s + calculateProductionTime(o['MATERIAL'] || o['CodMaterial'] || '', Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), o), 0) / 3600;
+        capacidadRestantePorPuesto.set(puesto, Math.max(0, capacidadTotal - horasNaturales));
+      }
+      return capacidadRestantePorPuesto.get(puesto)!;
+    };
+
+    reglas.forEach(regla => {
+      const origenPuesto = getPuestoDeCelula(regla.origenSuffix);
+      const destinoPuesto = getPuestoDeCelula(regla.destinoSuffix);
+      if (!origenPuesto || !destinoPuesto) {
+        pendientes.push({ regla, orders: [], motivo: !origenPuesto ? `no se encontró la máquina de la célula ${regla.origenSuffix}` : `no se encontró la máquina de la célula ${regla.destinoSuffix}` });
+        return;
+      }
+      const hrOrigen = mapToHojaRutaInternal(origenPuesto).trim().toUpperCase();
+      const yaExcluidas = excludeKeysPorPuesto.get(origenPuesto) || new Set<string>();
+      const bloqueadasOrigen = bloqueadasPorPuesto.get(origenPuesto) || new Set<string>();
+      // La medida aparece de dos formas distintas según sea Acolchado o Tapa (verificado con datos
+      // reales): el Acolchado la trae como "... H 190" / "... H 200"; la Tapa la trae como
+      // "...090X190" / "...160X200" (ancho x alto, sin espacio). Se acepta cualquiera de las dos.
+      const medidaRegex = regla.medida ? new RegExp(`(H\\s*${regla.medida}\\b|X\\s*${regla.medida}\\b)`, 'i') : null;
+      const candidatas = ordenesOrigen.filter(o => {
+        if (String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() !== hrOrigen) return false;
+        if (yaExcluidas.has(mk(o))) return false;
+        // Una orden ya bloqueada con el candado no se fabrica en ningún lado — no es candidata a
+        // moverse, se queda bloqueada donde está.
+        if (bloqueadasOrigen.has(mk(o))) return false;
+        const nombre = String(o['NOMBRE'] || o['TEXTOMATERIAL'] || o['Material'] || '');
+        if (!normalizeText(nombre).includes(regla.familia)) return false;
+        if (medidaRegex && !medidaRegex.test(nombre)) return false;
+        return true;
+      });
+      // De mayor a menor duración (first-fit decreasing): se intenta colocar ENTERA primero; partir
+      // (si `permitirSplit`) es el último recurso, solo para la orden que ya no entra completa.
+      const conHoras = candidatas
+        .map(o => ({ order: o, horas: calculateProductionTime(o['MATERIAL'] || o['CodMaterial'] || '', Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), o) / 3600 }))
+        .sort((a, b) => b.horas - a.horas);
+
+      let restante = getCapacidadRestante(destinoPuesto);
+      let cantidadMovida = 0;
+      const sinAsignar: any[] = [];
+      const hrDestino = mapToHojaRutaInternal(destinoPuesto).trim().toUpperCase();
+      conHoras.forEach(({ order, horas }) => {
+        if (horas <= restante + 0.001) {
+          if (!excludeKeysPorPuesto.has(origenPuesto)) excludeKeysPorPuesto.set(origenPuesto, new Set());
+          excludeKeysPorPuesto.get(origenPuesto)!.add(mk(order));
+          if (!adjustedInPorPuesto.has(destinoPuesto)) adjustedInPorPuesto.set(destinoPuesto, []);
+          adjustedInPorPuesto.get(destinoPuesto)!.push({ ...order, _finalHR: hrDestino, _wasAdjusted: true, _fromPuesto: origenPuesto, _toPuesto: destinoPuesto, _averiaRegla: regla.raw });
+          restante -= horas;
+          cantidadMovida += Number(order['CANTIDAD'] || order['CANTPROGRAMADA'] || 0);
+        } else if (permitirSplit && restante > 0.01) {
+          const cantidadOriginal = Number(order['CANTIDAD'] || order['CANTPROGRAMADA'] || 0);
+          const cantidadFragmento = cantidadOriginal * (restante / horas);
+          const cantidadRemanente = cantidadOriginal - cantidadFragmento;
+          if (cantidadFragmento > 0.01) {
+            if (!excludeKeysPorPuesto.has(origenPuesto)) excludeKeysPorPuesto.set(origenPuesto, new Set());
+            excludeKeysPorPuesto.get(origenPuesto)!.add(mk(order));
+            if (!splitRemaindersPorPuesto.has(origenPuesto)) splitRemaindersPorPuesto.set(origenPuesto, []);
+            splitRemaindersPorPuesto.get(origenPuesto)!.push({ ...order, CANTIDAD: cantidadRemanente, CANTPROGRAMADA: cantidadRemanente, _isSplitRemainder: true, _originalCantidad: cantidadOriginal, _originalKey: mk(order) });
+            if (!adjustedInPorPuesto.has(destinoPuesto)) adjustedInPorPuesto.set(destinoPuesto, []);
+            adjustedInPorPuesto.get(destinoPuesto)!.push({ ...order, CANTIDAD: cantidadFragmento, CANTPROGRAMADA: cantidadFragmento, _finalHR: hrDestino, _wasAdjusted: true, _isSplit: true, _originalCantidad: cantidadOriginal, _originalKey: mk(order), _fromPuesto: origenPuesto, _toPuesto: destinoPuesto, _averiaRegla: regla.raw });
+            cantidadMovida += cantidadFragmento;
+            restante = 0;
+          } else {
+            sinAsignar.push(order);
+          }
+        } else {
+          sinAsignar.push(order);
+        }
+      });
+      capacidadRestantePorPuesto.set(destinoPuesto, restante);
+      cantidadMovidaPorRegla.set(regla.raw, (cantidadMovidaPorRegla.get(regla.raw) || 0) + cantidadMovida);
+      if (sinAsignar.length > 0) {
+        pendientes.push({ regla, orders: sinAsignar, motivo: `${sinAsignar.length} orden(es) no caben en ${destinoPuesto} (capacidad libre agotada)${permitirSplit ? '' : ' — no se parten'}` });
+      }
+    });
+
+    return { excludeKeysPorPuesto, adjustedInPorPuesto, splitRemaindersPorPuesto, pendientes, cantidadMovidaPorRegla };
+  }, [averiaAch08Activa, workstationConfigs, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, mapToHojaRutaInternal, calculateProductionTime]);
+
+  const averiaAcolchadoResultado = useMemo(
+    () => calcularAveriaReasignacion(reglasAveriaAcolchado, techFilteredOrdenesParaAcolchado, getAchDeCelula, acolchadoOrdenesBloqueadasPorPuesto, true),
+    [calcularAveriaReasignacion, reglasAveriaAcolchado, techFilteredOrdenesParaAcolchado, getAchDeCelula, acolchadoOrdenesBloqueadasPorPuesto]
+  );
+
+  const averiaTapaResultado = useMemo(
+    () => calcularAveriaReasignacion(reglasAveriaTapa, techFilteredOrdenes, getPefDeCelula, tapaOrdenesBloqueadasPorPuesto, false),
+    [calcularAveriaReasignacion, reglasAveriaTapa, techFilteredOrdenes, getPefDeCelula, tapaOrdenesBloqueadasPorPuesto]
+  );
+
+  // Coincidencia Acolchado↔Tapa: por cada regla de Tapa, compara cuánto se movió de Tapa (unidades)
+  // contra cuánto se movió del Acolchado equivalente (misma célula origen + familia + medida) según
+  // el ratio real BOM ya resuelto en `acolchadoTapasIndexCombinado` — nunca se fuerza a que cuadren,
+  // solo se avisa si no coinciden para que el planificador ajuste a mano (bloqueando órdenes).
+  const averiaConciliacion = useMemo(() => {
+    return reglasAveriaTapa.map(reglaTapa => {
+      const reglaAcolchado = reglasAveriaAcolchado.find(r => r.origenSuffix === reglaTapa.origenSuffix && r.familia === reglaTapa.familia && r.medida === reglaTapa.medida);
+      const cantidadTapa = averiaTapaResultado.cantidadMovidaPorRegla.get(reglaTapa.raw) || 0;
+      const cantidadAcolchado = reglaAcolchado ? (averiaAcolchadoResultado.cantidadMovidaPorRegla.get(reglaAcolchado.raw) || 0) : 0;
+      // Ratio: se toma el mayor conocido entre los Acolchados de las órdenes de Tapa movidas (mismo
+      // respaldo genérico que usa `cuantizarAcolchadoATapaEntera` cuando no hay ratio específico).
+      let ratio: number | undefined;
+      const ordenesTapaMovidas = averiaTapaResultado.adjustedInPorPuesto.get(getPefDeCelula(reglaTapa.destinoSuffix) || '') || [];
+      ordenesTapaMovidas.forEach(o => {
+        const matTapa = normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || '');
+        acolchadoTapasIndexCombinado.forEach((tapas) => {
+          const r = tapas.get(matTapa);
+          if (r && (ratio === undefined || r > ratio)) ratio = r;
+        });
+      });
+      const cantidadTapaEquivalente = ratio ? cantidadTapa * ratio : undefined;
+      const coincide = cantidadTapaEquivalente === undefined ? undefined : Math.abs(cantidadTapaEquivalente - cantidadAcolchado) < Math.max(1, cantidadAcolchado * 0.02);
+      return { reglaTapa, reglaAcolchado, cantidadTapa, cantidadAcolchado, ratio, cantidadTapaEquivalente, coincide };
+    });
+  }, [reglasAveriaTapa, reglasAveriaAcolchado, averiaTapaResultado, averiaAcolchadoResultado, getPefDeCelula, normalizeMaterialCode, acolchadoTapasIndexCombinado]);
+
   // Toggle de ajuste POR CÉLULA (un botón "Ajustar" independiente por acolchadora, ver render) en
   // vez de un único interruptor para las 7 a la vez — así se puede activar solo la célula que
   // interesa sin mover de paso la producción de las demás. El motor (`acolchadoAsignacionOptima`)
@@ -7093,6 +7406,24 @@ useEffect(() => {
     });
     return map;
   }, [acolchadoAdjustedInPorPuesto, acolchadoCelulasAjusteActivas]);
+
+  // Puestos ORIGEN cuyo excedente fue REALMENTE reclamado por una célula destino que tiene su
+  // propio "Ajustar por Versión" activo — el único caso donde aceptar el plan NATURAL (sin ajuste)
+  // de la célula origen duplicaría producción en Plan Final (ver handleAceptarAjusteAcolchadoPuesto:
+  // `adjustedIn` de la célula destino solo se usa cuando SU PROPIO ajusteActivo es true).
+  // Antes se usaba `excludeKeysPorPuesto.size > 0` para esto, pero ese set también incluye el
+  // "exceso" que no cupo en NINGÚN lado (sin destino, así que nadie puede duplicarlo) y piezas
+  // movidas hacia destinos que siguen sin ajustar (que tampoco las reclaman) — bloqueaba "Aceptar
+  // Plan" aunque las 7 células estuvieran sin ajuste activo y no hubiera ningún riesgo real.
+  const acolchadoOrigenesConDestinoAjustadoPorPuesto = useMemo(() => {
+    const set = new Set<string>();
+    acolchadoAsignacionOptima.piezas.forEach(p => {
+      if (p.puestoFinal !== p.puestoNatural && acolchadoCelulasAjusteActivas.has(p.puestoFinal)) {
+        set.add(p.puestoNatural);
+      }
+    });
+    return set;
+  }, [acolchadoAsignacionOptima, acolchadoCelulasAjusteActivas]);
 
   // Lista plana de piezas movidas/divididas (compatibilidad con el panel de resumen y "Aceptar").
   const acolchadoMovedOrders = useMemo(() => (
@@ -7471,35 +7802,16 @@ useEffect(() => {
   useEffect(() => {
     if (acolchadoAceptadoPuestos.size === 0) return;
     const mk = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
-    // Retiro automático de "aceptado": el motor SIEMPRE calcula qué se mueve de una célula a otra
-    // (haya o no ajuste activo aquí, ver comentario más abajo). Si una célula YA aceptada queda con
-    // producción movida hacia otra (ej. se apagó la máquina en Personal y Turnos DESPUÉS de haber
-    // aceptado) pero su propio "Ajustar por Versión" sigue apagado, Plan Final le mandaría la
-    // producción ORIGINAL completa — duplicada con la porción que la célula destino ya recibió y
-    // aceptó por su cuenta. Se retira sola de "aceptado" (nunca queda un plan peligroso vigente en
-    // Plan Final) y se avisa para que el usuario active el ajuste y vuelva a aceptar a propósito.
-    const puestosRiesgoDuplicado: string[] = [];
-    acolchadoAceptadoPuestos.forEach(puesto => {
-      const ajusteActivo = acolchadoCelulasAjusteActivas.has(puesto);
-      const excludeSiempre = acolchadoExcludeKeysPorPuesto.get(puesto);
-      if (!ajusteActivo && excludeSiempre && excludeSiempre.size > 0) puestosRiesgoDuplicado.push(puesto);
-    });
-    if (puestosRiesgoDuplicado.length > 0) {
-      setAcolchadoAceptadoPuestos(prev => {
-        const next = new Set(prev);
-        puestosRiesgoDuplicado.forEach(p => next.delete(p));
-        return next;
-      });
-      addNotification('error', `Se retiró de Plan Final el plan de ${puestosRiesgoDuplicado.join(', ')}: el motor movió su producción a otra célula pero su "Ajustar por Versión" seguía apagado. Actívalo y vuelve a aceptar para no duplicar producción.`);
-    }
+    // El usuario debe poder aceptar SIEMPRE el plan de una célula "sin ajuste" (tal como está hoy en
+    // SAP), aunque el motor haya calculado que otra célula podría recibir su excedente — esa
+    // redistribución solo se aplica si el usuario activa "Ajustar por Versión" aquí. Antes esto se
+    // retiraba solo de Plan Final (con un error) apenas se detectaba el excedente, lo que le quitaba
+    // al usuario la opción de aceptar el plan natural. Aceptar sin ajuste siempre manda la producción
+    // ORIGINAL completa de la célula — nunca puede duplicarse por sí sola.
     setPlanFinalOrders(prev => {
       let next = prev;
       acolchadoAceptadoPuestos.forEach(puesto => {
         const source = `acolchado-${puesto}`;
-        if (puestosRiesgoDuplicado.includes(puesto)) {
-          next = next.filter(o => o._source !== source);
-          return;
-        }
         const hr = mapToHojaRutaInternal(puesto).trim().toUpperCase();
         const hojaSinPrefijo = hr.replace(/^HR-/, '');
         // El motor calcula SIEMPRE las 7 células, pero solo debe aplicarse a las que el usuario
@@ -7508,9 +7820,20 @@ useEffect(() => {
         // remanentes de split. Antes se usaban los mapas del motor aunque el ajuste estuviera
         // apagado, así que aceptar "sin ajuste" mandaba un plan redistribuido y descuadraba.
         const ajusteActivo = acolchadoCelulasAjusteActivas.has(puesto);
-        const excludeKeys = ajusteActivo ? (acolchadoExcludeKeysPorPuesto.get(puesto) || new Set<string>()) : new Set<string>();
-        const adjustedIn = ajusteActivo ? (acolchadoAdjustedInPorPuesto.get(puesto) || []) : [];
-        const splitRemainders = ajusteActivo ? (acolchadoSplitRemaindersPorPuesto.get(puesto) || []) : [];
+        // Reasignación por Avería: independiente del toggle "Ajustar por Versión" — se une siempre
+        // que esté activa, aunque `ajusteActivo` sea false para esta célula.
+        const excludeKeys = new Set([
+          ...(ajusteActivo ? (acolchadoExcludeKeysPorPuesto.get(puesto) || []) : []),
+          ...(averiaAcolchadoResultado.excludeKeysPorPuesto.get(puesto) || []),
+        ]);
+        const adjustedIn = [
+          ...(ajusteActivo ? (acolchadoAdjustedInPorPuesto.get(puesto) || []) : []),
+          ...(averiaAcolchadoResultado.adjustedInPorPuesto.get(puesto) || []),
+        ];
+        const splitRemainders = [
+          ...(ajusteActivo ? (acolchadoSplitRemaindersPorPuesto.get(puesto) || []) : []),
+          ...(averiaAcolchadoResultado.splitRemaindersPorPuesto.get(puesto) || []),
+        ];
         // Versión de Fabricación para Plan Final (columna PROD_VERS): la del material en ESTA
         // máquina (todas las filas de este puesto terminan asignadas aquí, se movieran o no).
         const getVersion = (o: any) => {
@@ -7560,7 +7883,7 @@ useEffect(() => {
       });
       return next;
     });
-  }, [acolchadoAceptadoPuestos, acolchadoCelulasAjusteActivas, acolchadoExcludeKeysPorPuesto, acolchadoAdjustedInPorPuesto, acolchadoSplitRemaindersPorPuesto, mapToHojaRutaInternal, techFilteredOrdenesParaAcolchado, normalizeMaterialCode, versionPorMaterialAjusteAcolchado, acolchadoBloqueadasKeysGlobal, acolchadoQtyOverridePorOrden, isAchConsolidated, addNotification]);
+  }, [acolchadoAceptadoPuestos, acolchadoCelulasAjusteActivas, acolchadoExcludeKeysPorPuesto, acolchadoAdjustedInPorPuesto, acolchadoSplitRemaindersPorPuesto, averiaAcolchadoResultado, mapToHojaRutaInternal, techFilteredOrdenesParaAcolchado, normalizeMaterialCode, versionPorMaterialAjusteAcolchado, acolchadoBloqueadasKeysGlobal, acolchadoQtyOverridePorOrden, isAchConsolidated, addNotification]);
 
   // ─── Aceptar Plan de Tapa/Cosedora (COSEDORA-ACHXX) — igual patrón que Acolchado ───────
   // Antes, la Tapa/Cosedora nunca tenía forma de llegar a Plan Final (solo Acolchado la tenía).
@@ -7581,8 +7904,16 @@ useEffect(() => {
       let next = prev;
       tapaAceptadoPuestos.forEach(puesto => {
         const hr = mapToHojaRutaInternal(puesto).trim().toUpperCase();
-        const excludeKeys = tapaCascadaDesdeAcolchado.excludeKeysPorPuesto.get(puesto) || new Set<string>();
-        const adjustedIn = tapaCascadaDesdeAcolchado.adjustedInPorPuesto.get(puesto) || [];
+        // Reasignación por Avería: se une a la cascada normal Tapa-sigue-a-Acolchado, siempre que
+        // esté activa (independiente de si esta célula tiene cascada normal o no).
+        const excludeKeys = new Set([
+          ...(tapaCascadaDesdeAcolchado.excludeKeysPorPuesto.get(puesto) || []),
+          ...(averiaTapaResultado.excludeKeysPorPuesto.get(puesto) || []),
+        ]);
+        const adjustedIn = [
+          ...(tapaCascadaDesdeAcolchado.adjustedInPorPuesto.get(puesto) || []),
+          ...(averiaTapaResultado.adjustedInPorPuesto.get(puesto) || []),
+        ];
         // Parte de una orden partida que se queda acá: sin esto, esas unidades no llegan a Plan
         // Final (la orden entera fue excluida del origen y solo viajó el fragmento).
         const splitRemainders = tapaCascadaDesdeAcolchado.splitRemaindersPorPuesto.get(puesto) || [];
@@ -7600,7 +7931,7 @@ useEffect(() => {
       });
       return next;
     });
-  }, [tapaAceptadoPuestos, tapaCascadaDesdeAcolchado, tapaOrdenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes]);
+  }, [tapaAceptadoPuestos, tapaCascadaDesdeAcolchado, averiaTapaResultado, tapaOrdenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes]);
 
   // ─── Aceptar Plan de Forros Finales (FORRO / FBASE) ───────────────────────
   // Esta pestaña no tiene motor de ajuste (cada puesto produce lo suyo, no hay redistribución),
@@ -7636,12 +7967,13 @@ useEffect(() => {
         const finalOrds = techFilteredOrdenes
           .filter(o => codigos.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()))
           .filter(o => !bloqueadas.has(mk(o)))
+          .map(aplicarCantidadManual)
           .map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: source }));
         next = [...next.filter(o => o._source !== source), ...finalOrds];
       });
       return next;
     });
-  }, [forrosAceptadoPuestos, ordenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes]);
+  }, [forrosAceptadoPuestos, ordenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes, aplicarCantidadManual]);
 
   const renderDateFilterHeaderInternal = () => renderDateFilterHeader(techStartDate, setTechStartDate, techEndDate, setTechEndDate);
 
@@ -7896,6 +8228,11 @@ useEffect(() => {
   const [confirmGuardarPlanFinalOpen, setConfirmGuardarPlanFinalOpen] = useState(false);
   const [planFinalExistente, setPlanFinalExistente] = useState<PlanGrupo[] | null>(null);
   const [planFinalGuardado, setPlanFinalGuardado] = useState(false);
+  // Se bloquea (queda "Generado ✓") solo tras un envío 100% exitoso — un fallo parcial deja el
+  // botón habilitado para reintentar, y cada nuevo "Guardar Plan" lo reinicia (ver
+  // ejecutarGuardadoPlanFinal) porque el codigo_detalle_tactico de un guardado anterior ya no
+  // corresponde al plan_grupo PFM-FINAL vigente.
+  const [sapEnviado, setSapEnviado] = useState(false);
 
   const ejecutarGuardadoPlanFinal = useCallback(async (planesADesactivar: PlanGrupo[]) => {
     const fecha = recuperacionFechasCalculadas?.n2n3;
@@ -7919,8 +8256,8 @@ useEffect(() => {
       codigo_grupo: 2,
       codigo_familia_grupo: 0,
       valor: `Plan Táctico - Centro ${planFinalCentro} - PFM - FINAL`,
-      fecha_inicio_plan: new Date(fecha),
-      fecha_fin_plan: new Date(fecha),
+      fecha_inicio_plan: toDatetime2Medianoche(fecha),
+      fecha_fin_plan: toDatetime2Medianoche(fecha),
       estado: 'A',
       fecha_creacion: new Date(),
       usuario_creacion: 'admin',
@@ -7952,6 +8289,11 @@ useEffect(() => {
     }
 
     setPlanFinalGuardado(true);
+    setSapEnviado(false);
+    // La vista previa (si quedó abierta de un guardado anterior) ya no corresponde al
+    // plan_grupo PFM-FINAL recién creado — se descarta, hay que volver a "Generar SAP".
+    setSapPreviewOpen(false);
+    setSapPreviewRows([]);
     addNotification('success', `Plan Final guardado (PFM - FINAL): ${planesADesactivar.length} plan(es) anterior(es) desactivado(s), ${detallesCreados} orden(es) guardada(s).`);
   }, [recuperacionFechasCalculadas, planFinalCentro, planFinalOrders, addNotification, normalizeMaterialCode, getCantidadFinalCorregida]);
 
@@ -7969,15 +8311,11 @@ useEffect(() => {
     try {
       const todosPlanesResp = await planGrupoService.getAll();
       const todosPlanes = todosPlanesResp.data || [];
-      const fechaLocal = (f: Date | string) => {
-        const d = new Date(f);
-        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      };
       const existentes = todosPlanes.filter((pg: PlanGrupo) =>
         pg.codigo_grupo === 2 &&
         pg.estado === 'A' &&
         PLAN_GRUPO_VALOR_REGEX_PFM_FINAL.test(String(pg.valor || '')) &&
-        pg.fecha_inicio_plan && fechaLocal(pg.fecha_inicio_plan) === fecha
+        pg.fecha_inicio_plan && toFechaEcuador(pg.fecha_inicio_plan) === fecha
       );
       if (existentes.length > 0) {
         setPlanFinalExistente(existentes);
@@ -8005,6 +8343,135 @@ useEffect(() => {
       setIsGuardandoPlanFinal(false);
     }
   }, [planFinalExistente, ejecutarGuardadoPlanFinal, addNotification]);
+
+  // ─── PLAN FINAL: enviar a SAP (InsertarSolicitudProduccionHB) ────────────
+  // Solo tiene sentido después de "Guardar Plan" (planFinalGuardado): SAP exige un
+  // CodigoOrdenExterna, y se usa el codigo_detalle_tactico de cada orden — un ID que recién
+  // existe una vez guardada en base. Por eso no se reutiliza lo que ya está en memoria
+  // (`planFinalOrders`): se vuelve a consultar el plan_grupo PFM-FINAL recién guardado para la
+  // fecha objetivo (mismo patrón que el resto de "recuperación" de este archivo,
+  // `detallePlanTacticoPorGrupos` + regex de PLAN_GRUPO_VALOR_REGEX_PFM_FINAL), y se empareja
+  // con `planFinalOrders` por posición: ambas listas se construyen filtrando
+  // `getCantidadFinalCorregida(o) > 0` en el mismo orden en que `ejecutarGuardadoPlanFinal` las
+  // guardó, así que ordenando los detalles por codigo_detalle_tactico ascendente (orden de
+  // creación) el índice i de una lista corresponde al índice i de la otra.
+  //
+  // No se manda directo a SAP: primero se arma el payload de cada orden y se muestra en una
+  // VISTA PREVIA editable (Cantidad/Puesto/Versión/Observaciones) para que el usuario pueda
+  // corregir algo antes de confirmar — recién al presionar "Confirmar y Enviar" (
+  // handleConfirmarEnvioSap) se hace el POST real, uno por orden.
+  const [isPreparandoSap, setIsPreparandoSap] = useState(false);
+  const [isEnviandoSapConfirmado, setIsEnviandoSapConfirmado] = useState(false);
+  const [sapPreviewOpen, setSapPreviewOpen] = useState(false);
+  const [sapPreviewRows, setSapPreviewRows] = useState<SolicitudProduccionHB[]>([]);
+
+  const handlePrepararEnvioSap = useCallback(async () => {
+    if (planFinalOrders.length === 0) return;
+    const fecha = recuperacionFechasCalculadas?.n2n3;
+    if (!fecha) {
+      addNotification('warning', 'No se pudo determinar la fecha del plan — selecciona la fecha del P1 en la pestaña "Recuperación Pasos P1-P3".');
+      return;
+    }
+    setIsPreparandoSap(true);
+    try {
+      const gruposParam = forrosGruposList.map(g => g.codigo_grupo).join('&');
+      const respDetalle = await serviciosService.detallePlanTacticoPorGrupos(gruposParam, fecha);
+      const detallesPFMFinal = (respDetalle.data || [])
+        .filter((item: any) => PLAN_GRUPO_VALOR_REGEX_PFM_FINAL.test(String(item.valor || '')))
+        .sort((a: any, b: any) => Number(a.codigo_detalle_tactico) - Number(b.codigo_detalle_tactico));
+
+      const ordenesConCantidad = planFinalOrders.filter(o => getCantidadFinalCorregida(o) > 0);
+
+      if (detallesPFMFinal.length !== ordenesConCantidad.length) {
+        addNotification('error', `El Plan Final en pantalla (${ordenesConCantidad.length} orden(es)) no coincide con lo guardado en base (${detallesPFMFinal.length} orden(es)). Vuelve a presionar "Guardar Plan" y luego "Generar SAP".`);
+        return;
+      }
+
+      // Formato AAAAMMDD (distinto del DD.MM.YYYY que usa el Excel/TXT viejo, ver formatFechaSAP)
+      // — `fecha` ya viene como YYYY-MM-DD, así que basta con quitar los guiones.
+      const fechaSap = fecha.replace(/-/g, '');
+      const filas: SolicitudProduccionHB[] = ordenesConCantidad.map((o, i) => ({
+        Mandante: planFinalMandt,
+        CodigoOrdenExterna: String(detallesPFMFinal[i].codigo_detalle_tactico),
+        // AUART en SAP es un código de 4 letras siempre en mayúsculas (ZBOQ, ZMOQ, ZCSQ...) — la
+        // restricción TIPO_ORDEN puede haberse cargado en minúscula ("zmoq") y SAP lo rechaza por
+        // no calzar con ningún código real, así que se normaliza acá antes de enviar.
+        ClaseOrden: planFinalTipoOrden.trim().toUpperCase(),
+        Centro: planFinalCentro,
+        CodigoMaterial: normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || ''),
+        CantidadPlanificada: getCantidadFinalCorregida(o),
+        VersionFabricacion: getProdVersionPlanFinal(o) ?? '',
+        PuestoTrabajo: String(o._finalHR || o['MAQUINA'] || o['Maquina'] || ''),
+        FechaFinProgramada: fechaSap,
+        HoraFinProgramada: '230000',
+        FechaInicioProgramada: fechaSap,
+        HoraInicioProgramada: '070000',
+        PedidoComercial: '',
+        PosicionPedido: '',
+        // "1" = cargado, pendiente de procesar (doc SAP) — no "A"/"I" (esos son de este app).
+        EstadoRegistro: '1',
+        Observaciones: '',
+        // Se recalculan justo antes de enviar (ver handleConfirmarEnvioSap) con la fecha/hora
+        // real de carga — acá solo van de placeholder mientras se arma la vista previa.
+        FechaCarga: '',
+        HoraCarga: '',
+        EstadoCarga: 'X',
+        NumeroOrdenSap: '',
+        FechaProceso: '',
+        HoraProceso: '',
+        UsuarioProceso: 'APIUSR',
+      }));
+      setSapPreviewRows(filas);
+      setSapPreviewOpen(true);
+    } catch (error: any) {
+      addNotification('error', `Error al preparar el envío a SAP: ${error.message}`);
+    } finally {
+      setIsPreparandoSap(false);
+    }
+  }, [planFinalOrders, recuperacionFechasCalculadas, forrosGruposList, addNotification, getCantidadFinalCorregida, planFinalMandt, planFinalTipoOrden, planFinalCentro, normalizeMaterialCode, getProdVersionPlanFinal]);
+
+  // Edita un campo de una fila de la vista previa (Cantidad/Puesto/Versión/Observaciones) antes
+  // de confirmar el envío — el resto de campos quedan fijos por diseño (mandante, fechas, estados).
+  const actualizarFilaSapPreview = useCallback((index: number, campo: keyof SolicitudProduccionHB, valor: string | number) => {
+    setSapPreviewRows(prev => prev.map((r, i) => i === index ? { ...r, [campo]: valor } : r));
+  }, []);
+
+  // Envío real a SAP — toma lo que quedó en `sapPreviewRows` (con las ediciones del usuario, si
+  // las hubo), no vuelve a calcular nada. Un POST por orden, en secuencia; solo bloquea el botón
+  // ("Generado ✓") si TODAS se insertaron sin error, igual criterio que antes.
+  const handleConfirmarEnvioSap = useCallback(async () => {
+    if (sapPreviewRows.length === 0) return;
+    setIsEnviandoSapConfirmado(true);
+    try {
+      // Misma fecha/hora de carga para todo el lote — se insertan juntas en esta misma acción.
+      const { fecha: fechaCarga, hora: horaCarga } = getFechaHoraCargaEcuador();
+      let exitos = 0;
+      const errores: string[] = [];
+      for (const fila of sapPreviewRows) {
+        const payload: SolicitudProduccionHB = { ...fila, FechaCarga: fechaCarga, HoraCarga: horaCarga };
+        try {
+          const resp = await serviciosService.insertarSolicitudProduccionHB(payload);
+          if (resp?.data?.success === false) {
+            errores.push(`${payload.CodigoOrdenExterna}: ${resp.data?.message || 'rechazada por SAP'}`);
+          } else {
+            exitos++;
+          }
+        } catch (error: any) {
+          errores.push(`${payload.CodigoOrdenExterna}: ${error.message}`);
+        }
+      }
+
+      if (errores.length === 0) {
+        setSapEnviado(true);
+        setSapPreviewOpen(false);
+        addNotification('success', `Generar SAP: ${exitos} orden(es) insertada(s) correctamente en HANA.`);
+      } else {
+        addNotification('error', `Generar SAP: ${exitos} orden(es) insertada(s), ${errores.length} con error. ${errores.slice(0, 5).join(' | ')}${errores.length > 5 ? ` y ${errores.length - 5} más` : ''}`);
+      }
+    } finally {
+      setIsEnviandoSapConfirmado(false);
+    }
+  }, [sapPreviewRows, addNotification]);
 
   // ─── ACOLCHADORA DE BANDAS (ACH11/ACH12): ajuste por Versión de Fabricación ──
   // Mismo criterio que Acolchado & Tapas — ya no se balancea por simple utilización. Materiales
@@ -8210,9 +8677,9 @@ useEffect(() => {
         const bloqueadas = ordenesBloqueadasPorPuesto.get(puesto) || new Set<string>();
         const orig = techFilteredOrdenes.filter(o => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hr);
         finalOrds.push(
-          ...orig.filter(o => !excludeKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'bandas-version', _prodVersion: getVersion(o) })),
-          ...splitRemainders.filter(o => !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
-          ...adjustedIn.filter(o => !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
+          ...orig.filter(o => !excludeKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'bandas-version', _prodVersion: getVersion(o) })),
+          ...splitRemainders.filter(o => !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
+          ...adjustedIn.filter(o => !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
         );
       });
       setPlanFinalOrders(prev => [...prev.filter(o => o._source !== 'bandas-version'), ...finalOrds]);
@@ -8223,7 +8690,7 @@ useEffect(() => {
     } finally {
       setIsAceptandoAjusteBandas(false);
     }
-  }, [uniquePuestos, mapToHojaRutaInternal, isBandasAjusteActivo, bandasExcludeKeysPorPuesto, bandasAdjustedInPorPuesto, bandasSplitRemaindersPorPuesto, techFilteredOrdenes, bandasMovedOrders, addNotification, versionPorMaterialAjusteBandas, normalizeMaterialCode, ordenesBloqueadasPorPuesto]);
+  }, [uniquePuestos, mapToHojaRutaInternal, isBandasAjusteActivo, bandasExcludeKeysPorPuesto, bandasAdjustedInPorPuesto, bandasSplitRemaindersPorPuesto, techFilteredOrdenes, bandasMovedOrders, addNotification, versionPorMaterialAjusteBandas, normalizeMaterialCode, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
 
   // Mantiene sincronizado el Plan Final de Bandas ya aceptado con el estado vigente del candado —
   // igual que Acolchado/Tapa/Forros. Sin esto, bloquear un material DESPUÉS de haber presionado
@@ -8250,13 +8717,13 @@ useEffect(() => {
       const bloqueadas = ordenesBloqueadasPorPuesto.get(puesto) || new Set<string>();
       const orig = techFilteredOrdenes.filter(o => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hr);
       finalOrds.push(
-        ...orig.filter(o => !excludeKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'bandas-version', _prodVersion: getVersion(o) })),
-        ...splitRemainders.filter(o => !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
-        ...adjustedIn.filter(o => !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
+        ...orig.filter(o => !excludeKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'bandas-version', _prodVersion: getVersion(o) })),
+        ...splitRemainders.filter(o => !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
+        ...adjustedIn.filter(o => !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
       );
     });
     setPlanFinalOrders(prev => [...prev.filter(o => o._source !== 'bandas-version'), ...finalOrds]);
-  }, [ajusteBandasAceptado, uniquePuestos, mapToHojaRutaInternal, isBandasAjusteActivo, bandasExcludeKeysPorPuesto, bandasAdjustedInPorPuesto, bandasSplitRemaindersPorPuesto, techFilteredOrdenes, versionPorMaterialAjusteBandas, normalizeMaterialCode, ordenesBloqueadasPorPuesto]);
+  }, [ajusteBandasAceptado, uniquePuestos, mapToHojaRutaInternal, isBandasAjusteActivo, bandasExcludeKeysPorPuesto, bandasAdjustedInPorPuesto, bandasSplitRemaindersPorPuesto, techFilteredOrdenes, versionPorMaterialAjusteBandas, normalizeMaterialCode, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
 
   const BORD_BAND_PUESTOS_FILTER = useCallback((p: string) =>
     p.includes('BO01') || p.includes('BORDADORA-BANDA01') ||
@@ -8327,12 +8794,13 @@ useEffect(() => {
         const finalOrds = techFilteredOrdenes
           .filter(o => codigos.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()))
           .filter(o => !bloqueadas.has(mk(o)))
+          .map(aplicarCantidadManual)
           .map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: source }));
         next = [...next.filter(o => o._source !== source), ...finalOrds];
       });
       return next;
     });
-  }, [otrosInterioresAceptadoPuestos, ordenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes]);
+  }, [otrosInterioresAceptadoPuestos, ordenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes, aplicarCantidadManual]);
 
   const handleBordadoraBandAdjust = useCallback(() => {
     if (isBordBandAdjustActive) {
@@ -8412,6 +8880,7 @@ useEffect(() => {
         const hr = String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase();
         return hr === hrCode && !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o));
       })
+      .map(aplicarCantidadManual)
       .map(o => ({
         ...o,
         _finalHR: hrCode,
@@ -8426,7 +8895,7 @@ useEffect(() => {
     addNotification('success', isBordBandAdjustActive
       ? `Ajuste aceptado para ${machineName}: ${excessCount} ${excessCount === 1 ? 'orden marcada' : 'órdenes marcadas'} como no producible. Ver pestaña Plan Final.`
       : `Plan ORIGINAL de ${machineName} aceptado sin ajuste (${machineOrders.length} orden(es), tal como está hoy en SAP). Ver pestaña Plan Final.`);
-  }, [bordBandAdjustSummary, bordBandAcceptedMachines, techFilteredOrdenes, addNotification, isBordBandAdjustActive, ordenesBloqueadasPorPuesto]);
+  }, [bordBandAdjustSummary, bordBandAcceptedMachines, techFilteredOrdenes, addNotification, isBordBandAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
 
   // Mantiene sincronizadas las máquinas de Bordadora/Cosedoras de Banda YA aceptadas con el estado
   // vigente del candado — sin esto, bloquear un material DESPUÉS de aceptar dejaba la fila ya
@@ -8447,12 +8916,13 @@ useEffect(() => {
             const hr = String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase();
             return hr === hrCode && !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o));
           })
+          .map(aplicarCantidadManual)
           .map(o => ({ ...o, _finalHR: hrCode, _wasAdjusted: false, _source: source }));
         next = [...next.filter(o => o._source !== source), ...machineOrders];
       });
       return next;
     });
-  }, [bordBandAdjustSummary, bordBandAcceptedMachines, techFilteredOrdenes, isBordBandAdjustActive, ordenesBloqueadasPorPuesto]);
+  }, [bordBandAdjustSummary, bordBandAcceptedMachines, techFilteredOrdenes, isBordBandAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
 
   // ─── RMTB1/2/3: ajuste por Versión de Fabricación ────────────────────────
   // Mismo criterio que Acolchado & Tapas y Bandas — ya no se balancea por simple utilización.
@@ -8946,9 +9416,9 @@ useEffect(() => {
         const splitRemainders = isRmtbAjusteActivo ? (rmtbSplitRemaindersPorPuesto.get(puesto) || []) : [];
         const orig = techFilteredOrdenes.filter(o => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hr);
         finalOrds.push(
-          ...orig.filter(o => !excludeKeys.has(mk(o)) && !isLiberada(o) && !estaBloqueada(puesto, o)).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
-          ...splitRemainders.filter(o => !isLiberada(o)).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
-          ...adjustedIn.filter(o => !isLiberada(o)).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
+          ...orig.filter(o => !excludeKeys.has(mk(o)) && !isLiberada(o) && !estaBloqueada(puesto, o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
+          ...splitRemainders.filter(o => !isLiberada(o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
+          ...adjustedIn.filter(o => !isLiberada(o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
         );
       });
 
@@ -8963,6 +9433,7 @@ useEffect(() => {
         const ordsM = techFilteredOrdenes
           .filter(o => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hrM)
           .filter(o => !estaBloqueada(rmtbM, o))
+          .map(aplicarCantidadManual)
           .map(o => ({
             ...o,
             _finalHR: hrM,
@@ -8984,7 +9455,7 @@ useEffect(() => {
     } finally {
       setIsAceptandoAjusteRmtb(false);
     }
-  }, [rmtb123PuestosActivos, uniquePuestos, mapToHojaRutaInternal, isRmtbAjusteActivo, rmtbExcludeKeysPorPuesto, rmtbAdjustedInPorPuesto, rmtbSplitRemaindersPorPuesto, techFilteredOrdenes, rmtbmBandaLiberada, rmtbVersionMovedOrders, bloqueoEfectivoPorPuesto, addNotification, versionPorMaterialAjusteRmtb, normalizeMaterialCode]);
+  }, [rmtb123PuestosActivos, uniquePuestos, mapToHojaRutaInternal, isRmtbAjusteActivo, rmtbExcludeKeysPorPuesto, rmtbAdjustedInPorPuesto, rmtbSplitRemaindersPorPuesto, techFilteredOrdenes, rmtbmBandaLiberada, rmtbVersionMovedOrders, bloqueoEfectivoPorPuesto, addNotification, versionPorMaterialAjusteRmtb, normalizeMaterialCode, aplicarCantidadManual]);
 
   // Mantiene sincronizado el Plan Final de RMTB (RMTB1/2/3 + RMTBM) ya aceptado con el estado
   // vigente del candado — sin esto, bloquear un material DESPUÉS de aceptar dejaba la fila ya
@@ -9010,9 +9481,9 @@ useEffect(() => {
       const splitRemainders = isRmtbAjusteActivo ? (rmtbSplitRemaindersPorPuesto.get(puesto) || []) : [];
       const orig = techFilteredOrdenes.filter(o => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hr);
       finalOrds.push(
-        ...orig.filter(o => !excludeKeys.has(mk(o)) && !isLiberada(o) && !estaBloqueada(puesto, o)).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
-        ...splitRemainders.filter(o => !isLiberada(o)).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
-        ...adjustedIn.filter(o => !isLiberada(o)).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
+        ...orig.filter(o => !excludeKeys.has(mk(o)) && !isLiberada(o) && !estaBloqueada(puesto, o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
+        ...splitRemainders.filter(o => !isLiberada(o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
+        ...adjustedIn.filter(o => !isLiberada(o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
       );
     });
     const rmtbM = uniquePuestos.find(p => { const u = p.toUpperCase(); return u.includes('RMTBM') || u.includes('RMTB-M'); });
@@ -9023,6 +9494,7 @@ useEffect(() => {
         ...techFilteredOrdenes
           .filter(o => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hrM)
           .filter(o => !estaBloqueada(rmtbM, o))
+          .map(aplicarCantidadManual)
           .map(o => ({
             ...o,
             _finalHR: hrM,
@@ -9033,7 +9505,7 @@ useEffect(() => {
       );
     }
     setPlanFinalOrders(prev => [...prev.filter(o => o._source !== 'rmtb-version'), ...finalOrds]);
-  }, [ajusteRmtbAceptado, rmtb123PuestosActivos, uniquePuestos, mapToHojaRutaInternal, isRmtbAjusteActivo, rmtbExcludeKeysPorPuesto, rmtbAdjustedInPorPuesto, rmtbSplitRemaindersPorPuesto, techFilteredOrdenes, rmtbmBandaLiberada, bloqueoEfectivoPorPuesto, versionPorMaterialAjusteRmtb, normalizeMaterialCode]);
+  }, [ajusteRmtbAceptado, rmtb123PuestosActivos, uniquePuestos, mapToHojaRutaInternal, isRmtbAjusteActivo, rmtbExcludeKeysPorPuesto, rmtbAdjustedInPorPuesto, rmtbSplitRemaindersPorPuesto, techFilteredOrdenes, rmtbmBandaLiberada, bloqueoEfectivoPorPuesto, versionPorMaterialAjusteRmtb, normalizeMaterialCode, aplicarCantidadManual]);
 
   // Cascada inversa RMTBM → RMTB3 (regla de negocio ya existente, sin cambios): llama
   // getMaestroMaterialesExplosion para cada material en exceso de RMTBM y cruza los componentes
@@ -9259,8 +9731,8 @@ useEffect(() => {
     const machineOrders = [
       ...techFilteredOrdenes
         .filter(o => hrList.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()) && !movedOutKeys.has(makeKey(o)) && !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o)))
-        .map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: false, _source: `corte-${machineFullHR}` })),
-      ...movedInOrders.filter(o => !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o))).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: true, _source: `corte-${machineFullHR}` })),
+        .map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: false, _source: `corte-${machineFullHR}` })),
+      ...movedInOrders.filter(o => !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: true, _source: `corte-${machineFullHR}` })),
     ];
     setPlanFinalOrders(prev => [...prev.filter(o => o._source !== `corte-${machineFullHR}`), ...machineOrders]);
     setCorteAcceptedMachines(prev => new Set([...prev, machineFullHR]));
@@ -9268,7 +9740,7 @@ useEffect(() => {
     addNotification('success', isCorteAdjustActive
       ? `Ajuste aceptado para ${machineName}: ${totalMoves} ${totalMoves === 1 ? 'orden redistribuida' : 'órdenes redistribuidas'}. Ver pestaña Plan Final.`
       : `Plan ORIGINAL de ${machineName} aceptado sin ajuste (${machineOrders.length} orden(es), tal como está hoy en SAP). Ver pestaña Plan Final.`);
-  }, [corteAdjustSummary, corteAcceptedMachines, corteMovedOrders, techFilteredOrdenes, addNotification, isCorteAdjustActive, ordenesBloqueadasPorPuesto]);
+  }, [corteAdjustSummary, corteAcceptedMachines, corteMovedOrders, techFilteredOrdenes, addNotification, isCorteAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
 
   // Mantiene sincronizadas las máquinas de Corte YA aceptadas con el estado vigente del candado —
   // sin esto, bloquear un material DESPUÉS de aceptar dejaba la fila ya exportada congelada con lo
@@ -9290,14 +9762,14 @@ useEffect(() => {
         const machineOrders = [
           ...techFilteredOrdenes
             .filter(o => hrList.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()) && !movedOutKeys.has(makeKey(o)) && !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o)))
-            .map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: false, _source: source })),
-          ...movedInOrders.filter(o => !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o))).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: true, _source: source })),
+            .map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: false, _source: source })),
+          ...movedInOrders.filter(o => !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: true, _source: source })),
         ];
         next = [...next.filter(o => o._source !== source), ...machineOrders];
       });
       return next;
     });
-  }, [corteAdjustSummary, corteAcceptedMachines, corteMovedOrders, techFilteredOrdenes, isCorteAdjustActive, ordenesBloqueadasPorPuesto]);
+  }, [corteAdjustSummary, corteAcceptedMachines, corteMovedOrders, techFilteredOrdenes, isCorteAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
 
   // ─── Utilidad compartida: bin-packing genérico ────────────────────────────
   const binPackGroup = useCallback((groupPuestos: string[]): { order: any; fromHR: string; toHR: string }[] => {
@@ -9386,10 +9858,10 @@ useEffect(() => {
     const bloqueadas = bloqueoEfectivoPorPuesto.get(machineName) || new Set<string>();
     const hrList = machineFullHR.includes('/') ? machineFullHR.split('/').map(c => c.trim()) : [machineFullHR];
     return [
-      ...techFilteredOrdenes.filter(o => hrList.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()) && !outKeys.has(mk(o)) && !excessKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: false, _source: '' })),
-      ...inOrds.filter(o => !excessKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: true, _source: '' })),
+      ...techFilteredOrdenes.filter(o => hrList.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()) && !outKeys.has(mk(o)) && !excessKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: false, _source: '' })),
+      ...inOrds.filter(o => !excessKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: true, _source: '' })),
     ];
-  }, [techFilteredOrdenes, bloqueoEfectivoPorPuesto]);
+  }, [techFilteredOrdenes, bloqueoEfectivoPorPuesto, aplicarCantidadManual]);
 
   const acceptGroupAdjust = useCallback((
     machineFullHR: string, machineName: string, sourcePrefix: string,
@@ -9934,45 +10406,103 @@ useEffect(() => {
     return resultado;
   }, [uniquePuestos, mapToHojaRutaInternal, techFilteredOrdenes, planFinalOrders, calculateProductionTime, workstationConfigs, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal]);
 
-  // Correo de "Salud de Planta" (pestaña Resumen) — POST /api/servicios/enviarCorreo. Destinatarios
-  // vienen de la restricción "CORREOS_PLAN" (grupo Forros, Parámetros → Grupos → Restricciones),
-  // igual patrón que DISPONIBILIDAD_<PUESTO>: no hay UI de captura nueva, se crea/edita allá.
+  // Correo de "Horarios y Turnos" + "Salud de Planta" (pestaña Resumen) — POST
+  // /api/servicios/enviarCorreo. Destinatarios vienen de la restricción "CORREOS_PLAN" (grupo
+  // Forros, Parámetros → Grupos → Restricciones), igual patrón que DISPONIBILIDAD_<PUESTO>: no
+  // hay UI de captura nueva, se crea/edita allá.
+  // Antes se mandaban los datos de "Salud de Planta" solos (una fila por POOL de Hoja de Ruta),
+  // luego se juntaron con "Horarios y Turnos" en una sola tabla. A pedido del usuario:
+  // 1) Solo se incluyen puestos con plan YA ACEPTADO (`ocupacionPorHR.get(p).yaAceptado` — el
+  //    mismo flag que ya usa "Salud de Planta" en pantalla para el sello "· Ajustado (Plan
+  //    Final)"), no todos los puestos configurados — un reporte de lo que de verdad va a producción.
+  // 2) Tabla con mejor lectura: secciones por categoría (fila título, no columna repetida),
+  //    franjas alternadas y badges de color para Día/Noche/Sábado, en vez de texto plano — estilos
+  //    100% inline (nada de <style>/flex/grid) porque los clientes de correo (Outlook en
+  //    particular) ignoran CSS moderno y hasta bloques <style>.
   const [isEnviandoCorreoResumen, setIsEnviandoCorreoResumen] = useState(false);
   const handleEnviarCorreoResumen = useCallback(async () => {
     if (correosPlanDestinatarios.length === 0) {
       addNotification('warning', 'No hay destinatarios configurados. Crea la restricción "CORREOS_PLAN" (grupo Forros) en Parámetros → Grupos → Restricciones, con los correos separados por "&" o ",".');
       return;
     }
+    const gruposConAceptados = workstationGroups
+      .map(group => ({
+        title: group.title,
+        items: group.items.filter(p => uniquePuestos.includes(p) && ocupacionPorHR.get(p)?.yaAceptado),
+      }))
+      .filter(group => group.items.length > 0);
+
+    if (gruposConAceptados.length === 0) {
+      addNotification('warning', 'No hay puestos con plan aceptado todavía — acepta al menos una máquina (botón "Aceptar Plan"/"Aceptar Ajuste") antes de enviar el correo.');
+      return;
+    }
+
     setIsEnviandoCorreoResumen(true);
     try {
-      const filas = Array.from(new Set(ocupacionPorHR.values()))
-        .sort((a, b) => b.utilization - a.utilization)
-        .map(g => `
+      const td = 'padding:8px 12px;border-bottom:1px solid #e2e8f0;';
+      const badge = (activo: boolean, personas: number, bg: string, color: string) => activo
+        ? `<span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${bg};color:${color};font-weight:bold;font-size:10px;white-space:nowrap;">${personas} pers.</span>`
+        : `<span style="display:inline-block;padding:3px 10px;border-radius:999px;background:#f1f5f9;color:#94a3b8;font-weight:bold;font-size:10px;white-space:nowrap;">Inactivo</span>`;
+      let totalPuestos = 0;
+      const filas = gruposConAceptados.flatMap(group => {
+        const filaCategoria = `
           <tr>
-            <td style="padding:6px 10px;border:1px solid #ddd;">${g.puestos[0]}${g.puestos.length > 1 ? ' (POOL)' : ''}</td>
-            <td style="padding:6px 10px;border:1px solid #ddd;font-family:monospace;">${g.hrCode}</td>
-            <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">${g.totalTimeHours.toFixed(2)} h</td>
-            <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">${g.totalCapacityHours.toFixed(2)} h</td>
-            <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;font-weight:bold;color:${g.utilization > 100 ? '#dc2626' : g.utilization >= 90 ? '#16a34a' : '#ca8a04'};">${g.utilization.toFixed(0)}%</td>
-          </tr>`).join('');
+            <td colspan="10" style="padding:10px 12px;background:#312e81;color:#e0e7ff;font-weight:bold;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;">${group.title}</td>
+          </tr>`;
+        const filasPuesto = group.items.map((p, idx) => {
+          totalPuestos++;
+          const config = workstationConfigs[p] || { machine: p, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
+          const capacidadTotal = capacidadPuesto(p, config, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
+          const grupo = ocupacionPorHR.get(p);
+          const utilization = grupo?.utilization ?? 0;
+          const utilColor = utilization > 100 ? '#dc2626' : utilization >= 90 ? '#16a34a' : '#ca8a04';
+          const bg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+          return `
+            <tr style="background:${bg};">
+              <td style="${td}font-weight:bold;color:#0f172a;">${p}</td>
+              <td style="${td}font-family:monospace;color:#4338ca;">${mapToHojaRutaInternal(p) || 'S/HR'}</td>
+              <td style="${td}text-align:center;">${badge(config.isDayActive, config.peopleDay || 0, '#fef3c7', '#92400e')}</td>
+              <td style="${td}text-align:center;">${badge(config.isNightActive, config.peopleNight || 0, '#e0e7ff', '#3730a3')}</td>
+              <td style="${td}text-align:center;">${badge(config.isSaturdayActive, config.peopleWeekend || 0, '#d1fae5', '#065f46')}</td>
+              <td style="${td}text-align:center;color:#334155;">${config.machines || 1}</td>
+              <td style="${td}text-align:right;color:#334155;">${(grupo?.totalUnits ?? 0).toLocaleString()}</td>
+              <td style="${td}text-align:right;color:#334155;">${(grupo?.totalTimeHours ?? 0).toFixed(2)} h</td>
+              <td style="${td}text-align:right;color:#334155;">${capacidadTotal.toFixed(2)} h</td>
+              <td style="${td}text-align:right;font-weight:bold;color:${utilColor};">${utilization.toFixed(0)}%</td>
+            </tr>`;
+        }).join('');
+        return [filaCategoria, filasPuesto];
+      }).join('');
+
       const cuerpo = `
-        <h2>Salud de Planta &mdash; Resumen de Producci&oacute;n</h2>
-        <p>Fecha: ${formatFechaLarga(techStartDate)}</p>
-        <table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:12px;">
-          <thead>
-            <tr style="background:#f1f5f9;">
-              <th style="padding:6px 10px;border:1px solid #ddd;text-align:left;">Puesto</th>
-              <th style="padding:6px 10px;border:1px solid #ddd;text-align:left;">Hoja de Ruta</th>
-              <th style="padding:6px 10px;border:1px solid #ddd;text-align:right;">T. Requerido</th>
-              <th style="padding:6px 10px;border:1px solid #ddd;text-align:right;">Capacidad</th>
-              <th style="padding:6px 10px;border:1px solid #ddd;text-align:right;">% Ocupaci&oacute;n</th>
-            </tr>
-          </thead>
-          <tbody>${filas}</tbody>
-        </table>`;
+        <div style="font-family:Arial,Helvetica,sans-serif;">
+          <div style="padding:18px 22px;background:#1e1b4b;border-radius:10px 10px 0 0;">
+            <p style="margin:0;color:#c7d2fe;font-size:10px;font-weight:bold;letter-spacing:0.12em;text-transform:uppercase;">Plan Táctico Forros</p>
+            <h2 style="margin:4px 0 0;color:#ffffff;font-size:19px;">Horarios y Turnos &mdash; Salud de Planta</h2>
+            <p style="margin:6px 0 0;color:#a5b4fc;font-size:12px;">Fecha: ${formatFechaLarga(techStartDate)} &nbsp;&middot;&nbsp; ${totalPuestos} puesto(s) con plan aceptado</p>
+          </div>
+          <table style="border-collapse:collapse;width:100%;font-family:Arial,Helvetica,sans-serif;font-size:12px;border:1px solid #e2e8f0;border-top:none;">
+            <thead>
+              <tr style="background:#eef2ff;">
+                <th style="padding:8px 12px;text-align:left;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Puesto</th>
+                <th style="padding:8px 12px;text-align:left;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">HR</th>
+                <th style="padding:8px 12px;text-align:center;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">D&iacute;a</th>
+                <th style="padding:8px 12px;text-align:center;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Noche</th>
+                <th style="padding:8px 12px;text-align:center;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">S&aacute;bado</th>
+                <th style="padding:8px 12px;text-align:center;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">M&aacute;q.</th>
+                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Cant. Total</th>
+                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">T. Requerido</th>
+                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Capacidad</th>
+                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">% Ocup.</th>
+              </tr>
+            </thead>
+            <tbody>${filas}</tbody>
+          </table>
+          <p style="margin:10px 2px 0;color:#94a3b8;font-size:10px;">Solo se listan los puestos con plan ya aceptado en Plan Final.</p>
+        </div>`;
       const res = await serviciosService.enviarCorreo({
         destino: correosPlanDestinatarios.join(','),
-        asunto: `Reporte de Producción — Salud de Planta (${formatFechaLarga(techStartDate)})`,
+        asunto: `Reporte de Producción — Horarios y Turnos / Salud de Planta (${formatFechaLarga(techStartDate)})`,
         cuerpo,
         nota: 'Este correo fue generado automáticamente, favor no responder.'
       });
@@ -9982,7 +10512,7 @@ useEffect(() => {
     } finally {
       setIsEnviandoCorreoResumen(false);
     }
-  }, [correosPlanDestinatarios, ocupacionPorHR, addNotification, techStartDate]);
+  }, [correosPlanDestinatarios, ocupacionPorHR, addNotification, techStartDate, uniquePuestos, workstationConfigs, capacidadPuesto, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, mapToHojaRutaInternal]);
 
   if (!isMounted) {
     return (
@@ -10207,20 +10737,48 @@ useEffect(() => {
             const achPuesto = achNames[0];
             const pefPuesto = pefNames[0];
             const achAjusteActivo = !!achPuesto && acolchadoCelulasAjusteActivas.has(achPuesto);
-            const achExcludeKeys = achAjusteActivo && achPuesto ? acolchadoExcludeKeysPorPuesto.get(achPuesto) : undefined;
+            // La Reasignación por Avería es un mecanismo INDEPENDIENTE del toggle "Ajustar por
+            // Versión" de cada célula (ver el bloque "REASIGNACIÓN POR AVERÍA" más arriba) — se
+            // combina (unión) con lo que ya calcule el motor normal, nunca lo reemplaza.
+            const achAveriaExclude = achPuesto ? averiaAcolchadoResultado.excludeKeysPorPuesto.get(achPuesto) : undefined;
+            const achAveriaAdjustedIn = achPuesto ? averiaAcolchadoResultado.adjustedInPorPuesto.get(achPuesto) : undefined;
+            const achExcludeKeysBase = achAjusteActivo && achPuesto ? acolchadoExcludeKeysPorPuesto.get(achPuesto) : undefined;
+            const achExcludeKeys = (achExcludeKeysBase || achAveriaExclude)
+              ? new Set([...(achExcludeKeysBase || []), ...(achAveriaExclude || [])])
+              : undefined;
             // El motor SIEMPRE calcula qué se mueve de esta célula a otra, tenga o no el ajuste
-            // activo (ver comentario de más abajo sobre `techFilteredOrdenesParaAcolchado`). Si hay
-            // algo que mover pero el ajuste de ESTA célula está apagado, "Aceptar Plan" mandaría a
-            // Plan Final la producción ORIGINAL completa (sin descontar lo que se fue) — y si la
-            // célula destino también acepta con su ajuste activo, esa porción queda duplicada.
-            const achExcludeKeysSiempre = achPuesto ? acolchadoExcludeKeysPorPuesto.get(achPuesto) : undefined;
-            const achRiesgoDuplicado = !achAjusteActivo && !!achExcludeKeysSiempre && achExcludeKeysSiempre.size > 0;
+            // activo (ver comentario de más abajo sobre `techFilteredOrdenesParaAcolchado`). Solo
+            // hay riesgo real de duplicar si ese excedente fue reclamado por una célula DESTINO que
+            // tiene SU PROPIO ajuste activo (ver `acolchadoOrigenesConDestinoAjustadoPorPuesto`) —
+            // si el excedente quedó como "exceso" sin destino, o el destino también está sin
+            // ajustar, nadie más lo reclama y aceptar el plan natural aquí es seguro. No bloquea el
+            // botón (el usuario debe poder aceptar SIEMPRE el plan natural): solo avisa.
+            const achRiesgoDuplicado = !achAjusteActivo && !!achPuesto && acolchadoOrigenesConDestinoAjustadoPorPuesto.has(achPuesto);
             // Las órdenes que ENTRAN se muestran aunque esta célula no esté ajustada: basta con que
             // lo esté la de ORIGEN (ver `acolchadoAdjustedInVisiblePorPuesto`).
-            const achAdjustedIn = achPuesto ? acolchadoAdjustedInVisiblePorPuesto.get(achPuesto) : undefined;
-            const achSplitRemainders = achAjusteActivo && achPuesto ? acolchadoSplitRemaindersPorPuesto.get(achPuesto) : undefined;
+            const achAdjustedInBase = achPuesto ? acolchadoAdjustedInVisiblePorPuesto.get(achPuesto) : undefined;
+            const achAdjustedIn = (achAdjustedInBase || achAveriaAdjustedIn)
+              ? [...(achAdjustedInBase || []), ...(achAveriaAdjustedIn || [])]
+              : undefined;
+            const achSplitRemaindersBase = achAjusteActivo && achPuesto ? acolchadoSplitRemaindersPorPuesto.get(achPuesto) : undefined;
+            const achAveriaSplitRemainders = achPuesto ? averiaAcolchadoResultado.splitRemaindersPorPuesto.get(achPuesto) : undefined;
+            const achSplitRemainders = (achSplitRemaindersBase || achAveriaSplitRemainders)
+              ? [...(achSplitRemaindersBase || []), ...(achAveriaSplitRemainders || [])]
+              : undefined;
             const achExceso = achAjusteActivo && achPuesto ? acolchadoExcesoPorPuesto.get(achPuesto) : undefined;
             const achTapasAfectadas = achAjusteActivo && achPuesto ? tapasAfectadasPorCelula.get(achPuesto) : undefined;
+            // Misma unión (Reasignación por Avería + cascada normal Tapa-sigue-a-Acolchado) para la
+            // Cosedora de esta célula.
+            const pefAveriaExclude = pefPuesto ? averiaTapaResultado.excludeKeysPorPuesto.get(pefPuesto) : undefined;
+            const pefAveriaAdjustedIn = pefPuesto ? averiaTapaResultado.adjustedInPorPuesto.get(pefPuesto) : undefined;
+            const pefExcludeKeysBase = pefPuesto ? tapaCascadaDesdeAcolchado.excludeKeysPorPuesto.get(pefPuesto) : undefined;
+            const pefExcludeKeys = (pefExcludeKeysBase || pefAveriaExclude)
+              ? new Set([...(pefExcludeKeysBase || []), ...(pefAveriaExclude || [])])
+              : undefined;
+            const pefAdjustedInBase = pefPuesto ? tapaCascadaDesdeAcolchado.adjustedInPorPuesto.get(pefPuesto) : undefined;
+            const pefAdjustedIn = (pefAdjustedInBase || pefAveriaAdjustedIn)
+              ? [...(pefAdjustedInBase || []), ...(pefAveriaAdjustedIn || [])]
+              : undefined;
             return (
               <div key={suffix} className="space-y-6">
                 <div className="flex items-center justify-between flex-wrap gap-3">
@@ -10240,29 +10798,43 @@ useEffect(() => {
                         <Layers className="w-3.5 h-3.5" /> {achAjusteActivo ? 'Revertir Ajuste' : 'Ajustar por Versión'}
                       </Button>
                     )}
-                    {/* Botón de aceptación SIEMPRE visible, aunque no haya movimientos — el plan
-                        natural (sin ajustar) también debe poder mandarse a Plan Final. Se bloquea
-                        SOLO si hay producción movida hacia otra célula y el ajuste de ESTA sigue
-                        apagado (ver `achRiesgoDuplicado`) — evita duplicar producción en Plan Final. */}
+                    {/* Reasignación por Avería: caso puntual de la ACH08 (ver bloque "REASIGNACIÓN POR
+                        AVERÍA" arriba en el código) — un mapa fijo de familia→máquina decidido por el
+                        planificador, independiente del ajuste por Versión. Se muestra el botón único
+                        en la célula 08 (el origen de la avería) porque afecta a varias células a la
+                        vez (02, 06, 07, 09) — activarlo/desactivarlo desde un solo lugar. */}
+                    {suffix === '08' && (
+                      <Button
+                        onClick={() => setAveriaAch08Activa(v => !v)}
+                        className={cn(
+                          'font-black uppercase tracking-widest text-[9px] px-5 py-2 rounded-2xl shadow-lg flex items-center gap-2',
+                          averiaAch08Activa ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-orange-600 hover:bg-orange-700 text-white'
+                        )}
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5" /> {averiaAch08Activa ? 'Revertir Reasignación por Avería' : 'Reasignar por Avería (ACH08)'}
+                      </Button>
+                    )}
+                    {/* Botón de aceptación SIEMPRE visible y SIEMPRE habilitado, haya o no movimientos
+                        — el plan natural (sin ajustar) siempre debe poder mandarse a Plan Final tal
+                        como está hoy en SAP. Si el motor detectó producción que movería a otra célula
+                        (`achRiesgoDuplicado`) se avisa, pero no se bloquea: aceptar sin ajuste manda
+                        siempre la producción ORIGINAL completa de esta célula, nunca se duplica por
+                        sí sola. */}
                     {achPuesto && (
                       <Button
                         onClick={() => {
                           if (achRiesgoDuplicado) {
-                            addNotification('error', `${achPuesto} tiene producción que el motor movió a otra célula, pero su "Ajustar por Versión" está apagado. Actívalo antes de aceptar, o esa producción quedaría duplicada en Plan Final (completa aquí y también en la célula que la recibió).`);
-                            return;
+                            addNotification('warning', `${achPuesto}: el motor detectó producción que podría moverse a otra célula, pero su "Ajustar por Versión" está apagado — se acepta el plan ORIGINAL completo de ${achPuesto} tal cual. Si esa otra célula también acepta con su ajuste activo, revisa que no quede duplicado.`);
                           }
                           handleAceptarAjusteAcolchadoPuesto(achPuesto);
                         }}
-                        disabled={achRiesgoDuplicado}
                         className={cn(
                           'font-black uppercase tracking-widest text-[9px] px-5 py-2 rounded-2xl shadow-lg flex items-center gap-2',
-                          achRiesgoDuplicado
-                            ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
-                            : acolchadoAceptadoPuestos.has(achPuesto) ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                          acolchadoAceptadoPuestos.has(achPuesto) ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'
                         )}
                       >
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        {achRiesgoDuplicado ? 'Activa el Ajuste primero' : acolchadoAceptadoPuestos.has(achPuesto) ? 'Reaceptar Plan' : 'Aceptar Plan'}
+                        {acolchadoAceptadoPuestos.has(achPuesto) ? 'Reaceptar Plan' : 'Aceptar Plan'}
                       </Button>
                     )}
                     {/* Tapa/Cosedora antes nunca llegaba a Plan Final — ahora tiene su propio botón,
@@ -10347,6 +10919,40 @@ useEffect(() => {
                     </p>
                   </div>
                 )}
+                {/* Reasignación por Avería: qué no se pudo mover completo (nunca se parte una orden) y
+                    si el Acolchado movido coincide con la Tapa movida. Se muestra una sola vez, en la
+                    célula 08 (el origen), porque el resultado abarca varias células a la vez. */}
+                {suffix === '08' && averiaAch08Activa && (averiaAcolchadoResultado.pendientes.length > 0 || averiaTapaResultado.pendientes.length > 0) && (
+                  <div className="rounded-2xl border border-red-300 bg-red-50/70 px-5 py-4 space-y-2">
+                    <p className="text-[9px] font-black uppercase text-red-700 tracking-widest">
+                      Reasignación por Avería — órdenes que NO se movieron (no caben completas, no se parten)
+                    </p>
+                    {[...averiaAcolchadoResultado.pendientes, ...averiaTapaResultado.pendientes].map((p, idx) => (
+                      <div key={idx} className="text-[10px] font-mono text-red-800 border-b border-red-200 last:border-0 pb-1.5 last:pb-0">
+                        <span className="font-black">{p.regla.raw}</span> — {p.motivo}
+                        {p.orders.length > 0 && (
+                          <span className="block text-red-700 font-sans font-bold mt-0.5">
+                            {p.orders.map((o: any) => `${o['MATERIAL'] || o['CodMaterial']} (${Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0).toLocaleString()})`).join(' · ')}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {suffix === '08' && averiaAch08Activa && averiaConciliacion.some(c => c.coincide === false) && (
+                  <div className="rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 space-y-2">
+                    <p className="text-[9px] font-black uppercase text-amber-700 tracking-widest">
+                      Reasignación por Avería — Acolchado y Tapa NO coinciden en cantidad
+                    </p>
+                    {averiaConciliacion.filter(c => c.coincide === false).map((c, idx) => (
+                      <p key={idx} className="text-[10px] font-bold text-amber-800 leading-tight">
+                        Regla Tapa <span className="font-mono">{c.reglaTapa.raw}</span>: se movieron <span className="font-black">{c.cantidadTapa.toLocaleString()}</span> uds de Tapa
+                        {c.ratio !== undefined && <> (equivalen a <span className="font-black">{Math.round(c.cantidadTapaEquivalente || 0).toLocaleString()}</span> uds de Acolchado, ratio {c.ratio.toLocaleString(undefined, { maximumFractionDigits: 2 })})</>}
+                        , pero el Acolchado movido fue <span className="font-black">{c.cantidadAcolchado.toLocaleString()}</span> uds — ajusta a mano (bloqueando órdenes) para que cuadren.
+                      </p>
+                    ))}
+                  </div>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
                   {achNames.length > 0 && (
                     <MachineCard
@@ -10377,8 +10983,8 @@ useEffect(() => {
                       horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                       mapToHojaRuta={mapToHojaRutaInternal}
                       normalizeMaterialCode={normalizeMaterialCode}
-                      excludeOrderKeys={tapaCascadaDesdeAcolchado.excludeKeysPorPuesto.get(pefNames[0])}
-                      adjustedInOrders={tapaCascadaDesdeAcolchado.adjustedInPorPuesto.get(pefNames[0])}
+                      excludeOrderKeys={pefExcludeKeys}
+                      adjustedInOrders={pefAdjustedIn}
                       splitRemainderOrders={tapaCascadaDesdeAcolchado.splitRemaindersPorPuesto.get(pefNames[0])}
                       blockedOrderKeys={tapaOrdenesBloqueadasPorPuesto.get(pefNames[0])}
                       onToggleBlock={(o) => handleToggleBloqueoOrdenTapa(pefNames[0], o)}
@@ -10612,6 +11218,9 @@ useEffect(() => {
                   splitRemainderOrders={isBandasAjusteActivo ? bandasSplitRemaindersPorPuesto.get(pName) : undefined}
                   blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                   onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
+                  qtyOverrideByKey={manualQtyOverridePorOrden}
+                  qtyEditable
+                  onQtyEdit={handleManualQtyEdit}
                 />
                 {/* Mismo botón que el del encabezado — duplicado aquí para que quede a la vista
                     justo bajo la tarjeta, igual criterio que el resto de secciones de esta pestaña
@@ -10703,6 +11312,9 @@ useEffect(() => {
                     excessOrderKeys={isBordBandAdjustActive ? bordBandExcessKeys : undefined}
                     blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
+                    qtyOverrideByKey={manualQtyOverridePorOrden}
+                    qtyEditable
+                    onQtyEdit={handleManualQtyEdit}
                   />
                   {/* Botón directo bajo la tarjeta — antes solo estaba dentro del panel de
                       "Análisis de Capacidad" más abajo, desconectado visualmente de su máquina. */}
@@ -10968,6 +11580,9 @@ useEffect(() => {
                     excessOrderKeys={isM ? rmtbmInfo?.excessOrderKeys : undefined}
                     blockedOrderKeys={bloqueoEfectivoPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
+                    qtyOverrideByKey={manualQtyOverridePorOrden}
+                    qtyEditable
+                    onQtyEdit={handleManualQtyEdit}
                   />
                   {/* Mismo botón que el del encabezado — acepta RMTB1/2/3+RMTBM como grupo (no hay
                       aceptación por máquina individual aquí), duplicado bajo cada tarjeta para que
@@ -11176,6 +11791,9 @@ useEffect(() => {
                   normalizeMaterialCode={normalizeMaterialCode}
                   blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                   onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
+                  qtyOverrideByKey={manualQtyOverridePorOrden}
+                  qtyEditable
+                  onQtyEdit={handleManualQtyEdit}
                 />
                 <Button
                   onClick={() => handleAceptarPlanOtrosInteriores(pName)}
@@ -11231,6 +11849,9 @@ useEffect(() => {
                     excludeOrderKeys={excludeKeys}
                     blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
+                    qtyOverrideByKey={manualQtyOverridePorOrden}
+                    qtyEditable
+                    onQtyEdit={handleManualQtyEdit}
                   />
                   {/* Antes solo el candado vivía junto a la tarjeta — el botón de aceptar (con o sin
                       ajuste) estaba solo en el panel "Análisis de Capacidad" más abajo, desconectado
@@ -11279,6 +11900,9 @@ useEffect(() => {
                     excludeOrderKeys={isBscAdjustActive ? new Set(bscMovedOrders.filter(m => m.fromHR === hrCode).map(m => mk(m.order))) : undefined}
                     blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
+                    qtyOverrideByKey={manualQtyOverridePorOrden}
+                    qtyEditable
+                    onQtyEdit={handleManualQtyEdit}
                   />
                   <Button
                     onClick={() => handleAcceptBscForMachine(hrCode, pName)}
@@ -11322,6 +11946,9 @@ useEffect(() => {
                     excludeOrderKeys={isIntpfAdjustActive ? new Set(intpfMovedOrders.filter(m => m.fromHR === hrCode).map(m => mk(m.order))) : undefined}
                     blockedOrderKeys={bloqueoEfectivoPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
+                    qtyOverrideByKey={manualQtyOverridePorOrden}
+                    qtyEditable
+                    onQtyEdit={handleManualQtyEdit}
                   />
                   <Button
                     onClick={() => handleAcceptIntpfForMachine(hrCode, pName)}
@@ -11493,6 +12120,9 @@ useEffect(() => {
                     excludeOrderKeys={isTtchnAdjustActive ? new Set(ttchnMovedOrders.filter(m => m.fromHR === hrCode).map(m => mk(m.order))) : undefined}
                     blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
+                    qtyOverrideByKey={manualQtyOverridePorOrden}
+                    qtyEditable
+                    onQtyEdit={handleManualQtyEdit}
                   />
                   <Button
                     onClick={() => handleAcceptTtchnForMachine(hrCode, pName)}
@@ -11544,6 +12174,9 @@ useEffect(() => {
                   normalizeMaterialCode={normalizeMaterialCode}
                   blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                   onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
+                  qtyOverrideByKey={manualQtyOverridePorOrden}
+                  qtyEditable
+                  onQtyEdit={handleManualQtyEdit}
                 />
                 {/* Aceptar por máquina — esta pestaña no redistribuye nada, así que el botón está
                     siempre disponible: acepta el plan tal cual, menos lo bloqueado con el candado. */}
@@ -11820,6 +12453,18 @@ useEffect(() => {
                   {planFinalGuardado ? 'Guardado' : 'Guardar Plan'}
                 </Button>
                 <Button
+                  onClick={handlePrepararEnvioSap}
+                  disabled={!planFinalGuardado || planFinalOrders.length === 0 || isPreparandoSap || sapEnviado}
+                  title={!planFinalGuardado ? 'Primero guarda el Plan Final' : undefined}
+                  className={cn(
+                    'font-black uppercase tracking-widest text-[9px] px-4 py-2 rounded-xl disabled:opacity-40 flex items-center gap-2',
+                    sapEnviado ? 'bg-emerald-700 hover:bg-emerald-800 text-white' : 'bg-violet-600 hover:bg-violet-700 text-white'
+                  )}
+                >
+                  {isPreparandoSap ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
+                  {sapEnviado ? 'Generado ✓' : 'Vista Previa SAP'}
+                </Button>
+                <Button
                   onClick={handleDescargarPlanFinalExcel}
                   disabled={planFinalOrders.length === 0 || !recuperacionFechasCalculadas?.n2n3}
                   className="bg-emerald-600 hover:bg-emerald-700 text-white font-black uppercase tracking-widest text-[9px] px-4 py-2 rounded-xl disabled:opacity-40 flex items-center gap-2"
@@ -11958,6 +12603,99 @@ useEffect(() => {
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
+
+          {/* Vista previa editable antes de mandar a SAP — se arma en handlePrepararEnvioSap
+              ("Vista Previa SAP") y solo se envía de verdad al presionar "Confirmar y Enviar"
+              (handleConfirmarEnvioSap), tomando lo que haya en `sapPreviewRows` con las
+              ediciones del usuario. Cerrar el diálogo (Cancelar/ESC/click afuera) descarta la
+              vista previa sin mandar nada — volver a abrir "Vista Previa SAP" recalcula todo
+              desde cero. */}
+          <Dialog
+            open={sapPreviewOpen}
+            onOpenChange={(open) => { if (!open && !isEnviandoSapConfirmado) setSapPreviewOpen(false); }}
+          >
+            <DialogContent className="max-w-6xl max-h-[90vh] flex flex-col">
+              <DialogHeader>
+                <DialogTitle>Vista previa — Generar SAP</DialogTitle>
+                <DialogDescription>
+                  {sapPreviewRows.length} orden(es) para el {formatFechaSAP(planFinalFechaPlanificada)}. Puedes corregir Cantidad, Versión, Puesto u Observaciones antes de confirmar — el resto de campos (mandante, fechas, estados) van fijos.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex-1 overflow-y-auto rounded-xl border border-slate-200">
+                <table className="w-full text-[11px] border-collapse">
+                  <thead className="bg-slate-50 text-slate-500 sticky top-0 uppercase tracking-widest font-black text-left z-10">
+                    <tr>
+                      <th className="px-3 py-2">Cod. Orden</th>
+                      <th className="px-3 py-2">Material</th>
+                      <th className="px-3 py-2">Centro</th>
+                      <th className="px-3 py-2 text-right">Cantidad</th>
+                      <th className="px-3 py-2">Versión</th>
+                      <th className="px-3 py-2">Puesto</th>
+                      <th className="px-3 py-2 whitespace-nowrap">Fecha (07:00–23:00)</th>
+                      <th className="px-3 py-2">Observaciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {sapPreviewRows.map((r, i) => (
+                      <tr key={r.CodigoOrdenExterna || i} className="hover:bg-slate-50">
+                        <td className="px-3 py-1.5 font-mono font-bold text-indigo-700 whitespace-nowrap">{r.CodigoOrdenExterna}</td>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap">{r.CodigoMaterial}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap">{r.Centro}</td>
+                        <td className="px-3 py-1.5">
+                          <Input
+                            type="number"
+                            value={r.CantidadPlanificada}
+                            onChange={(e) => actualizarFilaSapPreview(i, 'CantidadPlanificada', Number(e.target.value))}
+                            className="h-7 text-right text-[11px] w-24"
+                          />
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <Input
+                            value={r.VersionFabricacion}
+                            onChange={(e) => actualizarFilaSapPreview(i, 'VersionFabricacion', e.target.value)}
+                            className="h-7 text-[11px] w-16"
+                          />
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <Input
+                            value={r.PuestoTrabajo}
+                            onChange={(e) => actualizarFilaSapPreview(i, 'PuestoTrabajo', e.target.value)}
+                            className="h-7 text-[11px] w-32"
+                          />
+                        </td>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap text-slate-500">{r.FechaInicioProgramada}</td>
+                        <td className="px-3 py-1.5">
+                          <Input
+                            value={r.Observaciones}
+                            onChange={(e) => actualizarFilaSapPreview(i, 'Observaciones', e.target.value)}
+                            className="h-7 text-[11px] w-36"
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  disabled={isEnviandoSapConfirmado}
+                  onClick={() => setSapPreviewOpen(false)}
+                  className="font-black uppercase tracking-widest text-[9px]"
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  disabled={isEnviandoSapConfirmado || sapPreviewRows.length === 0}
+                  onClick={handleConfirmarEnvioSap}
+                  className="bg-violet-600 hover:bg-violet-700 text-white font-black uppercase tracking-widest text-[9px] flex items-center gap-2"
+                >
+                  {isEnviandoSapConfirmado ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                  Confirmar y Enviar a SAP ({sapPreviewRows.length})
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
           </Tabs>
         </TabsContent>

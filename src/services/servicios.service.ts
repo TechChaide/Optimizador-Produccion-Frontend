@@ -4,6 +4,48 @@ import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/servicios`;
 
+// Payload de la interfaz Z de SAP (tabla ZPPT_ORDER_INT, doc "CHD-EF AUTOMATIZAR GENERACION DE
+// ORDENES DE PRODUCCION") para InsertarSolicitudProduccionHB — una orden por llamada. Mapeo
+// campo humanizado -> campo técnico SAP:
+//   Mandante->MANDT, CodigoOrdenExterna->COD_ORDEN, ClaseOrden->AUART, Centro->WERKS,
+//   CodigoMaterial->PLNBEZ, CantidadPlanificada->GAMNG, VersionFabricacion->VERID,
+//   PuestoTrabajo->ARBPL, FechaInicioProgramada->GSTRS, HoraInicioProgramada->GSUZS,
+//   FechaFinProgramada->GLTRS, HoraFinProgramada->GLUZS, PedidoComercial->KDAUF,
+//   PosicionPedido->KDPOS, EstadoRegistro->ESTATUS_REG_ORD, Observaciones->OBSERVACION,
+//   FechaCarga->FECHA_CARGA, HoraCarga->HORA_CARGA, EstadoCarga->ESTATUS_CARGA,
+//   NumeroOrdenSap->AUFNR, FechaProceso->FECHA_PROCESO, HoraProceso->HORA_PROCESO,
+//   UsuarioProceso->USUARIO.
+export interface SolicitudProduccionHB {
+  Mandante: string;
+  CodigoOrdenExterna: string;
+  ClaseOrden: string;
+  Centro: string;
+  CodigoMaterial: string;
+  CantidadPlanificada: number;
+  VersionFabricacion: string;
+  PuestoTrabajo: string;
+  FechaFinProgramada: string;
+  HoraFinProgramada: string;
+  FechaInicioProgramada: string;
+  HoraInicioProgramada: string;
+  PedidoComercial: string;
+  PosicionPedido: string;
+  // ESTATUS_REG_ORD: "1" al cargar el registro (pendiente de procesar) — NO "A"/"I". SAP lo
+  // sobreescribe después con "2" (creada y liberada) o "3" (error), ver doc §"ESTATUS_REG_ORD".
+  EstadoRegistro: string;
+  Observaciones: string;
+  // FECHA_CARGA/HORA_CARGA (DATS/TIMS): fecha y hora en que ESTE aplicativo carga el registro a
+  // la interfaz — responsabilidad del "proceso externo de gestión de Carga" según el doc, no
+  // vienen vacíos. Van en formato AAAAMMDD / HHMMSS, igual que el resto de fechas/horas.
+  FechaCarga: string;
+  HoraCarga: string;
+  EstadoCarga: string;
+  NumeroOrdenSap: string;
+  FechaProceso: string;
+  HoraProceso: string;
+  UsuarioProceso: string;
+}
+
 export const serviciosService = {
   async getCuboHabilidadesOP(): Promise<BodyResponse<any>> {
     const response = await fetchWithAuth(API_URL + "/CuboHabilidadesOp", {
@@ -383,7 +425,7 @@ export const serviciosService = {
   },
 
   async getProduccionEstimadaPorIntervalo(anio: string, mes: string, semana: string): Promise<BodyResponse<any>> {
-    const response = await fetchWithAuth(API_URL + "/ProduccionEstimadaPorAnioMesSemana", {
+    const response = await fetchWithAuth(API_URL + "/produccionEstimadaPorAnioMesSemana", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ anio: anio, mes: mes, semana: semana }),
@@ -607,6 +649,21 @@ export const serviciosService = {
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
       throw new Error(errorBody.message || "Failed to send Correo");
+    }
+    return response.json();
+  },
+
+  // Inserta UNA solicitud de producción en SAP/HANA (interfaz Z). El endpoint procesa una orden
+  // por llamada, no un lote — quien llama debe iterar y hacer un POST por cada orden.
+  async insertarSolicitudProduccionHB(solicitud: SolicitudProduccionHB): Promise<BodyResponse<{ success: boolean; message: string }>> {
+    const response = await fetchWithAuth(API_URL + "/InsertarSolicitudProduccionHB", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(solicitud),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error al insertar la solicitud de producción en SAP." }));
+      throw new Error(errorBody.message || "Error al insertar la solicitud de producción en SAP.");
     }
     return response.json();
   },
