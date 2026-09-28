@@ -78,14 +78,14 @@ import {
 } from "@/components/ui/select";
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
-import { serviciosService, SolicitudProduccionHB } from '@/services/servicios.service';
+import { serviciosService } from '@/services/servicios.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { maestroMaterialCentroService } from '@/services/MaestroMaterialCentro.service';
 import { materialesBalanceoService } from '@/services/materialesBalanceo.service';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { toFechaEcuador, toDatetime2Medianoche } from '@/lib/fecha-ecuador';
-import type { Grupo, Restriccion, PlanGrupo, DetalleTactico, MaterialesBalanceo } from '@/types/interfaces';
+import type { Grupo, Restriccion, PlanGrupo, DetalleTactico, MaterialesBalanceo, SolicitudProduccionHB } from '@/types/interfaces';
 import type { MaestroMaterialCentro } from '@/types/types';
 import { cn } from '@/lib/utils';
 import { useAppContext } from '@/context/AppProvider';
