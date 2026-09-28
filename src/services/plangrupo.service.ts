@@ -3,7 +3,7 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { PlanGrupo } from "../types/interfaces";
-import { fetchWithAuth } from "@/lib/http-client";
+import { fetchWithAuth, extractErrorMessage } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/plan_grupo`;
 
@@ -37,8 +37,7 @@ export const planGrupoService = {
       body: JSON.stringify(plan),
     });
     if (!response.ok) {
-      const errorText = await response.text().catch(() => 'No body');
-      throw new Error(`Error ${response.status}: No se pudo guardar el plan de grupo. ${errorText}`);
+      throw new Error(await extractErrorMessage(response, `Error ${response.status}: No se pudo guardar el plan de grupo`));
     }
     return response.json();
   },

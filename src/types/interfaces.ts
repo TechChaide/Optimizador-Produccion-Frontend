@@ -451,3 +451,34 @@ export interface ProvisionalOrder {
   PUESTOTRABAJO?: string;
   [key: string]: any;
 }
+
+/**
+ * Payload de entrada del endpoint InsertarSolicitudProduccionHB (inserta una orden de producción
+ * externa en HANA, para que SAP la recoja). Campos obligatorios siempre: Mandante, CodigoOrdenExterna,
+ * ClaseOrden, Centro, CodigoMaterial, CantidadPlanificada, VersionFabricacion, PuestoTrabajo.
+ * Fecha/Hora Fin son obligatorias solo si la clase de orden programa "hacia atrás"; Fecha/Hora Inicio
+ * solo si programa "hacia adelante". PedidoComercial/PosicionPedido solo si la clase de orden es MTO.
+ */
+export interface SolicitudProduccionHB {
+  Mandante: string;
+  CodigoOrdenExterna: string;
+  ClaseOrden: string;
+  Centro: string;
+  CodigoMaterial: string;
+  CantidadPlanificada: number;
+  VersionFabricacion: string;
+  PuestoTrabajo: string;
+  FechaFinProgramada?: string;
+  HoraFinProgramada?: string;
+  FechaInicioProgramada?: string;
+  HoraInicioProgramada?: string;
+  PedidoComercial?: string;
+  PosicionPedido?: string;
+  EstadoRegistro?: string;
+  Observaciones?: string;
+  EstadoCarga?: string;
+  NumeroOrdenSap?: string;
+  FechaProceso?: string;
+  HoraProceso?: string;
+  UsuarioProceso?: string;
+}

@@ -1,38 +1,19 @@
 import type { BodyResponse } from "@/types/body-response";
+import type { SolicitudProduccionHB } from "@/types/interfaces";
 import { environment } from "@/environments/environments.prod";
 import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/servicios`;
 
-// Payload de InsertarSolicitudProduccionHB (SAP/HANA) — compartido por el usuario 2026-09-11 junto
-// con un ejemplo de payload y de respuesta exitosa. Los campos marcados "IF" en ese ejemplo dependen
-// del tipo de programación de ClaseOrden ("hacia adelante" pide FechaInicioProgramada/
-// HoraInicioProgramada; "hacia atrás" pide FechaFinProgramada/HoraFinProgramada) o de si la orden
-// trae Pedido Comercial (PedidoComercial + PosicionPedido van juntos) — por eso van opcionales acá,
-// no obligatorios en el tipo. Compartida entre Corte y Laminado y Programación Táctica (Ensamblado).
-export interface SolicitudProduccionHBPayload {
-  Mandante: string;
-  CodigoOrdenExterna: string;
-  ClaseOrden: string;
-  Centro: string;
-  CodigoMaterial: string;
-  CantidadPlanificada: number;
-  VersionFabricacion: string;
-  PuestoTrabajo: string;
-  FechaFinProgramada?: string;
-  HoraFinProgramada?: string;
-  FechaInicioProgramada?: string;
-  HoraInicioProgramada?: string;
-  PedidoComercial?: string;
-  PosicionPedido?: string;
-  EstadoRegistro?: string;
-  Observaciones?: string;
-  EstadoCarga?: string;
-  NumeroOrdenSap?: string;
-  FechaProceso?: string;
-  HoraProceso?: string;
-  UsuarioProceso?: string;
-}
+// Alias de SolicitudProduccionHB (@/types/interfaces) — mismo payload de InsertarSolicitudProduccionHB
+// (SAP/HANA), con dos nombres distintos porque se agregó por separado para Corte y Laminado/Venta
+// Externa/Ensamblado (este alias, usado por TacticalPlanCorteLaminadoSection.tsx,
+// TacticalPlanEspumasSection.tsx y ResumenPlanFinalTabSection.tsx) y para Programación Táctica
+// Muebles/Taller de Corte (SolicitudProduccionHB, usado por ProvisionalOrdersAlphaTab.tsx y
+// ProvisionalOrdersTallerCorteTab.tsx) en ramas de trabajo paralelas — unificado en un solo tipo real
+// al integrar ambas (2026-09-28) para no duplicar la definición, sin tener que tocar los 3 archivos
+// que ya importan este nombre.
+export type SolicitudProduccionHBPayload = SolicitudProduccionHB;
 
 export const serviciosService = {
   async getCuboHabilidadesOP(): Promise<BodyResponse<any>> {
@@ -305,25 +286,6 @@ export const serviciosService = {
     return response.json();
   },
 
-  // Crea una orden de producción real en SAP/HANA (compartido por el usuario 2026-09-11). Reemplaza
-  // en concepto al TXT manual de Corte y Laminado ("Exportar TXT" en Plan de Salida — Corridas
-  // Looper, ver [[corte_laminado_exportar_txt_reemplazado_por_sap_insert]]): antes el archivo se
-  // descargaba y alguien lo cargaba a mano en SAP, ahora este endpoint la inserta directo. Todos los
-  // campos van como string salvo CantidadPlanificada (number) — confirmado con el payload de ejemplo
-  // del usuario. Los opcionales sin valor real se mandan como "" (no se omiten), mismo criterio que
-  // ya usa el ejemplo compartido para EstadoCarga/NumeroOrdenSap/FechaProceso/HoraProceso.
-  async insertarSolicitudProduccionHB(payload: SolicitudProduccionHBPayload): Promise<BodyResponse<{ success: boolean; message: string }>> {
-    const response = await fetchWithAuth(API_URL + "/InsertarSolicitudProduccionHB", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
-      throw new Error(errorBody.message || "Failed to insert Solicitud Producción HB");
-    }
-    return response.json();
-  },
   async getHabilidadesOperadorPorEstacion(): Promise<BodyResponse<any>> {
     const response = await fetchWithAuth(API_URL + "/HabilidadesOperadorPorEstacion", {
       method: "GET",
@@ -671,6 +633,35 @@ export const serviciosService = {
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
       throw new Error(errorBody.message || "Failed to send Correo");
+    }
+    return response.json();
+  },
+
+  // Inserta una orden de producción externa en HANA (para que SAP la recoja). Ver SolicitudProduccionHB
+  // en @/types/interfaces para el detalle de qué campos son obligatorios. Compartida por TODOS los
+  // módulos con "Enviar a SAP": Programación Táctica Muebles/Taller de Corte (ProvisionalOrdersAlphaTab,
+  // ProvisionalOrdersTallerCorteTab) y Corte y Laminado/Venta Externa/Ensamblado
+  // (TacticalPlanCorteLaminadoSection, TacticalPlanEspumasSection, ResumenPlanFinalTabSection, que
+  // reciben el mismo tipo bajo el alias SolicitudProduccionHBPayload) — unificada en una sola
+  // implementación al integrar ambas ramas de trabajo (2026-09-28), quedándose con el manejo de errores
+  // más completo (revisa data.message/data.error anidado, no solo el nivel superior).
+  async insertarSolicitudProduccionHB(
+    solicitud: SolicitudProduccionHB
+  ): Promise<BodyResponse<{ success: boolean; message: string }>> {
+    const response = await fetchWithAuth(API_URL + "/InsertarSolicitudProduccionHB", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(solicitud),
+    });
+    if (!response.ok) {
+      // El body de error puede traer el motivo real anidado en `data.message`/`data.error` (mismo
+      // shape que la respuesta exitosa: {message, data:{success, message}}) en vez de en el nivel
+      // superior — sin este chequeo se perdía el mensaje real de SAP (p. ej. una validación de la
+      // interfaz ZPPT_ORDER_INT: clase de orden inválida, campos obligatorios faltantes, etc.) y solo
+      // se mostraba el genérico "Failed to insert..." (confirmado 2026-09-17).
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      const mensaje = errorBody?.data?.message || errorBody?.data?.error || errorBody?.message || errorBody?.error;
+      throw new Error(mensaje || `Failed to insert Solicitud de Producción (HTTP ${response.status})`);
     }
     return response.json();
   },

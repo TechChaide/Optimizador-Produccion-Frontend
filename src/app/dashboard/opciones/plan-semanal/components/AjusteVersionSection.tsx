@@ -65,7 +65,7 @@ async function saveBatchToDB(
       codigo_material:         r.CodMaterial,
       cantidad_proyectada:     r.despachosVentasSemana,    // despachos ventas distribuidos
       cantidad_producir:       r.cantidadSemanal,          // producción planificada semanal
-      semana:                  r.isoWeek,
+      semana:                  r.weekKey,
       cantidad_transferencia:  r.trasladoSemana,           // traslado intercentro distribuido
       linea_produccion:        r.linea,
       estado:                  'A',

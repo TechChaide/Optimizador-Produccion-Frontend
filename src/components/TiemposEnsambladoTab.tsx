@@ -195,16 +195,16 @@ export const TiemposEnsambladoTab: React.FC<TiemposEnsambladoTabProps> = ({ data
                                             Página {currentPage} de {totalPages} ({totalRecords} registros)
                                         </span>
                                         <div className="flex gap-1">
-                                            <Button variant="outline" size="sm" onClick={() => goToPage(1)} disabled={currentPage === 1}>
+                                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(1)} disabled={currentPage === 1}>
                                                 Primera
                                             </Button>
-                                            <Button variant="outline" size="sm" onClick={() => goToPage(prev => Math.max(1, prev - 1))} disabled={currentPage === 1}>
+                                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))} disabled={currentPage === 1}>
                                                 Anterior
                                             </Button>
-                                            <Button variant="outline" size="sm" onClick={() => goToPage(prev => Math.min(totalPages, prev + 1))} disabled={currentPage === totalPages}>
+                                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))} disabled={currentPage === totalPages}>
                                                 Siguiente
                                             </Button>
-                                            <Button variant="outline" size="sm" onClick={() => goToPage(totalPages)} disabled={currentPage === totalPages}>
+                                            <Button variant="outline" size="sm" onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages}>
                                                 Última
                                             </Button>
                                         </div>
