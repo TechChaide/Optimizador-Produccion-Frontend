@@ -144,6 +144,7 @@ const CARRUSEL_ACTIVIDAD_ADICIONAL_FACTOR = 1.35;
 //   RespCtrlProd             → TODOS los responsables permitidos del centro
 //   RespCtrlProd_Verticales  → subconjunto que trabaja en corte VERTICAL
 //   (carruseles = permitidos − verticales, no hay restricción propia)
+// (El 015 de Centro 2000 NO va aquí: solo aplica a materiales puntuales, ver RESP_EXCEPCION_POR_MATERIAL.)
 const ALLOWED_RESP_CORTE_FALLBACK: Record<'1000' | '2000', string[]> = {
   '1000': ['013', '038', '039', '044', '036', '029'],
   '2000': ['002', '038', '039'],
@@ -202,6 +203,12 @@ const fechaOrdenCoincideConP2 = (fechaOrdenStr: string, fechaOrdenFinStr: string
   const dias = /venta\s*externa/i.test(area) ? 2 : 1;
   return Math.abs(tOrden - tP2) <= dias * 86400000;
 };
+
+// Desfase del PT del plan P1/PFF de Ensamblado respecto a hoy, en días hábiles del calendario.
+// Ajustado de 3 a 2 (2026-09-28, confirmado con el usuario): Ensamblado acortó su ventana de
+// planificación — caso real PFF #920 (1000) / #921 (2000), creados el lunes 28-sep con
+// fecha_inicio_plan 30-sep. El Nivel 2 de Capacidad (ciclo atrasado un día) es siempre este valor − 1.
+const DIAS_HABILES_PT_ENSAMBLADO = 2;
 
 // Almacenes de stock disponible por centro para la Respuesta P3 (último fallback de la cascada
 // FERT → Provisional → Stock). Antes solo contaba 1006/2006 — verificado con datos reales (caso
@@ -271,7 +278,61 @@ const MACHINE_SAP_NOMBRE_UIO: Partial<Record<string, string>> = {
   CR03: 'HR-CAR03',
   CR01: 'HR-CAR01',
 };
-const MACHINES_BY_PLANTA: Record<'UIO' | 'GYE', { id: string; n: string; proceso: ProcesoCorte }[]> = {
+// Materiales que la laminadora repotenciada de Guayaquil (LA02) corta bajo el responsable 015 — el 015
+// es de Prensado/Planchas Mixtas, así que NO se habilita completo en Corte Espuma: solo estos
+// materiales entran (ver RESP_EXCEPCION_POR_MATERIAL) y se atribuyen a LA02 sin importar su HR.
+const MATERIALES_LA02_GYE = new Set(['30002888', '30002889']);
+// Responsables que Corte Espuma acepta en un centro SOLO para materiales puntuales (no para todo su
+// alcance). Se suman a los carruseles del centro; cualquier otra orden/componente de ese responsable
+// se descarta en la entrada (getFilteredData, auditMapper, explosión PFF — ver respExcepcionExcluye).
+const RESP_EXCEPCION_POR_MATERIAL: Record<'1000' | '2000', { resp: string; materiales: Set<string> }[]> = {
+  '1000': [],
+  '2000': [{ resp: '015', materiales: MATERIALES_LA02_GYE }],
+};
+// true = la fila es de un responsable de excepción pero su material no está habilitado → se descarta.
+const respExcepcionExcluye = (centro: string, resp: string, material: string): boolean => {
+  const excepcion = RESP_EXCEPCION_POR_MATERIAL[centro as '1000' | '2000']?.find(e => e.resp === resp);
+  return !!excepcion && !excepcion.materiales.has(material);
+};
+// Guayaquil (Centro 2000): Hoja de Ruta → máquina, esquema confirmado por el usuario 2026-09-28:
+//   VAGYE → HR-VAGYE (resp 039) · CR02 → HR-CARG2 · CR01 → HR-CARG1 (resp 002/038) ·
+//   LA02 → HR-CARG3 (resp 002/015) + materiales 30002888/30002889 (ver MATERIALES_LA02_GYE).
+// HR-CAR02/HR-CAR01 son los códigos anteriores de CR02/CR01 ("cambia a"): se siguen aceptando para
+// que las órdenes ya creadas con el código viejo no queden sin atribuir mientras SAP migra.
+// HR-LAMR1/HR-LAMPT (resp 038) se reparten entre CR01 y CR02 — ver SAP_CODES_COMPARTIDOS_POR_PLANTA.
+const MACHINE_SAP_CODES_GYE: Record<string, (codigoNormalizado: string) => boolean> = {
+  CR02: (c) => c === 'HR-CARG2' || c === 'HR-CAR02',
+  CR01: (c) => c === 'HR-CARG1' || c === 'HR-CAR01',
+  LA02: (c) => c === 'HR-CARG3',
+  VAGYE: (c) => c === 'HR-VAGYE',
+};
+const MACHINE_SAP_CODES_POR_PLANTA: Record<'UIO' | 'GYE', Record<string, (codigoNormalizado: string) => boolean>> = {
+  UIO: MACHINE_SAP_CODES_UIO,
+  GYE: MACHINE_SAP_CODES_GYE,
+};
+// Hojas de Ruta que no pertenecen a una sola máquina: sus horas se reparten en partes iguales entre
+// las máquinas listadas (esquema del usuario: "se reparte a HR-CARG1 / HR-CARG2").
+const SAP_CODES_COMPARTIDOS_POR_PLANTA: Record<'UIO' | 'GYE', Record<string, string[]>> = {
+  UIO: {},
+  GYE: {
+    'HR-LAMR1': ['CR01', 'CR02'],
+    'HR-LAMPT': ['CR01', 'CR02'],
+  },
+};
+// A qué máquina(s) de la planta se atribuye una orden, y con qué fracción de su tiempo. Exclusivo (una
+// orden nunca suma dos veces): 1) material propio de una máquina (LA02 en GYE, sin importar su HR),
+// 2) Hoja de Ruta de una sola máquina, 3) Hoja de Ruta compartida (partes iguales). [] = sin mapeo.
+const asignacionMaquinaOrden = (planta: 'UIO' | 'GYE', codigoNormalizado: string, material: string): { id: string; fraccion: number }[] => {
+  if (planta === 'GYE' && MATERIALES_LA02_GYE.has(material)) return [{ id: 'LA02', fraccion: 1 }];
+  const mapa = MACHINE_SAP_CODES_POR_PLANTA[planta];
+  const id = Object.keys(mapa).find(k => mapa[k](codigoNormalizado));
+  if (id) return [{ id, fraccion: 1 }];
+  const compartida = SAP_CODES_COMPARTIDOS_POR_PLANTA[planta][codigoNormalizado];
+  return compartida ? compartida.map(m => ({ id: m, fraccion: 1 / compartida.length })) : [];
+};
+// sinTurnoNoche: la máquina no opera de noche por definición operativa (no es "turno sin definir") —
+// no se muestra su selector Noche, no entra en el aviso de turnos vacíos ni en "aplicar a toda la planta".
+const MACHINES_BY_PLANTA: Record<'UIO' | 'GYE', { id: string; n: string; proceso: ProcesoCorte; sinTurnoNoche?: boolean }[]> = {
   UIO: [
     { id: 'CR04', n: 'CARRUSEL 4 FECKEN', proceso: 'carrusel' },
     { id: 'CR03', n: 'CARRUSEL 3 SCHMUZIGER', proceso: 'carrusel' },
@@ -283,12 +344,16 @@ const MACHINES_BY_PLANTA: Record<'UIO' | 'GYE', { id: string; n: string; proceso
     { id: 'V02', n: 'VERTICAL HR_V02', proceso: 'vertical' },
     { id: 'V03', n: 'VERTICAL HR_V03', proceso: 'vertical' },
   ],
+  // Modelo operativo de Guayaquil (confirmado por el usuario 2026-09-28):
+  //   Día: 2 laminadores para los 3 carruseles (CR02, CR01, LA02) — sin ayudante por máquina.
+  //   Noche: 2 laminadores, solo se encienden CR02 y CR01 (la repotenciada LA02 no opera de noche).
+  //   Vertical para esquineros (VAGYE): 1 persona.
   GYE: [
     { id: 'CR02', n: 'CARRUSEL 2 FEMA', proceso: 'carrusel' },
     { id: 'CR01', n: 'CARRUSEL 1 SCHMUZIGER', proceso: 'carrusel' },
-    { id: 'LA02', n: 'LAMINADORA REPOTENCIADA', proceso: 'carrusel' },
-    // Guayaquil tiene UNA sola máquina vertical según las órdenes reales del responsable 039
-    // (HR-VAGYE, 46 órdenes). Inferido de los datos, no confirmado por el usuario.
+    { id: 'LA02', n: 'LAMINADORA REPOTENCIADA', proceso: 'carrusel', sinTurnoNoche: true },
+    // Guayaquil tiene UNA sola máquina vertical (esquineros) — órdenes reales del responsable 039 en
+    // HR-VAGYE; operada por 1 persona.
     { id: 'VAGYE', n: 'VERTICAL HR-VAGYE', proceso: 'vertical' },
   ],
 };
@@ -845,7 +910,7 @@ interface SnapshotCorteEspuma {
   diasLaborablesExtra: string[];
   necesidadesPlantaData: Record<string, NecesidadPlantaRow[]>;
   necesidadPFFData: Record<'1000' | '2000', NecesidadPlantaRow[]>;
-  // Nivel 2 de Capacidad Planificada (hoy+2 días hábiles, ver calcularNecesidadPFF) — se calcula junto
+  // Nivel 2 de Capacidad Planificada (hoy+1 día hábil, ver calcularNecesidadPFF) — se calcula junto
   // con necesidadPFFData pero no se cacheaba: navegar a otro módulo y volver perdía el Nivel 2 aunque
   // el Nivel 1 sí sobrevivía, dejando el panel "sobre-ocupado" inconsistente (verificación de
   // persistencia entre módulos de esta sesión).
@@ -953,7 +1018,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // del filtro `allowed` que usan las auditorías y TODA la carga vertical de Guayaquil
       // desaparecería en silencio. La restricción de verticales define el PROCESO; el alcance de
       // responsables es la suma de las dos.
-      const permitidos = Array.from(new Set([...declarados, ...verticales]));
+      // + responsables de excepción por material (ej. 015 en GYE para LA02): entran al alcance, pero sus
+      // filas de otros materiales se descartan en la entrada (ver respExcepcionExcluye).
+      const excepciones = RESP_EXCEPCION_POR_MATERIAL[centro].map(e => e.resp);
+      const permitidos = Array.from(new Set([...declarados, ...verticales, ...excepciones]));
       // Carruseles = todo lo permitido que no sea vertical (no hay restricción propia para carrusel).
       const carruseles = permitidos.filter(r => !verticales.includes(r));
       return {
@@ -1000,8 +1068,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // innecesariamente lento). Cada fila ya trae su propio "centro", así que se combina en una sola
   // lista y el resto del pipeline (materialNecesidadesPlantaMapPorCentro, etc.) la separa solo.
   const [necesidadPFFData, setNecesidadPFFData] = useState<Record<'1000' | '2000', NecesidadPlantaRow[]>>({ '1000': [], '2000': [] });
-  // Capacidad Operativa Nivel 2 (ver renderDashboard): mismo PFF pero apuntando a hoy+2 días hábiles
-  // en vez de hoy+3 — red de seguridad para un ciclo que se quedó un día atrás del ideal (el plan
+  // Capacidad Operativa Nivel 2 (ver renderDashboard): mismo PFF pero apuntando a hoy+1 día hábil
+  // en vez de hoy+2 (DIAS_HABILES_PT_ENSAMBLADO) — red de seguridad para un ciclo que se quedó un día atrás del ideal (el plan
   // sigue 'A' porque nada lo desactivó todavía). NO alimenta el tab "Necesidades Planta" ni la
   // Respuesta P3 — es exclusivo del cálculo de Capacidad Planificada.
   const [necesidadPFFNivel2Data, setNecesidadPFFNivel2Data] = useState<Record<'1000' | '2000', NecesidadPlantaRow[]>>({ '1000': [], '2000': [] });
@@ -1181,11 +1249,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const [gyeConfig, setGyeConfig] = useState<PlantaConfig>({
     performance: 75,
     performanceCNC: 75, // Guayaquil no tiene máquina CNC hoy (ver MACHINES_BY_PLANTA.GYE) — sin uso real, solo por tipado.
+    // Horarios por defecto del modelo operativo de GYE (ver MACHINES_BY_PLANTA.GYE): Día 07:00-18:00
+    // en las 4 máquinas, Noche 21:00-05:30 solo en CR02/CR01/VAGYE (LA02 no opera de noche). Sábado
+    // sigue en VACÍO: es condicional, se activa (07:00-13:00) solo cuando se decide producir.
     shifts: {
-      CR02: { day: 'H1', night: 'EMPTY', op1D: '', op2D: '', op1N: '', op2N: '', paro1: 13, paro2: 13, saturday: 'EMPTY', op1S: '', op2S: '', paro3: 13, activa: true },
-      CR01: { day: 'H1', night: 'EMPTY', op1D: '', op2D: '', op1N: '', op2N: '', paro1: 13, paro2: 13, saturday: 'EMPTY', op1S: '', op2S: '', paro3: 13, activa: true },
-      LA02: { day: 'H1', night: 'EMPTY', op1D: '', op2D: '', op1N: '', op2N: '', paro1: 13, paro2: 13, saturday: 'EMPTY', op1S: '', op2S: '', paro3: 13, activa: true },
-      VAGYE: { day: 'H1', night: 'EMPTY', op1D: '', op2D: '', op1N: '', op2N: '', paro1: 13, paro2: 13, saturday: 'EMPTY', op1S: '', op2S: '', paro3: 13, activa: true }
+      CR02: { day: 'H3', night: 'B21', op1D: '', op2D: '', op1N: '', op2N: '', paro1: 13, paro2: 13, saturday: 'EMPTY', op1S: '', op2S: '', paro3: 13, activa: true },
+      CR01: { day: 'H3', night: 'B21', op1D: '', op2D: '', op1N: '', op2N: '', paro1: 13, paro2: 13, saturday: 'EMPTY', op1S: '', op2S: '', paro3: 13, activa: true },
+      LA02: { day: 'H3', night: 'EMPTY', op1D: '', op2D: '', op1N: '', op2N: '', paro1: 13, paro2: 13, saturday: 'EMPTY', op1S: '', op2S: '', paro3: 13, activa: true },
+      VAGYE: { day: 'H3', night: 'B21', op1D: '', op2D: '', op1N: '', op2N: '', paro1: 13, paro2: 13, saturday: 'EMPTY', op1S: '', op2S: '', paro3: 13, activa: true }
     }
   });
 
@@ -1307,7 +1378,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // fila del batch, sin el resto de columnas — sirve para armar la lista de vecinos reales
     // (ancho/largo/esp/densidad + tIndiv) que usa el 3er nivel de respaldo más abajo
     // (ver estimarTiempoIndivPorVecino).
-    const prepared = data.map(o => {
+    // Responsable de excepción (ej. 015 en GYE, ver RESP_EXCEPCION_POR_MATERIAL): fuera los materiales
+    // no habilitados antes de mapear — las auditorías "All" (fertAuditAll*/provAuditAll*) llegan acá sin
+    // pasar por getFilteredData y después solo se filtran por responsable.
+    const dataHabilitada = data.filter(o => !respExcepcionExcluye(
+      centroId,
+      String(getProp(o, ['RESPCONTROLPROD', 'RESPCTRLPROD', 'RespControlProd', 'RESP_CONTROL_PROD', 'RESPONSABLE'])).trim(),
+      extractMaterialInfo(o).code
+    ));
+    const prepared = dataHabilitada.map(o => {
       const info = extractMaterialInfo(o);
       const tMatch = tiemposCatalogo.find(t => cleanCode(t.CodMaterial) === info.code && String(t.Centro).trim() === centroId);
       let tIndivReal = tMatch ? safeNum(tMatch.Tiempo || tMatch.Tiempo_Min) : 0;
@@ -1466,6 +1545,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // ~94 órdenes de este material sumaban 10.659h de las 10.708h "totales" de Quito en Órdenes
       // FERT (99.5% del número era este artefacto). Se excluye igual que PRENSAD/FORRO.
       if (/APROVECHAMIENTO/i.test(desc)) return false;
+      // Responsable de excepción (ej. 015 en GYE): solo sus materiales habilitados pasan.
+      if (respExcepcionExcluye(c, r, extractMaterialInfo(o).code)) return false;
       const dateRaw = String(getProp(o, ['FECHAINICIO', 'FECHA', 'FECHA_INICIO'])).trim();
       const date = dateRaw.includes('T') ? dateRaw.split('T')[0] : dateRaw;
       const dateFinRaw = String(getProp(o, ['FECHAFIN', 'FECHA_FIN'])).trim();
@@ -1481,7 +1562,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const coincide = dates.has(dateFin);
       return c === centro && allowed.includes(r) && coincide;
     });
-  }, [todayStr, allowedRespPorCentro]);
+  }, [todayStr, allowedRespPorCentro, extractMaterialInfo]);
 
   const provAuditUIO = useMemo(() => auditMapper(getFilteredData(ordenesProvisionales, '1000', selectedDatesProv, 'future'), '1000'), [auditMapper, getFilteredData, ordenesProvisionales, selectedDatesProv]);
   const provAuditGYE = useMemo(() => auditMapper(getFilteredData(ordenesProvisionales, '2000', selectedDatesProv, 'future'), '2000'), [auditMapper, getFilteredData, ordenesProvisionales, selectedDatesProv]);
@@ -2078,7 +2159,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const necesidadCapacidadGYE = useMemo(() => necesidadCapacidadMapper(necesidadesPlantaConsolidada, '2000'), [necesidadCapacidadMapper, necesidadesPlantaConsolidada]);
 
   // Capacidad Operativa Nivel 2 (red de seguridad, ciclo atrasado un día — ver renderDashboard): SOLO
-  // P1/PFF (necesidadPFFNivel2Data, hoy+2 días hábiles). Venta Externa-Espumas NO tiene Nivel 2 propio
+  // P1/PFF (necesidadPFFNivel2Data, hoy+1 día hábil). Venta Externa-Espumas NO tiene Nivel 2 propio
   // — verificado que fetchNecesidadesPlanta ya toma "el único P2-Espumas activo del grupo, sea cual
   // sea su fecha" (Venta Externa garantiza como máximo uno activo por centro): si ese plan está
   // atrasado, YA es lo que Nivel 1 está usando, no hay un segundo plan "de ayer" que buscar aparte.
@@ -3065,7 +3146,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       return fechaLocalEcuador(p.fecha_inicio_plan) === fechaObjetivoPFF;
     });
     // Solo el plan PFF MÁS RECIENTE del grupo — red de seguridad secundaria para el caso (menos común
-    // ahora que planesPFFCrudo ya exige fecha_inicio_plan = hoy+3 días hábiles) de que el origen
+    // ahora que planesPFFCrudo ya exige fecha_inicio_plan = hoy+DIAS_HABILES_PT_ENSAMBLADO días hábiles) de que el origen
     // genere dos ciclos "A" con esa misma fecha.
     let masRecientePFF: PlanGrupo | undefined = undefined;
     planesPFFCrudo.forEach(p => {
@@ -3160,7 +3241,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             // solo el resp 017 ("LAMINA PRENSADA") quedaba fuera del filtro de responsable — cierto,
             // pero incompleto: no cubría "TACO PRENSADO" con 029/039.
             const esDeCorte = !ES_FORRO(desc) && !/PRENSAD/i.test(desc) && (respComponente
-              ? allowedRespPorCentro(centro).includes(respComponente)
+              ? allowedRespPorCentro(centro).includes(respComponente) && !respExcepcionExcluye(centro, respComponente, laminaCode)
               : ES_LAMINA_CORTADA(desc));
             if (!esDeCorte) return;
 
@@ -3226,7 +3307,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return { filas, sinMatch, conError, tipoPlan };
   }, [allowedRespPorCentro, materialRespCPPorCentro]);
 
-  // Wrapper de siempre: hoy+3 días hábiles, delega en explotarPFFParaCentroConFecha. Mismo
+  // Wrapper de siempre: hoy+DIAS_HABILES_PT_ENSAMBLADO días hábiles (antes +3), delega en explotarPFFParaCentroConFecha. Mismo
   // nombre/firma/comportamiento de antes — no cambia nada para calcularNecesidadPFF.
   const explotarPFFParaCentro = useCallback((
     codigoGrupoEnsamblado: number,
@@ -3234,7 +3315,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     planesTodos: PlanGrupo[],
     detallesTodos: DetalleTactico[],
     onStep: () => void
-  ) => explotarPFFParaCentroConFecha(codigoGrupoEnsamblado, centro, planesTodos, detallesTodos, format(sumarDiasHabiles(new Date(), 3), 'yyyy-MM-dd'), onStep),
+  ) => explotarPFFParaCentroConFecha(codigoGrupoEnsamblado, centro, planesTodos, detallesTodos, format(sumarDiasHabiles(new Date(), DIAS_HABILES_PT_ENSAMBLADO), 'yyyy-MM-dd'), onStep),
   [explotarPFFParaCentroConFecha, sumarDiasHabiles]);
 
   // Botón manual "Calcular Necesidad PFF": corre la explosión para Ensamblado - Quito (1000, grupo 1)
@@ -3276,10 +3357,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       actualizarEnCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA, { necesidadPFFData: pff });
 
       // Nivel 2 de Capacidad Operativa (red de seguridad, ciclo atrasado un día — ver renderDashboard):
-      // mismos planesTodos/detallesTodos ya obtenidos arriba, sin fetch extra, apuntando a hoy+2 en vez
-      // de hoy+3. Silencioso (onStep no-op, no se suma al contador de progreso visible ni se muestra en
+      // mismos planesTodos/detallesTodos ya obtenidos arriba, sin fetch extra, apuntando un día hábil
+      // antes que el ciclo "a tiempo" (hoy+1 con DIAS_HABILES_PT_ENSAMBLADO = 2). Silencioso (onStep no-op, no se suma al contador de progreso visible ni se muestra en
       // la notificación) para no confundir el flujo principal — solo alimenta Capacidad Planificada.
-      const fechaObjetivoNivel2 = format(sumarDiasHabiles(new Date(), 2), 'yyyy-MM-dd');
+      const fechaObjetivoNivel2 = format(sumarDiasHabiles(new Date(), DIAS_HABILES_PT_ENSAMBLADO - 1), 'yyyy-MM-dd');
       const [resultado1000Nivel2, resultado2000Nivel2] = [
         await explotarPFFParaCentroConFecha(CODIGO_GRUPO_ENSAMBLADO_QUITO, '1000', planesTodos, detallesTodos, fechaObjetivoNivel2, () => {}),
         await explotarPFFParaCentroConFecha(CODIGO_GRUPO_ENSAMBLADO_GUAYAQUIL, '2000', planesTodos, detallesTodos, fechaObjetivoNivel2, () => {}),
@@ -4108,7 +4189,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const setFn = planta === 'UIO' ? setUioConfig : setGyeConfig;
     setFn(prev => {
       const shifts = { ...prev.shifts };
-      Object.keys(shifts).forEach(id => { shifts[id] = { ...shifts[id], [campo]: valor }; });
+      Object.keys(shifts).forEach(id => {
+        // Máquina que no opera de noche (ej. LA02 en GYE): no se le aplica el turno Noche masivo.
+        if (campo === 'night' && MACHINES_BY_PLANTA[planta].find(m => m.id === id)?.sinTurnoNoche) return;
+        shifts[id] = { ...shifts[id], [campo]: valor };
+      });
       return { ...prev, shifts };
     });
     const etiqueta = (campo === 'day' || campo === 'saturday' ? shiftOptions : nightShiftOptions).find(o => o.v === valor)?.l;
@@ -4119,10 +4204,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const renderMachineCol = (id: string, name: string, planta: 'UIO' | 'GYE', ocupacion: OcupacionMaquinaInfo) => {
     const config = planta === 'UIO' ? uioConfig.shifts[id] : gyeConfig.shifts[id];
     const plantaConfig = planta === 'UIO' ? uioConfig : gyeConfig;
-    const proceso = MACHINES_BY_PLANTA[planta].find(m => m.id === id)?.proceso ?? 'carrusel';
-    // OP2/Ayudante: solo aplica a Carruseles (confirmado por el usuario 2026-09-18) — CNC y
-    // Verticales operan con un solo operador, así que el campo ni se muestra ni ocupa espacio.
-    const tieneAyudante = proceso === 'carrusel';
+    const machineDef = MACHINES_BY_PLANTA[planta].find(m => m.id === id);
+    const proceso = machineDef?.proceso ?? 'carrusel';
+    const sinTurnoNoche = machineDef?.sinTurnoNoche === true;
+    // OP2/Ayudante: solo aplica a Carruseles de Quito (confirmado por el usuario 2026-09-18) — CNC y
+    // Verticales operan con un solo operador. En Guayaquil tampoco: 2 laminadores cubren los 3
+    // carruseles (ver MACHINES_BY_PLANTA.GYE), sin ayudante por máquina — un mismo laminador puede
+    // quedar asignado a dos máquinas del turno.
+    const tieneAyudante = proceso === 'carrusel' && planta === 'UIO';
+    const labelOp1 = planta === 'GYE' && proceso === 'carrusel' ? '— LAMINADOR —' : '— OP1 —';
     const labelProceso = proceso === 'carrusel' ? 'Carruseles' : proceso === 'cnc' ? 'CNC' : 'Verticales';
     // Rendim. (%): mismo % que se edita a nivel de proceso en renderProcesoConfig, mostrado acá por
     // máquina para que el resumen "{Proceso} · {ID}" quede completo (pedido por el usuario, ver
@@ -4184,7 +4274,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             </div>
 
             {ocupacion.estado === 'sin-fecha' || ocupacion.estado === 'sin-mapeo' ? (
-              <div title={ocupacion.estado === 'sin-fecha' ? "Elige una fecha en 'Evaluar Capacidad' para calcular el detalle de este recurso." : "Guayaquil todavía no tiene un mapeo confirmado de Hoja de Ruta/Puesto de Trabajo → máquina."}>
+              <div title={ocupacion.estado === 'sin-fecha' ? "Elige una fecha en 'Evaluar Capacidad' para calcular el detalle de este recurso." : "Esta máquina no tiene un código de Hoja de Ruta/Puesto de Trabajo SAP asociado (ver MACHINE_SAP_CODES_POR_PLANTA)."}>
                 <p className="text-[8px] font-bold text-gray-400 uppercase">{ocupacion.estado === 'sin-fecha' ? 'Sin fecha' : 'Sin mapeo SAP'}</p>
               </div>
             ) : (
@@ -4213,7 +4303,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
               {shiftOptions.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
             </select>
             <select value={config.op1D} onChange={e => updateConfig(planta, id, 'op1D', e.target.value)} className="w-full bg-white text-slate-700 text-[10px] rounded px-2 py-1 outline-none border border-gray-200">
-              <option value="">— OP1 —</option>
+              <option value="">{labelOp1}</option>
               {operadoresCorte.map((op, i) => <option key={i} value={getProp(op, ['CodigoOperador ', 'CODIGO_OPERADOR'])}>{getProp(op, ['NombreOperador', 'NOMBRE_OPERADOR'])}</option>)}
             </select>
             {tieneAyudante && (
@@ -4225,14 +4315,22 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           </div>
           <div className="space-y-2 pt-2 border-t border-gray-100">
             <p className="text-[9px] font-black text-slate-500 uppercase tracking-wide">Turno Noche</p>
-            <select value={config.night} onChange={e => updateConfig(planta, id, 'night', e.target.value)} className="w-full bg-white text-purple-700 font-black text-[11px] rounded px-2 py-1.5 outline-none border border-gray-200">
-              {nightShiftOptions.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
-            </select>
-            <select value={config.op1N} onChange={e => updateConfig(planta, id, 'op1N', e.target.value)} className="w-full bg-white text-slate-700 text-[10px] rounded px-2 py-1 outline-none border border-gray-200">
-              <option value="">— OP1 —</option>
-              {operadoresCorte.map((op, i) => <option key={i} value={getProp(op, ['CodigoOperador ', 'CODIGO_OPERADOR'])}>{getProp(op, ['NombreOperador', 'NOMBRE_OPERADOR'])}</option>)}
-            </select>
-            {tieneAyudante && (
+            {sinTurnoNoche ? (
+              <p className="w-full bg-slate-100 text-slate-400 font-black text-[10px] uppercase rounded px-2 py-1.5 border border-gray-200 text-center" title="Esta máquina no se enciende en el turno noche (modelo operativo de la planta).">
+                No opera de noche
+              </p>
+            ) : (
+              <>
+                <select value={config.night} onChange={e => updateConfig(planta, id, 'night', e.target.value)} className="w-full bg-white text-purple-700 font-black text-[11px] rounded px-2 py-1.5 outline-none border border-gray-200">
+                  {nightShiftOptions.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                </select>
+                <select value={config.op1N} onChange={e => updateConfig(planta, id, 'op1N', e.target.value)} className="w-full bg-white text-slate-700 text-[10px] rounded px-2 py-1 outline-none border border-gray-200">
+                  <option value="">{labelOp1}</option>
+                  {operadoresCorte.map((op, i) => <option key={i} value={getProp(op, ['CodigoOperador ', 'CODIGO_OPERADOR'])}>{getProp(op, ['NombreOperador', 'NOMBRE_OPERADOR'])}</option>)}
+                </select>
+              </>
+            )}
+            {tieneAyudante && !sinTurnoNoche && (
               <select value={config.op2N} onChange={e => updateConfig(planta, id, 'op2N', e.target.value)} className="w-full bg-white text-slate-700 text-[10px] rounded px-2 py-1 outline-none border border-gray-200">
                 <option value="">— OP2 AYUD —</option>
                 {operadoresCorte.map((op, i) => <option key={i} value={getProp(op, ['CodigoOperador ', 'CODIGO_OPERADOR'])}>{getProp(op, ['NombreOperador', 'NOMBRE_OPERADOR'])}</option>)}
@@ -4247,7 +4345,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
               {shiftOptions.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
             </select>
             <select value={config.op1S} onChange={e => updateConfig(planta, id, 'op1S', e.target.value)} className="w-full bg-white text-slate-700 text-[10px] rounded px-2 py-1 outline-none border border-gray-200">
-              <option value="">— OP1 —</option>
+              <option value="">{labelOp1}</option>
               {operadoresCorte.map((op, i) => <option key={i} value={getProp(op, ['CodigoOperador ', 'CODIGO_OPERADOR'])}>{getProp(op, ['NombreOperador', 'NOMBRE_OPERADOR'])}</option>)}
             </select>
             {tieneAyudante && (
@@ -4349,16 +4447,17 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (!c) return [];
         const faltan: string[] = [];
         if (c.day === 'EMPTY') faltan.push(`${m.id} día`);
-        if (c.night === 'EMPTY') faltan.push(`${m.id} noche`);
+        if (c.night === 'EMPTY' && !m.sinTurnoNoche) faltan.push(`${m.id} noche`);
         return faltan;
       });
       // Resumen corto del aviso: enumerar máquina por máquina daba un párrafo ilegible ("CR04 noche,
       // CR03 noche, CR01 noche…"). Basta con decir qué turno falta y en cuántas máquinas del proceso.
       const sinDia = machinesProceso.filter(m => config.shifts[m.id]?.day === 'EMPTY').length;
-      const sinNoche = machinesProceso.filter(m => config.shifts[m.id]?.night === 'EMPTY').length;
+      const machinesConNoche = machinesProceso.filter(m => !m.sinTurnoNoche);
+      const sinNoche = machinesConNoche.filter(m => config.shifts[m.id]?.night === 'EMPTY').length;
       const resumen = [
         sinDia > 0 ? `Día en ${sinDia} de ${machinesProceso.length}` : null,
-        sinNoche > 0 ? `Noche en ${sinNoche} de ${machinesProceso.length}` : null,
+        sinNoche > 0 ? `Noche en ${sinNoche} de ${machinesConNoche.length}` : null,
       ].filter(Boolean).join(' · ');
       return { lista, resumen };
     };
@@ -4368,10 +4467,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // eje que ve el usuario (antes lo era, y resultó ilegible para alguien que no construyó el
     // código). Referencia de qué alimenta cada fecha:
     //   Necesidad "a tiempo" (antes Nivel 1): 3 fuentes con su propia fecha real de origen — P1/PFF
-    //     hoy+3 días hábiles, P2-Espumas Venta la fecha que seleccionó el planificador, P2-Muebles/
+    //     hoy+2 días hábiles (DIAS_HABILES_PT_ENSAMBLADO), P2-Espumas Venta la fecha que seleccionó el planificador, P2-Muebles/
     //     Prensado hoy+1 día hábil exacto.
     //   Necesidad "red de seguridad" (antes Nivel 2, ver necesidadPFFNivel2Data): solo P1/PFF, para
-    //     un plan que se quedó fechado hoy+2 en vez de hoy+3 (activo pero invisible para la necesidad
+    //     un plan que se quedó fechado hoy+1 en vez de hoy+2 (activo pero invisible para la necesidad
     //     "a tiempo", que exige match exacto). Venta Externa-Espumas no la necesita: garantiza un
     //     solo plan activo por centro, si está atrasado ya es el que usa la necesidad "a tiempo".
     //   Tarjeta "Atrasado" (antes Nivel 3, WIP — SIN CAMBIOS): todo FERT con fecha ≤ hoy, sin ventana.
@@ -4524,13 +4623,24 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // atribuido a máquinas específicas es horas con código de Hoja de Ruta ambiguo (HR-TACOS, que
       // comparte CR04/Vertical 3) o sin mapear (HR-CAR02 histórico, u orden sin campo MAQUINA) — no
       // desaparecen del total, solo no se pueden repartir por columna con certeza.
-      const ocupadoAtribuidoMaquina = planta === 'UIO'
-        ? machines.filter(m => m.proceso === proceso).reduce((s, m) => {
-            const info = ocupacionInfoMaquina(m.id);
-            return s + (info.estado === 'ok' ? info.horas : 0);
-          }, 0)
-        : 0;
-      const sinAtribuirProceso = planta === 'UIO' ? Math.max(0, ocupadoProceso - ocupadoAtribuidoMaquina) : 0;
+      const ocupadoAtribuidoMaquina = machines.filter(m => m.proceso === proceso).reduce((s, m) => {
+        const info = ocupacionInfoMaquina(m.id);
+        return s + (info.estado === 'ok' ? info.horas : 0);
+      }, 0);
+      const sinAtribuirProceso = Math.max(0, ocupadoProceso - ocupadoAtribuidoMaquina);
+      // Qué códigos de Hoja de Ruta/Puesto de Trabajo explican esas horas sin atribuir — sirve para
+      // identificar/confirmar el mapeo de una planta (pedido por el usuario 2026-09-28 para GYE): si
+      // una máquina muestra 0h y aquí aparece un código con horas, ese es el código real a mapear.
+      const codigosSinAtribuirProceso = Array.from(
+        filasSeleccion
+          .filter(x => (esCnc ? esFilaCNC(x.row.maquina) : respProceso.includes(x.row.responsable) && !esFilaCNC(x.row.maquina)))
+          .filter(x => asignacionMaquinaOrden(planta, normalizarCodigoMaquina(x.row.maquina), x.row.material).length === 0)
+          .reduce((acc, x) => {
+            const codigo = normalizarCodigoMaquina(x.row.maquina) || '(sin código)';
+            acc.set(codigo, (acc.get(codigo) || 0) + x.row.tTotal);
+            return acc;
+          }, new Map<string, number>())
+      ).filter(([, h]) => h > 0.05).sort((a, b) => b[1] - a[1]);
 
       // Antes: tarjeta con 5 filas (Rendim/Tiempo Proceso/Tiempo Máquina/Capacidad/% Ocupación) — el
       // usuario pidió mover Rendim/Tiempo Proceso/Tiempo Máquina a un recuadro POR máquina (ver
@@ -4593,6 +4703,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                 </span>
               )}
             </div>
+            {fechasSel.length > 0 && codigosSinAtribuirProceso.length > 0 && (
+              <div
+                className="text-[8px] font-bold text-slate-400 uppercase leading-tight"
+                title="Horas de órdenes cuyo código de Hoja de Ruta/Puesto de Trabajo no está asociado a ninguna máquina de esta planta. Cuentan en el % Ocupación del proceso, pero no en la tarjeta de ninguna máquina."
+              >
+                Sin mapeo: {codigosSinAtribuirProceso.map(([codigo, h]) => `${codigo} ${h.toFixed(1)}h`).join(' · ')}
+              </div>
+            )}
           </div>
         </div>
       );
@@ -4670,11 +4788,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // máquina en vez de por responsable. Sin fecha seleccionada no hay nada que sumar todavía.
     const ocupacionInfoMaquina = (id: string): OcupacionMaquinaInfo => {
       if (fechasSel.length === 0) return { estado: 'sin-fecha' };
-      const matcher = planta === 'UIO' ? MACHINE_SAP_CODES_UIO[id] : undefined;
-      if (!matcher) return { estado: 'sin-mapeo' };
-      const horas = filasSeleccion
-        .filter(x => matcher(normalizarCodigoMaquina(x.row.maquina)))
-        .reduce((s, x) => s + x.row.tTotal, 0);
+      if (!MACHINE_SAP_CODES_POR_PLANTA[planta][id]) return { estado: 'sin-mapeo' };
+      // asignacionMaquinaOrden: HR exclusiva, material propio (LA02 GYE) o HR compartida (fracción).
+      const horas = filasSeleccion.reduce((s, x) => {
+        const asignada = asignacionMaquinaOrden(planta, normalizarCodigoMaquina(x.row.maquina), x.row.material).find(a => a.id === id);
+        return s + (asignada ? x.row.tTotal * asignada.fraccion : 0);
+      }, 0);
       const capNeta = horasDeMaquina(id);
       const tiempoMaquinaBruto = horasMaquinaBruto(id);
       // Ocupación Recurso (pedido por el usuario, ver recuadro "{Proceso} · {ID}" en renderMachineCol):
@@ -4898,7 +5017,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           ]).map(t => {
             // Valor común si todas las máquinas comparten horario; si difieren, queda "Mixto" para
             // no mentir sobre el estado real (y ahí el detalle se ve en cada columna).
-            const valores = new Set(machines.map(m => config.shifts[m.id]?.[t.campo]));
+            // Las máquinas que no operan de noche (sinTurnoNoche) no cuentan para el valor común de Noche.
+            const valores = new Set(machines.filter(m => t.campo !== 'night' || !m.sinTurnoNoche).map(m => config.shifts[m.id]?.[t.campo]));
             const comun = valores.size === 1 ? [...valores][0] : '';
             // Disponibilidad neta del turno para UNA máquina, con su paro y el rendimiento de la
             // planta — mismo criterio con el que se calcula la capacidad total.
