@@ -96,7 +96,7 @@ export const OrdenesFertTabSection: React.FC = () => {
       const centersFromGroups = [...new Set(groupsData.map((g: any) => String(g.centro).trim()))].sort();
       setAvailableCenters(centersFromGroups);
 
-      operationTracker.updateOperation(opId, 'running', 'Recuperando órdenes FERT...');
+      operationTracker.updateOperation(opId, 'in_progress', 'Recuperando órdenes FERT...');
       const firstPageRes = await serviciosService.getOrdenesFert(1, 10000);
       const rawData: any[] = Array.isArray(firstPageRes?.data) ? firstPageRes.data : [];
       

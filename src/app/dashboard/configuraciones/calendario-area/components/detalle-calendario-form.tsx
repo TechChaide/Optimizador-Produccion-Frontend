@@ -49,6 +49,7 @@ export default function DetalleCalendarioForm({
   const [formData, setFormData] = useState<DetalleCalendarioFormState>({
     codigo_detalle: record?.codigo_detalle,
     codigo_calendario: codigoCalendario,
+    codigo_tipo_detalle: record?.codigo_tipo_detalle,
     nombre_detalle: record?.nombre_detalle || '',
     fecha_real: convertDateToString(record?.fecha_real),
     fecha_inicio: convertDateToString(record?.fecha_inicio),
@@ -170,8 +171,8 @@ export default function DetalleCalendarioForm({
                 Tipo de Detalle
               </label>
               <Select
-                value={formData.codigo_detalle ? String(formData.codigo_detalle) : ''}
-                onValueChange={(value) => setFormData(prev => ({ ...prev, codigo_detalle: value ? Number(value) : undefined }))}
+                value={formData.codigo_tipo_detalle ? String(formData.codigo_tipo_detalle) : ''}
+                onValueChange={(value) => setFormData(prev => ({ ...prev, codigo_tipo_detalle: value ? Number(value) : undefined }))}
               >
                 <SelectTrigger id="tipo_detalle" className="w-full">
                   <SelectValue placeholder="Selecciona un tipo..." />

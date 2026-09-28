@@ -41,10 +41,20 @@ import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths,
 import { es } from 'date-fns/locale';
 
 const BLOCK_LENGTH_METERS = 20;
-const CURADO_DIAS_ESPERA = 2; // tiempo de curado/espera desde fabricación hasta disponible para consumo
+// Tiempo de curado/reposo: 3 días TOTALES contando el propio día de fabricación (día 1 = fab, día 2,
+// día 3 = reposo), disponible para consumo recién al día 4 (fab + 3). Antes era 2 (disponible en
+// fab + 2, es decir solo 2 días de reposo sin contar el de fabricación como día 1) — confirmado por
+// el usuario como bug de criterio: le faltaba un día de cobertura real a los bloques.
+const CURADO_DIAS_ESPERA = 3;
 
-// Responsables de Control de Producción que consumen el recurso Formulación, por centro
-const RESPONSABLES_POR_CENTRO: Record<string, string[]> = {
+// Responsables de Control de Producción que consumen el recurso Formulación, por centro — FALLBACK
+// únicamente, para el ratito entre que el módulo se monta y "Sincronizar" trae la restricción real
+// (ver respPorCentroDinamico). Verificado contra la restricción real del Grupo Formulación
+// (RespCtrlProd_Consumo_1000 / RespCtrlProd_Consumo_2000) que compartió el usuario: este arreglo
+// fijo estaba desactualizado (1000 traía "014"/"041" que no están en la restricción real, y le
+// faltaban "029"/"031"/"040"; 2000 le faltaba "038") — quedó como reflejo de la restricción en el
+// momento en que se escribió, no una fuente de verdad viva.
+const RESPONSABLES_POR_CENTRO_FALLBACK: Record<string, string[]> = {
   '1000': ['013', '014', '036', '038', '039', '041', '044'],
   '2000': ['002', '039']
 };
@@ -444,8 +454,8 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
   );
 };
 
-const isResponsableAllowed = (centro: string, resp: string): boolean => {
-  const allowed = RESPONSABLES_POR_CENTRO[centro];
+const isResponsableAllowed = (centro: string, resp: string, respPorCentro: Record<string, string[]>): boolean => {
+  const allowed = respPorCentro[centro];
   return !!allowed && allowed.includes(resp);
 };
 
@@ -478,10 +488,14 @@ interface FormuladoFertEntry {
 }
 
 // Fila agregada del Resumen (tab "Salida de Datos"): un Bloque Formulado con su necesidad,
-// stock y plan de reposición, agrupado por apertura/densidad.
+// stock y plan de reposición, agrupado por apertura/densidad/CENTRO — el mismo código de material
+// puede existir físicamente en Quito (1000) y Guayaquil (2000) como inventario y necesidad
+// separados; agruparlos juntos (como se hacía antes) neteaba stock/necesidad de un centro contra
+// el otro y podía esconder un faltante real en uno de los dos.
 interface FormuladoSummaryRow {
   blockCode: string;
   blockDesc: string;
+  centro: string;
   corrida: string;
   dens: string;
   apertura: string;
@@ -504,15 +518,23 @@ interface FormuladoSummaryRow {
 
 // Recorre la explosión BOM (getMaestroMaterialesExplosion) de una orden y, por cada material
 // "BLOQUE FORMULADO" encontrado, sube un nivel (MATERIAL_PADRE) para identificar el componente
-// intermedio que lo consume, y otro nivel más para el componente final. CANTIDAD_ACUMULADA ya
-// viene expresada por unidad de la orden, tal como se usa en el resto de trazas BOM de este módulo.
+// intermedio que lo consume, y otro nivel más para el componente final. CANTIDAD_ACUMULADA viene
+// expresada POR UNIDAD del material consultado (fertCode) — hay que multiplicarla por la cantidad
+// real de la orden (qtyOrden: CANTPEND/CANTPENDIENTE/CANTPROGRAMADA) para obtener el consumo real,
+// mismo criterio que el resto de trazas BOM del proyecto (ver TacticalPlanForrosSection.tsx,
+// `cantidadUnitaria * orderQty`). Antes se omitía esa multiplicación acá y el Total de esta tabla
+// quedaba en la escala "por unidad", no en el consumo real de la orden — confirmado por el usuario
+// comparando contra un Excel de referencia (los mismos dos componentes con cantidades distintas por
+// orden, sin relación de factor constante entre Excel y app: prueba de que faltaba multiplicar por
+// la cantidad propia de CADA orden, no un ajuste de escala único).
 const traceBloqueFormuladoConsumption = (
   bomData: MaterialExplosionRow[],
   fertCode: string,
   ordenNum: string,
   origin: 'prov' | 'fert',
   centro: string,
-  respCtrlProd: string
+  respCtrlProd: string,
+  qtyOrden: number
 ): ConsumoBloqueRow[] => {
   const formuladoRows = bomData.filter(row => (row.DESCRIPCION_COMPONENTE || '').toUpperCase().includes('BLOQUE FORMULADO'));
 
@@ -526,7 +548,7 @@ const traceBloqueFormuladoConsumption = (
       : String(formuladoRow.DESCRIPCION_FERT || '—').toUpperCase();
     const material = componenteRow ? cleanCode(componenteRow.MATERIAL_PADRE) : fertCode;
     const nombre = String(formuladoRow.DESCRIPCION_FERT || '—').toUpperCase();
-    const total = safeNum(formuladoRow.CANTIDAD_ACUMULADA || formuladoRow.CANTIDAD_UNITARIA || 0);
+    const total = safeNum(formuladoRow.CANTIDAD_ACUMULADA || formuladoRow.CANTIDAD_UNITARIA || 0) * qtyOrden;
 
     return {
       codFormulado,
@@ -623,7 +645,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   const [mounted, setMounted] = useState(false);
   const [activeTab, setActiveTab] = useState('resumen');
   const [, setGrupos] = useState<Grupo[]>([]);
-  const [, setRestricciones] = useState<Restriccion[]>([]);
+  const [restricciones, setRestricciones] = useState<Restriccion[]>([]);
   const [ordenes, setOrders] = useState<RawApiRow[]>([]);
   const [ordenesFert, setOrdersFert] = useState<RawApiRow[]>([]);
   const [cuboInventarios, setCuboInventarios] = useState<CuboInventariosItem[]>([]);
@@ -643,7 +665,15 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   const [unifiedSummaryData, setUnifiedSummaryData] = useState<FormuladoSummaryRow[]>([]);
   const [consumoBloqueFormulado, setConsumoBloqueFormulado] = useState<ConsumoBloqueRow[]>([]);
 
-  const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set());
+  // Rango de fechas (reemplaza el multi-select de días sueltos que había antes): con ambos extremos
+  // en null equivale a "Plan Maestro" (sin filtro, todas las órdenes cargadas) — el resto del tiempo
+  // acota provFiltradas/prodFiltradas a [rangeStart, rangeEnd] inclusive. Default hoy -> hoy+3 (ver
+  // efecto de montaje más abajo): mismo horizonte que CURADO_DIAS_ESPERA, para que la necesidad ya
+  // incluya de entrada las órdenes que caen dentro de la ventana de reposo/recuperación de bloques
+  // (antes, con un solo día seleccionado, se perdían órdenes futuras dentro de esa ventana — bug de
+  // alcance que reportó el usuario con una fecha_inicio_plan/fecha de recuperación reales).
+  const [rangeStart, setRangeStart] = useState<string | null>(null);
+  const [rangeEnd, setRangeEnd] = useState<string | null>(null);
   const [viewDate, setViewDate] = useState(new Date());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
@@ -651,12 +681,40 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     setMounted(true);
     const today = new Date();
     setViewDate(today);
-    setSelectedDates(new Set([format(today, 'yyyy-MM-dd')]));
+    const horizonte = new Date(today);
+    horizonte.setDate(horizonte.getDate() + CURADO_DIAS_ESPERA);
+    setRangeStart(format(today, 'yyyy-MM-dd'));
+    setRangeEnd(format(horizonte, 'yyyy-MM-dd'));
   }, []);
 
 
+  // Responsables de Control de Producción reales, leídos de la restricción del Grupo Formulación
+  // (RespCtrlProd_Consumo_1000 / RespCtrlProd_Consumo_2000 — ver handleSincronizarYGenerar, que ya
+  // filtra `restricciones` a los grupos "formulación"/"espuma"), en vez del arreglo fijo que quedaba
+  // desactualizado en cuanto alguien tocaba la restricción en Configuraciones. Con `restricciones`
+  // todavía vacío (antes de sincronizar) cae al fallback fijo, para no dejar el módulo sin ningún
+  // responsable mientras carga.
+  const respPorCentroDinamico = useMemo(() => {
+    const build = (centro: string): string[] => {
+      const rest = restricciones.find(r => r.nombre_restriccion === `RespCtrlProd_Consumo_${centro}`);
+      const valor = rest?.valor_restriccion?.trim();
+      if (!valor) return RESPONSABLES_POR_CENTRO_FALLBACK[centro] || [];
+      return valor.split(/[,&]/).map(v => v.trim()).filter(Boolean);
+    };
+    return { '1000': build('1000'), '2000': build('2000') };
+  }, [restricciones]);
+
+  // 'yyyy-MM-dd' ordena lexicográficamente igual que cronológicamente, así que comparar como string
+  // basta para el rango — sin rangeStart/rangeEnd (Plan Maestro) no filtra nada.
+  const enRangoFechas = useCallback((itemDate: string): boolean => {
+    if (!rangeStart && !rangeEnd) return true;
+    if (rangeStart && itemDate < rangeStart) return false;
+    if (rangeEnd && itemDate > rangeEnd) return false;
+    return true;
+  }, [rangeStart, rangeEnd]);
+
   // Base por centro y fecha (1000 = UIO, 2000 = GYE). El filtro por responsable de Control de
-  // Producción (RESPONSABLES_POR_CENTRO) se aplica más abajo, en handleProcessResumen, antes de
+  // Producción (respPorCentroDinamico) se aplica más abajo, en handleProcessResumen, antes de
   // acumular necesidades — el Resumen ya NO considera la necesidad global de todos los
   // responsables, solo la de quienes controlan el recurso Formulación.
   const provFiltradas = useMemo(() => {
@@ -665,9 +723,9 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       if (centro && !['1000', '2000'].includes(centro)) return false;
       const itemDateFull = getProp(o, ['FECHAINICIO', 'FECHA']).trim();
       const itemDate = itemDateFull.includes('T') ? itemDateFull.split('T')[0] : itemDateFull;
-      return selectedDates.size === 0 || selectedDates.has(itemDate);
+      return enRangoFechas(itemDate);
     });
-  }, [ordenes, selectedDates]);
+  }, [ordenes, enRangoFechas]);
 
   const prodFiltradas = useMemo(() => {
     return ordenesFert.filter(o => {
@@ -675,9 +733,9 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       if (centro && !['1000', '2000'].includes(centro)) return false;
       const itemDateFull = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']).trim();
       const itemDate = itemDateFull.includes('T') ? itemDateFull.split('T')[0] : itemDateFull;
-      return selectedDates.size === 0 || selectedDates.has(itemDate);
+      return enRangoFechas(itemDate);
     });
-  }, [ordenesFert, selectedDates]);
+  }, [ordenesFert, enRangoFechas]);
 
   // Inventario SAP (fuente CuboInventarios) filtrado a materiales "BLOQUE FORMULADO". El
   // StockActual de CuboInventarios ya viene en KG para estos materiales HALB (PesoNetoActual/
@@ -737,7 +795,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // Necesidad neta = (necesidad de órdenes provisionales por fecha + necesidad en proceso de
   // órdenes FERT) − stock disponible (stock SAP menos lo que aún está en curado). El plan de
   // reposición solo cubre el faltante, no la necesidad bruta. Solo se acumulan órdenes cuyo
-  // responsable de Control de Producción está autorizado para el centro (RESPONSABLES_POR_CENTRO)
+  // responsable de Control de Producción está autorizado para el centro (respPorCentroDinamico)
   // — una orden de un responsable no listado no debe inflar la necesidad de Formulación.
   const handleProcessResumen = useCallback(async () => {
     const buildEntry = (o: RawApiRow, origin: 'prov' | 'fert') => ({
@@ -749,7 +807,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const allOrders = [
       ...provFiltradas.map(o => buildEntry(o, 'prov' as const)),
       ...prodFiltradas.map(o => buildEntry(o, 'fert' as const))
-    ].filter(e => isResponsableAllowed(e.centro, e.resp));
+    ].filter(e => isResponsableAllowed(e.centro, e.resp, respPorCentroDinamico));
     if (allOrders.length === 0) {
       setUnifiedSummaryData([]);
       setConsumoBloqueFormulado([]);
@@ -789,7 +847,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
             blockCode = cleanCode(blockComp.COMPONENTE);
             blockDesc = String(blockComp.DESCRIPCION_COMPONENTE).toUpperCase();
           }
-          consumoRows.push(...traceBloqueFormuladoConsumption(bomData, info.code, ordenNum, origin, centroOrden, respOrden));
+          consumoRows.push(...traceBloqueFormuladoConsumption(bomData, info.code, ordenNum, origin, centroOrden, respOrden, qty));
         }
       } catch { console.warn(`Error BOM para ${info.code}`); }
       // Materiales cuyo BOM no resuelve a ningún "BLOQUE FORMULADO" (13 casos reales verificados:
@@ -824,22 +882,32 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       // (sin apertura técnica)" con un Stock/Plan Reposición calculado con la física de bloque
       // (pesoBloque), que no les aplica. Ahora solo entran los materiales con blockCode real.
       if (blockCode !== '—') {
-        const key = `${blockCode}|${info.apertura}|${densVal}`;
+        // Clave incluye CENTRO: el mismo blockCode es inventario y necesidad separados en Quito
+        // (1000) y Guayaquil (2000) — ver comentario de FormuladoSummaryRow.
+        const key = `${blockCode}|${info.apertura}|${densVal}|${centroOrden}`;
         if (!groupsMap.has(key)) {
-          const invRows = cuboInventarios.filter(inv => cleanCode(inv.Material) === blockCode);
+          const invRows = cuboInventarios.filter(inv => cleanCode(inv.Material) === blockCode && String(inv.Centro || '').trim() === centroOrden);
           const stockKg = invRows.reduce((sum, item) => sum + safeNum(item.StockActual), 0);
           const corrida = extraerCorridaCategoria(invRows[0]?.Categoria || '');
           const pesoBloque = (100 * usefulHeight * BLOCK_LENGTH_METERS * densVal) / 10000;
           const stockUN = pesoBloque > 0 ? stockKg / pesoBloque : 0;
+          // getStockEnCurado NO distingue centro todavía (getTiemposCuradoBloqueFormulado solo trae
+          // CodMaterial/fecha/peso confirmados, sin campo Centro verificado — ver su comentario). Si
+          // el mismo blockCode cura en ambos centros a la vez, este Kg "en curado" se le resta a los
+          // dos grupos por igual (puede sobrestimar el descuento de un centro y subestimar el otro)
+          // hasta que se confirme un campo Centro real en esa respuesta.
           const stockEnCuradoKg = getStockEnCurado(blockCode);
           const stockEnCuradoUN = pesoBloque > 0 ? stockEnCuradoKg / pesoBloque : 0;
           const stockUtilUN = Math.max(0, stockUN - stockEnCuradoUN);
+          // Mismo caso que getStockEnCurado: getConsumosFormulado/Registros51Mb solo confirma
+          // Movimiento/Fecha/Cantidad, sin Centro — el Consumo/D de acá es compartido entre los dos
+          // centros hasta confirmar ese campo en la respuesta real.
           if (!consumoDiarioCache.has(blockCode)) {
             consumoDiarioCache.set(blockCode, await fetchConsumoDiarioKg(blockCode));
           }
           const consumoDiarioKg = consumoDiarioCache.get(blockCode) ?? 0;
           groupsMap.set(key, {
-            blockCode, blockDesc: blockDesc !== '—' ? blockDesc : info.desc, corrida,
+            blockCode, blockDesc: blockDesc !== '—' ? blockDesc : info.desc, centro: centroOrden, corrida,
             dens: info.dens, apertura: info.apertura,
             totalBloquesProv: 0, totalBloquesFert: 0, planReposicion: 0,
             stockKg, stockUN, stockEnCuradoUN, stockUtilUN, pesoBloque,
@@ -866,7 +934,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     // (ej. un material de apertura 219 etiquetado "BQ_F_A_216.5"), así que Apertura es la fuente
     // más confiable para el orden. Corrida entra como desempate alfabético dentro de cada apertura.
     const summaryOrdenado = Array.from(groupsMap.values()).sort((a, b) =>
-      aperturaSortIndex(a.apertura) - aperturaSortIndex(b.apertura) || a.corrida.localeCompare(b.corrida)
+      aperturaSortIndex(a.apertura) - aperturaSortIndex(b.apertura) || a.corrida.localeCompare(b.corrida) || a.centro.localeCompare(b.centro)
     );
     setUnifiedSummaryData(summaryOrdenado);
     setConsumoBloqueFormulado(consumoRows);
@@ -878,7 +946,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       consumoBloqueFormulado: consumoRows,
     });
     setIsProcessingResumen(false);
-  }, [provFiltradas, prodFiltradas, cuboInventarios, getStockEnCurado]);
+  }, [provFiltradas, prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico]);
 
   // Segunda fase de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar): corre
   // handleProcessResumen automáticamente en cuanto el render con los datos recién sincronizados ya
@@ -908,13 +976,26 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // responsables de control de producción que corresponden a cada centro — este es el
   // contenido de las pestañas "Provisionales" y "FERT".
   const provConsumoResponsable = useMemo(
-    () => consumoBloqueFormulado.filter(r => r.origin === 'prov' && isResponsableAllowed(r.centro, r.respCtrlProd)),
-    [consumoBloqueFormulado]
+    () => consumoBloqueFormulado.filter(r => r.origin === 'prov' && isResponsableAllowed(r.centro, r.respCtrlProd, respPorCentroDinamico)),
+    [consumoBloqueFormulado, respPorCentroDinamico]
   );
   const fertConsumoResponsable = useMemo(
-    () => consumoBloqueFormulado.filter(r => r.origin === 'fert' && isResponsableAllowed(r.centro, r.respCtrlProd)),
-    [consumoBloqueFormulado]
+    () => consumoBloqueFormulado.filter(r => r.origin === 'fert' && isResponsableAllowed(r.centro, r.respCtrlProd, respPorCentroDinamico)),
+    [consumoBloqueFormulado, respPorCentroDinamico]
   );
+
+  // Mismas dos colecciones, partidas por centro (1000 = UIO, 2000 = GYE) — contenido del "segundo
+  // espacio" pedido por el usuario para no mezclar Quito y Guayaquil en una sola tabla, ya que cada
+  // centro tiene su propio stock físico e insumos (ver también el Plan de Reposición por centro en
+  // handleProcessResumen/FormuladoSummaryRow.centro).
+  const provConsumoPorCentro = useMemo(() => ({
+    '1000': provConsumoResponsable.filter(r => r.centro === '1000'),
+    '2000': provConsumoResponsable.filter(r => r.centro === '2000'),
+  }), [provConsumoResponsable]);
+  const fertConsumoPorCentro = useMemo(() => ({
+    '1000': fertConsumoResponsable.filter(r => r.centro === '1000'),
+    '2000': fertConsumoResponsable.filter(r => r.centro === '2000'),
+  }), [fertConsumoResponsable]);
 
   // Evaluación de Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material "BLOQUE
   // FORMULADO", con la misma base de conversión (TamLoteMin) que el Resumen e Inventarios — para
@@ -1180,6 +1261,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
               <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-400 tracking-widest z-20">
                 <tr>
                   <th className="px-6 py-4 text-left border-r border-gray-100 w-32">Bloque Formulado</th>
+                  <th className="px-3 py-4 border-r border-gray-100 text-slate-500">Centro</th>
                   <th className="px-4 py-4 text-left border-r border-gray-100 text-indigo-700">Corrida</th>
                   <th className="px-6 py-4 text-left border-r border-gray-100">Descripción Técnica SAP</th>
                   <th className="px-3 py-4 border-r border-gray-100">Dens.</th>
@@ -1197,7 +1279,11 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-gray-50 font-bold">
                 {data.map((row, idx) => {
-                  const isExp = expandedGroups.has(row.blockCode);
+                  // Clave compuesta con centro: el mismo blockCode puede aparecer dos veces (Quito y
+                  // Guayaquil) desde que la agrupación se partió por centro — usar solo blockCode acá
+                  // expandía/colapsaba ambas filas a la vez.
+                  const groupKey = `${row.blockCode}|${row.centro}`;
+                  const isExp = expandedGroups.has(groupKey);
                   // Cobertura Actual (días) = Stock Útil (convertido a Kg vía pesoBloque) ÷
                   // Consumo/D. Sin consumo reciente (0 Kg/día en los últimos 7 días) no hay con qué
                   // dividir — se muestra "—" en vez de un falso Infinity o un 0 que se leería como
@@ -1205,11 +1291,12 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
                   const coberturaActualDias = row.consumoDiarioKg > 0 ? (row.stockUtilUN * row.pesoBloque) / row.consumoDiarioKg : null;
                   return (
                     <React.Fragment key={idx}>
-                      <tr className="hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => { const n = new Set(expandedGroups); if (isExp) { n.delete(row.blockCode); } else { n.add(row.blockCode); } setExpandedGroups(n); }}>
+                      <tr className="hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => { const n = new Set(expandedGroups); if (isExp) { n.delete(groupKey); } else { n.add(groupKey); } setExpandedGroups(n); }}>
                         <td className="px-6 py-3 text-left font-mono font-black text-indigo-600 border-r border-gray-100 flex items-center gap-2">
                            {isExp ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
                            {row.blockCode}
                         </td>
+                        <td className="px-3 py-3 border-r border-gray-100 font-black text-slate-500">{row.centro}</td>
                         <td className="px-4 py-3 text-left font-mono font-black text-indigo-700 bg-indigo-50/10 border-r border-gray-100 whitespace-nowrap">{row.corrida}</td>
                         <td className="px-6 py-3 text-left uppercase text-slate-900 font-black text-[9px] border-r border-gray-100 truncate max-w-[300px]">{row.blockDesc}</td>
                         <td className="px-3 py-3 border-r border-gray-100 font-mono text-slate-400">{row.dens}</td>
@@ -1228,6 +1315,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
                         <tr key={`${idx}-${fIdx}`} className="bg-slate-50/50 text-[9px] text-slate-400 font-medium">
                           <td className="px-6 py-1.5 text-left pl-10 italic">{f.code}</td>
                           <td></td>
+                          <td></td>
                           <td className="px-6 py-1.5 text-left uppercase italic truncate max-w-[300px]">{f.desc}</td>
                           <td colSpan={2}></td>
                           <td className="px-4 py-1.5 font-mono">{f.origin === 'prov' ? f.bloques.toFixed(3) : '—'}</td>
@@ -1243,7 +1331,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
               </tbody>
               <tfoot className="bg-gray-100 text-gray-800 font-black text-[9px] uppercase border-t-2 border-gray-200 sticky bottom-0 z-20">
                 <tr>
-                  <td colSpan={7} className="px-6 py-4 text-right tracking-widest border-r border-gray-200">Totales de Sección</td>
+                  <td colSpan={8} className="px-6 py-4 text-right tracking-widest border-r border-gray-200">Totales de Sección</td>
                   <td className="px-6 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{formatNum(tStockKg, 0)}</td>
                   <td className="px-4 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{Math.round(tStockUn)}</td>
                   <td colSpan={2} className="px-6 py-4"></td>
@@ -1381,19 +1469,24 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         </div>
       );
       case 'ordenes': return (
-        <div className="animate-in fade-in duration-300 text-left">
+        <div className="animate-in fade-in duration-300 text-left space-y-10">
            {/* El espacio de órdenes crudas (Provisionales tal cual las devuelve SAP, una fila por
                orden) se retiró a pedido del usuario: para captura y trazabilidad es más útil este
                único espacio, ya agrupado por material/componente con cantidades unificadas. Incluye
                TODOS los materiales de responsables de Formulación, no solo los que trazan a un
                "BLOQUE FORMULADO" — los que no trazan aparecen auto-referenciados (Formulado =
-               el propio material) para no perder visibilidad de ninguna orden. */}
-           {renderConsumoBloqueTable(provConsumoResponsable, "Consumo de Bloque Formulado por Componente — Provisionales")}
+               el propio material) para no perder visibilidad de ninguna orden.
+               Partido por centro (1000 Quito / 2000 Guayaquil): cada centro tiene su propio stock e
+               insumos de Formulación, mezclarlos en una sola tabla ocultaba de qué centro salía cada
+               necesidad — mismo criterio que "FERT" más abajo. */}
+           {renderConsumoBloqueTable(provConsumoPorCentro['1000'], "Consumo de Bloque Formulado por Componente — Provisionales (Centro 1000, Quito)")}
+           {renderConsumoBloqueTable(provConsumoPorCentro['2000'], "Consumo de Bloque Formulado por Componente — Provisionales (Centro 2000, Guayaquil)")}
         </div>
       );
       case 'ordenesProd': return (
-        <div className="animate-in fade-in duration-300 text-left">
-          {renderConsumoBloqueTable(fertConsumoResponsable, "Consumo de Bloque Formulado por Componente — FERT")}
+        <div className="animate-in fade-in duration-300 text-left space-y-10">
+          {renderConsumoBloqueTable(fertConsumoPorCentro['1000'], "Consumo de Bloque Formulado por Componente — FERT (Centro 1000, Quito)")}
+          {renderConsumoBloqueTable(fertConsumoPorCentro['2000'], "Consumo de Bloque Formulado por Componente — FERT (Centro 2000, Guayaquil)")}
         </div>
       );
       case 'inventario': return (
@@ -1480,7 +1573,12 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
           <Popover>
             <PopoverTrigger asChild>
               <Button variant="outline" className="h-9 px-5 rounded-xl border-gray-200 gap-2 font-black text-[10px] uppercase shadow-sm transition-all hover:border-primary/50">
-                <CalendarIcon className="w-4 h-4 text-primary" /> {selectedDates.size === 0 ? 'Plan Maestro' : `${selectedDates.size} Días`}
+                <CalendarIcon className="w-4 h-4 text-primary" />
+                {!rangeStart && !rangeEnd
+                  ? 'Plan Maestro'
+                  : rangeStart && rangeEnd
+                    ? `${format(new Date(rangeStart + 'T00:00:00'), 'd/MM')} → ${format(new Date(rangeEnd + 'T00:00:00'), 'd/MM')}`
+                    : `Desde ${format(new Date(rangeStart! + 'T00:00:00'), 'd/MM')}...`}
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-72 p-0 border-none shadow-2xl rounded-2xl overflow-hidden mt-2" align="end">
@@ -1492,20 +1590,45 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
                     <Button variant="ghost" size="icon" onClick={() => setViewDate(prev => addMonths(prev, 1))} className="h-8 w-8 hover:bg-white"><ChevronRight className="w-4 h-4" /></Button>
                   </div>
                 </div>
+                <p className="text-[9px] font-bold text-slate-300 uppercase tracking-widest mb-2">
+                  {!rangeStart ? 'Elige la fecha de inicio' : !rangeEnd ? 'Elige la fecha de fin' : 'Rango seleccionado — click reinicia'}
+                </p>
                 <div className="grid grid-cols-7 gap-y-1 text-center mb-4">
                   {['LU', 'MA', 'MI', 'JU', 'VI', 'SA', 'DO'].map(d => <div key={d} className="text-[9px] font-black text-slate-300 uppercase py-1">{d}</div>)}
                   {calendarDaysList.map((day, idx) => {
                     if (!day) return <div key={idx} />;
                     const dStr = format(day, 'yyyy-MM-dd');
-                    const isSel = selectedDates.has(dStr);
+                    // Extremo del rango (inicio o fin exacto) resaltado sólido; los días intermedios,
+                    // resaltado suave — mismo patrón visual de cualquier range-picker.
+                    const isEdge = dStr === rangeStart || dStr === rangeEnd;
+                    const isInRange = !!rangeStart && !!rangeEnd && dStr > rangeStart && dStr < rangeEnd;
                     return (
-                      <button key={dStr} onClick={() => { const n = new Set(selectedDates); if (isSel) { n.delete(dStr); } else { n.add(dStr); } setSelectedDates(n); }} className={cn("relative h-8 w-8 mx-auto rounded-xl flex items-center justify-center transition-all", isSel ? "bg-primary text-white shadow-md" : "hover:bg-slate-50")}>
-                        <span className={cn("text-xs font-black", isSel ? "text-white" : "text-slate-700")}>{format(day, 'd')}</span>
+                      <button
+                        key={dStr}
+                        onClick={() => {
+                          // Click 1: fija inicio. Click 2 (>= inicio): fija fin, ya con rango completo.
+                          // Click 2 (< inicio): reinicia el inicio en el nuevo día. Con el rango ya
+                          // completo, cualquier click siguiente empieza una selección nueva.
+                          if (!rangeStart || (rangeStart && rangeEnd)) {
+                            setRangeStart(dStr);
+                            setRangeEnd(null);
+                          } else if (dStr < rangeStart) {
+                            setRangeStart(dStr);
+                          } else {
+                            setRangeEnd(dStr);
+                          }
+                        }}
+                        className={cn(
+                          "relative h-8 w-8 mx-auto flex items-center justify-center transition-all",
+                          isEdge ? "rounded-xl bg-primary text-white shadow-md" : isInRange ? "bg-primary/10" : "rounded-xl hover:bg-slate-50"
+                        )}
+                      >
+                        <span className={cn("text-xs font-black", isEdge ? "text-white" : "text-slate-700")}>{format(day, 'd')}</span>
                       </button>
                     );
                   })}
                 </div>
-                <Button variant="ghost" size="sm" className="w-full text-[10px] font-black uppercase text-primary h-9 rounded-xl hover:bg-primary/5 tracking-widest" onClick={() => setSelectedDates(new Set())}>Ver Todo</Button>
+                <Button variant="ghost" size="sm" className="w-full text-[10px] font-black uppercase text-primary h-9 rounded-xl hover:bg-primary/5 tracking-widest" onClick={() => { setRangeStart(null); setRangeEnd(null); }}>Ver Todo (Plan Maestro)</Button>
               </div>
             </PopoverContent>
           </Popover>

@@ -368,7 +368,7 @@ export const TacticalPlan2Section: React.FC = () => {
           </Card>
         </TabsContent>
 
-        <TabsContent value="rev_capacidad">
+        <TabsContent value="rev_capacidad" forceMount className="data-[state=inactive]:hidden">
           <Card>
             <CardHeader>
               <CardTitle>Revisión de Capacidad</CardTitle>
@@ -404,14 +404,14 @@ export const TacticalPlan2Section: React.FC = () => {
           </Card>
         </TabsContent>
 
-        <TabsContent value="resumen_plan_final">
+        <TabsContent value="resumen_plan_final" forceMount className="data-[state=inactive]:hidden">
           <Card>
             <CardHeader>
               <CardTitle>Resumen Plan final</CardTitle>
               <CardDescription>Total de cantidad por Centro, Línea y Puesto trabajo, agregado a partir de "Plan Final".</CardDescription>
             </CardHeader>
             <CardContent>
-              <ResumenPlanFinalTabSection />
+              <ResumenPlanFinalTabSection restrictions={restriccionesFiltradas} />
             </CardContent>
           </Card>
         </TabsContent>

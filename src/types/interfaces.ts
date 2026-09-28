@@ -455,3 +455,40 @@ export interface ProvisionalOrder {
   PUESTOTRABAJO?: string;
   [key: string]: any;
 }
+
+/**
+ * Payload de entrada del endpoint InsertarSolicitudProduccionHB (inserta una orden de producción
+ * externa en HANA, para que SAP la recoja). Campos obligatorios siempre: Mandante, CodigoOrdenExterna,
+ * ClaseOrden, Centro, CodigoMaterial, CantidadPlanificada, VersionFabricacion, PuestoTrabajo.
+ * Fecha/Hora Fin son obligatorias solo si la clase de orden programa "hacia atrás"; Fecha/Hora Inicio
+ * solo si programa "hacia adelante". PedidoComercial/PosicionPedido solo si la clase de orden es MTO.
+ */
+export interface SolicitudProduccionHB {
+  Mandante: string;
+  CodigoOrdenExterna: string;
+  ClaseOrden: string;
+  Centro: string;
+  CodigoMaterial: string;
+  CantidadPlanificada: number;
+  VersionFabricacion: string;
+  PuestoTrabajo: string;
+  FechaFinProgramada?: string;
+  HoraFinProgramada?: string;
+  FechaInicioProgramada?: string;
+  HoraInicioProgramada?: string;
+  PedidoComercial?: string;
+  PosicionPedido?: string;
+  EstadoRegistro?: string;
+  Observaciones?: string;
+  // FECHA_CARGA/HORA_CARGA (doc oficial de la interfaz SAP ZPPT_ORDER_INT): fecha y hora en que el
+  // aplicativo externo carga el registro — responsabilidad de "el proceso externo de gestión de
+  // Carga", no las llena SAP. Opcionales acá porque no todos los módulos las completan todavía,
+  // pero Programación Táctica Forros siempre las envía (ver getFechaHoraCargaEcuador).
+  FechaCarga?: string;
+  HoraCarga?: string;
+  EstadoCarga?: string;
+  NumeroOrdenSap?: string;
+  FechaProceso?: string;
+  HoraProceso?: string;
+  UsuarioProceso?: string;
+}

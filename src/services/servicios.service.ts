@@ -1,50 +1,22 @@
 import type { BodyResponse } from "@/types/body-response";
+import type { SolicitudProduccionHB } from "@/types/interfaces";
 import { environment } from "@/environments/environments.prod";
 import { fetchWithAuth } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/servicios`;
 
-// Payload de la interfaz Z de SAP (tabla ZPPT_ORDER_INT, doc "CHD-EF AUTOMATIZAR GENERACION DE
-// ORDENES DE PRODUCCION") para InsertarSolicitudProduccionHB — una orden por llamada. Mapeo
-// campo humanizado -> campo técnico SAP:
-//   Mandante->MANDT, CodigoOrdenExterna->COD_ORDEN, ClaseOrden->AUART, Centro->WERKS,
-//   CodigoMaterial->PLNBEZ, CantidadPlanificada->GAMNG, VersionFabricacion->VERID,
-//   PuestoTrabajo->ARBPL, FechaInicioProgramada->GSTRS, HoraInicioProgramada->GSUZS,
-//   FechaFinProgramada->GLTRS, HoraFinProgramada->GLUZS, PedidoComercial->KDAUF,
-//   PosicionPedido->KDPOS, EstadoRegistro->ESTATUS_REG_ORD, Observaciones->OBSERVACION,
-//   FechaCarga->FECHA_CARGA, HoraCarga->HORA_CARGA, EstadoCarga->ESTATUS_CARGA,
-//   NumeroOrdenSap->AUFNR, FechaProceso->FECHA_PROCESO, HoraProceso->HORA_PROCESO,
-//   UsuarioProceso->USUARIO.
-export interface SolicitudProduccionHB {
-  Mandante: string;
-  CodigoOrdenExterna: string;
-  ClaseOrden: string;
-  Centro: string;
-  CodigoMaterial: string;
-  CantidadPlanificada: number;
-  VersionFabricacion: string;
-  PuestoTrabajo: string;
-  FechaFinProgramada: string;
-  HoraFinProgramada: string;
-  FechaInicioProgramada: string;
-  HoraInicioProgramada: string;
-  PedidoComercial: string;
-  PosicionPedido: string;
-  // ESTATUS_REG_ORD: "1" al cargar el registro (pendiente de procesar) — NO "A"/"I". SAP lo
-  // sobreescribe después con "2" (creada y liberada) o "3" (error), ver doc §"ESTATUS_REG_ORD".
-  EstadoRegistro: string;
-  Observaciones: string;
-  // FECHA_CARGA/HORA_CARGA (DATS/TIMS): fecha y hora en que ESTE aplicativo carga el registro a
-  // la interfaz — responsabilidad del "proceso externo de gestión de Carga" según el doc, no
-  // vienen vacíos. Van en formato AAAAMMDD / HHMMSS, igual que el resto de fechas/horas.
-  FechaCarga: string;
-  HoraCarga: string;
-  EstadoCarga: string;
-  NumeroOrdenSap: string;
-  FechaProceso: string;
-  HoraProceso: string;
-  UsuarioProceso: string;
-}
+// Alias de SolicitudProduccionHB (@/types/interfaces) — mismo payload de InsertarSolicitudProduccionHB
+// (SAP/HANA), con dos nombres distintos porque se agregó por separado para Corte y Laminado/Venta
+// Externa/Ensamblado (este alias, usado por TacticalPlanCorteLaminadoSection.tsx,
+// TacticalPlanEspumasSection.tsx y ResumenPlanFinalTabSection.tsx) y para Programación Táctica
+// Muebles/Taller de Corte (SolicitudProduccionHB, usado por ProvisionalOrdersAlphaTab.tsx y
+// ProvisionalOrdersTallerCorteTab.tsx) en ramas de trabajo paralelas — unificado en un solo tipo real
+// al integrar ambas (2026-09-28) para no duplicar la definición, sin tener que tocar los 3 archivos
+// que ya importan este nombre. Programación Táctica Forros (TacticalPlanForrosSection.tsx) también
+// lo consume directamente como SolicitudProduccionHB — FechaCarga/HoraCarga (ver esa interfaz en
+// @/types/interfaces) se agregaron a pedido de Forros, siguiendo el doc oficial de la interfaz SAP
+// ZPPT_ORDER_INT.
+export type SolicitudProduccionHBPayload = SolicitudProduccionHB;
 
 export const serviciosService = {
   async getCuboHabilidadesOP(): Promise<BodyResponse<any>> {
@@ -284,13 +256,28 @@ export const serviciosService = {
     return response.json();
   },
 
-  // Endpoint nuevo (tiemposEnsambladoByGrupoYCentro) — reemplaza a TiemposEnsambladoPorCentroYCodigoGrupo:
-  // mismo payload {Centro, CodigoGrupo} y misma forma de respuesta, verificado en vivo (1138 vs 1137
-  // filas para Centro 1000/Grupo 8, 1 material adicional en el nuevo, sin diferencias en el resto) —
-  // se actualiza acá el único punto de llamada, sin tocar los 2 módulos que lo consumen (Venta Externa,
-  // Corte Espuma).
+  // Endpoint nuevo (tiemposEnsambladoByGrupoYCentroPR2) — reemplaza a tiemposEnsambladoByGrupoYCentro
+  // (2026-09-10, compartido por el usuario): mismo payload {Centro, CodigoGrupo} y misma forma de
+  // respuesta, verificado en vivo (1197 vs 1138 filas para Centro 1000/Grupo 8) — cubre materiales que
+  // el anterior no traía (los 10 que bloqueaban "Exportar TXT" en Corte y Laminado por falta de
+  // PuestoTrabajo/VersionFabricacion_Manual, ver [[corte_laminado_exportar_txt_reemplazado_por_sap_insert]]
+  // ahora los 10 traen ambos campos). Se actualiza acá el único punto de llamada, sin tocar los 3
+  // módulos que lo consumen (Corte y Laminado, Venta Externa, Corte Espuma) — mismo criterio que la
+  // migración anterior (TiemposEnsambladoPorCentroYCodigoGrupo -> tiemposEnsambladoByGrupoYCentro).
   async getTiemposEnsambladobyCentroyCodigoGrupo(centro: string, codigoGrupo: number): Promise<BodyResponse<any>> {
-    const response = await fetchWithAuth(API_URL + "/tiemposEnsambladoByGrupoYCentro", {
+    const response = await fetchWithAuth(API_URL + "/tiemposEnsambladoByGrupoYCentroPR2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ Centro: String(centro), CodigoGrupo: Number(codigoGrupo) }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      throw new Error(errorBody.message || "Failed to fetch Tiempos Ensamblado");
+    }
+    return response.json();
+  },
+  async tiemposEnsambladoByGrupoYCentroPR2(centro: string, codigoGrupo: number): Promise<BodyResponse<any>> {
+    const response = await fetchWithAuth(API_URL + "/tiemposEnsambladoByGrupoYCentroPR2", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ Centro: String(centro), CodigoGrupo: Number(codigoGrupo) }),
@@ -653,17 +640,33 @@ export const serviciosService = {
     return response.json();
   },
 
-  // Inserta UNA solicitud de producción en SAP/HANA (interfaz Z). El endpoint procesa una orden
-  // por llamada, no un lote — quien llama debe iterar y hacer un POST por cada orden.
-  async insertarSolicitudProduccionHB(solicitud: SolicitudProduccionHB): Promise<BodyResponse<{ success: boolean; message: string }>> {
+  // Inserta una orden de producción externa en HANA (para que SAP la recoja). Ver SolicitudProduccionHB
+  // en @/types/interfaces para el detalle de qué campos son obligatorios. Compartida por TODOS los
+  // módulos con "Enviar a SAP": Programación Táctica Muebles/Taller de Corte (ProvisionalOrdersAlphaTab,
+  // ProvisionalOrdersTallerCorteTab), Corte y Laminado/Venta Externa/Ensamblado
+  // (TacticalPlanCorteLaminadoSection, TacticalPlanEspumasSection, ResumenPlanFinalTabSection, que
+  // reciben el mismo tipo bajo el alias SolicitudProduccionHBPayload) y Programación Táctica Forros
+  // (TacticalPlanForrosSection) — unificada en una sola implementación al integrar las ramas de
+  // trabajo paralelas (2026-09-28), quedándose con el manejo de errores más completo (revisa
+  // data.message/data.error anidado, no solo el nivel superior). El endpoint procesa UNA orden por
+  // llamada, no un lote — quien llama debe iterar y hacer un POST por cada orden.
+  async insertarSolicitudProduccionHB(
+    solicitud: SolicitudProduccionHB
+  ): Promise<BodyResponse<{ success: boolean; message: string }>> {
     const response = await fetchWithAuth(API_URL + "/InsertarSolicitudProduccionHB", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(solicitud),
     });
     if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({ message: "Error al insertar la solicitud de producción en SAP." }));
-      throw new Error(errorBody.message || "Error al insertar la solicitud de producción en SAP.");
+      // El body de error puede traer el motivo real anidado en `data.message`/`data.error` (mismo
+      // shape que la respuesta exitosa: {message, data:{success, message}}) en vez de en el nivel
+      // superior — sin este chequeo se perdía el mensaje real de SAP (p. ej. una validación de la
+      // interfaz ZPPT_ORDER_INT: clase de orden inválida, campos obligatorios faltantes, etc.) y solo
+      // se mostraba el genérico "Failed to insert..." (confirmado 2026-09-17).
+      const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
+      const mensaje = errorBody?.data?.message || errorBody?.data?.error || errorBody?.message || errorBody?.error;
+      throw new Error(mensaje || `Failed to insert Solicitud de Producción (HTTP ${response.status})`);
     }
     return response.json();
   },

@@ -25,7 +25,7 @@ const CentroExplosionTable: React.FC<CentroExplosionTableProps> = ({ columns, it
   const filteredItemsByCentro = useMemo(() => {
     const term = searchTerm.toLowerCase().trim();
     if (!term) return itemsByCentro;
-    const result: Record<Centro, ExplosionMaterialItem[]> = { '1000': [], '2000': [] };
+    const result: Record<Centro, any[]> = { '1000': [], '2000': [] };
     CENTROS.forEach(centro => {
       result[centro] = itemsByCentro[centro].filter(item =>
         columns.some(col => String(item[col] ?? '').toLowerCase().includes(term))

@@ -5,11 +5,16 @@ import * as XLSX from 'xlsx';
 import { serviciosService } from '@/services/servicios.service';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { useAppContext } from '@/context/AppProvider';
-import { Loader2, PlayCircle, LayoutGrid, Gauge, Clock, Sun, Moon, RefreshCw, TriangleAlert, Scissors, FileSpreadsheet, Download, BedDouble } from 'lucide-react';
+import { Loader2, PlayCircle, LayoutGrid, Gauge, Clock, Sun, Moon, RefreshCw, TriangleAlert, Scissors, FileSpreadsheet, Download, BedDouble, Send } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import type { SolicitudProduccionHB } from '@/types/interfaces';
 import { cn } from '@/lib/utils';
 
 const normalizeMaterialCode = (code: string | number): string => String(code).trim().slice(-8);
@@ -55,12 +60,26 @@ const esExcepcionUSN = (descripcionUpper: string): boolean =>
     descripcionUpper.startsWith('FORRO COJIN INTER') ||
     descripcionUpper.startsWith('ANTIFAZ');
 
-// Forros de cama (descripción empieza con "FORRO CAMA") y forros de cabecero (empieza con "FORRO CAB",
-// ej. "FORRO CAB CAPRI ...") comparten el mismo pool de máquinas dedicadas — por defecto solo TC-COS04,
+// Forros de cama (descripción empieza con "FORRO CAMA" o, para los modelos Milán/París/Creta,
+// directamente "FORRO MILAN"/"FORRO PARIS"/"FORRO CRETA" sin la palabra "CAMA" — ej. "FORRO MILAN 105
+// AZUL RESIFLEX", confirmado en vivo 2026-09-10; "FORRO PARIS"/"FORRO CRETA", pedido explícito del
+// usuario 2026-09-22) y forros de cabecero (empieza con "FORRO CAB", ej. "FORRO CAB CAPRI ...", "FORRO
+// CAB MILAN 145X50 BEIGE") comparten el mismo pool de máquinas dedicadas — por defecto solo TC-COS04,
 // pero el usuario puede habilitar otras cosedoras adicionales (camasMachineIds) cuando por temas
 // operacionales haga falta más capacidad para camas/cabeceros (2026-09-02, pedido explícito del usuario).
 const esForroCamaOCabecero = (descripcionUpper: string): boolean =>
-    descripcionUpper.startsWith('FORRO CAMA') || descripcionUpper.startsWith('FORRO CAB');
+    descripcionUpper.startsWith('FORRO CAMA') || descripcionUpper.startsWith('FORRO CAB') ||
+    descripcionUpper.startsWith('FORRO MILAN') || descripcionUpper.startsWith('FORRO PARIS') ||
+    descripcionUpper.startsWith('FORRO CRETA');
+
+// Identifica si el SECTOR (Cubo de Inventarios) de un material PADRE (mueble terminado, ej. 20014803)
+// es "02 BASES-CABECERO-CAMA" — usado en fetchAllData para encontrar los padres candidatos a explosionar
+// (ver forrosCamaCabeceroSet). Importante: este SECTOR clasifica al PADRE, NO a sus forros semielaborados
+// (confirmado en vivo por el usuario 2026-09-22 — el forro 30027154 no tiene SECTOR propio en el Cubo de
+// Inventarios; su padre 20014803 sí). Se compara con `includes` (no igualdad exacta) por si el maestro
+// trae variantes de mayúsculas/espacios alrededor del mismo código "02".
+const esSectorCamaOCabecero = (sector: string): boolean =>
+    sector.toUpperCase().includes('BASES-CABECERO-CAMA');
 
 const MACHINE_IDS = ['TC-COS01', 'TC-COS02', 'TC-COS03', 'TC-COS04', 'TC-COS05', 'TC-COS06', 'TC-COS07', 'TC-COS08', 'TC-COS09', 'TC-COS10', 'TC-USN01'] as const;
 type MachineId = typeof MACHINE_IDS[number];
@@ -83,10 +102,15 @@ const MACHINE_CAMAS_DEFAULT: MachineId = 'TC-COS04';
 //    todas en cero uso son TC-COS01/02/03 (primeras del pool por orden de MACHINE_IDS); cuando no hay
 //    suficientes forros grandes para llenarlas, el resto de forros (medianos/pequeños) también puede
 //    caer ahí, regularizando la carga entre las 10 mesas para que terminen en un horario similar.
-const machineAcceptsMaterial = (machineId: MachineId, descripcionUpper: string, camasMachineIds: Set<MachineId>): boolean => {
+const machineAcceptsMaterial = (
+    machineId: MachineId,
+    descripcionUpper: string,
+    camasMachineIds: Set<MachineId>,
+    esComponenteDePadreCamaOCabecero: boolean = false,
+): boolean => {
     if (esExcepcionUSN(descripcionUpper)) return machineId === 'TC-USN01';
     if (machineId === 'TC-USN01') return false;
-    if (esForroCamaOCabecero(descripcionUpper)) return camasMachineIds.has(machineId);
+    if (esForroCamaOCabecero(descripcionUpper) || esComponenteDePadreCamaOCabecero) return camasMachineIds.has(machineId);
     if (machineId === 'TC-COS04') return false;
     return true;
 };
@@ -209,6 +233,36 @@ const formatFechaKeyToDDMMYYYY = (fechaKey: string): string => {
     return `${d}.${m}.${y}`;
 };
 
+// Convierte una fecha clave "YYYY-MM-DD" a "AAAAMMDD" (sin separadores) para el endpoint
+// InsertarSolicitudProduccionHB (botón "ENVIAR A SAP") — tipo SAP DATS(08), ver documento oficial
+// referenciado en ProvisionalOrdersAlphaTab.tsx (formatSapDate, mismo criterio).
+const formatFechaKeyToSap = (fechaKey: string): string => fechaKey.replace(/-/g, '');
+
+// Convierte una hora "HH:MM" a "HHMMSS" (sin separadores, segundos en 00) para el mismo endpoint —
+// tipo SAP TIMS(06).
+const formatHoraToSap = (hora: string): string => `${hora.replace(':', '')}00`;
+
+// Columnas editables de la pantalla de revisión de "ENVIAR A SAP" — mismo patrón que Planificación
+// Táctica Muebles (ProvisionalOrdersAlphaTab.tsx, SAP_PREVIEW_COLUMNS), duplicado aquí a propósito
+// (archivos independientes).
+const SAP_PREVIEW_COLUMNS: { field: keyof SolicitudProduccionHB; label: string; type?: 'number'; width: string }[] = [
+    { field: 'Mandante', label: 'Mandante', width: 'w-16' },
+    { field: 'CodigoOrdenExterna', label: 'Cód. Orden Externa', width: 'w-28' },
+    { field: 'ClaseOrden', label: 'Clase Orden', width: 'w-20' },
+    { field: 'Centro', label: 'Centro', width: 'w-16' },
+    { field: 'CodigoMaterial', label: 'Material', width: 'w-24' },
+    { field: 'CantidadPlanificada', label: 'Cant. Planificada', type: 'number', width: 'w-20' },
+    { field: 'VersionFabricacion', label: 'Versión Fabr.', width: 'w-20' },
+    { field: 'PuestoTrabajo', label: 'Puesto Trabajo', width: 'w-24' },
+    { field: 'FechaFinProgramada', label: 'Fecha Fin', width: 'w-24' },
+    { field: 'HoraFinProgramada', label: 'Hora Fin', width: 'w-20' },
+    { field: 'FechaInicioProgramada', label: 'Fecha Inicio', width: 'w-24' },
+    { field: 'HoraInicioProgramada', label: 'Hora Inicio', width: 'w-20' },
+    { field: 'EstadoRegistro', label: 'Estado', width: 'w-14' },
+    { field: 'Observaciones', label: 'Observaciones', width: 'w-32' },
+    { field: 'UsuarioProceso', label: 'Usuario Proceso', width: 'w-24' },
+];
+
 // Escala fija del eje X del Diagrama de Gantt (en horas) — igual patrón que Muebles/Planchas Mixtas
 const GANTT_HOURS_SCALE = 12;
 
@@ -289,6 +343,37 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
     const [machineDistribution, setMachineDistribution] = useState<Map<string, MachineDistributionEntry> | null>(null);
     const [unassignedOrders, setUnassignedOrders] = useState<TCOrder[]>([]);
 
+    // Sector por material (Cubo de Inventarios/maestro de materiales) — el SECTOR "02 BASES-CABECERO-CAMA"
+    // clasifica el material PADRE (el mueble terminado, ej. 20014803), NO el forro semielaborado en sí
+    // (ej. 30027154) — confirmado en vivo por el usuario (2026-09-22): los forros no tienen SECTOR propio
+    // en el Cubo de Inventarios. Por eso este mapa ahora se usa solo como paso intermedio para encontrar
+    // los materiales padre candidatos (ver forrosCamaCabeceroSet más abajo), no directamente para
+    // clasificar el forro.
+    const [materialSectorMap, setMaterialSectorMap] = useState<Map<string, string>>(new Map());
+
+    // Códigos de TODOS los componentes (forros, a cualquier profundidad) que cuelgan de un material padre
+    // cuyo SECTOR es "02 BASES-CABECERO-CAMA" — se arma explosionando cada uno de esos padres (ver
+    // fetchAllData) y juntando sus COMPONENTE en un solo set plano. Reemplaza la clasificación de "Forro
+    // de Cama/Cabecero" basada únicamente en el nombre (esForroCamaOCabecero: "FORRO CAMA"/"FORRO
+    // CAB"/"FORRO MILAN"), que se quedaba corta con materiales como 30027154 que sí son forro de
+    // cama/cabecero pero no calzan en ningún prefijo de nombre conocido. Se usa como criterio adicional
+    // (OR con el nombre), no en su reemplazo, por si algún forro de cama/cabecero real quedó fuera de la
+    // explosión (p. ej. un padre sin SECTOR asignado todavía en SAP).
+    const [forrosCamaCabeceroSet, setForrosCamaCabeceroSet] = useState<Set<string>>(new Set());
+
+    // "ENVIAR A SAP" (InsertarSolicitudProduccionHB) — mismo patrón de pantalla editable que
+    // Planificación Táctica Muebles (ver ProvisionalOrdersAlphaTab.tsx). CodigoOrdenExterna = el propio
+    // ID de la orden Previsional (TCOrder.id) — a diferencia de Muebles, aquí no existe un guardado de
+    // Plan Táctico Final (PFSM) del que sacar un codigo_detalle_tactico, y el usuario confirmó
+    // (2026-09-21) usar directamente el ID de la orden. ClaseOrden queda editable sin valor fijo, mismo
+    // criterio que Muebles.
+    const [enviarSapDialogOpen, setEnviarSapDialogOpen] = useState(false);
+    const [sapPreviewRows, setSapPreviewRows] = useState<{ orderKey: string; solicitud: SolicitudProduccionHB }[]>([]);
+    const [sapSendState, setSapSendState] = useState<{
+        sending: boolean;
+        results: Map<string, { status: 'success' | 'error'; message: string }>;
+    }>({ sending: false, results: new Map() });
+
     const toggleCamasMachine = (machineId: MachineId) => {
         if (machineId === MACHINE_CAMAS_DEFAULT) return;
         setCamasMachineIds(prev => {
@@ -342,6 +427,71 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                 }
             }
             setAllPrevisionalRaw(combinedProv);
+
+            // Sector por material (ver comentario de materialSectorMap) — para clasificar Forro de
+            // Cama/Cabecero de forma estructurada en vez de solo por nombre.
+            try {
+                const invExplore = await serviciosService.getCuboInventarios(1, 1);
+                const totalInv = invExplore.totalRegistros || 0;
+                const sectorMap = new Map<string, string>();
+                if (totalInv > 0) {
+                    const BATCH_INV = 20000;
+                    const pagesInv = Math.ceil(totalInv / BATCH_INV);
+                    for (let i = 1; i <= pagesInv; i++) {
+                        const res = await serviciosService.getCuboInventarios(i, BATCH_INV);
+                        if (res.data) {
+                            const items = Array.isArray(res.data) ? res.data : [res.data];
+                            items.forEach((item: any) => {
+                                // Un mismo material puede aparecer varias veces en el Cubo de Inventarios
+                                // (un registro por Centro) con SECTOR distinto en cada uno — sin filtrar
+                                // por Centro, la última fila que llegara (de cualquier centro) sobrescribía
+                                // a las demás sin ningún criterio, pudiendo perder el SECTOR real de Centro
+                                // 1000 (confirmado como causa probable 2026-09-22, tras el caso de
+                                // 30021581 el día anterior). Taller de Corte solo opera en CENTRO_TC.
+                                const centro = String(item.Centro || item.CENTRO || '').trim();
+                                if (centro && centro !== CENTRO_TC) return;
+                                const material = normalizeMaterialCode(item.Material || '');
+                                const sector = String(item.SECTOR || item.Sector || '').trim();
+                                if (material && sector) sectorMap.set(material, sector);
+                            });
+                        }
+                    }
+                }
+                setMaterialSectorMap(sectorMap);
+
+                // Explosiona cada material PADRE con SECTOR "02 BASES-CABECERO-CAMA" para encontrar todos
+                // sus componentes (forros, a cualquier profundidad) — ver comentario de
+                // forrosCamaCabeceroSet. En paralelo con un límite de concurrencia (mismo patrón que
+                // useNecesidadesExplotadas.ts) para no disparar decenas de llamadas de golpe.
+                try {
+                    const camaPadreMateriales = Array.from(sectorMap.entries())
+                        .filter(([, sector]) => esSectorCamaOCabecero(sector))
+                        .map(([material]) => material);
+
+                    const forrosSet = new Set<string>();
+                    const CONCURRENCY = 5;
+                    for (let i = 0; i < camaPadreMateriales.length; i += CONCURRENCY) {
+                        const batch = camaPadreMateriales.slice(i, i + CONCURRENCY);
+                        await Promise.all(batch.map(async (padre) => {
+                            try {
+                                const res = await serviciosService.getMaestroMaterialesExplosion(CENTRO_TC, padre, 1, 5000);
+                                const components = res && res.data ? (Array.isArray(res.data) ? res.data : [res.data]) : [];
+                                components.forEach((c: any) => {
+                                    const componente = normalizeMaterialCode(c.COMPONENTE || '');
+                                    if (componente) forrosSet.add(componente);
+                                });
+                            } catch (error) {
+                                console.error(`Error al explosionar el material padre ${padre} (SECTOR cama/cabecero) para Taller de Corte:`, error);
+                            }
+                        }));
+                    }
+                    setForrosCamaCabeceroSet(forrosSet);
+                } catch (error) {
+                    console.error('Error al armar el set de forros de cama/cabecero por material padre:', error);
+                }
+            } catch (error) {
+                console.error('Error al descargar el Cubo de Inventarios (Sector) para Taller de Corte:', error);
+            }
         } catch (error) {
             console.error('Error al descargar datos del Taller de Corte:', error);
         } finally {
@@ -478,7 +628,8 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
 
         sortedOrders.forEach(order => {
             const descUpper = order.nombre.toUpperCase();
-            const candidates = activeSlots.filter(slot => machineAcceptsMaterial(slot.machineId, descUpper, camasMachineIds));
+            const esComponenteCama = forrosCamaCabeceroSet.has(normalizeMaterialCode(order.material));
+            const candidates = activeSlots.filter(slot => machineAcceptsMaterial(slot.machineId, descUpper, camasMachineIds, esComponenteCama));
             if (candidates.length === 0) {
                 unassigned.push(order);
                 return;
@@ -561,9 +712,10 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                 for (const item of candidateItems) {
                     const duracion = item.endHour - item.startHour;
                     const descUpper = item.order.nombre.toUpperCase();
+                    const esComponenteCama = forrosCamaCabeceroSet.has(normalizeMaterialCode(item.order.material));
                     const destinos = machineKeys
                         .filter(key => key !== sourceKey)
-                        .filter(key => machineAcceptsMaterial(machineIdById.get(key)!, descUpper, camasMachineIds))
+                        .filter(key => machineAcceptsMaterial(machineIdById.get(key)!, descUpper, camasMachineIds, esComponenteCama))
                         .filter(key => usedHoursOf(key) + duracion <= (capacityById.get(key) ?? 0))
                         .sort((a, b) => utilizationOf(a) - utilizationOf(b));
 
@@ -707,6 +859,101 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
         URL.revokeObjectURL(url);
     };
 
+    // "ENVIAR A SAP" — Paso 1: arma la pantalla editable con lo que se enviará a SAP
+    // (InsertarSolicitudProduccionHB) por cada orden de la Distribución de Máquinas de Coser, mismos
+    // valores fuente que exportGanttToTxt (fecha/hora fijas por puesto de trabajo, no la fecha propia de
+    // la orden), para que el usuario la revise/corrija ANTES de enviar nada. CodigoOrdenExterna = el ID
+    // de la orden Previsional tal cual (no hay codigo_detalle_tactico aquí, a diferencia de Muebles — ver
+    // comentario del estado sapPreviewRows más arriba).
+    const handleOpenSapPreview = () => {
+        if (!machineDistribution || machineDistribution.size === 0) {
+            addNotification('warning', 'Debe ejecutar la Distribución de Máquinas de Coser antes de enviar a SAP.');
+            return;
+        }
+
+        const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
+        const usuarioProceso = user?.usuario || user?.id_usuario || 'admin';
+
+        const rows: { orderKey: string; solicitud: SolicitudProduccionHB }[] = [];
+        Array.from(machineDistribution.values()).forEach(machine => {
+            const effectiveStartTime = getEffectiveStartTimeParaTurno(machine.turno);
+            const fechaBase = getFixedExportDateKey(machine.machineId, holidaysSet);
+            machine.items.forEach((item, idx) => {
+                if (MATERIALES_EXCLUIDOS_EXPORT_GANTT.has(normalizeMaterialCode(item.order.material))) return;
+                const inicio = addHoursWithDate(fechaBase, effectiveStartTime, item.startHour);
+                const fin = addHoursWithDate(fechaBase, effectiveStartTime, item.endHour);
+                const orderKey = `${item.order.source}-${item.order.id}-${item.order.material}-${idx}`;
+                rows.push({
+                    orderKey,
+                    solicitud: {
+                        Mandante: '300',
+                        CodigoOrdenExterna: item.order.id,
+                        ClaseOrden: '',
+                        Centro: CENTRO_TC,
+                        CodigoMaterial: item.order.material,
+                        CantidadPlanificada: item.order.cantidad,
+                        VersionFabricacion: '01',
+                        PuestoTrabajo: machine.machineId,
+                        FechaFinProgramada: formatFechaKeyToSap(fin.fechaKey),
+                        HoraFinProgramada: formatHoraToSap(fin.hora),
+                        FechaInicioProgramada: formatFechaKeyToSap(inicio.fechaKey),
+                        HoraInicioProgramada: formatHoraToSap(inicio.hora),
+                        PedidoComercial: '',
+                        PosicionPedido: '',
+                        EstadoRegistro: 'A',
+                        Observaciones: '',
+                        UsuarioProceso: usuarioProceso,
+                    },
+                });
+            });
+        });
+
+        setSapPreviewRows(rows);
+        setSapSendState({ sending: false, results: new Map() });
+        setEnviarSapDialogOpen(true);
+    };
+
+    const updateSapPreviewField = (orderKey: string, field: keyof SolicitudProduccionHB, value: string | number) => {
+        setSapPreviewRows(prev => prev.map(row => row.orderKey === orderKey ? { ...row, solicitud: { ...row.solicitud, [field]: value } } : row));
+    };
+
+    // Aplica el mismo valor de Clase de Orden a todas las filas de la pantalla editable de una vez.
+    const applyClaseOrdenATodas = (valor: string) => {
+        setSapPreviewRows(prev => prev.map(row => ({ ...row, solicitud: { ...row.solicitud, ClaseOrden: valor } })));
+    };
+
+    // "ENVIAR A SAP" — Paso 2: envía lo que esté en la pantalla editable (sapPreviewRows), tal cual lo
+    // dejó el usuario. Sigue enviando el resto aunque una orden falle, y muestra un resumen de
+    // éxitos/errores al terminar. `retryKeys`: si se pasa, solo reintenta esas órdenes.
+    const handleEnviarASap = async (retryKeys?: Set<string>) => {
+        const rowsAEnviar = retryKeys ? sapPreviewRows.filter(r => retryKeys.has(r.orderKey)) : sapPreviewRows;
+        const sinClaseOrden = rowsAEnviar.find(r => !r.solicitud.ClaseOrden.trim());
+        if (sinClaseOrden) {
+            addNotification('warning', 'Todas las órdenes deben tener una Clase de Orden antes de enviar a SAP.');
+            return;
+        }
+
+        setSapSendState(prev => ({ sending: true, results: retryKeys ? prev.results : new Map() }));
+        const results = new Map<string, { status: 'success' | 'error'; message: string }>(retryKeys ? sapSendState.results : undefined);
+
+        for (const { orderKey, solicitud } of rowsAEnviar) {
+            try {
+                await serviciosService.insertarSolicitudProduccionHB(solicitud);
+                results.set(orderKey, { status: 'success', message: 'Enviado correctamente.' });
+            } catch (error) {
+                results.set(orderKey, { status: 'error', message: (error as Error).message });
+            }
+        }
+
+        setSapSendState({ sending: false, results });
+        const okCount = Array.from(results.values()).filter(r => r.status === 'success').length;
+        const errCount = results.size - okCount;
+        addNotification(
+            errCount === 0 ? 'success' : 'warning',
+            `Envío a SAP: ${okCount} orden(es) enviada(s) correctamente${errCount > 0 ? `, ${errCount} con error (ver detalle)` : ''}.`
+        );
+    };
+
     if (isLoading && allPrevisionalRaw.length === 0) {
         return (
             <div className="flex flex-col items-center justify-center py-20 bg-gray-50 rounded-xl border-2 border-dashed gap-4">
@@ -826,7 +1073,7 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                     <h3 className="text-sm font-bold text-gray-800 uppercase tracking-tight">Cosedoras para Forros de Cama y Cabecero</h3>
                 </div>
                 <p className="text-xs text-gray-500">
-                    TC-COS04 fabrica siempre los forros de cama y de cabecero (materiales que empiezan con &quot;FORRO CAMA&quot; o &quot;FORRO CAB&quot;). Habilita otras cosedoras aquí cuando por temas operacionales haga falta repartir esa carga en más máquinas — esas cosedoras seguirán recibiendo también su carga normal del pool general.
+                    TC-COS04 fabrica siempre los forros de cama y de cabecero — materiales que empiezan con &quot;FORRO CAMA&quot;, &quot;FORRO CAB&quot;, &quot;FORRO MILAN&quot;, &quot;FORRO PARIS&quot; o &quot;FORRO CRETA&quot;, o que sean componente de un material padre (el mueble terminado) cuyo SECTOR en el Cubo de Inventarios sea &quot;02 BASES-CABECERO-CAMA&quot;. Habilita otras cosedoras aquí cuando por temas operacionales haga falta repartir esa carga en más máquinas — esas cosedoras seguirán recibiendo también su carga normal del pool general.
                 </p>
                 <div className="flex flex-wrap gap-1.5">
                     {MACHINE_IDS.filter(machineId => machineId !== 'TC-USN01').map(machineId => {
@@ -1007,6 +1254,14 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                                 <FileSpreadsheet className="w-3.5 h-3.5" />
                                 Descargar Excel
                             </Button>
+                            <Button
+                                onClick={handleOpenSapPreview}
+                                size="sm"
+                                className="h-8 bg-sky-600 hover:bg-sky-700 text-white gap-1.5 text-xs"
+                            >
+                                <Send className="w-3.5 h-3.5" />
+                                ENVIAR A SAP
+                            </Button>
                         </div>
                     </div>
                     <div className="p-6 space-y-6">
@@ -1089,6 +1344,140 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                     </div>
                 </div>
             )}
+
+            {/* "ENVIAR A SAP": pantalla editable — muestra exactamente lo que se va a enviar a SAP
+                (InsertarSolicitudProduccionHB) por cada orden de la Distribución de Máquinas de Coser
+                para que el usuario lo revise y corrija ANTES de enviar nada, y solo entonces se envía al
+                presionar "CONFIRMAR Y ENVIAR A SAP" — mismo patrón que Planificación Táctica Muebles. */}
+            <Dialog open={enviarSapDialogOpen} onOpenChange={(open) => { setEnviarSapDialogOpen(open); if (!open) setSapSendState({ sending: false, results: new Map() }); }}>
+                <DialogContent className="sm:max-w-[95vw] lg:max-w-[1300px] max-h-[90vh] flex flex-col">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <Send className="w-4 h-4 text-sky-600" />
+                            Enviar a SAP — Revisión antes de enviar ({sapPreviewRows.length} orden(es))
+                        </DialogTitle>
+                        <DialogDescription>
+                            Esta es la información exacta que se enviará a SAP (InsertarSolicitudProduccionHB), una
+                            solicitud por orden. Puede editar cualquier campo antes de confirmar — nada se envía hasta
+                            que presione "CONFIRMAR Y ENVIAR A SAP".
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-3 overflow-y-auto flex-1 pr-1">
+                        <div className="flex items-end gap-2 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
+                            <div className="flex-1">
+                                <Label htmlFor="clase-orden-bulk-tc" className="text-xs font-semibold text-gray-700">Aplicar Clase de Orden a todas las filas</Label>
+                                <Input
+                                    id="clase-orden-bulk-tc"
+                                    placeholder="Ej. ZRFI — escriba y presione Aplicar"
+                                    className="mt-1 h-8 text-xs bg-white"
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') applyClaseOrdenATodas((e.target as HTMLInputElement).value);
+                                    }}
+                                />
+                            </div>
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-8 text-xs bg-white"
+                                onClick={() => {
+                                    const el = document.getElementById('clase-orden-bulk-tc') as HTMLInputElement | null;
+                                    if (el) applyClaseOrdenATodas(el.value);
+                                }}
+                            >
+                                Aplicar a todas
+                            </Button>
+                        </div>
+
+                        {sapPreviewRows.length === 0 ? (
+                            <div className="flex items-center gap-2 text-gray-500 bg-gray-50 px-3 py-4 justify-center rounded-lg">
+                                <p className="text-xs">No hay órdenes para enviar (revise que la Distribución de Máquinas de Coser esté ejecutada).</p>
+                            </div>
+                        ) : (
+                            <div className="border border-gray-200 rounded-lg overflow-auto max-h-[50vh]">
+                                <table className="text-xs">
+                                    <thead className="bg-gray-50 sticky top-0 z-10">
+                                        <tr>
+                                            <th className="px-2 py-2 text-left font-bold text-gray-600 uppercase whitespace-nowrap">Orden</th>
+                                            {SAP_PREVIEW_COLUMNS.map(col => (
+                                                <th key={col.field} className="px-2 py-2 text-left font-bold text-gray-600 uppercase whitespace-nowrap">{col.label}</th>
+                                            ))}
+                                            <th className="px-2 py-2 text-left font-bold text-gray-600 uppercase whitespace-nowrap">Resultado</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="bg-white divide-y divide-gray-100">
+                                        {sapPreviewRows.map(row => {
+                                            const resultado = sapSendState.results.get(row.orderKey);
+                                            return (
+                                                <tr key={row.orderKey} className={resultado?.status === 'error' ? 'bg-red-50/40' : resultado?.status === 'success' ? 'bg-emerald-50/40' : undefined}>
+                                                    <td className="px-2 py-1 font-mono text-gray-500 whitespace-nowrap">{row.orderKey}</td>
+                                                    {SAP_PREVIEW_COLUMNS.map(col => (
+                                                        <td key={col.field} className="px-1 py-1">
+                                                            <Input
+                                                                value={row.solicitud[col.field] as any}
+                                                                onChange={(e) => updateSapPreviewField(row.orderKey, col.field, col.type === 'number' ? Number(e.target.value) : e.target.value)}
+                                                                type={col.type === 'number' ? 'number' : 'text'}
+                                                                className={`h-7 text-xs ${col.width}`}
+                                                            />
+                                                        </td>
+                                                    ))}
+                                                    <td className="px-2 py-1 whitespace-nowrap">
+                                                        {resultado ? (
+                                                            <Badge className={resultado.status === 'success' ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-red-100 text-red-700 border-red-200'} title={resultado.message}>
+                                                                {resultado.status === 'success' ? 'Enviado' : 'Error'}
+                                                            </Badge>
+                                                        ) : (
+                                                            <span className="text-gray-300">—</span>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        {Array.from(sapSendState.results.values()).some(r => r.status === 'error') && (
+                            <div className="border border-red-200 bg-red-50 rounded-lg px-3 py-2">
+                                <p className="text-xs font-bold text-red-800 mb-1">Errores al enviar:</p>
+                                <ul className="text-[11px] text-red-700 space-y-0.5">
+                                    {Array.from(sapSendState.results.entries()).filter(([, r]) => r.status === 'error').map(([key, r]) => (
+                                        <li key={key}><span className="font-mono">{key}</span>: {r.message}</li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+                    </div>
+                    <DialogFooter className="gap-2">
+                        <Button variant="outline" onClick={() => setEnviarSapDialogOpen(false)}>Cerrar</Button>
+                        {Array.from(sapSendState.results.values()).some(r => r.status === 'error') && (
+                            <Button
+                                variant="outline"
+                                className="border-red-300 text-red-700 hover:bg-red-50"
+                                disabled={sapSendState.sending}
+                                onClick={() => {
+                                    const failedKeys = new Set(
+                                        Array.from(sapSendState.results.entries()).filter(([, r]) => r.status === 'error').map(([key]) => key)
+                                    );
+                                    handleEnviarASap(failedKeys);
+                                }}
+                            >
+                                {sapSendState.sending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : null}
+                                Reintentar fallidas
+                            </Button>
+                        )}
+                        <Button
+                            onClick={() => handleEnviarASap()}
+                            disabled={sapSendState.sending || sapPreviewRows.length === 0}
+                            className="bg-sky-600 hover:bg-sky-700 text-white gap-2"
+                        >
+                            {sapSendState.sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                            {sapSendState.sending ? 'Enviando...' : 'CONFIRMAR Y ENVIAR A SAP'}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 };

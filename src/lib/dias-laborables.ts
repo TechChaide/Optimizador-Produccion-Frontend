@@ -1,5 +1,8 @@
 import { format } from 'date-fns';
 import { detalleCalendarioService } from '@/services/detallecalendario.service';
+import { tipoDetalleService } from '@/services/tipodetalle.service';
+import { calendarioService } from '@/services/calendario.service';
+import type { DetalleCalendario } from '@/types/interfaces';
 
 /**
  * Días hábiles para la programación táctica.
@@ -90,20 +93,41 @@ export const esFinDeSemana = (d: Date): boolean => {
   return dia === 0 || dia === 6;
 };
 
-export const esDiaNoLaborable = (d: Date, feriados: DiasNoLaborables = SIN_DIAS_NO_LABORABLES): boolean =>
-  esFinDeSemana(d) || feriados.has(format(d, 'yyyy-MM-dd'));
+/**
+ * `laborablesExtra` es el complemento de `feriados`: fechas que el calendario configurado declaró
+ * explícitamente como "Jornada" y que SÍ se trabajan aunque caigan en fin de semana — el caso de
+ * negocio es el sábado habilitado puntualmente para cubrir un excedente de capacidad que lunes a
+ * viernes no alcanza a cubrir. Antes esto no tenía efecto: `esDiaNoLaborable` solo probaba
+ * `feriados.has(...)`, y para un feriado nacional anulado por "Jornada" alcanzaba con borrarlo de
+ * `feriados` (ver `cargarDiasNoLaborables`), pero un sábado/domingo caía por `esFinDeSemana` sin
+ * importar qué tuviera `feriados` — no existía forma de anularlo. Por eso `laborablesExtra` se
+ * consulta primero y gana sobre el chequeo de fin de semana.
+ */
+export const esDiaNoLaborable = (
+  d: Date,
+  feriados: DiasNoLaborables = SIN_DIAS_NO_LABORABLES,
+  laborablesExtra: DiasNoLaborables = SIN_DIAS_NO_LABORABLES,
+): boolean => {
+  const fecha = format(d, 'yyyy-MM-dd');
+  if (laborablesExtra.has(fecha)) return false;
+  return esFinDeSemana(d) || feriados.has(fecha);
+};
 
 /**
  * Próximo día laborable a partir de una fecha: avanza un día y sigue avanzando mientras caiga en
  * fin de semana o en un día no laborable. Siempre avanza al menos un día (nunca devuelve `from`).
  */
-export const nextBusinessDay = (from: Date, feriados: DiasNoLaborables = SIN_DIAS_NO_LABORABLES): Date => {
+export const nextBusinessDay = (
+  from: Date,
+  feriados: DiasNoLaborables = SIN_DIAS_NO_LABORABLES,
+  laborablesExtra: DiasNoLaborables = SIN_DIAS_NO_LABORABLES,
+): Date => {
   const d = new Date(from);
   d.setDate(d.getDate() + 1);
   // Tope de seguridad: si alguien declarara un año entero como no laborable, esto corta en vez de
   // colgar el navegador en un while infinito.
   let guardia = 0;
-  while (esDiaNoLaborable(d, feriados) && guardia < 366) {
+  while (esDiaNoLaborable(d, feriados, laborablesExtra) && guardia < 366) {
     d.setDate(d.getDate() + 1);
     guardia++;
   }
@@ -114,11 +138,15 @@ export const nextBusinessDay = (from: Date, feriados: DiasNoLaborables = SIN_DIA
  * Día laborable anterior a una fecha: retrocede un día y sigue retrocediendo mientras caiga en fin
  * de semana o en un día no laborable. Simétrico a nextBusinessDay. Siempre retrocede al menos un día.
  */
-export const previousBusinessDay = (from: Date, feriados: DiasNoLaborables = SIN_DIAS_NO_LABORABLES): Date => {
+export const previousBusinessDay = (
+  from: Date,
+  feriados: DiasNoLaborables = SIN_DIAS_NO_LABORABLES,
+  laborablesExtra: DiasNoLaborables = SIN_DIAS_NO_LABORABLES,
+): Date => {
   const d = new Date(from);
   d.setDate(d.getDate() - 1);
   let guardia = 0;
-  while (esDiaNoLaborable(d, feriados) && guardia < 366) {
+  while (esDiaNoLaborable(d, feriados, laborablesExtra) && guardia < 366) {
     d.setDate(d.getDate() - 1);
     guardia++;
   }
@@ -130,26 +158,46 @@ export const previousBusinessDay = (from: Date, feriados: DiasNoLaborables = SIN
  * resultado anterior desde fuera: hay que aplicarlo N veces sobre la misma fecha que va avanzando
  * (encadenarlo mal, por ejemplo llamándolo dos veces sobre "hoy", da +3 en viernes en vez de +2).
  */
-export const addBusinessDays = (from: Date, n: number, feriados: DiasNoLaborables = SIN_DIAS_NO_LABORABLES): Date => {
+export const addBusinessDays = (
+  from: Date,
+  n: number,
+  feriados: DiasNoLaborables = SIN_DIAS_NO_LABORABLES,
+  laborablesExtra: DiasNoLaborables = SIN_DIAS_NO_LABORABLES,
+): Date => {
   let d = new Date(from);
   const paso = n < 0 ? previousBusinessDay : nextBusinessDay;
-  for (let i = 0; i < Math.abs(n); i++) d = paso(d, feriados);
+  for (let i = 0; i < Math.abs(n); i++) d = paso(d, feriados, laborablesExtra);
   return d;
 };
 
+/** Resultado de `cargarDiasNoLaborables`: no laborables y, aparte, las excepciones "Jornada". */
+export interface DiasLaborablesConfig {
+  /** Feriados nacionales + días que el calendario configurado marcó como no trabajados. */
+  noLaborables: Set<string>;
+  /**
+   * Fechas que el calendario configurado marcó explícitamente como "Jornada" — se trabajan aunque
+   * caigan en fin de semana o coincidan con un feriado nacional. Es lo que permite habilitar un
+   * sábado puntual como día hábil (ver comentario de `esDiaNoLaborable`).
+   */
+  laborablesExtra: Set<string>;
+}
+
 /**
- * Carga las fechas no laborables desde el calendario configurado en la app. Devuelve un Set de
- * 'yyyy-MM-dd'. Ante cualquier error devuelve un Set vacío: quedarse sin feriados degrada a la
- * conducta anterior (solo fines de semana), que es preferible a romper el cálculo de fechas.
+ * Carga las fechas no laborables (y las excepciones "Jornada") desde el calendario configurado en
+ * la app. Ante cualquier error devuelve solo la línea base de feriados nacionales, sin excepciones:
+ * quedarse sin el calendario configurado degrada a la conducta anterior (feriados nacionales +
+ * fines de semana, sin sábados habilitados), que es preferible a romper el cálculo de fechas.
  */
-export const cargarDiasNoLaborables = async (): Promise<Set<string>> => {
+export const cargarDiasNoLaborables = async (): Promise<DiasLaborablesConfig> => {
   // 1) Línea base: feriados nacionales del año en curso y del siguiente (para que un cálculo hecho
   //    en diciembre no se quede sin los de enero).
   const anio = new Date().getFullYear();
   const fechas = new Set<string>([...feriadosNacionales(anio), ...feriadosNacionales(anio + 1)]);
+  const laborablesExtra = new Set<string>();
 
   // 2) Encima, el calendario configurado en la app: puede agregar días no trabajados (paros,
-  //    mantenimientos, inventarios) y también anular un feriado si ese día se declara como jornada.
+  //    mantenimientos, inventarios) y también anular un feriado, o un fin de semana, si ese día se
+  //    declara como jornada (por ejemplo, un sábado habilitado para cubrir excedente de capacidad).
   try {
     const res = await detalleCalendarioService.getAll();
     const fechasDeDetalle = (det: (typeof res.data)[number]): string[] => {
@@ -180,14 +228,21 @@ export const cargarDiasNoLaborables = async (): Promise<Set<string>> => {
       if (!esNoLaborable && !esLaborable) return;
 
       fechasDeDetalle(det).forEach(f => {
-        if (esNoLaborable) fechas.add(f);
-        else fechas.delete(f); // jornada declarada: ese día SÍ se trabaja, aunque sea feriado
+        if (esNoLaborable) {
+          fechas.add(f);
+          laborablesExtra.delete(f);
+        } else {
+          // Jornada declarada: ese día SÍ se trabaja, sea que caiga en feriado (se anula de
+          // `fechas`) o en fin de semana (se anota aparte, `esDiaNoLaborable` la consulta primero).
+          fechas.delete(f);
+          laborablesExtra.add(f);
+        }
       });
     });
   } catch (e) {
     console.warn('[dias-laborables] No se pudo cargar el calendario configurado; quedan solo los feriados nacionales:', (e as Error).message);
   }
-  return fechas;
+  return { noLaborables: fechas, laborablesExtra };
 };
 
 /**
@@ -217,6 +272,71 @@ const ZONA_HORARIA_NEGOCIO = 'America/Guayaquil';
  * es un reemplazo directo tanto de `String(v).split('T')[0]` como del `soloFecha` que ya existía en
  * Corte y Laminado.
  */
+/**
+ * Convierte una fecha calendario 'yyyy-MM-dd' (fecha de negocio, sin hora) al string que se envía
+ * como `fecha_inicio_plan`/`fecha_fin_plan` — ej. "2026-09-05" -> "2026-09-05T00:00:00.000Z".
+ *
+ * Convención "naive Ecuador" (cambiada 2026-09-10, decisión explícita del usuario, ver
+ * [[plan_grupo_fecha_zona_horaria_escritura]]): estos campos son de nuestra propia app de punta a
+ * punta (los escribimos Y los leemos nosotros) — a diferencia de campos que SAP escribe directamente
+ * (FECHA_ENTREGA, FECHA_OT_PRG_INI/FIN), esos SÍ siguen siendo UTC real. Antes esta función devolvía
+ * "...T05:00:00.000Z" (medianoche
+ * Ecuador expresada correctamente en UTC real) porque el backend, al recibir un string de fecha plano,
+ * lo guardaba como medianoche UTC -- eso SÍ era matemáticamente correcto para un timestamp UTC
+ * genuino, pero el usuario pidió que el dato crudo en base de datos se lea directamente como hora de
+ * Ecuador sin tener que restarle 5 horas al mirarlo en SQL/Excel. Por eso ahora se manda el string
+ * "Z" pero con la hora LITERAL de Ecuador (no un instante UTC real) -- el símbolo "Z" es una
+ * convención de formato para que el backend lo acepte, no una afirmación de que es UTC genuino. La
+ * lectura correspondiente es `fechaLocalPlana` (NO `fechaLocalEcuador`, que sí resta 5h y correría el
+ * día un día hacia atrás sobre este nuevo formato).
+ */
+export const ecuadorMidnightISO = (dateStr: string): string => {
+  const s = String(dateStr ?? '').trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return dateStr;
+  return `${s}T00:00:00.000Z`;
+};
+
+/**
+ * Instante "ahora" para `fecha_creacion` de plan_grupo, en la misma convención "naive Ecuador" que
+ * `ecuadorMidnightISO` (ver su comentario) — la hora LITERAL de Ecuador en este momento, no el
+ * instante UTC real que da `new Date()`. Reemplaza `fecha_creacion: new Date()` en los puntos que
+ * graban P2/P3/PFD.
+ */
+export const ecuadorNowNaiveISO = (): string => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: ZONA_HORARIA_NEGOCIO,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const get = (type: string) => {
+    const v = parts.find(p => p.type === type)?.value ?? '00';
+    // Intl con hour12:false a veces da "24" para la medianoche en vez de "00" (quirk documentado del
+    // motor ICU) -- normalizado acá para no producir una hora inválida en el ISO resultante.
+    return type === 'hour' && v === '24' ? '00' : v;
+  };
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:${get('second')}.000Z`;
+};
+
+/**
+ * Lee `fecha_inicio_plan`/`fecha_fin_plan`/`fecha_creacion` bajo la convención "naive Ecuador" (ver
+ * `ecuadorMidnightISO`) — sin restar zona horaria, porque el valor guardado YA es la hora literal de
+ * Ecuador, no un instante UTC real. Es la lectura que corresponde a `ecuadorMidnightISO`/
+ * `ecuadorNowNaiveISO`. NO usar para campos que SAP escribe directamente (FECHA_ENTREGA,
+ * FECHA_OT_PRG_INI/FIN, fecha_modificacion cuando la genera el backend) -- esos siguen siendo UTC
+ * real y deben seguir leyéndose con `fechaLocalEcuador`.
+ */
+export const fechaLocalPlana = (v: unknown): string => {
+  if (v === null || v === undefined || v === '') return '';
+  if (v instanceof Date) {
+    // Un objeto Date real es un instante genuino (no un string ya escrito en la convención naive) --
+    // sigue necesitando la conversión real de fechaLocalEcuador para dar el día calendario correcto.
+    if (isNaN(v.getTime())) return '';
+    return new Intl.DateTimeFormat('en-CA', { timeZone: ZONA_HORARIA_NEGOCIO, year: 'numeric', month: '2-digit', day: '2-digit' }).format(v);
+  }
+  return String(v).trim().slice(0, 10);
+};
+
 export const fechaLocalEcuador = (v: unknown): string => {
   if (v === null || v === undefined || v === '') return '';
   if (v instanceof Date) {
@@ -237,4 +357,61 @@ export const fechaLocalEcuador = (v: unknown): string => {
     month: '2-digit',
     day: '2-digit',
   }).format(d);
+};
+
+/**
+ * Marca una fecha puntual (típicamente un sábado) como "Jornada" en el calendario configurado —
+ * de modo que `cargarDiasNoLaborables`/`esDiaNoLaborable` la traten como día hábil de ahí en
+ * adelante. Pensado para el botón de confirmación en Laminado/Corte Espuma/Venta Externa cuando el
+ * planificador activa capacidad de sábado puntual (ver [[sabado_dia_habil_condicional]]).
+ *
+ * Requiere que YA EXISTAN un Tipo de Detalle activo con nombre tipo "Jornada" (Parámetros → Tipo de
+ * Detalle) y un Calendario Área activo (Configuraciones → Calendario Área) — son catálogos que debe
+ * crear un administrador a propósito, no algo que deba aparecer como efecto secundario de un clic en
+ * un módulo táctico. Si falta alguno, lanza un error con el mensaje que indica dónde crearlo.
+ *
+ * Si ya existe un detalle activo cubriendo esa fecha (de cualquier tipo), lo REUTILIZA cambiándole
+ * el tipo a Jornada en vez de crear uno superpuesto — evita duplicar registros para el mismo día.
+ */
+export const marcarDiaComoJornada = async (fecha: string, nombreDetalle: string): Promise<void> => {
+  const [tiposRes, calendariosRes, detallesRes] = await Promise.all([
+    tipoDetalleService.getAll(),
+    calendarioService.getAll(),
+    detalleCalendarioService.getAll(),
+  ]);
+
+  const tipoJornada = (tiposRes.data || []).find(t => t.estado === 'A' && TIPO_LABORABLE.test(t.nombre_tipo_detalle || ''));
+  if (!tipoJornada) {
+    throw new Error('No existe un Tipo de Detalle activo con nombre "Jornada" (o similar). Créalo en Parámetros → Tipo de Detalle antes de marcar un sábado.');
+  }
+  const calendario = (calendariosRes.data || []).find(c => c.estado === 'A');
+  if (!calendario) {
+    throw new Error('No existe un Calendario Área activo. Créalo en Configuraciones → Calendario Área antes de marcar un sábado.');
+  }
+
+  const existente = (detallesRes.data || []).find(d => {
+    if (d.estado !== 'A') return false;
+    const inicio = d.fecha_inicio || d.fecha_real;
+    const fin = d.fecha_fin || d.fecha_real || inicio;
+    if (!inicio) return false;
+    const f = format(new Date(inicio), 'yyyy-MM-dd');
+    const h = format(new Date(fin), 'yyyy-MM-dd');
+    return fecha >= f && fecha <= h;
+  });
+
+  const fechaDate = new Date(`${fecha}T00:00:00`);
+  const payload = {
+    codigo_detalle: existente?.codigo_detalle,
+    codigo_calendario: existente?.codigo_calendario ?? calendario.codigo_calendario,
+    codigo_tipo_detalle: tipoJornada.codigo_tipo_detalle,
+    nombre_detalle: nombreDetalle,
+    fecha_real: fechaDate,
+    fecha_inicio: fechaDate,
+    fecha_fin: fechaDate,
+    estado: 'A',
+    fecha_modificacion: new Date(),
+    usuario_modificacion: 'modulo-tactico',
+  } as DetalleCalendario;
+
+  await detalleCalendarioService.save(payload);
 };
