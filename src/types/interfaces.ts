@@ -320,8 +320,12 @@ export interface PlanGrupo {
     codigo_grupo: number;
     codigo_familia_grupo: number;
     valor: string;
-    fecha_inicio_plan: Date;
-    fecha_fin_plan: Date;
+    // Día calendario del plan (sin hora) — se guarda como string naive 'YYYY-MM-DDT00:00:00'
+    // (ver toDatetime2Medianoche en @/lib/fecha-ecuador) para que el backend no le aplique
+    // ninguna conversión de huso horario. Sigue aceptando Date para no romper lecturas ya
+    // existentes que construyen un Date a partir de lo que devuelve la API.
+    fecha_inicio_plan: Date | string;
+    fecha_fin_plan: Date | string;
     estado: string;
     fecha_creacion: Date;
     usuario_creacion: string;
@@ -450,4 +454,41 @@ export interface ProvisionalOrder {
   PosicionPedido?: string;
   PUESTOTRABAJO?: string;
   [key: string]: any;
+}
+
+/**
+ * Payload de entrada del endpoint InsertarSolicitudProduccionHB (inserta una orden de producción
+ * externa en HANA, para que SAP la recoja). Campos obligatorios siempre: Mandante, CodigoOrdenExterna,
+ * ClaseOrden, Centro, CodigoMaterial, CantidadPlanificada, VersionFabricacion, PuestoTrabajo.
+ * Fecha/Hora Fin son obligatorias solo si la clase de orden programa "hacia atrás"; Fecha/Hora Inicio
+ * solo si programa "hacia adelante". PedidoComercial/PosicionPedido solo si la clase de orden es MTO.
+ */
+export interface SolicitudProduccionHB {
+  Mandante: string;
+  CodigoOrdenExterna: string;
+  ClaseOrden: string;
+  Centro: string;
+  CodigoMaterial: string;
+  CantidadPlanificada: number;
+  VersionFabricacion: string;
+  PuestoTrabajo: string;
+  FechaFinProgramada?: string;
+  HoraFinProgramada?: string;
+  FechaInicioProgramada?: string;
+  HoraInicioProgramada?: string;
+  PedidoComercial?: string;
+  PosicionPedido?: string;
+  EstadoRegistro?: string;
+  Observaciones?: string;
+  // FECHA_CARGA/HORA_CARGA (doc oficial de la interfaz SAP ZPPT_ORDER_INT): fecha y hora en que el
+  // aplicativo externo carga el registro — responsabilidad de "el proceso externo de gestión de
+  // Carga", no las llena SAP. Opcionales acá porque no todos los módulos las completan todavía,
+  // pero Programación Táctica Forros siempre las envía (ver getFechaHoraCargaEcuador).
+  FechaCarga?: string;
+  HoraCarga?: string;
+  EstadoCarga?: string;
+  NumeroOrdenSap?: string;
+  FechaProceso?: string;
+  HoraProceso?: string;
+  UsuarioProceso?: string;
 }

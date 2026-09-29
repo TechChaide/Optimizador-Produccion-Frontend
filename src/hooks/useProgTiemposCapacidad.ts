@@ -107,6 +107,60 @@ export function useCantidadInicialPorPuesto(): CantidadInicialPorPuesto {
   return useSyncExternalStore(subscribeCantidadInicial, getCantidadInicialSnapshot, getCantidadInicialSnapshot);
 }
 
+export type OcupacionPorCentroLinea = Record<string, number>;
+
+let ocupacionStore: OcupacionPorCentroLinea = {};
+const ocupacionListeners = new Set<() => void>();
+
+const emitOcupacion = () => ocupacionListeners.forEach(listener => listener());
+
+const subscribeOcupacion = (listener: () => void) => {
+  ocupacionListeners.add(listener);
+  return () => ocupacionListeners.delete(listener);
+};
+
+const getOcupacionSnapshot = () => ocupacionStore;
+
+export function publishOcupacionPorCentroLinea(data: OcupacionPorCentroLinea) {
+  ocupacionStore = { ...ocupacionStore, ...data };
+  emitOcupacion();
+}
+
+export function useOcupacionPorCentroLinea(): OcupacionPorCentroLinea {
+  return useSyncExternalStore(subscribeOcupacion, getOcupacionSnapshot, getOcupacionSnapshot);
+}
+
+export interface ResumenCapacidadRow {
+  centro: string;
+  linea: string;
+  puesto: string;
+  totalCantidad: number;
+  puestosT1: number;
+  puestosT2: number;
+  ocupacion: number;
+}
+
+let resumenCapacidadStore: ResumenCapacidadRow[] = [];
+const resumenCapacidadListeners = new Set<() => void>();
+
+const emitResumenCapacidad = () => resumenCapacidadListeners.forEach(listener => listener());
+
+const subscribeResumenCapacidad = (listener: () => void) => {
+  resumenCapacidadListeners.add(listener);
+  return () => resumenCapacidadListeners.delete(listener);
+};
+
+const getResumenCapacidadSnapshot = () => resumenCapacidadStore;
+
+export function publishResumenCapacidad(rows: ResumenCapacidadRow[]) {
+  resumenCapacidadStore = rows;
+  emitResumenCapacidad();
+}
+
+export function useResumenCapacidad(): ResumenCapacidadRow[] {
+  return useSyncExternalStore(subscribeResumenCapacidad, getResumenCapacidadSnapshot, getResumenCapacidadSnapshot);
+}
+
 // Resultado (por Centro) de la última vez que se ejecutó el botón "Ajustar Capacidad" en
 // "Prog Tiempos" — a diferencia de un store continuo, esto NO se actualiza con cada edición o
 // recálculo en vivo: solo se reemplaza cuando el botón corre para ese Centro. "Plan Propuesto" lo

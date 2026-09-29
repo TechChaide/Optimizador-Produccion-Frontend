@@ -3,7 +3,7 @@ import type { BodyListResponse } from "@/types/body-list-response";
 import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { DetalleTactico } from "../types/interfaces";
-import { fetchWithAuth } from "@/lib/http-client";
+import { fetchWithAuth, extractErrorMessage } from "@/lib/http-client";
 
 const API_URL = `${environment.apiURL}/api/detalle_tactico`;
 
@@ -11,8 +11,7 @@ export const detalleTacticoService = {
   async getAll(): Promise<BodyListResponse<DetalleTactico>> {
     const response = await fetchWithAuth(API_URL);
     if (!response.ok) {
-      const errorText = await response.text().catch(() => 'No body');
-      throw new Error(`Error ${response.status}: Error al obtener los Detalles Tácticos. ${errorText}`);
+      throw new Error(await extractErrorMessage(response, `Error ${response.status}: Error al obtener los Detalles Tácticos`));
     }
     return response.json();
   },
@@ -32,8 +31,7 @@ export const detalleTacticoService = {
       body: JSON.stringify(detalle),
     });
     if (!response.ok) {
-      const errorText = await response.text().catch(() => 'No body');
-      throw new Error(`Error ${response.status}: Error al guardar el detalle táctico. ${errorText}`);
+      throw new Error(await extractErrorMessage(response, `Error ${response.status}: Error al guardar el detalle táctico`));
     }
     return response.json();
   },

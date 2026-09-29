@@ -52,3 +52,6 @@ firebase-debug.log
 firestore-debug.log
 
 package-lock.json
+package-lock.json
+.gitignore
+tsconfig.tsbuildinfo

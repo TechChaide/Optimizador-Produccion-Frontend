@@ -7,6 +7,7 @@ import { restriccionService } from '@/services/restriccion.service';
 import { CalendarDays, Home, Clock, AlertCircle, Loader2, Timer, Plus, ShieldCheck } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import type { Calendario, Restriccion, Grupo } from '@/types/interfaces';
 
 export const HorariosTabSection: React.FC = () => {

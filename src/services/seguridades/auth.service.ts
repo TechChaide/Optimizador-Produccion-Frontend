@@ -34,6 +34,11 @@ export const authService = {
   },
 
   async loginCentral(credentials: any): Promise<BodyResponse<Auth>> {
+    // suppressAuthRedirect: true — un 401 aquí es simplemente "contraseña incorrecta", no una sesión
+    // expirada (ver comentario en fetchWithAuth), así que no debe limpiar+recargar la página. Sigue
+    // enviando cookies normalmente (skipAuth NO se toca) — un intento anterior de arreglo usó
+    // `skipAuth: true` y eso dejó de enviar cookies en el login, lo que puede haber roto la validación
+    // en el backend (dejó de poder loguearse incluso con credenciales correctas, confirmado 2026-09-28).
     const response = await fetchWithAuth(API_URL_CENTRAL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -41,7 +46,7 @@ export const authService = {
         email: credentials.email,
         password: credentials.password,
       }),
-      skipAuth: false,
+      suppressAuthRedirect: true,
     });
 
     if (!response.ok) {

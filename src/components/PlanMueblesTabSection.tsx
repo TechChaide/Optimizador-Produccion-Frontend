@@ -1,9 +1,9 @@
-'use client';
+﻿'use client';
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { serviciosService } from '@/services/servicios.service';
 import { useAppContext } from '@/context/AppProvider';
-import { Package, Check, ChevronsUpDown, Loader2, BellRing, AlertTriangle, Clock, Calendar, CalendarDays, LayoutDashboard, History, ListChecks, ChevronUp, ChevronDown, Calculator, FileJson, Sparkles, CheckCircle2, PieChart, PackageSearch, Mail } from 'lucide-react';
+import { Package, Check, ChevronsUpDown, Loader2, BellRing, AlertTriangle, Clock, Calendar, CalendarDays, LayoutDashboard, History, ListChecks, ChevronUp, ChevronDown, Calculator, FileJson, Sparkles, CheckCircle2, PieChart, PackageSearch, Mail, ClipboardCheck } from 'lucide-react';
 import type { OrdenFert, ProvisionalOrder, Restriccion } from '@/types/interfaces';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -28,6 +28,11 @@ const normalizeMaterialCode = (code: string | number): string => {
 // consume esos snapshots (ya vienen en la prop `restricciones`, filtrada por el Grupo de Muebles) en
 // vez de recalcular una aproximación propia con un horario/N° de mesas genérico.
 const PLAN_DIARIO_PREFIJO = 'PlanDiarioConfig:';
+
+// Solo para el texto "1 equivalente = X min" del recuadro "Unidades Equivalentes Planificadas" — el
+// valor numérico en sí ya viene calculado y congelado en PlanDiarioSnapshotResumen.unidadesEquivalentesPlanificadas
+// (ver MINUTOS_POR_MUEBLE_EQUIVALENTE en ProvisionalOrdersAlphaTab.tsx, ambos deben evolucionar juntos).
+const MINUTOS_POR_MUEBLE_EQUIVALENTE_PLAN = 32.21;
 
 // Copia local de las formas de PlanDiarioSnapshot (definidas en ProvisionalOrdersAlphaTab.tsx) — es el
 // contrato JSON persistido en `descripcion`, así que ambas copias deben evolucionar juntas si cambia el
@@ -56,6 +61,22 @@ interface PlanDiarioSnapshotMesa {
   items: PlanDiarioSnapshotItem[];
 }
 
+// Mismos 6 recuadros de "Detalle de Planificación Ejecutada" de "Plan Táctico (Alpha)", congelados en
+// el momento de guardar el snapshot (ver ProvisionalOrdersAlphaTab.tsx) — permite mostrar ese resumen
+// para fechas ya ejecutadas sin re-derivar la clasificación inmediata/diferida/movible/extra.
+interface PlanDiarioSnapshotResumen {
+  horasRequeridas: number;
+  capacidadDisponible: number;
+  deficitCapacidad: number; // negativo = déficit real, positivo = capacidad sobrante
+  ordenesMtsAdicionalesCount: number;
+  ordenesMtsAdicionalesHoras: number;
+  unidadesFisicasPlanificadas: number;
+  ordenesPlanificadasTotal: number;
+  diferidasCount: number;
+  moviblesCount: number;
+  unidadesEquivalentesPlanificadas: number;
+}
+
 interface PlanDiarioSnapshot {
   fecha: string;
   shiftId: string;
@@ -63,6 +84,7 @@ interface PlanDiarioSnapshot {
   shiftStartTime: string;
   shiftDisplayEndTime: string;
   mesas: PlanDiarioSnapshotMesa[];
+  resumen: PlanDiarioSnapshotResumen | null;
 }
 
 interface PlanSummaryDay {
@@ -126,27 +148,68 @@ const TIPO_MUEBLE_LABEL: Record<TipoMueble, string> = {
 
 // Clasificación por palabras clave en la descripción (NOMBRE) — "CAMA"/"CABECERO" priman sobre "SOFA"
 // porque no se solapan en la práctica; todo lo que no matchea ninguna palabra clave cae en "Otros".
+// Cabeceros: además de la palabra completa "CABECERO", muchos vienen con el nombre abreviado empezando
+// directamente en "CAB" (ej. "CAB CAPRI 105...", confirmado en vivo por el usuario 2026-09-28 — sin esto
+// caían silenciosamente en "Otros", ej. las 12 órdenes de cabecero de la fecha objetivo 01/10/2026 que
+// se veían en el sistema pero el resumen mostraba en 0).
 const clasificarTipoMueble = (nombreRaw: string, tiempoUnitMin: number): TipoMueble => {
   const n = stripAccents(String(nombreRaw || '').toUpperCase());
-  if (n.includes('CABECERO')) return 'CABECEROS';
+  if (n.startsWith('CAB') || n.includes('CABECERO')) return 'CABECEROS';
   if (n.includes('CAMA')) return 'CAMAS';
   if (n.includes('SOFA')) return tiempoUnitMin > SOFA_MINUTOS_GRANDE ? 'SOFAS_GRANDES' : 'SOFAS_PEQUEÑOS';
   return 'OTROS';
 };
 
-// Ventana de fabricación para la Alerta de Riesgo de Stock de Insumos (Telas/Cascos): hoy + los 2 días
-// siguientes (3 días calendario en total), a pedido explícito del usuario. Independiente del filtro
-// Fecha(s) de arriba — igual que resumenPorFecha, es una vista fija sobre TODO el histórico cargado.
-const INSUMO_VENTANA_DIAS = 3;
+// Ventana de fabricación para la Alerta de Riesgo de Stock de Insumos: hoy + los 13 días siguientes (14
+// días calendario en total). Independiente del filtro Fecha(s) de arriba — igual que resumenPorFecha, es
+// una vista fija sobre TODO el histórico cargado.
+// Ampliada de 3 a 14 días (2026-09-08, a pedido explícito del usuario) tras investigar en vivo por qué
+// dos telas con stock casi nulo (0.12/5.06, "TELA MUEBLES RESIFLEX HUGO...") no aparecían en riesgo: sí
+// tenían >60 órdenes Fert pendientes reales, pero todas con FECHA 6-20 días en el futuro (concentradas
+// ~09-14), fuera de la ventana de 3 días vigente entonces. Además esas telas tienen
+// `PlazoEntregaPrevisto` (lead time de compra) = 8 días en el Cubo de Inventarios — con una ventana de
+// solo 3 días, la alerta nunca alcanzaría a dar aviso a tiempo para reordenar. 14 días da margen sobre
+// ese lead time observado; no se implementó ventana dinámica por insumo (usar el propio
+// PlazoEntregaPrevisto de cada uno) porque el usuario eligió explícitamente la opción más simple de
+// ampliar el valor fijo, no la variante dinámica.
+const INSUMO_VENTANA_DIAS = 14;
 
-// Identifica el tipo de insumo por la descripción del COMPONENTE de la explosión de materiales (mismo
-// criterio ya usado en "Plan Táctico (Alpha)" para las tablas "Telas"/"Cascos", ver
-// ProvisionalOrdersAlphaTab.tsx: "TELA MUEBLES..." / "CASCO..."). Devuelve null si no es ninguno de los
-// dos — por ahora la alerta cubre solo Telas/Cascos, pedido explícito del usuario.
-const clasificarTipoInsumo = (descripcionUpper: string): 'Tela' | 'Casco' | null => {
+// Prefijos de DESCRIPCION_COMPONENTE que identifican insumos comprados (no fabricados en planta) más
+// allá de Telas/Cascos — pedido explícito del usuario (2026-09-08) para ampliar la Alerta de Riesgo de
+// Stock a cartón, herrajes, plásticos, etc. Cada prefijo se usa tal cual como etiqueta de "tipo" en la
+// UI (capitalizado), salvo que se indique lo contrario en INSUMO_PREFIJO_LABEL.
+const INSUMO_PREFIJOS_GENERALES = [
+  'CARTON', 'CERTIFICADO', 'ETIQUETA', 'FUNDA', 'GARRUCHA', 'HERRAJE', 'NIVELADOR',
+  'PADDING', 'PATA', 'PLACA', 'PLASTICO', 'RESBALON', 'RODELA', 'STICKER',
+  'TACO', 'TORNILLO',
+];
+
+const INSUMO_PREFIJO_LABEL: Record<string, string> = {
+  CARTON: 'Cartón', CERTIFICADO: 'Certificado', ETIQUETA: 'Etiqueta', FUNDA: 'Funda',
+  GARRUCHA: 'Garrucha', HERRAJE: 'Herraje', NIVELADOR: 'Nivelador', PADDING: 'Padding',
+  PATA: 'Pata', PLACA: 'Placa', PLASTICO: 'Plástico', RESBALON: 'Resbalón',
+  RODELA: 'Rodela', STICKER: 'Sticker', TACO: 'Taco', TORNILLO: 'Tornillo',
+};
+
+// Prefijos de componentes ficticios/semielaborados fabricados en planta (no son insumos comprados) —
+// se descartan explícitamente aunque coincidieran por error con algún prefijo de insumo real, pedido
+// explícito del usuario. "PLUMON" se agregó el 2026-09-08 (segunda corrección): no es un insumo comprado,
+// es un semielaborado fabricado en planta, se descarta igual que ENSAMBLE/BASE/ESTRUCTURA/etc. No se
+// solapan hoy con INSUMO_PREFIJOS_GENERALES, pero se chequean primero como salvaguarda ante futuros
+// prefijos que sí puedan colisionar.
+const COMPONENTE_FICTICIO_PREFIJOS = ['ENSAMBLE', 'BASE', 'ESTRUCTURA', 'FORRO BASE', 'FORRO', 'LAMINA', 'PLUMON'];
+
+// Identifica el tipo de insumo por la descripción del COMPONENTE de la explosión de materiales. Telas y
+// Cascos (criterio ya usado en "Plan Táctico (Alpha)": "TELA MUEBLES..." / "CASCO...") siguen siendo los
+// más relevantes; a partir de 2026-09-08 se amplía a otros insumos comprados vía
+// INSUMO_PREFIJOS_GENERALES, descartando explícitamente semielaborados fabricados en planta. Devuelve
+// null si no matchea ningún insumo conocido o si es un componente ficticio a descartar.
+const clasificarTipoInsumo = (descripcionUpper: string): string | null => {
   if (descripcionUpper.startsWith('TELA MUEBLES')) return 'Tela';
   if (descripcionUpper.startsWith('CASCO')) return 'Casco';
-  return null;
+  if (COMPONENTE_FICTICIO_PREFIJOS.some(p => descripcionUpper.startsWith(p))) return null;
+  const prefijo = INSUMO_PREFIJOS_GENERALES.find(p => descripcionUpper.startsWith(p));
+  return prefijo ? INSUMO_PREFIJO_LABEL[prefijo] : null;
 };
 
 // Devuelve los códigos (normalizados) que cuelgan, a cualquier profundidad, de "TELA DE APROVECHAMIENTO"
@@ -189,7 +252,7 @@ const getCodigosBajoTelaAprovechamiento = (components: any[]): Set<string> => {
 };
 
 interface InsumoRiesgoItem {
-  tipo: 'Tela' | 'Casco';
+  tipo: string;
   componente: string;
   descripcion: string;
   unidad: string;
@@ -198,6 +261,23 @@ interface InsumoRiesgoItem {
   consumoPasado: number;
   disponibleReal: number | null;
   cantidadNetaAConseguir: number;
+}
+
+// Una fila de "GENERAR INFORME DE RIESGO": una orden (Previsional o Fert) que consume, como componente
+// de su explosión de materiales, el insumo en riesgo — con el detalle de pedido/cliente resuelto vía
+// Pendientes Totales, igual patrón que ParentOrderRow en PlanGrupoRecuperadoTab.tsx.
+interface InsumoOrdenDetalle {
+  source: 'Previsional' | 'Fert';
+  id: string;
+  pedido: string;
+  posicion: string;
+  material: string;
+  nombre: string;
+  cliente: string;
+  fecha: string;
+  cantidadPendiente: number;
+  consumoComponente: number;
+  ventana: 'Pasada' | 'Futura';
 }
 
 // Diagrama de Gantt "tal cual" el de "Plan Táctico (Alpha)" (mismo layout/colores/leyenda/eje de
@@ -390,6 +470,52 @@ const buildResumenPorTipoMuebleHtml = (
     </table>`;
 };
 
+// Mismos 6 recuadros de "Detalle de Planificación Ejecutada" (ver el bloque equivalente en JSX,
+// detalleEjecutadoResumen) — dos filas de 3 columnas, mismo patrón de tabla título+valores que el resto
+// del correo (buildCapacidadEstadoHtml, etc.), para que se vea bien también en Outlook.
+const buildDetalleEjecutadoHtml = (r: {
+  horasRequeridas: number;
+  capacidadDisponible: number;
+  deficitCapacidad: number;
+  ordenesMtsAdicionalesCount: number;
+  ordenesMtsAdicionalesHoras: number;
+  unidadesFisicasPlanificadas: number;
+  ordenesPlanificadasTotal: number;
+  diferidasCount: number;
+  moviblesCount: number;
+  unidadesEquivalentesPlanificadas: number;
+  fechasConDatos: number;
+  fechasSinDatos: number;
+}): string => {
+  const esSobrante = r.deficitCapacidad >= 0;
+  return `
+    <p style="font-size:10px;color:#6b7280;margin:0 0 8px;">${r.fechasConDatos} fecha(s) con datos${r.fechasSinDatos > 0 ? ` · ${r.fechasSinDatos} sin Distribución de Mesas guardada` : ''}</p>
+    <table style="border-collapse:collapse;width:100%;margin-bottom:8px;" cellpadding="0" cellspacing="0">
+      <tr>
+        <th style="${CORREO_TH_STYLE}">Horas Requeridas (Compromisos Inmediatos)</th>
+        <th style="${CORREO_TH_STYLE}">Capacidad Disponible</th>
+        <th style="${CORREO_TH_STYLE}${esSobrante ? 'color:#15803d;' : 'color:#b91c1c;'}">${esSobrante ? 'Capacidad Sobrante' : 'Déficit de Capacidad'}</th>
+      </tr>
+      <tr>
+        <td style="${CORREO_TD_STYLE}font-weight:bold;color:#1d4ed8;">${r.horasRequeridas.toFixed(2)} h</td>
+        <td style="${CORREO_TD_STYLE}font-weight:bold;color:#15803d;">${r.capacidadDisponible.toFixed(2)} h</td>
+        <td style="${CORREO_TD_STYLE}font-weight:bold;${esSobrante ? 'color:#15803d;' : 'color:#b91c1c;'}">${Math.abs(r.deficitCapacidad).toFixed(2)} h</td>
+      </tr>
+    </table>
+    <table style="border-collapse:collapse;width:100%;" cellpadding="0" cellspacing="0">
+      <tr>
+        <th style="${CORREO_TH_STYLE}">Órdenes MTS Adicionales (Relleno de Capacidad)</th>
+        <th style="${CORREO_TH_STYLE}">Unidades Físicas Planificadas</th>
+        <th style="${CORREO_TH_STYLE}">Unidades Equivalentes Planificadas</th>
+      </tr>
+      <tr>
+        <td style="${CORREO_TD_STYLE}font-weight:bold;color:#6d28d9;">${r.ordenesMtsAdicionalesCount}<br/><span style="font-size:10px;font-weight:normal;">${r.ordenesMtsAdicionalesHoras.toFixed(2)} h agregadas</span></td>
+        <td style="${CORREO_TD_STYLE}font-weight:bold;color:#4338ca;">${r.unidadesFisicasPlanificadas.toLocaleString()}<br/><span style="font-size:10px;font-weight:normal;">${r.ordenesPlanificadasTotal} órdenes en total${(r.diferidasCount > 0 || r.moviblesCount > 0) ? ` (excl. ${r.diferidasCount} diferida(s)/${r.moviblesCount} movible(s))` : ''}</span></td>
+        <td style="${CORREO_TD_STYLE}font-weight:bold;color:#0e7490;">${r.unidadesEquivalentesPlanificadas.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}<br/><span style="font-size:10px;font-weight:normal;">1 equiv. = ${MINUTOS_POR_MUEBLE_EQUIVALENTE_PLAN} min</span></td>
+      </tr>
+    </table>`;
+};
+
 const buildCapacidadEstadoHtml = (
   globalSummary: { totalCant: number; totalHours: number },
   avgDailyCapacityHours: number,
@@ -547,11 +673,25 @@ const buildGanttHtml = (planSummaryByDate: PlanSummaryDay[]): string => {
       </div>`;
   }).join('');
 
-  return `<p style="${CORREO_SECTION_TITLE_STYLE}border-radius:6px 6px 0 0;">Diagrama de Gantt — Plan Diario Guardado (Plan Táctico)</p><div style="border:1px solid #e5e7eb;border-top:none;padding:12px;overflow-x:auto;">${dias}</div>`;
+  return `<div style="border:1px solid #e5e7eb;border-top:none;padding:12px;overflow-x:auto;">${dias}</div>`;
 };
 
 interface ReporteCorreoParams {
   fechasFiltro: string[];
+  detalleEjecutado: {
+    horasRequeridas: number;
+    capacidadDisponible: number;
+    deficitCapacidad: number;
+    ordenesMtsAdicionalesCount: number;
+    ordenesMtsAdicionalesHoras: number;
+    unidadesFisicasPlanificadas: number;
+    ordenesPlanificadasTotal: number;
+    diferidasCount: number;
+    moviblesCount: number;
+    unidadesEquivalentesPlanificadas: number;
+    fechasConDatos: number;
+    fechasSinDatos: number;
+  } | null;
   resumenPorFecha: { fecha: string; ordenes: number; unidades: number; horas: number; sinTiempoCount: number }[];
   resumenPorTipoMueble: { tipo: TipoMueble; unidades: number; ordenes: number; pct: number }[];
   globalSummary: { totalCant: number; totalHours: number };
@@ -560,6 +700,11 @@ interface ReporteCorreoParams {
   planSummaryByDate: PlanSummaryDay[];
 }
 
+// Orden de secciones del informe por correo — pedido explícito del usuario 2026-09-16:
+// 1. Detalle de Planificación Ejecutada, 2. Desglose por Fecha y Mesa, 3. Resumen por Tipo de Mueble,
+// 4. Diagrama de Gantt, 5. Resumen de Órdenes Lanzadas por Fecha, 6. Capacidad Consolidada y Estado de
+// Órdenes (antes el orden era distinto: Resumen por Fecha, Tipo de Mueble, Capacidad/Estado, Desglose,
+// Gantt — y no existía la sección de Detalle de Planificación Ejecutada).
 const buildReporteCorreoHtml = (p: ReporteCorreoParams): string => {
   const fechasLabel = p.fechasFiltro.length > 0 ? p.fechasFiltro.join(', ') : 'Todas las fechas disponibles';
   const seccionTitulo = (n: number, titulo: string) => `<p style="${CORREO_SECTION_TITLE_STYLE}border-radius:6px 6px 0 0;margin-top:20px;">${n}. ${escapeHtml(titulo)}</p>`;
@@ -570,27 +715,33 @@ const buildReporteCorreoHtml = (p: ReporteCorreoParams): string => {
       <h2 style="font-size:16px;color:#1e293b;margin:0 0 4px;">Planificación Táctica Muebles — Reporte "PLAN"</h2>
       <p style="font-size:11px;color:#6b7280;margin:0 0 16px;">Fecha(s) del filtro: <strong>${escapeHtml(fechasLabel)}</strong> — generado ${escapeHtml(new Date().toLocaleString('es-EC'))}</p>
 
-      ${seccionTitulo(1, 'Resumen de Órdenes Lanzadas por Fecha')}
-      <div style="border:1px solid #e5e7eb;border-top:none;padding:10px;overflow-x:auto;">
-        ${buildResumenPorFechaHtml(p.resumenPorFecha)}
-      </div>
-
-      ${seccionTitulo(2, 'Resumen por Tipo de Mueble (Filtro Actual)')}
+      ${seccionTitulo(1, 'Detalle de Planificación Ejecutada')}
       <div style="border:1px solid #e5e7eb;border-top:none;padding:10px;">
-        ${buildResumenPorTipoMuebleHtml(p.resumenPorTipoMueble)}
+        ${p.detalleEjecutado ? buildDetalleEjecutadoHtml(p.detalleEjecutado) : '<p style="font-size:12px;color:#6b7280;">Ninguna fecha del filtro tiene una Distribución de Mesas guardada desde "Plan Táctico (Alpha)".</p>'}
       </div>
 
-      ${seccionTitulo(3, 'Capacidad Consolidada y Estado de Órdenes')}
-      <div style="border:1px solid #e5e7eb;border-top:none;padding:10px;">
-        ${buildCapacidadEstadoHtml(p.globalSummary, p.avgDailyCapacityHours, p.statusSummary)}
-      </div>
-
-      ${seccionTitulo(4, 'Desglose por Fecha y Mesa (Filtro Actual)')}
+      ${seccionTitulo(2, 'Desglose por Fecha y Mesa (Filtro Actual)')}
       <div style="border:1px solid #e5e7eb;border-top:none;padding:10px;">
         ${buildDesglosePorFechaYMesaHtml(p.planSummaryByDate)}
       </div>
 
-      ${ganttHtml ? `<div style="margin-top:20px;">${ganttHtml}</div>` : ''}
+      ${seccionTitulo(3, 'Resumen por Tipo de Mueble (Filtro Actual)')}
+      <div style="border:1px solid #e5e7eb;border-top:none;padding:10px;">
+        ${buildResumenPorTipoMuebleHtml(p.resumenPorTipoMueble)}
+      </div>
+
+      ${seccionTitulo(4, 'Diagrama de Gantt — Plan Diario Guardado (Plan Táctico)')}
+      ${ganttHtml || '<div style="border:1px solid #e5e7eb;border-top:none;padding:10px;"><p style="font-size:12px;color:#6b7280;margin:0;">Ninguna fecha del filtro tiene una Distribución de Mesas guardada.</p></div>'}
+
+      ${seccionTitulo(5, 'Resumen de Órdenes Lanzadas por Fecha')}
+      <div style="border:1px solid #e5e7eb;border-top:none;padding:10px;overflow-x:auto;">
+        ${buildResumenPorFechaHtml(p.resumenPorFecha)}
+      </div>
+
+      ${seccionTitulo(6, 'Capacidad Consolidada y Estado de Órdenes')}
+      <div style="border:1px solid #e5e7eb;border-top:none;padding:10px;">
+        ${buildCapacidadEstadoHtml(p.globalSummary, p.avgDailyCapacityHours, p.statusSummary)}
+      </div>
     </div>`;
 };
 
@@ -727,6 +878,9 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   const [isMounted, setIsMounted] = useState(false);
   const [orders, setOrders] = useState<any[]>([]);
   const [deliveryDatesMap, setDeliveryDatesMap] = useState<Map<string, string>>(new Map());
+  // Cliente (DESTINATARIO_MERCADERIA/NOMBRE) por PEDIDO — usado por "GENERAR INFORME DE RIESGO" de la
+  // Alerta de Riesgo de Stock de Insumos, ver useEffect de fetchPendientesMapping más abajo.
+  const [clienteMap, setClienteMap] = useState<Map<string, string>>(new Map());
   const [pagination, setPagination] = useState<PaginationState>({
     currentPage: 1,
     totalRegistros: 0,
@@ -751,6 +905,16 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   const [emailDestino, setEmailDestino] = useState('');
   const [emailAsunto, setEmailAsunto] = useState('Reporte de Producción - Plan Táctico Muebles');
   const [emailSending, setEmailSending] = useState(false);
+
+  // Destinatarios del "Informe Ejecutivo" ya NO se ingresan a mano — se toman de la Restricción
+  // "CORREOS_ELECTRONICOS_INFORME_EJECUTIVO" del Grupo de Muebles (valor_restriccion = lista de correos
+  // separados por coma, mismo patrón de "Nombre Restricción/Valor" que el resto de Restricciones), pedido
+  // explícito del usuario 2026-09-16. Se recalcula solo si cambia la lista de restricciones cargadas.
+  const NOMBRE_RESTRICCION_CORREOS_INFORME = 'CORREOS_ELECTRONICOS_INFORME_EJECUTIVO';
+  const correosInformeEjecutivo = useMemo(() => {
+    const restriccion = restricciones.find(r => r.nombre_restriccion?.trim().toUpperCase() === NOMBRE_RESTRICCION_CORREOS_INFORME);
+    return (restriccion?.valor_restriccion || '').trim();
+  }, [restricciones]);
 
   const topScrollRef = useRef<HTMLDivElement>(null);
   const tableScrollRef = useRef<HTMLDivElement>(null);
@@ -840,37 +1004,56 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
     'MAQUINA', 'PUESTOTRABAJO', 'SECTORDESC', 'CATEGORIA', 'RESPCTRLPROD'
   ];
 
-  // Cargar fechas de entrega desde PEND TOTALES para el cruce de información
+  // Cargar fechas de entrega Y cliente (DESTINATARIO_MERCADERIA/NOMBRE) desde Pendientes Totales para el
+  // cruce de información — paginado completo (antes solo se pedía una página de 20000, incompleta frente
+  // al total real ~23000+ registros, dejando pedidos sin fecha/cliente resuelto al azar según el orden de
+  // los datos; se corrige aquí porque "GENERAR INFORME DE RIESGO" necesita el Cliente resuelto de forma
+  // confiable para cualquier pedido). Mismo patrón (`destinatarioMap`) que buildPendientesMaps en
+  // PlanGrupoRecuperadoTab.tsx.
   useEffect(() => {
     if (!isMounted) return;
 
-    const fetchDeliveryDatesMapping = async () => {
+    const fetchPendientesMapping = async () => {
       try {
-        const response = await serviciosService.getPendientesTotales(1, 20000);
-        if (response.data) {
-          const data = Array.isArray(response.data) ? response.data : [response.data];
-          const map = new Map<string, string>();
-          data.forEach((item: any) => {
-            const pedido = String(item.PEDIDO || '').trim();
-            if (pedido) {
-              const dia = String(item.DIAENTREGA || '').padStart(2, '0');
-              const mes = String(item.MESENTREGA || '').padStart(2, '0');
-              const anio = String(item.ANIOENTREGA || '');
-              
-              if (dia !== '00' && mes !== '00' && anio) {
-                const formattedDate = `${dia}-${mes}-${anio}`;
-                map.set(pedido, formattedDate);
-                map.set(pedido.replace(/^0+/, ''), formattedDate);
-              }
-            }
-          });
-          setDeliveryDatesMap(map);
+        const explore = await serviciosService.getPendientesTotales(1, 1);
+        const total = explore.totalRegistros || 0;
+        let combined: any[] = [];
+        if (total > 0) {
+          const BATCH = 20000;
+          const pages = Math.ceil(total / BATCH);
+          for (let i = 1; i <= pages; i++) {
+            const res = await serviciosService.getPendientesTotales(i, BATCH);
+            if (res.data) combined = combined.concat(Array.isArray(res.data) ? res.data : [res.data]);
+          }
         }
+
+        const dateMap = new Map<string, string>();
+        const clientMap = new Map<string, string>();
+        combined.forEach((item: any) => {
+          const pedido = String(item.PEDIDO || '').trim();
+          if (!pedido) return;
+
+          const cliente = String(item.DESTINATARIO_MERCADERIA || item.NOMBRE || '').trim();
+          if (cliente && !clientMap.has(pedido)) {
+            clientMap.set(pedido, cliente);
+            clientMap.set(pedido.replace(/^0+/, ''), cliente);
+          }
+
+          const dia = String(item.DIAENTREGA || '').padStart(2, '0');
+          const mes = String(item.MESENTREGA || '').padStart(2, '0');
+          const anio = String(item.ANIOENTREGA || '');
+          if (dia === '00' || mes === '00' || !anio) return;
+          const formattedDate = `${dia}-${mes}-${anio}`;
+          dateMap.set(pedido, formattedDate);
+          dateMap.set(pedido.replace(/^0+/, ''), formattedDate);
+        });
+        setDeliveryDatesMap(dateMap);
+        setClienteMap(clientMap);
       } catch (e) {
-        console.error("Error cargando mapeo de fechas de entrega", e);
+        console.error("Error cargando mapeo de fechas de entrega/cliente", e);
       }
     };
-    fetchDeliveryDatesMapping();
+    fetchPendientesMapping();
   }, [isMounted]);
 
   useEffect(() => {
@@ -901,13 +1084,20 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
         }
 
         const validResp = ['019', '006'];
-        
-        const fertMapped = allFert.filter(o => 
+
+        const fertMapped = allFert.filter(o =>
           validResp.includes(String(o.RESPCTRLPROD).trim()) && o.CENTRO === '1000'
         ).map(o => ({ ...o, _isPrevisional: false, _displayId: o.ORDEN }));
 
+        // Bugfix (2026-09-08, encontrado investigando por qué faltaban telas en la Alerta de Riesgo de
+        // Insumos): el campo real que devuelve /OrdenesProvisionalesPaginadas es "Centro" (verificado en
+        // vivo contra la API), NO "CENTRO" — `ProvisionalOrder.CENTRO` (types.ts) nunca coincidió con el
+        // dato real. `o.CENTRO === '1000'` daba SIEMPRE `undefined === '1000'` = false, así que TODAS las
+        // Órdenes Previsionales quedaban excluidas silenciosamente de esta pestaña "PLAN" (tabla
+        // principal, resúmenes, bottleneck, y Riesgo de Insumos) — grave dado que Previsional será ~90%
+        // del volumen a futuro (ver [[project_muebles_tactico_kardex]], entrada 2026-09-04).
         const provMapped = allProv.filter(o =>
-          validResp.includes(String(o.RESPCONTROLPROD).trim()) && o.CENTRO === '1000'
+          validResp.includes(String(o.RESPCONTROLPROD).trim()) && (o as any).Centro === '1000'
         ).map(o => ({
           FECHA: o.FECHAINICIO,
           PEDIDO: (o as any).PEDIDOVENTAS || '',
@@ -917,7 +1107,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
           NOMBRE: o.NOMBRE,
           CANTPROGRAMADA: o.CANTIDAD,
           CANTPENDIENTE: o.CANTIDAD,
-          CENTRO: o.CENTRO,
+          CENTRO: (o as any).Centro,
           MAQUINA: o.Maquina,
           PUESTOTRABAJO: o.PUESTOTRABAJO || o.Maquina,
           RESPCTRLPROD: o.RESPCONTROLPROD,
@@ -1147,12 +1337,23 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
     }));
   }, [filteredOrders, tiemposMap, displayMode]);
 
-  // Alerta de Riesgo de Stock — Insumos (Telas/Cascos): cálculo bajo demanda (botón), no automático,
-  // porque requiere una Explosión de Materiales por cada material único con demanda (una llamada de red
-  // por material, mismo costo que "Calcular Explosión" de más abajo). Cachea el Stock Actual (Cubo de
-  // Inventarios) tras la primera vez que se calcula.
+  // Alerta de Riesgo de Stock — Insumos (Telas/Cascos y, desde 2026-09-08, cartón/herrajes/plásticos/etc.
+  // vía INSUMO_PREFIJOS_GENERALES): cálculo bajo demanda (botón), no automático, porque requiere una
+  // Explosión de Materiales por cada material único con demanda (una llamada de red por material, mismo
+  // costo que "Calcular Explosión" de más abajo). Cachea el Stock Actual (Cubo de Inventarios) tras la
+  // primera vez que se calcula.
   const [materialStockActualMap, setMaterialStockActualMap] = useState<Map<string, number> | null>(null);
-  const [insumoStockState, setInsumoStockState] = useState<{ items: InsumoRiesgoItem[]; loading: boolean; calculatedAt: string | null }>({ items: [], loading: false, calculatedAt: null });
+  const [insumoStockState, setInsumoStockState] = useState<{ items: InsumoRiesgoItem[]; detalleMap: Map<string, InsumoOrdenDetalle[]>; loading: boolean; calculatedAt: string | null }>({ items: [], detalleMap: new Map(), loading: false, calculatedAt: null });
+  // "GENERAR INFORME DE RIESGO": un solo botón/modal que detalla TODOS los insumos en riesgo calculados y,
+  // para cada uno, las órdenes afectadas — no uno por insumo (a pedido explícito del usuario, 2026-09-08).
+  const [informeRiesgoOpen, setInformeRiesgoOpen] = useState(false);
+  // "GENERAR INFORME COMERCIAL": versión resumida del Informe de Riesgo para el área comercial (a
+  // quienes se les compartirá el link de esta pantalla para revisar a diario, pedido explícito del
+  // usuario 2026-09-14) — un listado plano de pedidos afectados, sin el detalle técnico de Stock
+  // Actual/Necesario/Disponible que sí necesita el Informe de Riesgo. Una fila por (orden, insumo en
+  // riesgo que la afecta): si una orden está bloqueada por más de un insumo, aparece una vez por cada
+  // uno con su propia "Razón de Riesgo", en vez de una sola fila con motivos combinados.
+  const [informeComercialOpen, setInformeComercialOpen] = useState(false);
 
   const ensureStockMap = async (): Promise<Map<string, number>> => {
     if (materialStockActualMap) return materialStockActualMap;
@@ -1181,7 +1382,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   // Kardex: Disponible Real = Stock Actual - Consumo de Órdenes Pasadas Pendientes (sin Producción
   // Propia Pendiente — Telas/Cascos son insumos comprados, no se fabrican en Muebles, mismo criterio ya
   // establecido en "Plan Táctico (Alpha)"). Riesgo cuando Cantidad Neta Requerida (Necesario de la
-  // ventana de 3 días - Disponible Real) > 0.
+  // ventana de INSUMO_VENTANA_DIAS días - Disponible Real) > 0.
   const handleCalcularRiesgoInsumos = async () => {
     setInsumoStockState(prev => ({ ...prev, loading: true }));
     try {
@@ -1197,6 +1398,12 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
 
       const demandMap = new Map<string, number>();
       const pastDemandMap = new Map<string, number>();
+      // Órdenes concretas (Previsional/Fert) detrás de cada material top-level, para poder desglosar
+      // "GENERAR INFORME DE RIESGO" por orden más abajo — sin esto solo tendríamos el total agregado por
+      // material, igual que ya le pasó a la investigación de déficit de "Plan Grupo Recuperado" (ver
+      // memoria de ese módulo: la composición exacta de órdenes no es reconstruible si no se guarda aquí).
+      const ordersByMaterialFuturo = new Map<string, typeof structuralFilteredOrders>();
+      const ordersByMaterialPasado = new Map<string, typeof structuralFilteredOrders>();
       structuralFilteredOrders.forEach(o => {
         const fecha = String(o.FECHA || '').trim();
         if (!fecha) return;
@@ -1205,22 +1412,29 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
         const material = normalizeMaterialCode(o.MATERIAL);
         if (ventanaKeys.has(fecha)) {
           demandMap.set(material, (demandMap.get(material) || 0) + pendiente);
+          if (!ordersByMaterialFuturo.has(material)) ordersByMaterialFuturo.set(material, []);
+          ordersByMaterialFuturo.get(material)!.push(o);
         } else if (fecha < todayKey) {
           pastDemandMap.set(material, (pastDemandMap.get(material) || 0) + pendiente);
+          if (!ordersByMaterialPasado.has(material)) ordersByMaterialPasado.set(material, []);
+          ordersByMaterialPasado.get(material)!.push(o);
         }
       });
 
       const uniqueMaterials = Array.from(new Set([...demandMap.keys(), ...pastDemandMap.keys()]));
       if (uniqueMaterials.length === 0) {
-        setInsumoStockState({ items: [], loading: false, calculatedAt: new Date().toLocaleString('es-EC') });
-        addNotification('info', 'No hay órdenes pendientes en la ventana de 3 días ni en el histórico pasado.');
+        setInsumoStockState({ items: [], detalleMap: new Map(), loading: false, calculatedAt: new Date().toLocaleString('es-EC') });
+        addNotification('info', `No hay órdenes pendientes en la ventana de ${INSUMO_VENTANA_DIAS} días ni en el histórico pasado.`);
         return;
       }
 
       const grouped = new Map<string, InsumoRiesgoItem>();
+      const detalleMap = new Map<string, InsumoOrdenDetalle[]>();
       for (const material of uniqueMaterials) {
         const parentDemand = demandMap.get(material) || 0;
         const parentPastDemand = pastDemandMap.get(material) || 0;
+        const ordenesFuturas = ordersByMaterialFuturo.get(material) || [];
+        const ordenesPasadas = ordersByMaterialPasado.get(material) || [];
         const res = await serviciosService.getMaestroMaterialesExplosion('1000', material, 1, 5000);
         if (!res.data) continue;
         const components = Array.isArray(res.data) ? res.data : [res.data];
@@ -1251,6 +1465,28 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
           const entry = grouped.get(componente)!;
           entry.necesario += necesario;
           entry.consumoPasado += consumoPasado;
+
+          if (!detalleMap.has(componente)) detalleMap.set(componente, []);
+          const detalleList = detalleMap.get(componente)!;
+          [...ordenesFuturas.map(o => ({ o, ventana: 'Futura' as const })), ...ordenesPasadas.map(o => ({ o, ventana: 'Pasada' as const }))]
+            .forEach(({ o, ventana }) => {
+              const cantidadPendiente = Number(o.CANTPENDIENTE) || 0;
+              if (cantidadPendiente <= 0) return;
+              const pedido = String(o.PEDIDO || '').trim();
+              detalleList.push({
+                source: o._isPrevisional ? 'Previsional' : 'Fert',
+                id: String(o._displayId || ''),
+                pedido,
+                posicion: String(o.POSICION || '').trim(),
+                material: String(o.MATERIAL || '').trim(),
+                nombre: String(o.NOMBRE || '').trim(),
+                cliente: clienteMap.get(pedido) || clienteMap.get(pedido.replace(/^0+/, '')) || (pedido ? 'Cliente no identificado' : 'Sin Pedido (MTS)'),
+                fecha: String(o.FECHA || '').trim(),
+                cantidadPendiente,
+                consumoComponente: cantBase * cantidadPendiente,
+                ventana,
+              });
+            });
         });
       }
 
@@ -1264,17 +1500,45 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
         .filter(item => item.cantidadNetaAConseguir > 0)
         .sort((a, b) => b.cantidadNetaAConseguir - a.cantidadNetaAConseguir);
 
-      setInsumoStockState({ items: results, loading: false, calculatedAt: new Date().toLocaleString('es-EC') });
+      results.forEach(item => {
+        detalleMap.get(item.componente)?.sort((a, b) => a.fecha.localeCompare(b.fecha));
+      });
+
+      setInsumoStockState({ items: results, detalleMap, loading: false, calculatedAt: new Date().toLocaleString('es-EC') });
       if (results.length === 0) {
-        addNotification('success', 'Sin riesgo de faltante de Telas/Cascos detectado para hoy y los próximos 3 días.');
+        addNotification('success', `Sin riesgo de faltante de insumos detectado para hoy y los próximos ${INSUMO_VENTANA_DIAS} días.`);
       } else {
-        addNotification('warning', `${results.length} insumo(s) (Tela/Casco) con riesgo de faltante detectado(s).`);
+        addNotification('warning', `${results.length} insumo(s) con riesgo de faltante detectado(s).`);
       }
     } catch (e) {
       addNotification('error', `Error al calcular riesgo de insumos: ${(e as Error).message}`);
       setInsumoStockState(prev => ({ ...prev, loading: false }));
     }
   };
+
+  // Filas del "INFORME COMERCIAL": aplana insumoStockState.detalleMap (agrupado por insumo) a un
+  // listado plano de pedidos, con la Razón de Riesgo (tipo + código del insumo) como texto simple —
+  // formato pedido explícito del usuario 2026-09-14 para compartir con el área comercial.
+  const informeComercialRows = useMemo(() => {
+    const rows: { orden: string; pedido: string; posicion: string; material: string; descripcion: string; cantidad: number; cliente: string; razon: string }[] = [];
+    insumoStockState.items.forEach(item => {
+      const detalles = insumoStockState.detalleMap.get(item.componente) || [];
+      const razon = `Falta de ${item.tipo} ${item.componente}`;
+      detalles.forEach(d => {
+        rows.push({
+          orden: d.id,
+          pedido: d.pedido,
+          posicion: d.posicion,
+          material: d.material,
+          descripcion: d.nombre,
+          cantidad: d.cantidadPendiente,
+          cliente: d.cliente,
+          razon,
+        });
+      });
+    });
+    return rows;
+  }, [insumoStockState]);
 
   // Desglose por Fecha y Mesa: ya NO se recalcula con un horario/N° de mesas genérico ni con un
   // ranking artificial de tapiceros — se lee tal cual el snapshot de Plan Diario guardado desde "Plan
@@ -1297,6 +1561,31 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
       };
     }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   }, [selectedDates, displayMode, planDiarioSnapshotsByDate]);
+
+  // "DETALLE DE PLANIFICACIÓN EJECUTADA": suma el `resumen` congelado (ver PlanDiarioSnapshotResumen)
+  // de cada fecha seleccionada que sí tenga snapshot guardado — pedido explícito del usuario 2026-09-16,
+  // primer recuadro de la pestaña "PLAN" y del informe por correo. `null` si ninguna fecha seleccionada
+  // tiene snapshot (nunca se ejecutó "Distribución de Mesas" ese día en "Plan Táctico (Alpha)").
+  const detalleEjecutadoResumen = useMemo(() => {
+    if (displayMode !== 'plan') return null;
+    const conSnapshot = planSummaryByDate.filter(d => d.snapshot?.resumen);
+    if (conSnapshot.length === 0) return null;
+    const sum = (fn: (r: PlanDiarioSnapshotResumen) => number) => conSnapshot.reduce((s, d) => s + fn(d.snapshot!.resumen as PlanDiarioSnapshotResumen), 0);
+    return {
+      horasRequeridas: sum(r => r.horasRequeridas),
+      capacidadDisponible: sum(r => r.capacidadDisponible),
+      deficitCapacidad: sum(r => r.deficitCapacidad),
+      ordenesMtsAdicionalesCount: sum(r => r.ordenesMtsAdicionalesCount),
+      ordenesMtsAdicionalesHoras: sum(r => r.ordenesMtsAdicionalesHoras),
+      unidadesFisicasPlanificadas: sum(r => r.unidadesFisicasPlanificadas),
+      ordenesPlanificadasTotal: sum(r => r.ordenesPlanificadasTotal),
+      diferidasCount: sum(r => r.diferidasCount),
+      moviblesCount: sum(r => r.moviblesCount),
+      unidadesEquivalentesPlanificadas: sum(r => r.unidadesEquivalentesPlanificadas),
+      fechasConDatos: conSnapshot.length,
+      fechasSinDatos: planSummaryByDate.length - conSnapshot.length,
+    };
+  }, [planSummaryByDate, displayMode]);
 
   const totalPagesLocal = Math.ceil(filteredOrders.length / pagination.rowsPerPage);
   const startIndex = (pagination.currentPage - 1) * pagination.rowsPerPage;
@@ -1391,13 +1680,14 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   // manda (a pedido explícito del usuario, 2026-09-06: quiere revisar el contenido antes de enviar).
   const emailCuerpoHtml = useMemo(() => buildReporteCorreoHtml({
     fechasFiltro: selectedDates,
+    detalleEjecutado: detalleEjecutadoResumen,
     resumenPorFecha,
     resumenPorTipoMueble,
     globalSummary,
     avgDailyCapacityHours,
     statusSummary,
     planSummaryByDate,
-  }), [selectedDates, resumenPorFecha, resumenPorTipoMueble, globalSummary, avgDailyCapacityHours, statusSummary, planSummaryByDate]);
+  }), [selectedDates, detalleEjecutadoResumen, resumenPorFecha, resumenPorTipoMueble, globalSummary, avgDailyCapacityHours, statusSummary, planSummaryByDate]);
 
   const handleEnviarCorreo = async () => {
     const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -1505,7 +1795,15 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
                         Calcular Explosión
                     </Button>
                     <Button
-                        onClick={() => setEmailDialogOpen(true)}
+                        onClick={() => {
+                            if (!correosInformeEjecutivo) {
+                                addNotification('warning', `No hay correos configurados en la Restricción "${NOMBRE_RESTRICCION_CORREOS_INFORME}". Configúrela en "Restricciones" o ingrese los destinatarios manualmente en el diálogo.`);
+                            }
+                            setEmailDestino(correosInformeEjecutivo);
+                            const fechaObjetivoAsunto = selectedDates.length > 0 ? selectedDates.join(', ') : 'Todas las fechas';
+                            setEmailAsunto(`Reporte de Producción - Plan Táctico Muebles - ${fechaObjetivoAsunto}`);
+                            setEmailDialogOpen(true);
+                        }}
                         className="bg-indigo-600 hover:bg-indigo-700 text-white gap-2 shadow-md h-9"
                     >
                         <Mail className="w-4 h-4" />
@@ -1516,6 +1814,66 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
               )}
             </div>
           </div>
+
+          {/* "DETALLE DE PLANIFICACIÓN EJECUTADA": mismos 6 recuadros que "Plan Táctico (Alpha)" muestra en
+              vivo el día que se ejecuta la Distribución de Mesas, ahora agregados para la(s) fecha(s)
+              seleccionada(s) en "Fecha(s):" — primer recuadro de la pestaña "PLAN", pedido explícito del
+              usuario 2026-09-16. Si ninguna fecha seleccionada tiene snapshot guardado (nunca se ejecutó
+              "Distribución de Mesas" en "Plan Táctico (Alpha)" ese día), no se muestra. */}
+          {displayMode === 'plan' && detalleEjecutadoResumen && (
+            <div className="bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden">
+              <div className="flex items-center justify-between px-6 py-4 bg-gradient-to-r from-purple-900 to-indigo-900">
+                <div className="flex items-center gap-2">
+                  <ClipboardCheck className="w-5 h-5 text-purple-200" />
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wide">Detalle de Planificación Ejecutada</h3>
+                </div>
+                <p className="text-[11px] text-purple-200 font-medium">
+                  {detalleEjecutadoResumen.fechasConDatos} fecha(s) con datos
+                  {detalleEjecutadoResumen.fechasSinDatos > 0 ? ` · ${detalleEjecutadoResumen.fechasSinDatos} sin Distribución de Mesas guardada` : ''}
+                </p>
+              </div>
+              <div className="p-6 grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <p className="text-[10px] font-bold text-blue-500 uppercase">Horas Requeridas (Compromisos Inmediatos)</p>
+                  <p className="text-xl font-black text-blue-800">{detalleEjecutadoResumen.horasRequeridas.toFixed(2)} h</p>
+                </div>
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4">
+                  <p className="text-[10px] font-bold text-emerald-500 uppercase">Capacidad Disponible</p>
+                  <p className="text-xl font-black text-emerald-800">{detalleEjecutadoResumen.capacidadDisponible.toFixed(2)} h</p>
+                </div>
+                <div className={`border rounded-lg p-4 ${detalleEjecutadoResumen.deficitCapacidad >= 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+                  <p className={`text-[10px] font-bold uppercase ${detalleEjecutadoResumen.deficitCapacidad >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                    {detalleEjecutadoResumen.deficitCapacidad >= 0 ? 'Capacidad Sobrante' : 'Déficit de Capacidad'}
+                  </p>
+                  <p className={`text-xl font-black ${detalleEjecutadoResumen.deficitCapacidad >= 0 ? 'text-emerald-800' : 'text-red-800'}`}>
+                    {Math.abs(detalleEjecutadoResumen.deficitCapacidad).toFixed(2)} h
+                  </p>
+                </div>
+                <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+                  <p className="text-[10px] font-bold text-purple-500 uppercase">Órdenes MTS Adicionales (Relleno de Capacidad)</p>
+                  <p className="text-xl font-black text-purple-800">{detalleEjecutadoResumen.ordenesMtsAdicionalesCount}</p>
+                  <p className="text-[10px] text-purple-400">{detalleEjecutadoResumen.ordenesMtsAdicionalesHoras.toFixed(2)} h agregadas</p>
+                </div>
+                <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4">
+                  <p className="text-[10px] font-bold text-indigo-500 uppercase">Unidades Físicas Planificadas</p>
+                  <p className="text-xl font-black text-indigo-800">{detalleEjecutadoResumen.unidadesFisicasPlanificadas.toLocaleString()}</p>
+                  <p className="text-[10px] text-indigo-400">{detalleEjecutadoResumen.ordenesPlanificadasTotal} órdenes en total</p>
+                  {(detalleEjecutadoResumen.diferidasCount > 0 || detalleEjecutadoResumen.moviblesCount > 0) && (
+                    <p className="text-[9px] text-indigo-300 mt-1 pt-1 border-t border-indigo-100">
+                      Ya excluye {detalleEjecutadoResumen.diferidasCount} diferida(s) y {detalleEjecutadoResumen.moviblesCount} movible(s)
+                    </p>
+                  )}
+                </div>
+                <div className="bg-cyan-50 border border-cyan-200 rounded-lg p-4">
+                  <p className="text-[10px] font-bold text-cyan-500 uppercase">Unidades Equivalentes Planificadas</p>
+                  <p className="text-xl font-black text-cyan-800">
+                    {detalleEjecutadoResumen.unidadesEquivalentesPlanificadas.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </p>
+                  <p className="text-[10px] text-cyan-400">1 equivalente = {MINUTOS_POR_MUEBLE_EQUIVALENTE_PLAN} min</p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {displayMode === 'plan' && (
             <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
@@ -1634,7 +1992,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
 
               <div className="border-t border-indigo-200 pt-3 space-y-2">
                 <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <p className="text-xs font-bold text-gray-700 uppercase tracking-tight">Riesgo de Stock — Insumos (Telas/Cascos)</p>
+                  <p className="text-xs font-bold text-gray-700 uppercase tracking-tight">Riesgo de Stock — Insumos (Telas, Cascos, Cartón, Herrajes, etc.)</p>
                   <Button
                     onClick={handleCalcularRiesgoInsumos}
                     disabled={insumoStockState.loading}
@@ -1647,26 +2005,44 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
                 </div>
                 {insumoStockState.calculatedAt === null ? (
                   <p className="text-[11px] text-gray-500">
-                    Calcula el riesgo de faltante de Telas/Cascos para hoy y los próximos {INSUMO_VENTANA_DIAS} días, tomando el Stock Actual menos el consumo de todas las órdenes pasadas pendientes (explota materiales de las órdenes con demanda — puede tardar unos segundos).
+                    Calcula el riesgo de faltante de insumos comprados (Telas, Cascos, Cartón, Certificados, Etiquetas, Fundas, Garruchas, Herrajes, Niveladores, Padding, Patas, Placas, Plástico, Resbalones, Rodelas, Stickers, Tacos, Tornillos) para hoy y los próximos {INSUMO_VENTANA_DIAS} días, tomando el Stock Actual menos el consumo de todas las órdenes pasadas pendientes (explota materiales de las órdenes con demanda — puede tardar unos segundos).
                   </p>
                 ) : insumoStockState.items.length === 0 ? (
                   <div className="flex items-center gap-2 text-emerald-700 bg-white/60 rounded-lg px-3 py-2">
                     <CheckCircle2 className="w-4 h-4 shrink-0" />
                     <p className="text-xs font-semibold">
-                      Sin riesgo de faltante de Telas/Cascos para hoy y los próximos {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
+                      Sin riesgo de faltante de insumos para hoy y los próximos {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
                     </p>
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    <div className="flex items-start gap-2 bg-white/60 rounded-lg px-3 py-2">
-                      <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                      <p className="text-xs font-semibold text-red-800">
-                        Hay {insumoStockState.items.length} insumo(s) (Tela/Casco) con riesgo de faltante hoy o dentro de la ventana de {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
-                      </p>
+                    <div className="flex items-start justify-between gap-3 flex-wrap bg-white/60 rounded-lg px-3 py-2">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                        <p className="text-xs font-semibold text-red-800">
+                          Hay {insumoStockState.items.length} insumo(s) con riesgo de faltante hoy o dentro de la ventana de {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Button
+                          onClick={() => setInformeRiesgoOpen(true)}
+                          size="sm"
+                          className="h-7 text-xs gap-1.5 bg-red-600 hover:bg-red-700 text-white shrink-0"
+                        >
+                          <FileJson className="w-3.5 h-3.5" /> GENERAR INFORME DE RIESGO
+                        </Button>
+                        <Button
+                          onClick={() => setInformeComercialOpen(true)}
+                          size="sm"
+                          className="h-7 text-xs gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white shrink-0"
+                        >
+                          <ListChecks className="w-3.5 h-3.5" /> GENERAR INFORME COMERCIAL
+                        </Button>
+                      </div>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                       {insumoStockState.items.map(item => (
-                        <div key={item.componente} className="border border-red-200 bg-white rounded-lg px-3 py-2">
+                        <div key={item.componente} className="border border-red-200 bg-white rounded-lg px-3 py-2 space-y-1.5">
                           <p className="text-[11px] font-bold text-gray-800">
                             {item.tipo} <span className="font-mono">{item.componente}</span>
                             <span className="font-normal text-gray-400"> — {item.descripcion}</span>
@@ -1996,12 +2372,14 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2"><Mail className="w-4 h-4 text-indigo-600" /> Enviar Correo — Reporte "PLAN"</DialogTitle>
             <DialogDescription>
-              Se enviarán las tablas de Resumen por Fecha, Resumen por Tipo de Mueble, Capacidad/Estado de Órdenes, Desglose por Fecha y Mesa, y el Diagrama de Gantt — para {selectedDates.length > 0 ? `${selectedDates.length} fecha(s) seleccionada(s)` : 'todas las fechas disponibles'}.
+              Se enviarán, en este orden: Detalle de Planificación Ejecutada, Desglose por Fecha y Mesa, Resumen por Tipo de Mueble, Diagrama de Gantt, Resumen de Órdenes Lanzadas por Fecha, y Capacidad Consolidada y Estado de Órdenes — para {selectedDates.length > 0 ? `${selectedDates.length} fecha(s) seleccionada(s)` : 'todas las fechas disponibles'}.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 overflow-y-auto flex-1 pr-1">
             <div className="space-y-1">
-              <Label htmlFor="email-destino" className="text-xs font-semibold">Destinatarios (separados por coma)</Label>
+              <Label htmlFor="email-destino" className="text-xs font-semibold">
+                Destinatarios (separados por coma) — tomados de la Restricción "{NOMBRE_RESTRICCION_CORREOS_INFORME}"
+              </Label>
               <Input
                 id="email-destino"
                 value={emailDestino}
@@ -2009,6 +2387,10 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
                 placeholder="correo1@chaideychaide.com, correo2@chaideychaide.com"
                 disabled={emailSending}
               />
+              <p className="text-[11px] text-gray-500">
+                Puede editarlos solo para este envío — para cambiarlos de forma permanente, actualice la
+                Restricción "{NOMBRE_RESTRICCION_CORREOS_INFORME}" en "Restricciones".
+              </p>
             </div>
             <div className="space-y-1">
               <Label htmlFor="email-asunto" className="text-xs font-semibold">Asunto</Label>
@@ -2037,6 +2419,164 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
               {emailSending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
               {emailSending ? 'Enviando...' : 'Enviar Correo'}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={informeRiesgoOpen} onOpenChange={setInformeRiesgoOpen}>
+        <DialogContent className="sm:max-w-6xl max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <PackageSearch className="w-4 h-4 text-red-600" />
+              Informe de Riesgo de Insumos — {insumoStockState.items.length} insumo(s) en riesgo
+            </DialogTitle>
+            <DialogDescription>
+              Detalle, por cada insumo con riesgo de faltante, de las órdenes (Previsionales y Fert) que lo consumen — hoy o dentro de la ventana de {INSUMO_VENTANA_DIAS} días (demanda futura) o con consumo pasado pendiente. (calculado {insumoStockState.calculatedAt})
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-6 overflow-y-auto flex-1 pr-1">
+            {insumoStockState.items.map(item => {
+              const detalles = insumoStockState.detalleMap.get(item.componente) || [];
+              return (
+                <div key={item.componente} className="border border-gray-200 rounded-lg overflow-hidden">
+                  <div className="bg-red-50 border-b border-red-200 px-4 py-2 space-y-2">
+                    <p className="text-sm font-bold text-gray-800">
+                      {item.tipo} <span className="font-mono">{item.componente}</span>
+                      <span className="font-normal text-gray-500"> — {item.descripcion}</span>
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <div className="bg-white border border-gray-200 rounded-lg p-2 text-center">
+                        <p className="text-[10px] font-semibold text-gray-500 uppercase">Stock Actual</p>
+                        <p className="text-sm font-bold text-gray-800">{item.stockActual !== null ? item.stockActual.toFixed(2) : '—'} {item.unidad}</p>
+                      </div>
+                      <div className="bg-white border border-gray-200 rounded-lg p-2 text-center">
+                        <p className="text-[10px] font-semibold text-gray-500 uppercase">Necesario ({INSUMO_VENTANA_DIAS} días)</p>
+                        <p className="text-sm font-bold text-gray-800">{item.necesario.toFixed(2)} {item.unidad}</p>
+                      </div>
+                      <div className="bg-white border border-gray-200 rounded-lg p-2 text-center">
+                        <p className="text-[10px] font-semibold text-gray-500 uppercase">Disponible Real</p>
+                        <p className="text-sm font-bold text-gray-800">{item.disponibleReal !== null ? item.disponibleReal.toFixed(2) : '—'} {item.unidad}</p>
+                      </div>
+                      <div className="bg-red-100 border border-red-200 rounded-lg p-2 text-center">
+                        <p className="text-[10px] font-semibold text-red-600 uppercase">Falta por Conseguir</p>
+                        <p className="text-sm font-bold text-red-700">{item.cantidadNetaAConseguir.toFixed(2)} {item.unidad}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {detalles.length === 0 ? (
+                    <div className="flex items-center gap-2 text-gray-500 bg-gray-50 px-3 py-4 justify-center">
+                      <p className="text-xs">No se encontraron órdenes con consumo positivo de este insumo (puede deberse a demanda de un material padre sin órdenes propias detectadas en el filtro actual).</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-gray-200 text-xs">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Ventana</th>
+                            <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Fecha</th>
+                            <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Pedido</th>
+                            <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Orden</th>
+                            <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Material</th>
+                            <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Descripción</th>
+                            <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Cliente</th>
+                            <th className="px-3 py-2 text-right font-bold text-gray-600 uppercase">Cant. Pendiente</th>
+                            <th className="px-3 py-2 text-right font-bold text-gray-600 uppercase">Consumo del Insumo</th>
+                          </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-100">
+                          {detalles.map((d, idx) => (
+                            <tr key={`${d.source}-${d.id}-${idx}`} className="hover:bg-red-50/30 transition-colors">
+                              <td className="px-3 py-2">
+                                <Badge className={d.ventana === 'Pasada' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-blue-100 text-blue-700 border-blue-200'}>
+                                  {d.ventana}
+                                </Badge>
+                              </td>
+                              <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{d.fecha}</td>
+                              <td className="px-3 py-2 font-mono text-gray-700">{d.pedido || '—'}{d.posicion ? `/${d.posicion}` : ''}</td>
+                              <td className="px-3 py-2 font-mono font-bold text-indigo-700">{d.id} <span className="text-gray-400 font-normal">({d.source})</span></td>
+                              <td className="px-3 py-2 font-mono text-gray-700">{d.material}</td>
+                              <td className="px-3 py-2 text-gray-700">{d.nombre}</td>
+                              <td className="px-3 py-2 text-gray-700">{d.cliente}</td>
+                              <td className="px-3 py-2 text-right text-gray-700">{d.cantidadPendiente.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                              <td className="px-3 py-2 text-right font-bold text-red-700">{d.consumoComponente.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-gray-800 text-white font-bold">
+                          <tr>
+                            <td colSpan={8} className="px-3 py-2 text-right uppercase">Total Consumo de Órdenes Listadas</td>
+                            <td className="px-3 py-2 text-right">
+                              {detalles.reduce((sum, d) => sum + d.consumoComponente, 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {item.unidad}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setInformeRiesgoOpen(false)}>Cerrar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* "GENERAR INFORME COMERCIAL": versión resumida para el área comercial (link de uso diario) — un
+          listado plano de pedidos afectados por riesgo de faltante de insumos, sin el detalle técnico
+          de Stock/Necesario/Disponible del Informe de Riesgo. */}
+      <Dialog open={informeComercialOpen} onOpenChange={setInformeComercialOpen}>
+        <DialogContent className="sm:max-w-5xl max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ListChecks className="w-4 h-4 text-indigo-600" />
+              Informe Comercial de Riesgo — {informeComercialRows.length} pedido(s) afectado(s)
+            </DialogTitle>
+            <DialogDescription>
+              Pedidos con riesgo de retraso por falta de un insumo (Tela, Casco u otro comprado) para hoy o
+              dentro de los próximos {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
+            </DialogDescription>
+          </DialogHeader>
+          <div className="overflow-auto flex-1 pr-1">
+            {informeComercialRows.length === 0 ? (
+              <div className="flex items-center gap-2 text-gray-500 bg-gray-50 px-3 py-4 justify-center rounded-lg">
+                <p className="text-xs">No hay pedidos afectados por riesgo de faltante de insumos.</p>
+              </div>
+            ) : (
+              <table className="min-w-full divide-y divide-gray-200 text-xs">
+                <thead className="bg-gray-50 sticky top-0">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Orden</th>
+                    <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Pedido</th>
+                    <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Posición</th>
+                    <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Material</th>
+                    <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Descripción</th>
+                    <th className="px-3 py-2 text-right font-bold text-gray-600 uppercase">Cantidad</th>
+                    <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Cliente</th>
+                    <th className="px-3 py-2 text-left font-bold text-gray-600 uppercase">Razón de Riesgo</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-100">
+                  {informeComercialRows.map((r, idx) => (
+                    <tr key={`${r.orden}-${idx}`} className="hover:bg-indigo-50/30 transition-colors">
+                      <td className="px-3 py-2 font-mono font-bold text-indigo-700">{r.orden}</td>
+                      <td className="px-3 py-2 font-mono text-gray-700">{r.pedido || '—'}</td>
+                      <td className="px-3 py-2 font-mono text-gray-700">{r.posicion || '—'}</td>
+                      <td className="px-3 py-2 font-mono text-gray-700">{r.material}</td>
+                      <td className="px-3 py-2 text-gray-700">{r.descripcion}</td>
+                      <td className="px-3 py-2 text-right text-gray-700">{r.cantidad.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                      <td className="px-3 py-2 text-gray-700">{r.cliente}</td>
+                      <td className="px-3 py-2 text-red-700 font-semibold whitespace-nowrap">{r.razon}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setInformeComercialOpen(false)}>Cerrar</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

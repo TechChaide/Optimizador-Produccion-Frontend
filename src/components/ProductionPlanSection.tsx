@@ -2070,7 +2070,7 @@ export const ProductionPlanSection: React.FC = () => {
     let totalHours = 0;
     let busiestLine: { lineName: string; units: number } | null = null;
 
-    filteredDailyPlanByLine.forEach(line => {
+    for (const line of filteredDailyPlanByLine) {
       let lineUnits = 0;
       Object.values(line.dailyData).forEach(day => {
         totalHours += day.hours;
@@ -2079,7 +2079,7 @@ export const ProductionPlanSection: React.FC = () => {
       if (!busiestLine || lineUnits > busiestLine.units) {
         busiestLine = { lineName: line.lineName, units: lineUnits };
       }
-    });
+    }
 
     const busiestShare = busiestLine && totalFilteredUnits > 0
       ? (busiestLine.units / totalFilteredUnits) * 100

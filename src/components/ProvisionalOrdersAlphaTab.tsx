@@ -8,19 +8,20 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { useAppContext } from '@/context/AppProvider';
-import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble } from 'lucide-react';
+import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble, Send } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction } from '@/components/ui/alert-dialog';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
-import type { Restriccion, Grupo, PlanGrupo, DetalleTactico } from '@/types/interfaces';
+import type { Restriccion, Grupo, PlanGrupo, DetalleTactico, SolicitudProduccionHB } from '@/types/interfaces';
 
 interface ProvisionalOrdersAlphaTabProps {
   restricciones: Restriccion[];
@@ -39,6 +40,78 @@ const ROWS_PER_PAGE_OPTIONS = [20, 50, 100, 500];
 const normalizeMaterialCode = (code: string | number): string => {
   const codeStr = String(code).trim();
   return codeStr.slice(-8);
+};
+
+// Devuelve los códigos que cuelgan (a cualquier profundidad) de un "FORRO BASE" dentro de la
+// explosión de un material padre. La explosión trae MATERIAL_PADRE por fila, así que se arma el
+// árbol y se desciende desde cada "FORRO BASE" marcando toda su rama.
+const getCodigosBajoForroBase = (components: any[]): Set<string> => {
+    const hijosPorPadre = new Map<string, any[]>();
+    const raices: string[] = [];
+    components.forEach((comp: any) => {
+        const padre = String(comp.MATERIAL_PADRE || '').trim();
+        const codigo = String(comp.COMPONENTE || '').trim();
+        if (padre) {
+            if (!hijosPorPadre.has(padre)) hijosPorPadre.set(padre, []);
+            hijosPorPadre.get(padre)!.push(comp);
+        }
+        const desc = String(comp.DESCRIPCION_COMPONENTE || '').trim().toUpperCase();
+        if (codigo && desc.startsWith('FORRO BASE')) raices.push(codigo);
+    });
+    const bajoForroBase = new Set<string>(raices);
+    const pendientes = [...raices];
+    while (pendientes.length > 0) {
+        const actual = pendientes.pop()!;
+        (hijosPorPadre.get(actual) || []).forEach((hijo: any) => {
+            const codigoHijo = String(hijo.COMPONENTE || '').trim();
+            if (codigoHijo && !bajoForroBase.has(codigoHijo)) {
+                bajoForroBase.add(codigoHijo);
+                pendientes.push(codigoHijo);
+            }
+        });
+    }
+    return bajoForroBase;
+};
+
+// Devuelve los códigos que cuelgan (a cualquier profundidad) de "TELA DE APROVECHAMIENTO" (código
+// 30020937) dentro de la explosión de un material padre. Este material es un "cajón de sastre" que
+// en SAP lista como sus propios "componentes" una muestra fija de ~10 telas de colores/productos
+// completamente distintos (todas con cantidad placeholder 0.25/1, sin relación con lo que el pedido
+// realmente usa) — NO es consumo real. Confirmado en vivo (2026-08-26): la explosión de "SOFÁ FOAM
+// 105 ELEMENTA BRUMA" (20014132) incluye, colgando de 30020937, "TELA MUEBLES ASTRA BEIGE WESTVIEW
+// STUCCO" (40003011) y "TELA MUEBLES EPIC BRUMA FLEMMINGS STORM" (40002771) — ninguna de las dos es
+// la tela real del pedido. Causaba falsos positivos en la Alerta de Stock de Telas Y en "Bloqueadas
+// por Insumo"/"Materiales en Espera" (ver verificarBloqueos más abajo — confirmado 2026-09-14: el
+// sofá "20014151 SOFÁ MÁNCHESTER 105 ELEMENTA BRUMA" se marcaba bloqueado por la tela 40002913, que
+// no usa realmente — colgaba de 30020937 en su explosión).
+const getCodigosBajoTelaAprovechamiento = (components: any[]): Set<string> => {
+    const hijosPorPadre = new Map<string, any[]>();
+    const raices: string[] = [];
+    components.forEach((comp: any) => {
+        const padre = String(comp.MATERIAL_PADRE || '').trim();
+        const codigo = String(comp.COMPONENTE || '').trim();
+        if (padre) {
+            if (!hijosPorPadre.has(padre)) hijosPorPadre.set(padre, []);
+            hijosPorPadre.get(padre)!.push(comp);
+        }
+        const desc = String(comp.DESCRIPCION_COMPONENTE || '').trim().toUpperCase();
+        if (codigo && (desc.startsWith('TELA DE APROVECHAMIENTO') || normalizeMaterialCode(codigo) === '30020937')) {
+            raices.push(codigo);
+        }
+    });
+    const bajoAprovechamiento = new Set<string>(raices);
+    const pendientes = [...raices];
+    while (pendientes.length > 0) {
+        const actual = pendientes.pop()!;
+        (hijosPorPadre.get(actual) || []).forEach((hijo: any) => {
+            const codigoHijo = String(hijo.COMPONENTE || '').trim();
+            if (codigoHijo && !bajoAprovechamiento.has(codigoHijo)) {
+                bajoAprovechamiento.add(codigoHijo);
+                pendientes.push(codigoHijo);
+            }
+        });
+    }
+    return bajoAprovechamiento;
 };
 
 // Generar lista de mesas 1 a 14
@@ -112,6 +185,44 @@ const shiftTimeToUTC = (baseDate: Date, timeStr: string): Date => {
 const formatEcuadorTime = (date: Date): string => {
     return date.toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Guayaquil' });
 };
+
+// Formatea una fecha (ya en el día calendario correcto, sin componente horario relevante) como
+// "AAAAMMDD" SIN separadores para FechaInicioProgramada/FechaFinProgramada del endpoint
+// InsertarSolicitudProduccionHB (botón "ENVIAR A SAP") — es el tipo SAP DATS(08) según el documento
+// oficial "CHD-EF AUTOMATIZAR GENERACION DE ORDENES DE PRODUCCION" (tabla ZPPT_ORDER_INT, campo GSTRS/
+// GLTRS), y coincide con el ejemplo original del endpoint. Pasó por dos formatos con puntos
+// (2026-09-16) que resultaron ser incorrectos — revertido 2026-09-17 tras confirmar contra el documento.
+const formatSapDate = (date: Date): string => {
+    return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+};
+
+// Formatea un instante UTC como hora local de Ecuador en formato SAP "HHMMSS" SIN separadores (tipo
+// TIMS(06), mismo documento/campo GSUZS/GLUZS que formatSapDate) — ver mismo historial de corrección.
+const formatSapTime = (date: Date): string => {
+    return date.toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'America/Guayaquil' }).replace(/:/g, '');
+};
+
+// Columnas editables de la pantalla de revisión de "ENVIAR A SAP" (ver handleOpenSapPreview) — una
+// entrada por campo de SolicitudProduccionHB que tiene sentido revisar/corregir antes de enviar.
+const SAP_PREVIEW_COLUMNS: { field: keyof SolicitudProduccionHB; label: string; type?: 'number'; width: string }[] = [
+    { field: 'Mandante', label: 'Mandante', width: 'w-16' },
+    { field: 'CodigoOrdenExterna', label: 'Cód. Orden Externa', width: 'w-28' },
+    { field: 'ClaseOrden', label: 'Clase Orden', width: 'w-20' },
+    { field: 'Centro', label: 'Centro', width: 'w-16' },
+    { field: 'CodigoMaterial', label: 'Material', width: 'w-24' },
+    { field: 'CantidadPlanificada', label: 'Cant. Planificada', type: 'number', width: 'w-20' },
+    { field: 'VersionFabricacion', label: 'Versión Fabr.', width: 'w-20' },
+    { field: 'PuestoTrabajo', label: 'Puesto Trabajo', width: 'w-24' },
+    { field: 'FechaFinProgramada', label: 'Fecha Fin', width: 'w-24' },
+    { field: 'HoraFinProgramada', label: 'Hora Fin', width: 'w-20' },
+    { field: 'FechaInicioProgramada', label: 'Fecha Inicio', width: 'w-24' },
+    { field: 'HoraInicioProgramada', label: 'Hora Inicio', width: 'w-20' },
+    { field: 'PedidoComercial', label: 'Pedido', width: 'w-20' },
+    { field: 'PosicionPedido', label: 'Posición', width: 'w-16' },
+    { field: 'EstadoRegistro', label: 'Estado', width: 'w-14' },
+    { field: 'Observaciones', label: 'Observaciones', width: 'w-32' },
+    { field: 'UsuarioProceso', label: 'Usuario Proceso', width: 'w-24' },
+];
 
 // Cargos habilitados para operar una Mesa de Trabajo
 const ALLOWED_ROLES = ['TAPICERO QUITO', 'ENSAMBLADOR DE MUEBLES', 'AUXILIAR DE PRODUCCION'];
@@ -495,6 +606,25 @@ interface PlanDiarioSnapshotMesa {
     items: PlanDiarioSnapshotItem[];
 }
 
+// Mismos 6 recuadros de "Detalle de Planificación Ejecutada" que se muestran en vivo en esta pestaña
+// (Horas Requeridas/Capacidad/Déficit/Órdenes MTS Adicionales/Unidades Físicas/Unidades Equivalentes),
+// congelados en el momento de guardar el snapshot — pedido explícito del usuario 2026-09-16, para que la
+// pestaña "PLAN" (PlanMueblesTabSection.tsx) pueda mostrar ese mismo resumen para fechas ya ejecutadas
+// sin tener que re-derivar la clasificación inmediata/diferida/movible/extra desde los items del Gantt
+// (esa clasificación no sobrevive completa en PlanDiarioSnapshotItem, solo el resultado final por mesa).
+interface PlanDiarioSnapshotResumen {
+    horasRequeridas: number;
+    capacidadDisponible: number;
+    deficitCapacidad: number; // negativo = déficit real, positivo = capacidad sobrante (mismo signo que liveDeficit)
+    ordenesMtsAdicionalesCount: number;
+    ordenesMtsAdicionalesHoras: number;
+    unidadesFisicasPlanificadas: number;
+    ordenesPlanificadasTotal: number;
+    diferidasCount: number;
+    moviblesCount: number;
+    unidadesEquivalentesPlanificadas: number;
+}
+
 interface PlanDiarioSnapshot {
     fecha: string; // YYYY-MM-DD
     shiftId: string;
@@ -502,6 +632,7 @@ interface PlanDiarioSnapshot {
     shiftStartTime: string;
     shiftDisplayEndTime: string;
     mesas: PlanDiarioSnapshotMesa[];
+    resumen: PlanDiarioSnapshotResumen | null;
 }
 
 // Material padre (de la Distribución de Mesas) del que proviene la necesidad de un componente, y las
@@ -770,11 +901,35 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // Verificación de Plan Táctico ya guardado para la fecha objetivo, al presionar "ESCOGER MESAS"
     const [planCheckModal, setPlanCheckModal] = useState<
         | { type: 'not-found' }
-        | { type: 'found'; planGrupo: PlanGrupo }
+        | { type: 'found'; planGrupo: PlanGrupo; hasPFSM: boolean }
         | { type: 'vista'; planGrupo: PlanGrupo; detalles: DetalleTactico[] }
         | null
     >(null);
     const [isPlanCheckBusy, setIsPlanCheckBusy] = useState(false);
+    // Fecha (YYYY-MM-DD) para la que el usuario ya confirmó "Continuar sin volver a guardar P1.3/P1.5/P2"
+    // (ver handleContinueToStepFinal) — evita que "Guardar Plan Táctico" duplique esos planes si, tras
+    // cerrar la app o actualizar la página a mitad del Paso 3, el usuario tiene que rehacer
+    // ESCOGER MESAS -> EJECUTAR PLANIFICACIÓN -> EJECUTAR DISTRIBUCIÓN DE MESAS para poder guardar el
+    // PFSM (P1.3/P1.5/P2 ya están guardados de la sesión anterior; solo falta el PFSM). Se limpia si el
+    // usuario borra el plan guardado o inicia una planificación nueva.
+    const [existingTacticalPlanDateKey, setExistingTacticalPlanDateKey] = useState<string | null>(null);
+
+    // "ENVIAR A SAP" (InsertarSolicitudProduccionHB): CodigoOrdenExterna = el codigo_detalle_tactico que
+    // el backend genera al guardar cada orden del PFSM (Guardar Plan Táctico Final), pedido explícito del
+    // usuario 2026-09-15 — por eso solo se puede enviar a SAP DESPUÉS de guardar el PFSM en esta misma
+    // sesión (no hay forma confiable de reconstruir la asociación orden->codigo_detalle_tactico si se
+    // pierde el estado de React, ya que DetalleTactico no guarda pedido/posición, solo material). Mapa
+    // orderKey (`${source}-${id}-${material}`) -> codigo_detalle_tactico, poblado en handleSavePlanAndDetails.
+    const [pfsmDetalleTacticoMap, setPfsmDetalleTacticoMap] = useState<Map<string, number>>(new Map());
+    // Pantalla editable de "ENVIAR A SAP": una fila por orden con la solicitud que se enviaría, para que
+    // el usuario la revise y corrija ANTES de enviar nada (pedido explícito del usuario 2026-09-15) — ver
+    // handleOpenSapPreview (la arma) y updateSapPreviewField (la edita).
+    const [enviarSapDialogOpen, setEnviarSapDialogOpen] = useState(false);
+    const [sapPreviewRows, setSapPreviewRows] = useState<{ orderKey: string; solicitud: SolicitudProduccionHB }[]>([]);
+    const [sapSendState, setSapSendState] = useState<{
+        sending: boolean;
+        results: Map<string, { status: 'success' | 'error'; message: string }>;
+    }>({ sending: false, results: new Map() });
 
     // Confirmación antes de reiniciar toda la planificación en curso ("Planificación Nueva")
     const [showNuevaPlanificacionConfirm, setShowNuevaPlanificacionConfirm] = useState(false);
@@ -972,6 +1127,21 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     };
                 });
 
+            // Mismas fórmulas que los 6 recuadros de "Detalle de Planificación Ejecutada" en pantalla
+            // (ver más abajo en el render) — congeladas aquí para que "PLAN" las muestre tal cual luego.
+            const resumen: PlanDiarioSnapshotResumen | null = planningResult ? {
+                horasRequeridas: liveCapacityInfo?.liveTotalHoursRequired ?? planningResult.totalHoursRequired,
+                capacidadDisponible: planningResult.totalCapacityAvailable,
+                deficitCapacidad: liveCapacityInfo?.liveDeficit ?? (planningResult.totalCapacityAvailable - planningResult.totalHoursRequired),
+                ordenesMtsAdicionalesCount: planningResult.extraOrders.length,
+                ordenesMtsAdicionalesHoras: planningResult.extraOrders.reduce((s, o) => s + o.horas, 0),
+                unidadesFisicasPlanificadas: [...planningResult.immediateOrders, ...planningResult.extraOrders].reduce((s, o) => s + o.cantidadPlanificada, 0),
+                ordenesPlanificadasTotal: planningResult.immediateOrders.length + planningResult.extraOrders.length,
+                diferidasCount: planningResult.deferredByCapacity.length,
+                moviblesCount: planningResult.movableOrders.length,
+                unidadesEquivalentesPlanificadas: [...planningResult.immediateOrders, ...planningResult.extraOrders].reduce((s, o) => s + o.horas, 0) * 60 / MINUTOS_POR_MUEBLE_EQUIVALENTE,
+            } : null;
+
             const snapshot: PlanDiarioSnapshot = {
                 fecha,
                 shiftId: selectedShiftConfig.id,
@@ -979,6 +1149,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 shiftStartTime: selectedShiftConfig.startTime,
                 shiftDisplayEndTime: selectedShiftConfig.displayEndTime,
                 mesas,
+                resumen,
             };
 
             const existente = planDiarioSnapshotIds.get(fecha);
@@ -1327,8 +1498,20 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     try {
                         const res = await serviciosService.getMaestroMaterialesExplosion('1000', material, 1, 5000);
                         const components = res && res.data ? (Array.isArray(res.data) ? res.data : [res.data]) : [];
+                        // Excluye los códigos que cuelgan de "FORRO BASE"/"TELA DE APROVECHAMIENTO": son
+                        // "cajones de sastre" que SAP lista con una muestra fija de materiales ajenos al
+                        // pedido real (ver comentario de getCodigosBajoTelaAprovechamiento) — sin este
+                        // filtro, cualquier insumo en espera de esa muestra fija bloqueaba TODOS los
+                        // materiales padre de Muebles, aunque no lo usaran de verdad (confirmado
+                        // 2026-09-14 con el sofá 20014151 bloqueado por la tela 40002913).
+                        const codigosIrrelevantes = new Set([
+                            ...getCodigosBajoForroBase(components),
+                            ...getCodigosBajoTelaAprovechamiento(components),
+                        ]);
                         const codigosComponentes = new Set(
-                            components.map((c: any) => normalizeMaterialCode(c.COMPONENTE || ''))
+                            components
+                                .filter((c: any) => !codigosIrrelevantes.has(String(c.COMPONENTE || '').trim()))
+                                .map((c: any) => normalizeMaterialCode(c.COMPONENTE || ''))
                         );
                         const insumosQueBloquean = insumosActivos.filter(ins => codigosComponentes.has(ins.insumoCodigo));
                         if (insumosQueBloquean.length > 0) {
@@ -2076,7 +2259,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         setIsPlanCheckBusy(true);
         try {
             const res = await planGrupoService.getAll();
-            const existing = (res.data || []).find(p => {
+            const matches = (res.data || []).filter(p => {
                 if (p.codigo_grupo !== mueblesGrupo.codigo_grupo) return false;
                 if (p.estado !== 'A') return false;
                 const valor = String(p.valor || '').trim();
@@ -2085,8 +2268,12 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 if (!expectedKey) return false;
                 return toDateKey(new Date(p.fecha_inicio_plan)) === expectedKey;
             });
+            // Prioriza mostrar el PFSM si ya existe (plan completo); si no, cualquiera de los otros
+            // sufijos sirve para informar al usuario que ya hay un avance guardado para esta fecha.
+            const existing = matches.find(p => /PFSM\s*$/i.test(String(p.valor || '').trim())) || matches[0];
+            const hasPFSM = matches.some(p => /PFSM\s*$/i.test(String(p.valor || '').trim()));
 
-            setPlanCheckModal(existing ? { type: 'found', planGrupo: existing } : { type: 'not-found' });
+            setPlanCheckModal(existing ? { type: 'found', planGrupo: existing, hasPFSM } : { type: 'not-found' });
         } catch (error) {
             addNotification('error', `Error al verificar planes guardados: ${(error as Error).message}`);
         } finally {
@@ -2117,6 +2304,20 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         }
 
         setPlanCheckModal(null);
+    };
+
+    // "Continuar al Paso 3": para cuando ya existe un Plan Táctico (P1.3/P1.5/P2) guardado para esta
+    // fecha pero todavía no el PFSM — típicamente porque se cerró la app o se actualizó la página entre
+    // "Guardar Plan Táctico" y terminar el Paso 3 en "Plan Grupo Recuperado". Deja rehacer ESCOGER MESAS
+    // -> EJECUTAR PLANIFICACIÓN -> EJECUTAR DISTRIBUCIÓN DE MESAS con seguridad: marca la fecha en
+    // existingTacticalPlanDateKey para que "Guardar Plan Táctico" (Paso 1/2) rechace volver a guardar
+    // P1.3/P1.5/P2 y así no los duplique — solo queda pendiente guardar el PFSM en el Paso 3.
+    const handleContinueToStepFinal = () => {
+        if (planningTargetDate) {
+            setExistingTacticalPlanDateKey(toDateKey(planningTargetDate));
+        }
+        confirmChooseTables();
+        addNotification('info', 'Ya existe un Plan Táctico guardado para esta fecha. Rehaga "EJECUTAR PLANIFICACIÓN" y "EJECUTAR DISTRIBUCIÓN DE MESAS" con normalidad — NO se volverá a guardar P1.3/P1.5/P2, así que puede continuar directo a "Plan Grupo Recuperado" para terminar el Paso 3 y guardar el PFSM.');
     };
 
     const handleActivateVistaMode = async () => {
@@ -2159,6 +2360,13 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             });
 
             await Promise.all(planesADesactivar.map(p => planGrupoService.save({ ...p, estado: 'I' })));
+
+            // El plan que bloqueaba "Guardar Plan Táctico" ya se desactivó — si esta fecha estaba
+            // marcada por handleContinueToStepFinal, esa marca ya no aplica (una nueva planificación sí
+            // debe poder guardar P1.3/P1.5/P2 de nuevo).
+            if (planningTargetDate && toDateKey(planningTargetDate) === existingTacticalPlanDateKey) {
+                setExistingTacticalPlanDateKey(null);
+            }
 
             addNotification('success', `Plan Táctico anterior (${planGrupo.valor}) marcado como inactivo. Puede continuar con la nueva planificación.`);
             confirmChooseTables();
@@ -2267,8 +2475,10 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         // fines de semana: si la fecha objetivo cae en viernes, +1 salta al lunes y +2 al martes.
         const targetPlus1 = addBusinessDays(planningTargetDate, 1);
         const targetPlus2 = addBusinessDays(planningTargetDate, 2);
-        const targetPlus14 = new Date(planningTargetDate);
-        targetPlus14.setDate(targetPlus14.getDate() + 14);
+        // Ventana de elegibilidad por "fecha propia" (ver eligibleOrders más abajo) — reducida de 14 a 2
+        // días calendario, pedido explícito del usuario 2026-09-16.
+        const targetPlusElegibilidad = new Date(planningTargetDate);
+        targetPlusElegibilidad.setDate(targetPlusElegibilidad.getDate() + 2);
 
         // Fuente que se toma como "fecha propia firme": mientras existan órdenes Fert de Muebles, solo
         // Fert (comportamiento histórico). Si SAP ya no genera Fert para Muebles (hayOrdenesFertMuebles
@@ -2293,13 +2503,13 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         });
 
         // Las órdenes de fuente firme cuya fecha propia esté fuera del rango [fecha objetivo, fecha
-        // objetivo + 2 semanas] se excluyen: las anteriores ya se planificaron en días previos, y
+        // objetivo + 2 días calendario] se excluyen: las anteriores ya se planificaron en días previos, y
         // las posteriores no deben fabricarse con tanta anticipación (pueden cancelarse por temas comerciales).
         const excluidasPorFechaPropia: OrderMissingDeliveryDate[] = [];
         const eligibleOrders = ordersDisponibles.filter(o => {
             if (esFuenteFirme(o) && o.fechaPropia) {
                 const dentroDelRango = o.fechaPropia.getTime() >= planningTargetDate.getTime()
-                    && o.fechaPropia.getTime() <= targetPlus14.getTime();
+                    && o.fechaPropia.getTime() <= targetPlusElegibilidad.getTime();
                 if (!dentroDelRango) {
                     excluidasPorFechaPropia.push({ source: o.source, id: o.id, pedido: o.pedido, material: o.material, nombre: o.nombre });
                 }
@@ -3019,13 +3229,16 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     };
 
     // Genera el archivo .txt de "Detalle de Planificación Ejecutada" para carga en SAP (formato LSMW ZCSQ,
-    // 15 columnas separadas por TAB, pedido explícito del usuario 2026-09-04):
-    // "003" | correlativo (001, 002... orden en que se listan los ítems en este archivo) | "ZCSQ" | "1000"
+    // 14 columnas separadas por TAB — se quitó la columna fija "003" y se intercambió el orden Hora
+    // Inicio/Hora Final, pedido explícito del usuario 2026-09-15):
+    // correlativo (001, 002... orden en que se listan los ítems en este archivo) | "ZCSQ" | "1000"
     // | Material | Cant. Planificada | "001" | Puesto de Trabajo | Fecha Planificación (hoy+3 días hábiles)
-    // | Hora Inicio | Fecha Planificación (repetida) | Hora Final | Pedido (sin ceros a la izquierda, vacío
+    // | Hora Final | Fecha Planificación (repetida) | Hora Inicio | Pedido (sin ceros a la izquierda, vacío
     // si es MTS) | Posición de Pedido (sin ceros a la izquierda, vacío si es MTS) | "001"
     // Puesto de Trabajo/Hora Inicio/Hora Final se calculan igual que en "Imprimir Planificación Confirmada"
-    // (requiere haber ejecutado la Distribución de Mesas).
+    // (requiere haber ejecutado la Distribución de Mesas). Mismos valores fuente que usa "ENVIAR A SAP"
+    // (ver handleEnviarASap más abajo) — el .txt y el envío a SAP deben reflejar siempre la misma
+    // planificación ejecutada.
     const exportPlanningDetailToLSMW = () => {
         if (!planningResult) return;
         if (!mesaDistribution || mesaDistribution.size === 0 || !planningTargetDate) {
@@ -3052,7 +3265,6 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     const pedido = sinCerosIniciales(item.order.pedido || '');
                     const posicion = sinCerosIniciales(item.order.posicion || '');
                     lines.push([
-                        '003',
                         String(correlativo).padStart(3, '0'),
                         'ZCSQ',
                         '1000',
@@ -3061,9 +3273,9 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                         '001',
                         puestoTrabajo,
                         fechaTexto,
-                        formatEcuadorTime(horaInicio),
-                        fechaTexto,
                         formatEcuadorTime(horaFinal),
+                        fechaTexto,
+                        formatEcuadorTime(horaInicio),
                         pedido,
                         posicion,
                         '001',
@@ -3223,78 +3435,9 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 });
             };
 
-            // Devuelve los códigos que cuelgan (a cualquier profundidad) de un "FORRO BASE" dentro de la
-            // explosión de un material padre. La explosión trae MATERIAL_PADRE por fila, así que se arma
-            // el árbol y se desciende desde cada "FORRO BASE" marcando toda su rama.
-            const getCodigosBajoForroBase = (components: any[]): Set<string> => {
-                const hijosPorPadre = new Map<string, any[]>();
-                const raices: string[] = [];
-                components.forEach((comp: any) => {
-                    const padre = String(comp.MATERIAL_PADRE || '').trim();
-                    const codigo = String(comp.COMPONENTE || '').trim();
-                    if (padre) {
-                        if (!hijosPorPadre.has(padre)) hijosPorPadre.set(padre, []);
-                        hijosPorPadre.get(padre)!.push(comp);
-                    }
-                    const desc = String(comp.DESCRIPCION_COMPONENTE || '').trim().toUpperCase();
-                    if (codigo && desc.startsWith('FORRO BASE')) raices.push(codigo);
-                });
-                const bajoForroBase = new Set<string>(raices);
-                const pendientes = [...raices];
-                while (pendientes.length > 0) {
-                    const actual = pendientes.pop()!;
-                    (hijosPorPadre.get(actual) || []).forEach((hijo: any) => {
-                        const codigoHijo = String(hijo.COMPONENTE || '').trim();
-                        if (codigoHijo && !bajoForroBase.has(codigoHijo)) {
-                            bajoForroBase.add(codigoHijo);
-                            pendientes.push(codigoHijo);
-                        }
-                    });
-                }
-                return bajoForroBase;
-            };
-
-            // Devuelve los códigos que cuelgan (a cualquier profundidad) de "TELA DE APROVECHAMIENTO"
-            // (código 30020937) dentro de la explosión de un material padre. Este material es un "cajón
-            // de sastre" que en SAP lista como sus propios "componentes" una muestra fija de ~10 telas de
-            // colores/productos completamente distintos (todas con cantidad placeholder 0.25/1, sin
-            // relación con lo que el pedido realmente usa) — NO es consumo real. Confirmado en vivo
-            // (2026-08-26): la explosión de "SOFÁ FOAM 105 ELEMENTA BRUMA" (20014132) incluye, colgando de
-            // 30020937, "TELA MUEBLES ASTRA BEIGE WESTVIEW STUCCO" (40003011) y "TELA MUEBLES EPIC BRUMA
-            // FLEMMINGS STORM" (40002771) — ninguna de las dos es la tela real del pedido (esa es
-            // "TELA MUEBLES ELEMENTA BRUMA WD24036A C21", 40003358, en otra rama del árbol) — causaba
-            // falsos positivos en la Alerta de Stock de Telas. Ya existía este mismo hallazgo en
-            // "Segundo Nivel" (esExcluidoSegundoNivel excluye "TELA DE APROVECHAMIENTO" en sí), pero no
-            // sus hijos aquí. Mismo patrón que getCodigosBajoForroBase.
-            const getCodigosBajoTelaAprovechamiento = (components: any[]): Set<string> => {
-                const hijosPorPadre = new Map<string, any[]>();
-                const raices: string[] = [];
-                components.forEach((comp: any) => {
-                    const padre = String(comp.MATERIAL_PADRE || '').trim();
-                    const codigo = String(comp.COMPONENTE || '').trim();
-                    if (padre) {
-                        if (!hijosPorPadre.has(padre)) hijosPorPadre.set(padre, []);
-                        hijosPorPadre.get(padre)!.push(comp);
-                    }
-                    const desc = String(comp.DESCRIPCION_COMPONENTE || '').trim().toUpperCase();
-                    if (codigo && (desc.startsWith('TELA DE APROVECHAMIENTO') || normalizeMaterialCode(codigo) === '30020937')) {
-                        raices.push(codigo);
-                    }
-                });
-                const bajoAprovechamiento = new Set<string>(raices);
-                const pendientes = [...raices];
-                while (pendientes.length > 0) {
-                    const actual = pendientes.pop()!;
-                    (hijosPorPadre.get(actual) || []).forEach((hijo: any) => {
-                        const codigoHijo = String(hijo.COMPONENTE || '').trim();
-                        if (codigoHijo && !bajoAprovechamiento.has(codigoHijo)) {
-                            bajoAprovechamiento.add(codigoHijo);
-                            pendientes.push(codigoHijo);
-                        }
-                    });
-                }
-                return bajoAprovechamiento;
-            };
+            // getCodigosBajoForroBase / getCodigosBajoTelaAprovechamiento ahora viven a nivel de módulo
+            // (arriba, junto a normalizeMaterialCode) — las reutiliza también verificarBloqueos (más
+            // arriba en el componente) para "Materiales en Espera"/"Bloqueadas por Insumo".
 
             responses.forEach((components, idx) => {
                 const material = allUniqueMaterials[idx];
@@ -3493,6 +3636,12 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         } else if (!hayP13 && !hayP15 && !hayP2) {
             addNotification('warning', 'No hay detalles de "Planificación Ejecutada" ni "Explosión de Materiales" para guardar. Ejecute primero la planificación y la explosión.');
             return;
+        } else if (planningTargetDate && toDateKey(planningTargetDate) === existingTacticalPlanDateKey) {
+            // Ver handleContinueToStepFinal: esta fecha ya tiene P1.3/P1.5/P2 guardados de una sesión
+            // anterior (interrumpida antes del PFSM) — bloquea el reguardado para no duplicarlos. El
+            // usuario debe continuar a "Plan Grupo Recuperado" -> Paso 3 para guardar el PFSM.
+            addNotification('warning', 'Ya existe un Plan Táctico (P1.3/P1.5/P2) guardado para esta fecha — no se vuelve a guardar para evitar duplicados. Continúe a "Plan Grupo Recuperado" y complete el Paso 3 para guardar el PFSM.');
+            return;
         }
         if (!planningTargetDate) {
             addNotification('warning', 'No se pudo determinar la fecha de programación de la Ventana de Fabricación.');
@@ -3538,10 +3687,11 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     codigo_detalle_tactico: 0,
                     codigo_plan_grupo: codigoPlanGrupo,
                     codigo_material: codigoMaterial,
+                    linea_produccion: '',
                     cantidad_produccion_neta: cantidadProduccionNeta.toFixed(2),
                     resp_ctrl_prod: respCtrlProd,
                     clase_aprovisionamiento: 'E',
-                    cantidad_aprovisionamiento: '0',
+                    cantidad_aprovisionamiento: 0,
                     estado: 'A',
                     fecha_modificacion: new Date(),
                     usuario_modificacion: 'Admin',
@@ -3589,12 +3739,20 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             }
 
             // 4. PFSM (Plan Final de Semielaborados de Muebles) — solo en Paso 3 (Final), y es lo ÚNICO que
-            // se guarda en ese paso: Detalle de Planificación Ejecutada (mismo contenido que P1.3).
+            // se guarda en ese paso: Detalle de Planificación Ejecutada (mismo contenido que P1.3). Se
+            // captura el codigo_detalle_tactico que el backend genera para cada orden — es el
+            // CodigoOrdenExterna que "ENVIAR A SAP" (handleEnviarASap) necesita para cada una.
             if (hayPFSM) {
                 const codigoPlanGrupoPFSM = await savePlanGrupo('PFSM');
+                const nuevoDetalleTacticoMap = new Map<string, number>();
                 for (const o of executedOrders) {
-                    await saveDetalle(codigoPlanGrupoPFSM, Number(o.material) || 0, o.cantidadPlanificada, '');
+                    const savedDetalle = await saveDetalle(codigoPlanGrupoPFSM, Number(o.material) || 0, o.cantidadPlanificada, '');
+                    const codigoDetalleTactico = savedDetalle?.data?.codigo_detalle_tactico;
+                    if (codigoDetalleTactico) {
+                        nuevoDetalleTacticoMap.set(`${o.source}-${o.id}-${o.material}`, codigoDetalleTactico);
+                    }
                 }
+                setPfsmDetalleTacticoMap(nuevoDetalleTacticoMap);
             }
 
             const partes = esPasoFinal
@@ -3619,6 +3777,130 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         }
     };
 
+    // Arma la solicitud SolicitudProduccionHB "de partida" para una orden — mismos valores fuente que
+    // exportPlanningDetailToLSMW (mesaDistribution + fecha/hora de Gantt + Puesto de Trabajo), pero con
+    // los campos/formato que pide el endpoint. CodigoOrdenExterna = el codigo_detalle_tactico que el
+    // backend generó para esa orden al guardar el PFSM (ver pfsmDetalleTacticoMap). Devuelve null si esa
+    // orden todavía no tiene codigo_detalle_tactico (PFSM no guardado en esta sesión).
+    const buildSolicitudSapBase = (
+        item: MesaScheduleItem,
+        puestoTrabajo: string,
+        fechaSap: string,
+        shiftStartUTC: Date,
+        usuarioProceso: string,
+    ): SolicitudProduccionHB | null => {
+        const orderKey = `${item.order.source}-${item.order.id}-${item.order.material}`;
+        const codigoDetalleTactico = pfsmDetalleTacticoMap.get(orderKey);
+        if (!codigoDetalleTactico) return null;
+
+        const sinCerosIniciales = (valor: string) => valor.replace(/^0+/, '');
+        const horaInicio = new Date(shiftStartUTC.getTime() + item.startHour * 60 * 60 * 1000);
+        const horaFinal = new Date(shiftStartUTC.getTime() + item.endHour * 60 * 60 * 1000);
+        const pedido = sinCerosIniciales(item.order.pedido || '');
+        const posicion = sinCerosIniciales(item.order.posicion || '');
+
+        return {
+            Mandante: '300',
+            CodigoOrdenExterna: String(codigoDetalleTactico),
+            ClaseOrden: '',
+            Centro: '1000',
+            CodigoMaterial: item.order.material,
+            CantidadPlanificada: item.order.cantidadPlanificada,
+            VersionFabricacion: '01',
+            PuestoTrabajo: puestoTrabajo,
+            FechaFinProgramada: fechaSap,
+            HoraFinProgramada: formatSapTime(horaFinal),
+            FechaInicioProgramada: fechaSap,
+            HoraInicioProgramada: formatSapTime(horaInicio),
+            PedidoComercial: pedido || '',
+            PosicionPedido: pedido ? posicion : '',
+            EstadoRegistro: 'A',
+            Observaciones: '',
+            UsuarioProceso: usuarioProceso,
+        };
+    };
+
+    // "ENVIAR A SAP" — Paso 1: arma la pantalla editable con lo que se enviará a cada orden de "Detalle
+    // de Planificación Ejecutada" (InsertarSolicitudProduccionHB), para que el usuario la revise/corrija
+    // ANTES de enviar nada (pedido explícito del usuario 2026-09-15) — ver handleEnviarASap (Paso 2, el
+    // envío real) y el diálogo enviarSapDialogOpen.
+    const handleOpenSapPreview = () => {
+        if (!planningResult || !mesaDistribution || mesaDistribution.size === 0 || !planningTargetDate) {
+            addNotification('warning', 'Debe ejecutar la Distribución de Mesas antes de enviar a SAP.');
+            return;
+        }
+        if (pfsmDetalleTacticoMap.size === 0) {
+            addNotification('warning', 'Debe guardar el "Plan Táctico Final" (PFSM) en esta sesión antes de enviar a SAP — se necesita el código de detalle táctico generado para cada orden.');
+            return;
+        }
+
+        const fechaPlanificacion = addBusinessDays(planningResult.targetDate, 3);
+        const fechaSap = formatSapDate(fechaPlanificacion);
+        const shiftStartUTC = shiftTimeToUTC(planningTargetDate, selectedShiftConfig.startTime);
+        const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
+        const usuarioProceso = user?.usuario || user?.id_usuario || 'admin';
+
+        const rows: { orderKey: string; solicitud: SolicitudProduccionHB }[] = [];
+        Array.from(mesaDistribution.values())
+            .sort((a, b) => a.tableId - b.tableId)
+            .forEach(mesa => {
+                const puestoTrabajo = `TAP-AR${String(mesa.tableId).padStart(2, '0')}`;
+                mesa.items.forEach(item => {
+                    const orderKey = `${item.order.source}-${item.order.id}-${item.order.material}`;
+                    const solicitud = buildSolicitudSapBase(item, puestoTrabajo, fechaSap, shiftStartUTC, usuarioProceso);
+                    if (solicitud) rows.push({ orderKey, solicitud });
+                });
+            });
+
+        setSapPreviewRows(rows);
+        setSapSendState({ sending: false, results: new Map() });
+        setEnviarSapDialogOpen(true);
+    };
+
+    // Actualiza un solo campo de una sola fila de la pantalla editable, sin tocar las demás.
+    const updateSapPreviewField = (orderKey: string, field: keyof SolicitudProduccionHB, value: string | number) => {
+        setSapPreviewRows(prev => prev.map(row => row.orderKey === orderKey ? { ...row, solicitud: { ...row.solicitud, [field]: value } } : row));
+    };
+
+    // Aplica el mismo valor de Clase de Orden a todas las filas de la pantalla editable de una vez
+    // (atajo — cada fila sigue siendo editable individualmente después).
+    const applyClaseOrdenATodas = (valor: string) => {
+        setSapPreviewRows(prev => prev.map(row => ({ ...row, solicitud: { ...row.solicitud, ClaseOrden: valor } })));
+    };
+
+    // "ENVIAR A SAP" — Paso 2: envía lo que esté en la pantalla editable (sapPreviewRows), tal cual lo
+    // dejó el usuario tras revisar/corregir. Sigue enviando el resto aunque una orden falle, y muestra un
+    // resumen de éxitos/errores al terminar. `retryKeys`: si se pasa, solo reintenta esas órdenes (orderKey
+    // `${source}-${id}-${material}`) — usado por "Reintentar fallidas", sin volver a enviar las exitosas.
+    const handleEnviarASap = async (retryKeys?: Set<string>) => {
+        const rowsAEnviar = retryKeys ? sapPreviewRows.filter(r => retryKeys.has(r.orderKey)) : sapPreviewRows;
+        const sinClaseOrden = rowsAEnviar.find(r => !r.solicitud.ClaseOrden.trim());
+        if (sinClaseOrden) {
+            addNotification('warning', 'Todas las órdenes deben tener una Clase de Orden antes de enviar a SAP.');
+            return;
+        }
+
+        setSapSendState(prev => ({ sending: true, results: retryKeys ? prev.results : new Map() }));
+        const results = new Map<string, { status: 'success' | 'error'; message: string }>(retryKeys ? sapSendState.results : undefined);
+
+        for (const { orderKey, solicitud } of rowsAEnviar) {
+            try {
+                await serviciosService.insertarSolicitudProduccionHB(solicitud);
+                results.set(orderKey, { status: 'success', message: 'Enviado correctamente.' });
+            } catch (error) {
+                results.set(orderKey, { status: 'error', message: (error as Error).message });
+            }
+        }
+
+        setSapSendState({ sending: false, results });
+        const okCount = Array.from(results.values()).filter(r => r.status === 'success').length;
+        const errCount = results.size - okCount;
+        addNotification(
+            errCount === 0 ? 'success' : 'warning',
+            `Envío a SAP: ${okCount} orden(es) enviada(s) correctamente${errCount > 0 ? `, ${errCount} con error (ver detalle)` : ''}.`
+        );
+    };
+
     // Reinicia todo el progreso de la planificación en curso (mesas, personal, planificación calculada,
     // distribución, explosión de materiales) para empezar una nueva desde cero. Los datos ya descargados
     // de SAP (órdenes, tiempos, inventario) NO se vuelven a descargar — para eso está "Actualizar Datos".
@@ -3629,6 +3911,10 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         setSelectedShift(SHIFT_SCHEDULES[0].id);
         setChosenTables(null);
         setTableAssignments({});
+        setExistingTacticalPlanDateKey(null);
+        setPfsmDetalleTacticoMap(new Map());
+        setSapPreviewRows([]);
+        setSapSendState({ sending: false, results: new Map() });
         setMaintenanceDecisions({});
         setHourDiscounts([]);
         setNewDiscountMotivo('');
@@ -4004,6 +4290,14 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                 >
                                     <FileSpreadsheet className="w-3.5 h-3.5" />
                                     Exportar a Excel
+                                </Button>
+                                <Button
+                                    onClick={handleOpenSapPreview}
+                                    size="sm"
+                                    className="h-8 bg-sky-600 hover:bg-sky-700 text-white gap-1.5 text-xs"
+                                >
+                                    <Send className="w-3.5 h-3.5" />
+                                    ENVIAR A SAP
                                 </Button>
                             </div>
                         </div>
@@ -5608,6 +5902,140 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 </AlertDialogContent>
             </AlertDialog>
 
+            {/* "ENVIAR A SAP": pantalla editable — muestra exactamente lo que se va a enviar a SAP
+                (InsertarSolicitudProduccionHB) por cada orden de "Detalle de Planificación Ejecutada" para
+                que el usuario lo revise y corrija ANTES de enviar nada, y solo entonces se envía al
+                presionar "CONFIRMAR Y ENVIAR A SAP" (pedido explícito del usuario 2026-09-15). */}
+            <Dialog open={enviarSapDialogOpen} onOpenChange={(open) => { setEnviarSapDialogOpen(open); if (!open) setSapSendState({ sending: false, results: new Map() }); }}>
+                <DialogContent className="sm:max-w-[95vw] lg:max-w-[1400px] max-h-[90vh] flex flex-col">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <Send className="w-4 h-4 text-sky-600" />
+                            Enviar a SAP — Revisión antes de enviar ({sapPreviewRows.length} orden(es))
+                        </DialogTitle>
+                        <DialogDescription>
+                            Esta es la información exacta que se enviará a SAP (InsertarSolicitudProduccionHB), una
+                            solicitud por orden. Puede editar cualquier campo antes de confirmar — nada se envía hasta
+                            que presione "CONFIRMAR Y ENVIAR A SAP".
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-3 overflow-y-auto flex-1 pr-1">
+                        <div className="flex items-end gap-2 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
+                            <div className="flex-1">
+                                <Label htmlFor="clase-orden-bulk" className="text-xs font-semibold text-gray-700">Aplicar Clase de Orden a todas las filas</Label>
+                                <Input
+                                    id="clase-orden-bulk"
+                                    placeholder="Ej. PP01 — escriba y presione Aplicar"
+                                    className="mt-1 h-8 text-xs bg-white"
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') applyClaseOrdenATodas((e.target as HTMLInputElement).value);
+                                    }}
+                                />
+                            </div>
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-8 text-xs bg-white"
+                                onClick={() => {
+                                    const el = document.getElementById('clase-orden-bulk') as HTMLInputElement | null;
+                                    if (el) applyClaseOrdenATodas(el.value);
+                                }}
+                            >
+                                Aplicar a todas
+                            </Button>
+                        </div>
+
+                        {sapPreviewRows.length === 0 ? (
+                            <div className="flex items-center gap-2 text-gray-500 bg-gray-50 px-3 py-4 justify-center rounded-lg">
+                                <p className="text-xs">No hay órdenes para enviar (revise que la Distribución de Mesas y el PFSM estén guardados).</p>
+                            </div>
+                        ) : (
+                            <div className="border border-gray-200 rounded-lg overflow-auto max-h-[45vh]">
+                                <table className="text-xs">
+                                    <thead className="bg-gray-50 sticky top-0 z-10">
+                                        <tr>
+                                            <th className="px-2 py-2 text-left font-bold text-gray-600 uppercase whitespace-nowrap">Orden</th>
+                                            {SAP_PREVIEW_COLUMNS.map(col => (
+                                                <th key={col.field} className="px-2 py-2 text-left font-bold text-gray-600 uppercase whitespace-nowrap">{col.label}</th>
+                                            ))}
+                                            <th className="px-2 py-2 text-left font-bold text-gray-600 uppercase whitespace-nowrap">Resultado</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="bg-white divide-y divide-gray-100">
+                                        {sapPreviewRows.map(row => {
+                                            const resultado = sapSendState.results.get(row.orderKey);
+                                            return (
+                                                <tr key={row.orderKey} className={resultado?.status === 'error' ? 'bg-red-50/40' : resultado?.status === 'success' ? 'bg-emerald-50/40' : undefined}>
+                                                    <td className="px-2 py-1 font-mono text-gray-500 whitespace-nowrap">{row.orderKey}</td>
+                                                    {SAP_PREVIEW_COLUMNS.map(col => (
+                                                        <td key={col.field} className="px-1 py-1">
+                                                            <Input
+                                                                value={row.solicitud[col.field] as any}
+                                                                onChange={(e) => updateSapPreviewField(row.orderKey, col.field, col.type === 'number' ? Number(e.target.value) : e.target.value)}
+                                                                type={col.type === 'number' ? 'number' : 'text'}
+                                                                className={`h-7 text-xs ${col.width}`}
+                                                            />
+                                                        </td>
+                                                    ))}
+                                                    <td className="px-2 py-1 whitespace-nowrap">
+                                                        {resultado ? (
+                                                            <Badge className={resultado.status === 'success' ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-red-100 text-red-700 border-red-200'} title={resultado.message}>
+                                                                {resultado.status === 'success' ? 'Enviado' : 'Error'}
+                                                            </Badge>
+                                                        ) : (
+                                                            <span className="text-gray-300">—</span>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        {Array.from(sapSendState.results.values()).some(r => r.status === 'error') && (
+                            <div className="border border-red-200 bg-red-50 rounded-lg px-3 py-2">
+                                <p className="text-xs font-bold text-red-800 mb-1">Errores al enviar:</p>
+                                <ul className="text-[11px] text-red-700 space-y-0.5">
+                                    {Array.from(sapSendState.results.entries()).filter(([, r]) => r.status === 'error').map(([key, r]) => (
+                                        <li key={key}><span className="font-mono">{key}</span>: {r.message}</li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+                    </div>
+                    <DialogFooter className="gap-2">
+                        <Button variant="outline" onClick={() => setEnviarSapDialogOpen(false)}>Cerrar</Button>
+                        {Array.from(sapSendState.results.values()).some(r => r.status === 'error') && (
+                            <Button
+                                variant="outline"
+                                className="border-red-300 text-red-700 hover:bg-red-50"
+                                disabled={sapSendState.sending}
+                                onClick={() => {
+                                    const failedKeys = new Set(
+                                        Array.from(sapSendState.results.entries()).filter(([, r]) => r.status === 'error').map(([key]) => key)
+                                    );
+                                    handleEnviarASap(failedKeys);
+                                }}
+                            >
+                                {sapSendState.sending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : null}
+                                Reintentar fallidas
+                            </Button>
+                        )}
+                        <Button
+                            onClick={() => handleEnviarASap()}
+                            disabled={sapSendState.sending || sapPreviewRows.length === 0}
+                            className="bg-sky-600 hover:bg-sky-700 text-white gap-2"
+                        >
+                            {sapSendState.sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                            {sapSendState.sending ? 'Enviando...' : 'CONFIRMAR Y ENVIAR A SAP'}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
             {/* No existe un Plan Táctico guardado para la fecha objetivo: confirmar antes de proceder */}
             <AlertDialog open={planCheckModal?.type === 'not-found'} onOpenChange={(open) => !open && setPlanCheckModal(null)}>
                 <AlertDialogContent>
@@ -5640,7 +6068,12 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                             <span className="font-bold text-gray-800">
                                 {planningTargetDate?.toLocaleDateString('es-EC', { day: '2-digit', month: '2-digit', year: 'numeric' })}
                             </span>{' '}
-                            ({planCheckModal?.type === 'found' ? planCheckModal.planGrupo.valor : ''}). Escoja qué desea hacer:
+                            ({planCheckModal?.type === 'found' ? planCheckModal.planGrupo.valor : ''}).
+                            {planCheckModal?.type === 'found' && !planCheckModal.hasPFSM ? (
+                                <> Todavía no se guardó el Plan Final (PFSM) — si se cerró la app o se actualizó la
+                                página antes de terminar el Paso 3, use "Continuar al Paso 3" para retomarlo sin
+                                duplicar lo ya guardado. Si no, escoja qué desea hacer:</>
+                            ) : ' Escoja qué desea hacer:'}
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter className="sm:justify-between">
@@ -5659,6 +6092,15 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                 {isPlanCheckBusy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : null}
                                 Activar Modo Vista
                             </AlertDialogAction>
+                            {planCheckModal?.type === 'found' && !planCheckModal.hasPFSM ? (
+                                <AlertDialogAction
+                                    onClick={handleContinueToStepFinal}
+                                    disabled={isPlanCheckBusy}
+                                    className="bg-emerald-600 hover:bg-emerald-700"
+                                >
+                                    Continuar al Paso 3
+                                </AlertDialogAction>
+                            ) : null}
                         </div>
                     </AlertDialogFooter>
                 </AlertDialogContent>

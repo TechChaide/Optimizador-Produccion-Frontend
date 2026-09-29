@@ -18,7 +18,7 @@
  *      - centro_produccion       <- sectorRef
  *      - codigo_material         <- material
  *      - linea_produccion        <- linea
- *      - semana                  <- isoWeek
+ *      - semana                  <- weekKey
  */
 
 import { detallesService } from '@/services/detalles.service';
@@ -73,7 +73,7 @@ export async function saveIv5DetailsBatch(
           (r.produccionAdelanto || 0) +
           (r.produccionPio || 0),
       ),
-      semana: Number(r.isoWeek || 0),
+      semana: String(r.weekKey || ''),
       cantidad_transferencia: Number(r.trasladoSaliente || 0),
       linea_produccion: String(r.linea || ''),
       estado: 'A',
