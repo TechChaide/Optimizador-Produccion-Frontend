@@ -25,7 +25,9 @@ import {
   Trash2,
   Mail,
   Send,
-  Info
+  Info,
+  Search,
+  X,
 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from '@/components/ui/button';
@@ -48,6 +50,7 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, PlanGrupo, DetalleTactico, Restriccion } from '@/types/interfaces';
+import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
 import type { BodyResponse } from '@/types/body-response';
 import { cn } from '@/lib/utils';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
@@ -395,6 +398,9 @@ interface UnifiedRow {
   origenCodigoPlanGrupo?: number;
   origenAmbiguo?: boolean;
   origenCandidatosCount?: number;
+  // La orden responde a un PT de Ensamblado pero su FECHAFIN es el propio día del PT (ver
+  // ventanaLaminaEnsamblado): cuenta como cobertura, con aviso de que llega tarde.
+  llegaDiaPT?: boolean;
   tIndivEstimado?: boolean;
   tIndivEstimadoNivel?: '3a' | '3b' | '3c';
   // true cuando el material no tiene ancho/largo/esp/densidad parseables desde su descripción (ver
@@ -420,6 +426,10 @@ interface NecesidadPlantaRow {
   // tiene un codigo_grupo distinto por centro (18/19), por eso se puede resolver aquí sin ambigüedad.
   // Alimenta la Respuesta P3 (ver materialNecesidadesPlantaMapPorCentro), que sí necesita separar por centro.
   centro: string;
+  // Solo filas de P1/PFF (explosión BOM): parte de cantidad_produccion_neta que llega directo del FERT
+  // (nivel 1) y la que llega vía un semielaborado (nivel 2+). Las demás áreas no las traen.
+  cantidad_nivel1?: number;
+  cantidad_nivel2?: number;
 }
 
 interface ConsolidatedNeedRow extends NecesidadPlantaRow {
@@ -511,6 +521,16 @@ interface EditableDetalleRowEspuma {
   marcadoEliminar: boolean;
   esNuevo: boolean;
   codigo_plan_grupo_padre: number;
+  nivel?: NivelBom;
+}
+
+// Composición de una orden de Exportar a SAP (ver resolverConversionProvisional).
+interface ConversionProvisionalEspuma {
+  faltantePFD: number;
+  provisionalQty: number;
+  cantidadOrden: number;
+  principal?: string;
+  motivo: 'solo-faltante' | 'provisional+faltante' | 'provisional-completa' | 'sin-orden';
 }
 
 interface EditPlanPreviewEspuma {
@@ -915,7 +935,73 @@ interface SnapshotCorteEspuma {
   // el Nivel 1 sí sobrevivía, dejando el panel "sobre-ocupado" inconsistente (verificación de
   // persistencia entre módulos de esta sesión).
   necesidadPFFNivel2Data: Record<'1000' | '2000', NecesidadPlantaRow[]>;
+  fertsP2Muebles?: NecesidadPlantaRow[];
+  fertsPFF?: NecesidadPlantaRow[];
 }
+
+// Una línea del BOM de un FERT del P2 Muebles que llega a un componente de corte (ver
+// verificarBomP2Muebles). consumo = cantidad del FERT en el P2 × CANTIDAD_ACUMULADA de la línea.
+interface LineaBomP2 {
+  fert: string;
+  cantidadFert: number;
+  nivel: number;
+  materialPadre: string;
+  cantUnitaria: number;
+  cantAcumulada: number;
+  unidad: string;
+  consumo: number;
+  nivelBom: 1 | 2;
+  valida: boolean;
+}
+
+// Verificación contra el BOM real de los FERT de origen (P2 "ESPUMA MUEBLES" del grupo 3 y P1/PFF de
+// Ensamblado), por plan y componente:
+//   p2Registrado  → lo que el plan registró para la lámina (lo que hoy responde el P3/PFD)
+//   bomNivel1/bomNivel2 → suma de las líneas válidas del BOM (ver leerLineaBom), directas del FERT
+//                         o vía semielaborado; bomSumaLineas = ambas (mismo criterio que la
+//                         explosión PFF desde 2026-09-29)
+interface VerificacionBomP2Row {
+  centro: string;
+  codigoPlanGrupo: number;
+  origen: string;
+  componente: string;
+  descripcion: string;
+  p2Registrado: number;
+  bomSumaLineas: number;
+  bomNivel1: number;
+  bomNivel2: number;
+  lineas: LineaBomP2[];
+}
+
+// Códigos de producto terminado (FERT) — 2xxxxxxx; los semielaborados de corte son 3xxxxxxx.
+const ES_CODIGO_FERT = (codigo: string | number): boolean => /^2\d{7}$/.test(String(Number(codigo)));
+
+// Lee una fila de getMaestroMaterialesExplosion para el FERT consultado. Todas las líneas se suman
+// (cada una es una posición de consumo real del BOM); la única que se descarta es la fila corrupta
+// verificada 2026-09-03 (FERT 20004463 -> lámina 30027586): SAP repite la relación DIRECTA con el
+// FERT (MATERIAL_PADRE = el FERT) con otro NIVEL y una CANTIDAD_ACUMULADA distinta de la unitaria
+// (unitaria=2/acumulada=0.02). En una relación directa acumulada = unitaria siempre.
+// nivelBom: 1 si cuelga directo del FERT, 2 si llega a través de un semielaborado.
+const leerLineaBom = (row: Record<string, unknown>, fertConsultado: string) => {
+  const nivel = Number(row.NIVEL || 0);
+  const cantUnitaria = Number(row.CANTIDAD_UNITARIA || 0);
+  const cantAcumulada = Number(row.CANTIDAD_ACUMULADA || cantUnitaria || 0);
+  const materialPadre = cleanCode(row.MATERIAL_PADRE);
+  const directa = materialPadre === cleanCode(fertConsultado);
+  const valida = !(directa && Math.abs(cantAcumulada - cantUnitaria) >= 0.0001);
+  return { nivel, cantUnitaria, cantAcumulada, materialPadre, nivelBom: (directa ? 1 : 2) as 1 | 2, valida };
+};
+
+// Nivel BOM de una línea de Respuesta P3/PFD (decisión del usuario 2026-09-29): DetalleTactico no
+// tiene campo propio, así que cada material se graba en una línea por nivel y el nivel viaja como
+// sufijo de linea_produccion ("Carruseles - LINEA 1 · N1" / "· N2"). Solo las necesidades de P1/PFF
+// (explosión BOM) llevan nivel; el resto de orígenes graba la línea sin sufijo, como antes.
+type NivelBom = 1 | 2;
+const sufijoNivelBom = (nivel?: NivelBom): string => nivel ? ` · N${nivel}` : '';
+const nivelBomDeLinea = (linea?: string | null): NivelBom | undefined => {
+  const m = /·s*N([12])s*$/.exec(String(linea || ''));
+  return m ? (Number(m[1]) as NivelBom) : undefined;
+};
 
 export const TacticalPlanEspumasSection: React.FC = () => {
   const { addNotification } = useAppContext();
@@ -979,13 +1065,19 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // interno de planchas, subnivel del PT, ej. 24-sep). La FECHAFIN de la provisional ya viene así de
   // SAP ("Disponible p.pl.nec."), se compara tal cual. Días hábiles del calendario (diasLaborablesExtra),
   // no fechas fijas: el sábado puede habilitarse como productivo.
-  const ventanaLaminaEnsamblado = useCallback((fechaPT: string): { desde: string; hasta: string } | null => {
+  // Ampliada hasta el PROPIO día del PT (decisión del usuario 2026-09-29, caso provisional 0145076478,
+  // 30000220, FECHAFIN 01-oct = PT del PFF #942): SAP ya la fechó contra ese PT, y excluirla hacía que
+  // el PFD/Exportar a SAP pidiera una orden duplicada. Cuenta íntegra, pero se marca con aviso
+  // "llega el día del PT" (ver esDiaPT) — llega tarde respecto a la regla de un día antes.
+  const ventanaLaminaEnsamblado = useCallback((fechaPT: string): { desde: string; hasta: string; pt: string } | null => {
     if (!fechaPT || fechaPT === '—') return null;
     const pt = parseFechaLocal(fechaPT);
     if (isNaN(pt.getTime())) return null;
+    const ptStr = format(pt, 'yyyy-MM-dd');
     return {
       desde: format(restarDiasHabiles(pt, 2), 'yyyy-MM-dd'),
-      hasta: format(restarDiasHabiles(pt, 1), 'yyyy-MM-dd'),
+      hasta: ptStr,
+      pt: ptStr,
     };
   }, [restarDiasHabiles]);
 
@@ -1059,6 +1151,17 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
   const [necesidadesPlantaData, setNecesidadesPlantaData] = useState<Record<string, NecesidadPlantaRow[]>>({});
   const [necesidadesPlantaLoading, setNecesidadesPlantaLoading] = useState(false);
+  // FERT (producto terminado, código 2xxxxxxx) que trae el P2 "ESPUMA MUEBLES" del grupo 3 junto a
+  // las láminas ya explotadas. No son necesidad de corte: no entran a necesidadesPlantaData (así no
+  // llegan a Respuesta P3/PFD ni a Exportar a SAP) y solo alimentan la Verificación BOM del tab.
+  const [fertsP2Muebles, setFertsP2Muebles] = useState<NecesidadPlantaRow[]>([]);
+  // FERT del PFF/P1 de Ensamblado que se explotó en calcularNecesidadPFF — misma Verificación BOM.
+  const [fertsPFF, setFertsPFF] = useState<NecesidadPlantaRow[]>([]);
+  const [verificacionBomP2, setVerificacionBomP2] = useState<VerificacionBomP2Row[] | null>(null);
+  const [isVerificandoBomP2, setIsVerificandoBomP2] = useState(false);
+  const [verificacionBomP2Progreso, setVerificacionBomP2Progreso] = useState({ current: 0, total: 0 });
+  const [verificacionBomP2Errores, setVerificacionBomP2Errores] = useState<string[]>([]);
+  const [verificacionBomP2Abierto, setVerificacionBomP2Abierto] = useState<string | null>(null);
 
   // Necesidad PFF (Ensamblado - Quito Y Guayaquil): a diferencia de Forros/Muebles/Prensado/
   // VentaExterna, que ya traen su P2 como líneas de material listas para usar, PFF exige explotar el
@@ -1099,7 +1202,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // getOrigenesProrrateoEspuma) se convierte en una línea del payload. exportSapPreview guarda el
   // PlanGrupo + las filas DetalleTactico crudas (para poder mostrar descripción/origen en la tabla);
   // exportSapPayloads es el payload editable 1:1, mismo índice.
-  const [exportSapPreview, setExportSapPreview] = useState<{ plan: PlanGrupo; centro: '1000' | '2000'; detalles: DetalleTactico[] } | null>(null);
+  // grupos[i] = las líneas del PFD que se consolidaron en exportSapPayloads[i] (una orden por material);
+  // conversion[i] = de qué se compone su cantidad (faltante del PFD + provisional convertida).
+  const [exportSapPreview, setExportSapPreview] = useState<{ plan: PlanGrupo; centro: '1000' | '2000'; grupos: DetalleTactico[][]; conversion: ConversionProvisionalEspuma[] } | null>(null);
   const [exportSapPayloads, setExportSapPayloads] = useState<SolicitudProduccionHBPayload[] | null>(null);
   const [isValidandoExportSap, setIsValidandoExportSap] = useState(false);
   const [isEnviandoSap, setIsEnviandoSap] = useState(false);
@@ -1169,8 +1274,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Igual que materialNecesidadesPlantaMapPorCentro, pero conserva el desglose por codigo_plan_grupo
   // ORIGEN (la otra área/P2 que generó la demanda) para poder prorratear la Respuesta P3 entre esos
   // orígenes reales — mismo patrón que materialOrigenesPlantaMap en Corte y Laminado.
+  // Las filas de P1/PFF se abren además por nivel BOM (N1 directa del FERT / N2 vía semielaborado,
+  // ver cantidad_nivel1/cantidad_nivel2): así la Respuesta P3/PFD graba una línea por nivel.
   const materialOrigenesPlantaMapPorCentro = useMemo(() => {
-    const porCentro: Record<string, Map<string, Map<number, number>>> = { '1000': new Map(), '2000': new Map() };
+    type Origen = { codigoPadre: number; nivel?: NivelBom; qty: number };
+    const porCentro: Record<string, Map<string, Map<string, Origen>>> = { '1000': new Map(), '2000': new Map() };
     Object.values(necesidadesPlantaConPFF).flat().forEach(row => {
       const centro = String(row.centro || '');
       if (!porCentro[centro]) return;
@@ -1178,8 +1286,18 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const map = porCentro[centro];
       if (!map.has(matKey)) map.set(matKey, new Map());
       const porOrigen = map.get(matKey)!;
-      const qty = parseQty(row.cantidad_produccion_neta);
-      porOrigen.set(row.codigo_plan_grupo, (porOrigen.get(row.codigo_plan_grupo) || 0) + qty);
+      const sumar = (qty: number, nivel?: NivelBom) => {
+        const key = `${row.codigo_plan_grupo}|${nivel ?? ''}`;
+        const previo = porOrigen.get(key) || { codigoPadre: row.codigo_plan_grupo, nivel, qty: 0 };
+        previo.qty += qty;
+        porOrigen.set(key, previo);
+      };
+      if (row.cantidad_nivel1 !== undefined || row.cantidad_nivel2 !== undefined) {
+        if ((row.cantidad_nivel1 || 0) > 0) sumar(row.cantidad_nivel1 || 0, 1);
+        if ((row.cantidad_nivel2 || 0) > 0) sumar(row.cantidad_nivel2 || 0, 2);
+      } else {
+        sumar(parseQty(row.cantidad_produccion_neta));
+      }
     });
     return porCentro;
   }, [necesidadesPlantaConPFF]);
@@ -1230,6 +1348,25 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // independiente por planta (cada una arma y manda su propio cuerpo de correo).
   const [destinatariosReporte, setDestinatariosReporte] = useState('');
   const [isSendingReporte, setIsSendingReporte] = useState<{ UIO: boolean; GYE: boolean }>({ UIO: false, GYE: false });
+
+  // Destinatarios precargados desde la restricción Grupo_Correos_Corte_Espuma (Grupo_Correos_Laminado
+  // es la de Corte y Laminado). Se lee al montar, aparte de la sincronización: al volver al módulo
+  // desde caché no se recargan restricciones y el campo quedaba vacío. Nombre sin distinguir
+  // mayúsculas y sin filtrar por codigo_grupo (el nombre ya es único). Sigue editable -- solo
+  // autocompleta si el usuario todavía no escribió nada.
+  useEffect(() => {
+    restriccionService.getAll()
+      .then(res => {
+        const correosGrupo = Array.from(new Set((res.data || [])
+          .filter(r => String(r.nombre_restriccion || '').trim().toUpperCase() === 'GRUPO_CORREOS_CORTE_ESPUMA')
+          .flatMap(r => String(r.valor_restriccion || '').split(/[,;&]/).map(v => v.trim()))
+          .filter(Boolean)));
+        if (correosGrupo.length > 0) {
+          setDestinatariosReporte(prev => prev.trim() ? prev : correosGrupo.join(', '));
+        }
+      })
+      .catch(e => console.warn('[Corte Espuma] No se pudo cargar Grupo_Correos_Corte_Espuma:', (e as Error).message));
+  }, []);
 
   // --- CONFIGURACIÓN DASHBOARDS ---
   const [uioConfig, setUioConfig] = useState<PlantaConfig>({
@@ -1461,9 +1598,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // orden. Si ninguno contiene esa fecha, se usa el primero como referencia y se marca
       // origenAmbiguo — esto aplica también con UN solo candidato: no hay "único candidato de
       // confianza", si su fecha no corresponde, la etiqueta debe advertirlo igual.
-      // Ensamblado (P1/PFF): su rango es el día del PT, y la lámina nunca cae ese día sino en
-      // [PT−2 hábiles, PT−1 hábil] (ver ventanaLaminaEnsamblado) — sin esto el aviso "fecha fuera de
-      // rango" salía para toda orden de Ensamblado bien programada.
+      // Ensamblado (P1/PFF): su rango es el día del PT, y la lámina cae en [PT−2 hábiles, PT] (ver
+      // ventanaLaminaEnsamblado) — sin esto el aviso "fecha fuera de rango" salía para toda orden de
+      // Ensamblado bien programada.
       const origenCandidatos = materialAreaMap.get(String(Number(info.code))) || [];
       const origenEnRango = origenCandidatos.find(c => {
         if (!fechaOrdenFin || c.fecha_inicio === '—' || c.fecha_fin === '—') return false;
@@ -1475,6 +1612,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
       const origen = origenEnRango || origenCandidatos[0];
       const origenAmbiguo = origenCandidatos.length > 0 && !origenEnRango;
+      const llegaDiaPT = !!origenEnRango && origenEnRango.area.startsWith('Ensamblado')
+        && fechaOrdenFin === ventanaLaminaEnsamblado(origenEnRango.fecha_inicio)?.pt;
 
       return {
         orden: getProp(o, ['ORDENPREVISIONAL', 'ORDEN']) || '—',
@@ -1507,7 +1646,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         origenCodigoGrupo: origen?.codigo_grupo,
         origenCodigoPlanGrupo: origen?.codigo_plan_grupo,
         origenAmbiguo,
-        origenCandidatosCount: origenCandidatos.length
+        origenCandidatosCount: origenCandidatos.length,
+        llegaDiaPT
       };
     });
   }, [extractMaterialInfo, tiemposCatalogo, kpiCarruselesData, kpiLooperData, materialAreaMap, esRespVertical, ventanaLaminaEnsamblado]);
@@ -1687,8 +1827,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // pide 04-ago, se le acreditaba una provisional del 08-sep). Al exigir la misma ventana que FERT, un
   // material sin provisional real que lo cubra cae a Stock o queda en 0 (ver
   // respuestaSalidaRowsPorCentro).
-  const provisionalUnPorMaterialPorCentro = useMemo(() => {
-    const porCentro: Record<string, Map<string, number>> = { '1000': new Map(), '2000': new Map() };
+  // Lista de las provisionales que cubren cada material (la cobertura de abajo es su suma) — la usa
+  // también "Exportar a SAP" para mostrar qué provisional ya existe para cada orden a crear, base del
+  // flujo de vincular/ajustar la provisional en vez de crear una orden nueva.
+  const provisionalesQueCubrenPorCentro = useMemo(() => {
+    const porCentro: Record<string, Map<string, UnifiedRow[]>> = { '1000': new Map(), '2000': new Map() };
 
     const procesar = (centro: '1000' | '2000', rows: UnifiedRow[]) => {
       const allowed = allowedRespPorCentro(centro);
@@ -1704,7 +1847,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const candidatosP2 = fechasPorMaterial?.get(r.material);
         if (!candidatosP2 || candidatosP2.length === 0) return;
         // Ensamblado (P1/PFF): la provisional responde al PT si su FECHAFIN cae en
-        // [PT−2 hábiles, PT−1 hábil] (ver ventanaLaminaEnsamblado) y cuenta ÍNTEGRA. Antes caía al ±1
+        // [PT−2 hábiles, PT] (ver ventanaLaminaEnsamblado; el día del PT se acepta con aviso) y cuenta ÍNTEGRA. Antes caía al ±1
         // alrededor del PT de fechaOrdenCoincideConP2: dejaba fuera la de planchas (PT−2, ej.
         // 0144951612 del 24-sep para el PT del 28-sep) y aceptaba láminas del mismo día o posteriores
         // al PT, que ya llegan tarde. Las demás áreas siguen con fechaOrdenCoincideConP2 sin cambios.
@@ -1716,7 +1859,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           return fechaOrdenCoincideConP2(r.fecha, r.fechaFin, c.area, c.fecha, todayStr);
         });
         if (!coincide) return;
-        map.set(r.material, (map.get(r.material) || 0) + r.cantUnidadReal);
+        if (!map.has(r.material)) map.set(r.material, []);
+        map.get(r.material)!.push(r);
       });
     };
 
@@ -1724,6 +1868,16 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     procesar('2000', provAuditAllGYE);
     return porCentro;
   }, [provAuditAllUIO, provAuditAllGYE, fechasP2PorMaterialPorCentro, todayStr, allowedRespPorCentro, clavesProvisionalesTransformadas, ventanaLaminaEnsamblado]);
+
+  const provisionalUnPorMaterialPorCentro = useMemo(() => {
+    const porCentro: Record<string, Map<string, number>> = { '1000': new Map(), '2000': new Map() };
+    (['1000', '2000'] as const).forEach(centro => {
+      provisionalesQueCubrenPorCentro[centro].forEach((ordenes, material) => {
+        porCentro[centro].set(material, ordenes.reduce((s, o) => s + o.cantUnidadReal, 0));
+      });
+    });
+    return porCentro;
+  }, [provisionalesQueCubrenPorCentro]);
 
   // Respuesta P3: cantidad "ya planificada" por material vía Órdenes FERT, emparejadas contra la
   // fecha del P2 que responden (fechasP2PorMaterialPorCentro) dentro de la tolerancia de SU área
@@ -2759,7 +2913,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
       const origenesDeMaterial = origenesMap.get(material);
       const origenes = origenesDeMaterial && origenesDeMaterial.size > 0
-        ? Array.from(origenesDeMaterial.keys()).join(', ')
+        ? Array.from(origenesDeMaterial.values()).map(o => `${o.codigoPadre}${o.nivel ? ` N${o.nivel}` : ''}`).join(', ')
         : '—';
       return {
         material,
@@ -2791,24 +2945,27 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // bug corregido en getOrigenesProrrateo de Corte y Laminado: auto-referenciar el P3 en vez del P2
   // real). El nombre del campo/parámetro ya no dice "Kg" — desde el fix de Respuesta P3 en UN, esta
   // función siempre recibe y devuelve unidades, nunca kilogramos.
-  const getOrigenesProrrateoEspuma = useCallback((material: string, cantidad: number, centro: '1000' | '2000', fallbackCodigoPlanGrupo: number) => {
+  // Cada origen puede venir abierto por nivel BOM (P1/PFF): el split lleva `nivel` y se graba como
+  // línea aparte (ver sufijoNivelBom).
+  const getOrigenesProrrateoEspuma = useCallback((material: string, cantidad: number, centro: '1000' | '2000', fallbackCodigoPlanGrupo: number): { codigoPadre: number; nivel?: NivelBom; cantidad: number }[] => {
     const origenes = materialOrigenesPlantaMapPorCentro[centro].get(material);
     if (!origenes || origenes.size === 0) {
       return [{ codigoPadre: fallbackCodigoPlanGrupo, cantidad: Math.round(cantidad) }];
     }
+    const entradas = Array.from(origenes.values());
     if (cantidad <= 0) {
-      return Array.from(origenes.keys()).map(codigoPadre => ({ codigoPadre, cantidad: 0 }));
+      return entradas.map(({ codigoPadre, nivel }) => ({ codigoPadre, nivel, cantidad: 0 }));
     }
-    const entradas = Array.from(origenes.entries());
-    const totalOrigen = entradas.reduce((s, [, v]) => s + v, 0);
+    const totalOrigen = entradas.reduce((s, o) => s + o.qty, 0);
     // Todos los orígenes registrados pidieron 0: se asigna completo al primero en vez de
     // auto-referenciar el P3 recién creado.
     if (totalOrigen <= 0) {
-      return entradas.map(([codigoPadre], i) => ({ codigoPadre, cantidad: i === 0 ? Math.round(cantidad) : 0 }));
+      return entradas.map(({ codigoPadre, nivel }, i) => ({ codigoPadre, nivel, cantidad: i === 0 ? Math.round(cantidad) : 0 }));
     }
-    return entradas.map(([codigoPadre, pesoOrigen]) => ({
+    return entradas.map(({ codigoPadre, nivel, qty }) => ({
       codigoPadre,
-      cantidad: Math.round(cantidad * (pesoOrigen / totalOrigen))
+      nivel,
+      cantidad: Math.round(cantidad * (qty / totalOrigen))
     }));
   }, [materialOrigenesPlantaMapPorCentro]);
 
@@ -2881,18 +3038,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           const restrs = (res.data || []).filter(r => Object.values(CODIGO_GRUPO_CORTE_POR_CENTRO).includes(r.codigo_grupo));
           setRestriccionesCorte(restrs);
           actualizarEnCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA, { restriccionesCorte: restrs });
-
-          // Destinatarios del "Enviar Reporte" (Gestión de Tiempos): se precargan desde la
-          // restricción Grupo_correos_Laminado (codigo_grupo 8, Centro 1000/Quito, mismo grupo SAP
-          // que comparte con Corte y Laminado) en vez de quedar en blanco. Sigue editable en pantalla
-          // -- solo se autocompleta si el usuario todavía no escribió nada.
-          const correosGrupo = (res.data || [])
-            .filter(r => r.nombre_restriccion === 'Grupo_correos_Laminado' && r.codigo_grupo === CODIGO_GRUPO_LAMINADO)
-            .flatMap(r => String(r.valor_restriccion || '').split(/[,&]/).map(v => v.trim()))
-            .filter(Boolean);
-          if (correosGrupo.length > 0) {
-            setDestinatariosReporte(prev => prev.trim() ? prev : correosGrupo.join(', '));
-          }
         })
         .catch(e => console.warn('[Corte Espuma] No se pudieron cargar las restricciones de responsables:', (e as Error).message));
 
@@ -2979,12 +3124,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         .flatMap((r) => String(r.valor_restriccion || '').split(/[,&]/).map((v: string) => normalizeName(v)))
         .filter((v: string) => v !== '');
 
-      const gruposFiltrados = (gruposRes.data || []).filter((g) => g.estado === 'A' && almacenConsumoNames.includes(normalizeName(g.nombre_grupo)));
+      // El grupo 3 (origen de los P2 "ESPUMA MUEBLES"/"LAMINA CILINDRICA") entra siempre, esté o no
+      // en ALMACEN_CONSUMO — aquí solo se toma su variante "ESPUMA MUEBLES" (ver esP2ParaModulo).
+      const gruposFiltrados = (gruposRes.data || []).filter((g) => g.estado === 'A' && (almacenConsumoNames.includes(normalizeName(g.nombre_grupo)) || g.codigo_grupo === CODIGO_GRUPO_P2_MUEBLES));
       const gruposCodigos = gruposFiltrados.map((g) => g.codigo_grupo);
       const grupoPorCodigo = new Map(gruposFiltrados.map((g) => [g.codigo_grupo, g]));
 
       if (gruposCodigos.length === 0) {
-        setNecesidadesPlantaData({});
+        setNecesidadesPlantaData({}); setFertsP2Muebles([]);
         return;
       }
 
@@ -3021,6 +3168,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (!/plan\s*t[aá]ctico.*centro.*p2/i.test(valor)) return false;
         const esVentaExterna = /venta\s*externa/i.test(grupoPorCodigo.get(pg.codigo_grupo)?.nombre_grupo || '');
         if (esVentaExterna && !/espuma/i.test(valor)) return false;
+        if (!esP2ParaModulo(pg, 'ESPUMA')) return false;
         return true;
       });
 
@@ -3046,7 +3194,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const planPorCodigo = new Map(planesActivos.map((pg) => [pg.codigo_plan_grupo, pg]));
 
       if (planGrupoCodigos.length === 0) {
-        setNecesidadesPlantaData({});
+        setNecesidadesPlantaData({}); setFertsP2Muebles([]);
         return;
       }
 
@@ -3055,12 +3203,17 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const detalles = (detallesRes.data || []).filter((d) => planGrupoCodigos.includes(d.codigo_plan_grupo));
 
       const grouped: Record<string, NecesidadPlantaRow[]> = {};
+      const ferts: NecesidadPlantaRow[] = [];
       detalles.forEach((d) => {
         const plan = planPorCodigo.get(d.codigo_plan_grupo);
         const grupo = plan ? grupoPorCodigo.get(plan.codigo_grupo) : undefined;
         const area = grupo?.nombre_grupo || 'Sin Área Asignada';
-        if (!grouped[area]) grouped[area] = [];
-        grouped[area].push({
+        // El P2 "ESPUMA MUEBLES" trae sus FERT de origen además de las láminas: esos van aparte (ver
+        // fertsP2Muebles), no son algo que Corte Espuma corte ni responda.
+        const destino = plan?.codigo_grupo === CODIGO_GRUPO_P2_MUEBLES && ES_CODIGO_FERT(d.codigo_material)
+          ? ferts
+          : (grouped[area] ??= []);
+        destino.push({
           codigo_material: d.codigo_material,
           cantidad_produccion_neta: d.cantidad_produccion_neta,
           // fechaLocalEcuador: estas fechas alimentan fechasP2PorMaterialPorCentro, que decide si
@@ -3075,10 +3228,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
 
       setNecesidadesPlantaData(grouped);
-      actualizarEnCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA, { necesidadesPlantaData: grouped });
+      setFertsP2Muebles(ferts);
+      setVerificacionBomP2(null);
+      actualizarEnCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA, { necesidadesPlantaData: grouped, fertsP2Muebles: ferts });
     } catch (e) {
       console.error('Error al recuperar necesidades de planta', e);
       setNecesidadesPlantaData({});
+      setFertsP2Muebles([]);
     } finally {
       setNecesidadesPlantaLoading(false);
     }
@@ -3100,6 +3256,19 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     }
   }, []);
 
+  // ¿Un componente del BOM es de Corte Espuma en este centro? Relevancia por RESPONSABLE (criterio
+  // autoritativo, el mismo que usa el resto del módulo), con el patrón de nombres como respaldo para
+  // los componentes sin responsable conocido. FORRO y PRENSADO nunca son de corte aunque su
+  // responsable coincida (ver los comentarios en explotarPFFParaCentroConFecha). Compartido por la
+  // explosión PFF y la Verificación BOM del P2 Muebles, para que ambas decidan igual.
+  const esComponenteDeCorte = useCallback((desc: string, codigo: string, centro: string): boolean => {
+    if (ES_FORRO(desc) || /PRENSAD/i.test(desc)) return false;
+    const resp = materialRespCPPorCentro[centro]?.get(codigo) || '';
+    return resp
+      ? allowedRespPorCentro(centro).includes(resp) && !respExcepcionExcluye(centro, resp, codigo)
+      : ES_LAMINA_CORTADA(desc);
+  }, [allowedRespPorCentro, materialRespCPPorCentro]);
+
   // Explota el BOM de los materiales de UN PlanGrupo "PFF"/"P1" (un centro/grupo de Ensamblado a la
   // vez) — mismo patrón que explodeNecesidadesFert en Venta Externa: acumula cantidad por material
   // único antes de explotar (para no repetir llamadas al Maestro), conservando el desglose por
@@ -3118,7 +3287,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     detallesTodos: DetalleTactico[],
     fechaObjetivoPFF: string,
     onStep: () => void
-  ): Promise<{ filas: NecesidadPlantaRow[]; sinMatch: string[]; conError: string[]; tipoPlan: 'P1' | 'PFF' | null }> => {
+  ): Promise<{ filas: NecesidadPlantaRow[]; sinMatch: string[]; conError: string[]; tipoPlan: 'P1' | 'PFF' | null; ferts: NecesidadPlantaRow[] }> => {
     // Además del estado, se exige que fecha_inicio_plan coincida EXACTO con `fechaObjetivoPFF`: esa
     // es la fecha de producción del Producto Terminado (PT) real del PFF/P1 — confirmado por el
     // usuario, corrige un valor (hoy+2) que se había fijado en una sesión anterior sin ese respaldo
@@ -3159,12 +3328,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // por igual (ver su comentario), así que esto es solo para poder DECIR cuál de los dos se está
     // usando en cada momento; no cambia en nada qué se procesa.
     const tipoPlan: 'P1' | 'PFF' | null = masRecientePFF ? (/pff/i.test(String((masRecientePFF as PlanGrupo).valor || '')) ? 'PFF' : 'P1') : null;
-    if (planesPFF.length === 0) return { filas: [], sinMatch: [], conError: [], tipoPlan };
+    if (planesPFF.length === 0) return { filas: [], sinMatch: [], conError: [], tipoPlan, ferts: [] };
 
     const planPorCodigo = new Map(planesPFF.map(p => [p.codigo_plan_grupo, p]));
     const codigosPlanPFF = new Set(planesPFF.map(p => p.codigo_plan_grupo));
     const detallesPFF = detallesTodos.filter(d => d.estado === 'A' && codigosPlanPFF.has(d.codigo_plan_grupo));
-    if (detallesPFF.length === 0) return { filas: [], sinMatch: [], conError: [], tipoPlan };
+    if (detallesPFF.length === 0) return { filas: [], sinMatch: [], conError: [], tipoPlan, ferts: [] };
 
     const qtyPorMaterialYPlan = new Map<string, Map<number, number>>();
     detallesPFF.forEach(d => {
@@ -3175,8 +3344,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       porPlan.set(d.codigo_plan_grupo, (porPlan.get(d.codigo_plan_grupo) || 0) + parseQty(d.cantidad_produccion_neta));
     });
 
-    // resultado[codigo_plan_grupo][codigo_lamina] = cantidad acumulada
-    const resultadoPorPlan = new Map<number, Map<string, number>>();
+    // resultado[codigo_plan_grupo][codigo_lamina] = cantidad por nivel BOM (1 = directa del FERT, 2+ = vía semielaborado)
+    const resultadoPorPlan = new Map<number, Map<string, { n1: number; n2: number }>>();
     const sinMatch: string[] = [];
     const conError: string[] = [];
 
@@ -3192,25 +3361,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         let tieneAlgunEspuma = false;
 
         if (Array.isArray(rawData)) {
-          // Un mismo componente puede aparecer en VARIOS niveles del árbol, cada uno con su propia
-          // CANTIDAD_ACUMULADA (verificado: el CHN 20013334 trae la lámina 30004179 en nivel 4 con
-          // 0,399 y en nivel 5 con 0,178). Sumar ambas filas contaría el mismo corte dos veces, así
-          // que se conserva UNA sola por componente: la del nivel MÁS PROFUNDO, que es la que refleja
-          // la cantidad real de ese componente en el árbol completo.
-          //
-          // Caso real distinto (verificado 2026-09-03, material 20004463 -> lámina 30027586, plan
-          // #602): 2 filas para el MISMO COMPONENTE con el MISMO MATERIAL_PADRE (20004463, el propio
-          // FERT consultado) -- no son 2 rutas BOM reales, es la MISMA relación directa reportada dos
-          // veces por SAP con un NIVEL/CANTIDAD_ACUMULADA distinto (nivel1: unitaria=2/acumulada=2;
-          // nivel2: unitaria=2/acumulada=0.02). "Preferir el nivel más profundo" en este caso tomaba
-          // la fila corrupta (0.02) sobre la sana (2) -- 120 unidades del plan devolvían 2.4 en vez de
-          // 240. Una relación directa (MATERIAL_PADRE = el Fert consultado) SIEMPRE debe cumplir
-          // acumulada=unitaria (verificado también en otro material real con 10/10 filas nivel 1
-          // consistentes) -- cuando 2 filas comparten el mismo MATERIAL_PADRE, se prefiere la que sí
-          // cumple esa igualdad (autoconsistente) sobre la que no, antes de aplicar el criterio de
-          // nivel más profundo (que sigue aplicando tal cual para rutas BOM genuinamente distintas,
-          // es decir, MATERIAL_PADRE diferente).
-          const porComponente = new Map<string, { nivel: number; cantAcum: number; materialPadre: string; autoconsistente: boolean }>();
+          // Cada línea del BOM que llega a una lámina de corte es consumo real y se SUMA (verificado
+          // con el usuario 2026-09-29, PFF #942, lámina 30000282: FERT 20001527 la trae en DOS
+          // posiciones de nivel 1 (21+21) y otros 4 FERT la traen vía semielaborado en nivel 2 (18) —
+          // la necesidad real es 60; el criterio anterior de "una sola línea por componente" daba 39).
+          // Solo se descarta la fila corrupta ya documentada (ver lineaBomValida). La cantidad de cada
+          // línea se separa además en nivel 1 (directa del FERT) y nivel 2+ (vía semielaborado).
+          const porComponente = new Map<string, { n1: number; n2: number }>();
 
           (rawData as Record<string, unknown>[]).forEach((row) => {
             const desc = String(row.DESCRIPCION_COMPONENTE || '');
@@ -3228,7 +3385,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             // descripción no empieza por "LAMINA D". "LAMINA PRENSADA D100" (resp 017) sigue quedando
             // fuera sola. La nomenclatura se dispersa en los niveles profundos del árbol (LAMINA D /
             // ESPUMA BABY / LAMINA ESQUINA / TACO ESPUMA conviven en el mismo nivel); el responsable no.
-            const respComponente = materialRespCPPorCentro[centro]?.get(laminaCode) || '';
             // FORRO nunca es de corte, sin importar el responsable — ver ES_FORRO. Se comprueba ANTES
             // del criterio de responsable/patrón porque el responsable por sí solo puede dar falso
             // positivo (verificado: 105 de 122 materiales con resp. de corte en Centro 2000 son FORRO).
@@ -3240,36 +3396,25 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             // responsables) solo por compartir máquina/responsable. El comentario de arriba asumía que
             // solo el resp 017 ("LAMINA PRENSADA") quedaba fuera del filtro de responsable — cierto,
             // pero incompleto: no cubría "TACO PRENSADO" con 029/039.
-            const esDeCorte = !ES_FORRO(desc) && !/PRENSAD/i.test(desc) && (respComponente
-              ? allowedRespPorCentro(centro).includes(respComponente) && !respExcepcionExcluye(centro, respComponente, laminaCode)
-              : ES_LAMINA_CORTADA(desc));
-            if (!esDeCorte) return;
+            if (!esComponenteDeCorte(desc, laminaCode, centro)) return;
 
             encontroMatch = true;
-            const nivel = Number(row.NIVEL || 0);
-            const cantUnitaria = Number(row.CANTIDAD_UNITARIA || 0);
-            const cantAcum = Number(row.CANTIDAD_ACUMULADA || cantUnitaria || 0);
-            const materialPadre = cleanCode(row.MATERIAL_PADRE);
-            const autoconsistente = Math.abs(cantAcum - cantUnitaria) < 0.0001;
-            const previo = porComponente.get(laminaCode);
-            if (!previo) {
-              porComponente.set(laminaCode, { nivel, cantAcum, materialPadre, autoconsistente });
-            } else if (previo.materialPadre === materialPadre) {
-              if (autoconsistente && !previo.autoconsistente) {
-                porComponente.set(laminaCode, { nivel, cantAcum, materialPadre, autoconsistente });
-              }
-            } else if (nivel > previo.nivel) {
-              porComponente.set(laminaCode, { nivel, cantAcum, materialPadre, autoconsistente });
-            }
+            const linea = leerLineaBom(row, materialCode);
+            if (!linea.valida) return;
+            const acum = porComponente.get(laminaCode) || { n1: 0, n2: 0 };
+            if (linea.nivelBom === 1) acum.n1 += linea.cantAcumulada; else acum.n2 += linea.cantAcumulada;
+            porComponente.set(laminaCode, acum);
           });
 
-          porComponente.forEach(({ cantAcum }, laminaCode) => {
-
+          porComponente.forEach(({ n1, n2 }, laminaCode) => {
             const porPlan = qtyPorMaterialYPlan.get(materialCode)!;
             porPlan.forEach((qtyPFF, codigoPlanGrupo) => {
               if (!resultadoPorPlan.has(codigoPlanGrupo)) resultadoPorPlan.set(codigoPlanGrupo, new Map());
               const porLamina = resultadoPorPlan.get(codigoPlanGrupo)!;
-              porLamina.set(laminaCode, (porLamina.get(laminaCode) || 0) + qtyPFF * cantAcum);
+              const acum = porLamina.get(laminaCode) || { n1: 0, n2: 0 };
+              acum.n1 += qtyPFF * n1;
+              acum.n2 += qtyPFF * n2;
+              porLamina.set(laminaCode, acum);
             });
           });
         }
@@ -3291,10 +3436,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // orden real cubre esta necesidad del PFF.
       const fechaInicio = plan?.fecha_inicio_plan ? fechaLocalEcuador(plan.fecha_inicio_plan) : '—';
       const fechaFin = plan?.fecha_fin_plan ? fechaLocalEcuador(plan.fecha_fin_plan) : fechaInicio;
-      porLamina.forEach((cantidad, codigoLamina) => {
+      porLamina.forEach(({ n1, n2 }, codigoLamina) => {
         filas.push({
           codigo_material: Number(codigoLamina),
-          cantidad_produccion_neta: cantidad.toFixed(4),
+          cantidad_produccion_neta: (n1 + n2).toFixed(4),
+          cantidad_nivel1: n1,
+          cantidad_nivel2: n2,
           fecha_inicio: fechaInicio,
           fecha_fin: fechaFin,
           codigo_grupo: codigoGrupoEnsamblado,
@@ -3304,8 +3451,23 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
     });
 
-    return { filas, sinMatch, conError, tipoPlan };
-  }, [allowedRespPorCentro, materialRespCPPorCentro]);
+    // FERT de origen tal como vienen en el PFF — solo para la Verificación BOM del tab Necesidades
+    // Planta (ver verificarBomP2Muebles), no entran a ningún cálculo.
+    const ferts: NecesidadPlantaRow[] = [];
+    qtyPorMaterialYPlan.forEach((porPlan, fert) => porPlan.forEach((qty, codigoPlanGrupo) => {
+      ferts.push({
+        codigo_material: Number(fert),
+        cantidad_produccion_neta: String(qty),
+        fecha_inicio: '—',
+        fecha_fin: '—',
+        codigo_grupo: codigoGrupoEnsamblado,
+        codigo_plan_grupo: codigoPlanGrupo,
+        centro,
+      });
+    }));
+
+    return { filas, sinMatch, conError, tipoPlan, ferts };
+  }, [esComponenteDeCorte]);
 
   // Wrapper de siempre: hoy+DIAS_HABILES_PT_ENSAMBLADO días hábiles (antes +3), delega en explotarPFFParaCentroConFecha. Mismo
   // nombre/firma/comportamiento de antes — no cambia nada para calcularNecesidadPFF.
@@ -3317,6 +3479,95 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     onStep: () => void
   ) => explotarPFFParaCentroConFecha(codigoGrupoEnsamblado, centro, planesTodos, detallesTodos, format(sumarDiasHabiles(new Date(), DIAS_HABILES_PT_ENSAMBLADO), 'yyyy-MM-dd'), onStep),
   [explotarPFFParaCentroConFecha, sumarDiasHabiles]);
+
+  // Verificación BOM (tab Necesidades Planta, bajo demanda): explota cada FERT del P2 "ESPUMA MUEBLES"
+  // y del P1/PFF de Ensamblado y recalcula la lámina de corte que debería pedir, para compararla con
+  // lo que quedó como necesidad (que es lo que responden el P3/PFD y lo que sale a SAP). Solo lectura: no cambia la
+  // necesidad ni el P3, sirve para auditar diferencias como "el BOM da 126 y el P2 dice 138".
+  // Se muestran dos totales porque la explosión PFF de Ensamblado deja UNA línea por componente y
+  // FERT, mientras que un componente con dos líneas de consumo reales en el árbol debería sumarlas —
+  // ver ambas contra el P2 dice cuál criterio usó el origen.
+  const verificarBomP2Muebles = useCallback(async () => {
+    const fertsOrigen = [...fertsP2Muebles, ...fertsPFF];
+    if (fertsOrigen.length === 0) {
+      addNotification('warning', 'No hay FERT de origen para verificar (P2 Muebles / PFF). Sincroniza primero.');
+      return;
+    }
+    // Cantidad por FERT, separada por centro y plan de origen (un mismo FERT puede venir en el P2
+    // Muebles y en el PFF a la vez; cada plan se compara contra lo que él mismo registró).
+    const fertPorPlan = new Map<string, number>();
+    fertsOrigen.forEach(r => {
+      const key = `${r.centro}|${r.codigo_plan_grupo}|${Number(r.codigo_material)}`;
+      fertPorPlan.set(key, (fertPorPlan.get(key) || 0) + parseQty(r.cantidad_produccion_neta));
+    });
+    const origenPorPlan = new Map<number, string>();
+    fertsP2Muebles.forEach(r => origenPorPlan.set(r.codigo_plan_grupo, 'P2 Muebles'));
+    fertsPFF.forEach(r => origenPorPlan.set(r.codigo_plan_grupo, 'Ensamblado P1/PFF'));
+
+    setIsVerificandoBomP2(true);
+    setVerificacionBomP2Progreso({ current: 0, total: fertPorPlan.size });
+    const porComponente = new Map<string, VerificacionBomP2Row>();
+    const errores: string[] = [];
+    const filaDe = (centro: string, plan: number, componente: string, descripcion: string) => {
+      const key = `${centro}|${plan}|${componente}`;
+      if (!porComponente.has(key)) {
+        porComponente.set(key, { centro, codigoPlanGrupo: plan, origen: origenPorPlan.get(plan) || '—', componente, descripcion, p2Registrado: 0, bomSumaLineas: 0, bomNivel1: 0, bomNivel2: 0, lineas: [] });
+      }
+      return porComponente.get(key)!;
+    };
+
+    const explosionCache = new Map<string, Record<string, unknown>[]>();
+    let paso = 0;
+    for (const [key, cantidadFert] of fertPorPlan) {
+      const [centro, planStr, fert] = key.split('|');
+      const plan = Number(planStr);
+      try {
+        const cacheKey = `${centro}|${fert}`;
+        if (!explosionCache.has(cacheKey)) {
+          const response = await serviciosService.getMaestroMaterialesExplosion(centro, fert.padStart(18, '0'), 1, 500);
+          const data = response?.data?.data || response?.data || [];
+          explosionCache.set(cacheKey, Array.isArray(data) ? data as Record<string, unknown>[] : []);
+        }
+        explosionCache.get(cacheKey)!.forEach(row => {
+          const desc = String(row.DESCRIPCION_COMPONENTE || '');
+          const componente = cleanCode(row.COMPONENTE);
+          if (!componente || !esComponenteDeCorte(desc, componente, centro)) return;
+          const linea = leerLineaBom(row, fert);
+          const consumo = cantidadFert * linea.cantAcumulada;
+          const fila = filaDe(centro, plan, componente, desc);
+          fila.lineas.push({
+            fert, cantidadFert, nivel: linea.nivel, materialPadre: linea.materialPadre,
+            cantUnitaria: linea.cantUnitaria, cantAcumulada: linea.cantAcumulada,
+            unidad: String(row.UNIDAD || row.UNIDAD_MEDIDA || '—'),
+            consumo, nivelBom: linea.nivelBom, valida: linea.valida,
+          });
+          if (!linea.valida) return;
+          fila.bomSumaLineas += consumo;
+          if (linea.nivelBom === 1) fila.bomNivel1 += consumo; else fila.bomNivel2 += consumo;
+        });
+      } catch (e) {
+        console.warn(`[Verificación BOM] Error explotando ${fert} (centro ${centro}):`, (e as Error).message);
+        errores.push(fert);
+      }
+      setVerificacionBomP2Progreso({ current: ++paso, total: fertPorPlan.size });
+    }
+
+    // Lo que cada plan registró por lámina: el P2 Muebles (grupo 3) y la necesidad PFF ya explotada.
+    [
+      ...Object.values(necesidadesPlantaData).flat().filter(r => r.codigo_grupo === CODIGO_GRUPO_P2_MUEBLES),
+      ...necesidadPFFData['1000'], ...necesidadPFFData['2000'],
+    ].forEach(r => {
+      const componente = String(Number(r.codigo_material));
+      filaDe(r.centro, r.codigo_plan_grupo, componente, materialDescMap.get(componente) || '—').p2Registrado += parseQty(r.cantidad_produccion_neta);
+    });
+
+    const filas = Array.from(porComponente.values())
+      .map(f => ({ ...f, descripcion: materialDescMap.get(f.componente) || f.descripcion }))
+      .sort((a, b) => Math.abs(b.p2Registrado - b.bomSumaLineas) - Math.abs(a.p2Registrado - a.bomSumaLineas));
+    setVerificacionBomP2(filas);
+    setVerificacionBomP2Errores(errores);
+    setIsVerificandoBomP2(false);
+  }, [fertsP2Muebles, fertsPFF, necesidadesPlantaData, necesidadPFFData, materialDescMap, esComponenteDeCorte, addNotification]);
 
   // Botón manual "Calcular Necesidad PFF": corre la explosión para Ensamblado - Quito (1000, grupo 1)
   // Y Ensamblado - Guayaquil (2000, grupo 6) en la misma acción. A diferencia de Corte y Laminado
@@ -3353,8 +3604,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
       const pff = { '1000': resultado1000.filas, '2000': resultado2000.filas };
       setNecesidadPFFData(pff);
+      const fertsEnsamblado = [...resultado1000.ferts, ...resultado2000.ferts];
+      setFertsPFF(fertsEnsamblado);
+      setVerificacionBomP2(null);
       setTipoPlanEnsambladoPorCentro({ '1000': resultado1000.tipoPlan, '2000': resultado2000.tipoPlan });
-      actualizarEnCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA, { necesidadPFFData: pff });
+      actualizarEnCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA, { necesidadPFFData: pff, fertsPFF: fertsEnsamblado });
 
       // Nivel 2 de Capacidad Operativa (red de seguridad, ciclo atrasado un día — ver renderDashboard):
       // mismos planesTodos/detallesTodos ya obtenidos arriba, sin fetch extra, apuntando un día hábil
@@ -3490,7 +3744,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const claveMaterial = (m: string | number) => String(Number(m));
     const existentesPorClave = new Map<string, DetalleTactico>();
     detallesPlan.forEach(d => {
-      existentesPorClave.set(`${claveMaterial(d.codigo_material)}|${d.codigo_plan_grupo_padre}`, d);
+      existentesPorClave.set(`${claveMaterial(d.codigo_material)}|${d.codigo_plan_grupo_padre}|${nivelBomDeLinea(d.linea_produccion) ?? ''}`, d);
     });
 
     const esPFD = /pfd/i.test(plan.valor);
@@ -3501,7 +3755,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     salidaFresca.forEach(row => {
       const splits = getOrigenesProrrateoEspuma(row.material, row.cantidadUnidades, centro, plan.codigo_plan_grupo);
       splits.forEach(split => {
-        const key = `${claveMaterial(row.material)}|${split.codigoPadre}`;
+        const key = `${claveMaterial(row.material)}|${split.codigoPadre}|${split.nivel ?? ''}`;
         clavesUsadas.add(key);
         const existente = existentesPorClave.get(key);
         rows.push({
@@ -3512,12 +3766,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           marcadoEliminar: false,
           esNuevo: !existente,
           codigo_plan_grupo_padre: split.codigoPadre,
+          nivel: split.nivel,
         });
       });
     });
 
     detallesPlan.forEach(d => {
-      const key = `${claveMaterial(d.codigo_material)}|${d.codigo_plan_grupo_padre}`;
+      const key = `${claveMaterial(d.codigo_material)}|${d.codigo_plan_grupo_padre}|${nivelBomDeLinea(d.linea_produccion) ?? ''}`;
       if (clavesUsadas.has(key)) return;
       const materialCode = cleanCode(d.codigo_material);
       rows.push({
@@ -3528,6 +3783,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         marcadoEliminar: true,
         esNuevo: false,
         codigo_plan_grupo_padre: d.codigo_plan_grupo_padre ?? 0,
+        nivel: nivelBomDeLinea(d.linea_produccion),
       });
     });
 
@@ -3566,7 +3822,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           codigo_plan_grupo: codigoPlanGrupo,
           codigo_plan_grupo_padre: row.codigo_plan_grupo_padre,
           usuario_modificacion: usuario,
-          linea_produccion: matchLineaProduccionEspuma(row.material, centro),
+          linea_produccion: matchLineaProduccionEspuma(row.material, centro) + sufijoNivelBom(row.nivel),
         };
         await detalleTacticoService.save(detallePayload as unknown as DetalleTactico);
         if (row.esNuevo) agregados++; else actualizados++;
@@ -3661,6 +3917,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         marcadoEliminar: false,
         esNuevo: true,
         codigo_plan_grupo_padre: split.codigoPadre,
+        nivel: split.nivel,
       }));
     setEditPlanPreview(prev => {
       if (!prev) return prev;
@@ -3832,7 +4089,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
               codigo_plan_grupo: nuevoCodigoPlanGrupo,
               codigo_plan_grupo_padre: split.codigoPadre,
               usuario_modificacion: usuario,
-              linea_produccion: matchLineaProduccionEspuma(row.material, preview.centro),
+              linea_produccion: matchLineaProduccionEspuma(row.material, preview.centro) + sufijoNivelBom(split.nivel),
             };
             await detalleTacticoService.save(detallePayload as unknown as DetalleTactico);
             exitosos++;
@@ -4002,31 +4259,50 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return { plan: planReciente, detalles };
   }, []);
 
-  // Payload de InsertarSolicitudProduccionHB por fila de DetalleTactico ya persistida del PFD — ver
-  // el bloque de comentarios más arriba para el detalle de cada supuesto.
+  // Payload de InsertarSolicitudProduccionHB por MATERIAL del PFD ya persistido — ver el bloque de
+  // comentarios más arriba para el detalle de cada supuesto. Un material puede tener varias líneas en
+  // el PFD (una por plan de origen y por nivel BOM N1/N2, ver sufijoNivelBom), pero es el mismo
+  // material físico: se consolidan en UNA sola orden (decisión del usuario 2026-09-29) — la
+  // separación por nivel/origen queda en el PFD como trazabilidad, no en SAP. CodigoOrdenExterna
+  // toma la primera línea; Observaciones lista las líneas consolidadas.
   const buildSolicitudProduccionEspuma = useCallback((
-    d: DetalleTactico,
+    lineas: DetalleTactico[],
     centro: '1000' | '2000',
     fechaInicioPlan: string,
-    versiones: Map<string, { version: string; ambiguo: boolean }>
+    versiones: Map<string, { version: string; ambiguo: boolean }>,
+    conversion?: ConversionProvisionalEspuma
   ): SolicitudProduccionHBPayload => {
+    const d = lineas[0];
     const material = cleanCode(d.codigo_material);
+    // Entero, como siempre salió del PFD (Math.round().toFixed(0) al grabar): la provisional puede
+    // traer decimales (cantUnidadReal de una orden en KG).
+    const cantidad = Math.round(conversion ? conversion.cantidadOrden : lineas.reduce((s, l) => s + parseQty(l.cantidad_produccion_neta), 0));
+    // Si la orden incluye consumo de nivel 2 (lámina que va a un semielaborado, que se fabrica antes
+    // que el PT), arranca un día hábil antes que la fecha del PFD (decisión del usuario 2026-09-29) —
+    // nunca antes de hoy (exportar un PFD de ayer no debe mandar una fecha de inicio ya pasada).
+    const tieneNivel2 = lineas.some(l => nivelBomDeLinea(l.linea_produccion) === 2);
+    const hoy = format(new Date(), 'yyyy-MM-dd');
+    const fechaAdelantada = tieneNivel2 ? format(restarDiasHabiles(parseFechaLocal(fechaInicioPlan), 1), 'yyyy-MM-dd') : fechaInicioPlan;
+    const fechaInicio = fechaAdelantada < hoy && fechaInicioPlan >= hoy ? hoy : fechaAdelantada;
     return {
       Mandante: '300',
       CodigoOrdenExterna: String(d.codigo_detalle_tactico),
       ClaseOrden: 'ZCSQ',
       Centro: centro,
       CodigoMaterial: material,
-      CantidadPlanificada: parseQty(d.cantidad_produccion_neta),
+      CantidadPlanificada: cantidad,
       VersionFabricacion: versiones.get(material)?.version || '',
       PuestoTrabajo: resolvePuestoTrabajoEspuma(material),
       FechaFinProgramada: '',
       HoraFinProgramada: '',
-      FechaInicioProgramada: fechaInicioPlan.replace(/-/g, ''),
+      FechaInicioProgramada: fechaInicio.replace(/-/g, ''),
       HoraInicioProgramada: '070000',
       PedidoComercial: '',
       PosicionPedido: '',
       EstadoRegistro: '1',
+      // Mismo texto fijo que ya cargaba sin problemas en SAP/HANA — el detalle de consolidación
+      // (N1/N2, provisional convertida) se muestra en la vista previa, no se manda aquí, para no
+      // arriesgar el largo del campo en el endpoint.
       Observaciones: 'Generado automático — Plan Táctico Corte Espuma (PFD)',
       EstadoCarga: '',
       NumeroOrdenSap: '',
@@ -4034,13 +4310,48 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       HoraProceso: '',
       UsuarioProceso: 'APIUSR',
     };
-  }, [resolvePuestoTrabajoEspuma]);
+  }, [resolvePuestoTrabajoEspuma, restarDiasHabiles]);
 
   // Paso 1: busca el PFD ya persistido de ese centro, resuelve Versión de Fabricación por material y
   // congela la vista previa editable — mismo criterio que handleExportTxt en Laminado (ninguno de los
   // dos recuperos bloquea el envío si falta: el payload sale con el campo en '' y se corrige a mano
   // en la tabla editable del diálogo).
+  // Conversión de la provisional existente (sin servicio nuevo — el envío a SAP con
+  // InsertarSolicitudProduccionHB ES la conversión; decisión del usuario 2026-09-29). Por material, con
+  // las provisionales que ya cubren su necesidad en la ventana (provisionalesQueCubrenPorCentro, match
+  // material + fecha) y el faltante del PFD persistido (respeta lo editado en "Editar Plan"):
+  //   - faltante > 0 y hay provisional → orden = provisional + faltante (se sube la provisional
+  //     hasta la necesidad: una sola orden por material).
+  //   - faltante = 0 y hay provisional → orden = provisional completa, solo si el stock solo no
+  //     cubre la necesidad (no se reduce la provisional: el lote lo fija SAP y el excedente cubre el
+  //     ciclo siguiente). Si el stock solo ya cubre, no hay orden.
+  //   - sin provisional → orden = faltante (como antes).
+  // Provisional "principal" (referencia en Observaciones) si hay varias: la que llega antes del día
+  // del PT (PT−1), luego la de fecha fin más tardía, luego la de mayor cantidad.
+  const resolverConversionProvisional = useCallback((centro: '1000' | '2000', material: string, faltantePFD: number): ConversionProvisionalEspuma => {
+    const provisionales = provisionalesQueCubrenPorCentro[centro].get(material) || [];
+    const provisionalQty = provisionales.reduce((s, o) => s + o.cantUnidadReal, 0);
+    const principal = [...provisionales].sort((a, b) =>
+      Number(!!a.llegaDiaPT) - Number(!!b.llegaDiaPT) || b.fechaFin.localeCompare(a.fechaFin) || b.cantUnidadReal - a.cantUnidadReal
+    )[0]?.orden;
+    if (provisionalQty <= 0) {
+      return { faltantePFD, provisionalQty: 0, cantidadOrden: faltantePFD, motivo: faltantePFD > 0 ? 'solo-faltante' : 'sin-orden' };
+    }
+    if (faltantePFD > 0) {
+      return { faltantePFD, provisionalQty, cantidadOrden: faltantePFD + provisionalQty, principal, motivo: 'provisional+faltante' };
+    }
+    const fila = respuestaSalidaRowsPorCentro(centro, true).find(r => r.material === material);
+    const requeridoSinStock = fila ? Math.max(0, fila.necesidad - fila.stock) : 0;
+    return requeridoSinStock > 0
+      ? { faltantePFD, provisionalQty, cantidadOrden: provisionalQty, principal, motivo: 'provisional-completa' }
+      : { faltantePFD, provisionalQty, cantidadOrden: 0, principal, motivo: 'sin-orden' };
+  }, [provisionalesQueCubrenPorCentro, respuestaSalidaRowsPorCentro]);
+
   const handleExportSap = useCallback(async (centro: '1000' | '2000') => {
+    if (!datosCargados) {
+      addNotification('warning', 'Sincroniza primero: el envío a SAP cruza el PFD con las órdenes provisionales vigentes.');
+      return;
+    }
     setIsValidandoExportSap(true);
     try {
       const ultimoPFD = await fetchUltimoPFDEspuma(centro);
@@ -4050,16 +4361,35 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       }
       const { plan, detalles } = ultimoPFD;
       const fechaInicioPlan = fechaLocalPlana(plan.fecha_inicio_plan);
-      const materiales = Array.from(new Set(detalles.map(d => cleanCode(d.codigo_material))));
-      const versiones = await fetchVersionesFabricacionEspuma(centro, materiales);
-      setExportSapPreview({ plan, centro, detalles });
-      setExportSapPayloads(detalles.map(d => buildSolicitudProduccionEspuma(d, centro, fechaInicioPlan, versiones)));
+      // Una orden por material (ver buildSolicitudProduccionEspuma), con su provisional convertida
+      // (ver resolverConversionProvisional). Material sin cantidad resultante → no genera orden.
+      const porMaterial = new Map<string, DetalleTactico[]>();
+      detalles.forEach(d => {
+        const material = cleanCode(d.codigo_material);
+        if (!porMaterial.has(material)) porMaterial.set(material, []);
+        porMaterial.get(material)!.push(d);
+      });
+      const conConversion = Array.from(porMaterial.entries())
+        .map(([material, lineas]) => ({
+          lineas,
+          conversion: resolverConversionProvisional(centro, material, lineas.reduce((s, l) => s + parseQty(l.cantidad_produccion_neta), 0)),
+        }))
+        .filter(g => g.conversion.cantidadOrden > 0);
+      if (conConversion.length === 0) {
+        addNotification('info', `El PFD #${plan.codigo_plan_grupo} del Centro ${centro} no tiene faltantes ni provisionales por convertir: no hay órdenes que crear en SAP.`);
+        return;
+      }
+      const grupos = conConversion.map(g => g.lineas);
+      const conversion = conConversion.map(g => g.conversion);
+      const versiones = await fetchVersionesFabricacionEspuma(centro, grupos.map(g => cleanCode(g[0].codigo_material)));
+      setExportSapPreview({ plan, centro, grupos, conversion });
+      setExportSapPayloads(conConversion.map(g => buildSolicitudProduccionEspuma(g.lineas, centro, fechaInicioPlan, versiones, g.conversion)));
     } catch (e) {
       addNotification('error', `No se pudo completar la validación previa al envío: ${(e as Error).message}. Envío cancelado por seguridad.`);
     } finally {
       setIsValidandoExportSap(false);
     }
-  }, [fetchUltimoPFDEspuma, fetchVersionesFabricacionEspuma, buildSolicitudProduccionEspuma, addNotification]);
+  }, [fetchUltimoPFDEspuma, fetchVersionesFabricacionEspuma, buildSolicitudProduccionEspuma, addNotification, datosCargados, resolverConversionProvisional]);
 
   const updateExportSapPayload = useCallback((index: number, field: keyof SolicitudProduccionHBPayload, value: string | number) => {
     setExportSapPayloads(prev => {
@@ -4131,6 +4461,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       setDiasNoLaborables(new Set(snap.diasNoLaborables));
       setDiasLaborablesExtra(new Set(snap.diasLaborablesExtra || []));
       setNecesidadesPlantaData(snap.necesidadesPlantaData);
+      setFertsP2Muebles(snap.fertsP2Muebles || []);
+      setFertsPFF(snap.fertsPFF || []);
       setNecesidadPFFData(snap.necesidadPFFData);
       setNecesidadPFFNivel2Data(snap.necesidadPFFNivel2Data || { '1000': [], '2000': [] });
       setDatosCargados(true);
@@ -4946,7 +5278,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                     placeholder="correo1@chaideychaide.com, correo2@chaideychaide.com"
                     className="w-full h-20 text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-red-400"
                   />
-                  <p className="text-[9px] text-slate-400 -mt-1">Precargado desde el grupo de correos configurado (Grupo_correos_Laminado) — editable antes de enviar.</p>
+                  <p className="text-[9px] text-slate-400 -mt-1">Precargado desde el grupo de correos configurado (Grupo_Correos_Corte_Espuma) — editable antes de enviar.</p>
                   <Button
                     onClick={() => handleEnviarReporteEspuma(planta)}
                     disabled={isSendingReporte[planta] || !destinatariosReporte.trim()}
@@ -5559,6 +5891,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                                       ⚠ {row.origenCandidatosCount} necesidad{row.origenCandidatosCount === 1 ? '' : 'es'}, fecha fuera de rango
                                     </span>
                                   )}
+                                  {row.llegaDiaPT && (
+                                    <span className="text-[7px] text-orange-600 font-black uppercase mt-0.5" title="Su Fin Extr. (FECHAFIN) es el mismo día del PT de Ensamblado: cuenta como cobertura, pero llega después de la regla de 'un día hábil antes'.">
+                                      ⚠ Llega el día del PT
+                                    </span>
+                                  )}
                                 </div>
                               ) : (
                                 <span className="text-red-400 italic font-black text-[9px] uppercase">Sin necesidad detectada</span>
@@ -5696,7 +6033,98 @@ export const TacticalPlanEspumasSection: React.FC = () => {
               >
                 {necesidadesPlantaLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Actualizar P2 (Venta Externa)
               </Button>
+              <Button
+                onClick={verificarBomP2Muebles}
+                disabled={isVerificandoBomP2 || necesidadesPlantaLoading || isCalculandoPFF || fertsP2Muebles.length + fertsPFF.length === 0}
+                variant="outline"
+                className="rounded-xl h-9 px-5 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                title={fertsP2Muebles.length + fertsPFF.length === 0 ? 'No hay FERT de origen cargados (P2 Muebles / P1-PFF Ensamblado)' : `Explota el BOM de los FERT del P2 ESPUMA MUEBLES (${fertsP2Muebles.length}) y del P1/PFF de Ensamblado (${fertsPFF.length}) y compara la lámina resultante contra la necesidad registrada (solo lectura)`}
+              >
+                {isVerificandoBomP2 ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                {isVerificandoBomP2 ? `Explotando BOM ${verificacionBomP2Progreso.current}/${verificacionBomP2Progreso.total}` : 'Verificar BOM · P2/PFF'}
+              </Button>
             </div>
+            {verificacionBomP2 && (
+              <div className="bg-white border border-emerald-100 rounded-2xl p-4 space-y-3">
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <div>
+                    <p className="text-xs font-black uppercase tracking-widest text-slate-700">Verificación BOM · P2 Muebles / P1-PFF Ensamblado</p>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      Cantidad de cada FERT del plan × CANTIDAD_ACUMULADA de cada línea del BOM que llega a un componente de corte. Se suman todas las líneas (nivel 1 = directa del FERT, nivel 2+ = vía semielaborado); solo se descarta la fila corrupta de SAP (relación directa con acumulada ≠ unitaria). Clic en una fila para ver las líneas.
+                    </p>
+                    {verificacionBomP2Errores.length > 0 && (
+                      <p className="text-[9px] text-red-700 mt-1">Error al consultar el BOM de: <span className="font-mono">{verificacionBomP2Errores.join(', ')}</span></p>
+                    )}
+                  </div>
+                  <Button variant="ghost" className="h-7 px-2 text-[10px]" onClick={() => setVerificacionBomP2(null)}><X className="w-3.5 h-3.5" /></Button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[10px]">
+                    <thead>
+                      <tr className="text-left text-slate-400 uppercase tracking-wider border-b border-slate-100">
+                        <th className="py-1.5 pr-2">Centro</th>
+                        <th className="py-1.5 pr-2">Origen · Plan</th>
+                        <th className="py-1.5 pr-2">Componente</th>
+                        <th className="py-1.5 pr-2">Descripción</th>
+                        <th className="py-1.5 pr-2 text-right">Necesidad registrada</th>
+                        <th className="py-1.5 pr-2 text-right">BOM · nivel 1</th>
+                        <th className="py-1.5 pr-2 text-right">BOM · nivel 2+</th>
+                        <th className="py-1.5 pr-2 text-right">BOM · total</th>
+                        <th className="py-1.5 pr-2 text-right">Dif. registrada − BOM</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {verificacionBomP2.map(f => {
+                        const key = `${f.centro}|${f.codigoPlanGrupo}|${f.componente}`;
+                        const dif = f.p2Registrado - f.bomSumaLineas;
+                        const abierto = verificacionBomP2Abierto === key;
+                        return (
+                          <React.Fragment key={key}>
+                            <tr className="border-b border-slate-50 cursor-pointer hover:bg-slate-50" onClick={() => setVerificacionBomP2Abierto(abierto ? null : key)}>
+                              <td className="py-1.5 pr-2">{f.centro}</td>
+                              <td className="py-1.5 pr-2">{f.origen} · #{f.codigoPlanGrupo}</td>
+                              <td className="py-1.5 pr-2 font-mono">{f.componente}</td>
+                              <td className="py-1.5 pr-2">{f.descripcion}</td>
+                              <td className="py-1.5 pr-2 text-right font-bold">{f.p2Registrado.toLocaleString('es-EC', { maximumFractionDigits: 3 })}</td>
+                              <td className="py-1.5 pr-2 text-right">{f.bomNivel1.toLocaleString('es-EC', { maximumFractionDigits: 3 })}</td>
+                              <td className="py-1.5 pr-2 text-right">{f.bomNivel2.toLocaleString('es-EC', { maximumFractionDigits: 3 })}</td>
+                              <td className="py-1.5 pr-2 text-right font-bold">{f.bomSumaLineas.toLocaleString('es-EC', { maximumFractionDigits: 3 })}</td>
+                              <td className={cn("py-1.5 pr-2 text-right font-black", Math.abs(dif) < 0.001 ? "text-emerald-600" : "text-red-600")}>{dif.toLocaleString('es-EC', { maximumFractionDigits: 3 })}</td>
+                            </tr>
+                            {abierto && (
+                              <tr>
+                                <td colSpan={9} className="bg-slate-50/70 px-3 py-2">
+                                  {f.lineas.length === 0 ? (
+                                    <p className="text-[9px] text-slate-400">Ningún FERT de este plan lleva este componente en su BOM — la necesidad registrada no sale de estos FERT.</p>
+                                  ) : (
+                                    <table className="w-full text-[9px]">
+                                      <thead>
+                                        <tr className="text-left text-slate-400 uppercase">
+                                          <th className="pr-2">FERT</th><th className="pr-2 text-right">Cant. FERT</th><th className="pr-2 text-right">Nivel SAP</th><th className="pr-2">Nivel BOM</th><th className="pr-2">Material padre</th>
+                                          <th className="pr-2 text-right">Cant. unitaria</th><th className="pr-2 text-right">Cant. acumulada</th><th className="pr-2">Unidad</th><th className="pr-2 text-right">Consumo</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {f.lineas.map((l, i) => (
+                                          <tr key={i} className={cn(!l.valida && "line-through opacity-50")} title={l.valida ? undefined : 'Descartada: relación directa con el FERT con acumulada ≠ unitaria (fila corrupta de SAP)'}>
+                                            <td className="pr-2 font-mono">{l.fert}</td><td className="pr-2 text-right">{l.cantidadFert}</td><td className="pr-2 text-right">{l.nivel}</td><td className="pr-2">{l.nivelBom === 1 ? 'N1 directa' : 'N2+ vía semielab.'}</td><td className="pr-2 font-mono">{l.materialPadre || '—'}</td>
+                                            <td className="pr-2 text-right">{l.cantUnitaria}</td><td className="pr-2 text-right">{l.cantAcumulada}</td><td className="pr-2">{l.unidad}</td><td className="pr-2 text-right font-bold">{l.consumo.toLocaleString('es-EC', { maximumFractionDigits: 3 })}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  )}
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
             {isCalculandoPFF && (
               <div className="space-y-1.5">
                 <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest">
@@ -6203,7 +6631,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           <DialogHeader>
             <DialogTitle>Confirmar envío a SAP — PFD Corte Espuma {exportSapPreview ? `(Centro ${exportSapPreview.centro})` : ''}</DialogTitle>
             <DialogDescription>
-              Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Sale del PFD #{exportSapPreview?.plan.codigo_plan_grupo} ya guardado (una línea por material/lote ya persistido). Esta acción no se puede deshacer desde acá.
+              Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Sale del PFD #{exportSapPreview?.plan.codigo_plan_grupo} ya guardado: una orden por material (las líneas por nivel N1/N2 u origen se suman). Si el material ya tiene provisional en la ventana, la orden la convierte: provisional + faltante, o la provisional completa si el faltante es 0 y el stock solo no cubre. Esta acción no se puede deshacer desde acá.
             </DialogDescription>
           </DialogHeader>
           {exportSapPreview && exportSapPayloads && (
@@ -6215,6 +6643,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                     <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0 z-10">
                       <tr>
                         <th className="px-2 py-2 text-left whitespace-nowrap">Descripción</th>
+                        <th className="px-2 py-2 text-left whitespace-nowrap" title="Órdenes provisionales de SAP de este material dentro de la ventana del plan (las mismas que ya cuentan como cobertura). Base para vincular/ajustar la provisional en vez de crear una orden nueva.">Provisional existente</th>
                         {SOLICITUD_PRODUCCION_FIELDS_ESPUMA.map(f => (
                           <th key={f.key} className="px-2 py-2 text-left whitespace-nowrap">{f.label}</th>
                         ))}
@@ -6222,8 +6651,30 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                     </thead>
                     <tbody className="divide-y divide-gray-50">
                       {exportSapPayloads.map((payload, i) => (
-                        <tr key={`${exportSapPreview.detalles[i]?.codigo_detalle_tactico}-${i}`}>
-                          <td className="px-2 py-1 truncate max-w-[180px]" title={materialDescMap.get(payload.CodigoMaterial) || ''}>{materialDescMap.get(payload.CodigoMaterial) || '—'}</td>
+                        <tr key={`${exportSapPreview.grupos[i]?.[0]?.codigo_detalle_tactico}-${i}`}>
+                          <td className="px-2 py-1 max-w-[180px]" title={materialDescMap.get(payload.CodigoMaterial) || ''}>
+                            <span className="block truncate">{materialDescMap.get(payload.CodigoMaterial) || '—'}</span>
+                            {(exportSapPreview.grupos[i]?.length || 0) > 1 && (
+                              <span className="block text-[9px] text-indigo-600 font-bold" title="Líneas del PFD consolidadas en esta orden">
+                                {exportSapPreview.grupos[i].map(l => `${nivelBomDeLinea(l.linea_produccion) ? `N${nivelBomDeLinea(l.linea_produccion)} ` : `#${l.codigo_plan_grupo_padre} `}${parseQty(l.cantidad_produccion_neta)}`).join(' + ')}
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1 whitespace-nowrap text-[9px] font-mono">
+                            {(provisionalesQueCubrenPorCentro[exportSapPreview.centro].get(payload.CodigoMaterial) || []).map(o => (
+                              <span key={o.orden} className={cn("block", o.llegaDiaPT && "text-orange-600")} title={o.llegaDiaPT ? 'Llega el día del PT' : undefined}>
+                                {o.orden} · {o.fechaFin} · {o.cantUnidadReal}
+                              </span>
+                            ))}
+                            {!provisionalesQueCubrenPorCentro[exportSapPreview.centro].get(payload.CodigoMaterial)?.length && <span className="text-slate-300">—</span>}
+                            {exportSapPreview.conversion[i] && exportSapPreview.conversion[i].provisionalQty > 0 && (
+                              <span className="block text-[8px] font-sans font-black uppercase text-emerald-700 mt-0.5">
+                                {exportSapPreview.conversion[i].motivo === 'provisional+faltante'
+                                  ? `Convierte ${exportSapPreview.conversion[i].provisionalQty} + faltante ${exportSapPreview.conversion[i].faltantePFD}`
+                                  : `Convierte provisional completa (${exportSapPreview.conversion[i].provisionalQty})`}
+                              </span>
+                            )}
+                          </td>
                           {SOLICITUD_PRODUCCION_FIELDS_ESPUMA.map(f => (
                             <td key={f.key} className="px-1 py-1">
                               <Input
@@ -6334,7 +6785,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                     <tbody className="divide-y divide-gray-50">
                       {editPlanPreview.rows.map((row, idx) => (
                         <tr key={`${row.material}-${row.codigo_plan_grupo_padre}-${idx}`} className={cn(row.marcadoEliminar && "opacity-40 line-through", row.esNuevo && !row.marcadoEliminar && "bg-emerald-50/50")}>
-                          <td className="px-3 py-2 font-mono">{row.material}</td>
+                          <td className="px-3 py-2 font-mono">
+                            {row.material}
+                            {row.nivel && <span className="ml-1 text-[8px] font-black text-indigo-600" title={row.nivel === 1 ? 'Nivel 1: directa del FERT' : 'Nivel 2+: vía semielaborado'}>N{row.nivel}</span>}
+                          </td>
                           <td className="px-3 py-2 truncate max-w-[200px]">{row.descripcion}</td>
                           <td className="px-3 py-2 text-right">
                             <input

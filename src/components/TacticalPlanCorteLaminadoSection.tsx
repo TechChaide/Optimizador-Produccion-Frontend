@@ -53,6 +53,7 @@ import { detalleTacticoService } from '@/services/detalletactico.service';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
+import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
 import { cn } from '@/lib/utils';
 import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
@@ -716,6 +717,24 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // serviciosService.enviarCorreo, no el resto del módulo.
   const [destinatariosReporte, setDestinatariosReporte] = useState('');
   const [isSendingReporte, setIsSendingReporte] = useState(false);
+
+  // Destinatarios precargados desde la restricción Grupo_Correos_Laminado (mismo patrón que
+  // Grupo_Correos_Corte_Espuma en Corte Espuma). Se lee al montar, aparte de la sincronización, para
+  // que también aparezcan al volver al módulo desde caché. Nombre sin distinguir mayúsculas. Sigue
+  // editable -- solo autocompleta si el usuario todavía no escribió nada.
+  useEffect(() => {
+    restriccionService.getAll()
+      .then(res => {
+        const correosGrupo = Array.from(new Set((res.data || [])
+          .filter((r) => String(r.nombre_restriccion || '').trim().toUpperCase() === 'GRUPO_CORREOS_LAMINADO')
+          .flatMap((r) => String(r.valor_restriccion || '').split(/[,;&]/).map((v: string) => v.trim()))
+          .filter(Boolean)));
+        if (correosGrupo.length > 0) {
+          setDestinatariosReporte(prev => prev.trim() ? prev : correosGrupo.join(', '));
+        }
+      })
+      .catch(e => console.warn('[Corte y Laminado] No se pudo cargar Grupo_Correos_Laminado:', (e as Error).message));
+  }, []);
   
   const [unifiedNeeds, setUnifiedNeeds] = useState<UnifiedNeedRow[]>([]);
   const [isProcessingResumen, setIsProcessingResumen] = useState(false);
@@ -1179,7 +1198,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         .flatMap((r) => String(r.valor_restriccion || '').split(/[,&]/).map((v: string) => normalizeName(v)))
         .filter((v: string) => v !== '');
 
-      const gruposFiltrados = (gruposRes.data || []).filter((g) => g.estado === 'A' && almacenConsumoNames.includes(normalizeName(g.nombre_grupo)));
+      // El grupo 3 (origen de los P2 "ESPUMA MUEBLES"/"LAMINA CILINDRICA") entra siempre, esté o no
+      // en ALMACEN_CONSUMO — aquí solo se toma su variante "LAMINA CILINDRICA" (ver esP2ParaModulo).
+      const gruposFiltrados = (gruposRes.data || []).filter((g) => g.estado === 'A' && (almacenConsumoNames.includes(normalizeName(g.nombre_grupo)) || g.codigo_grupo === CODIGO_GRUPO_P2_MUEBLES));
       const gruposCodigos = gruposFiltrados.map((g) => g.codigo_grupo);
       const grupoPorCodigo = new Map(gruposFiltrados.map((g) => [g.codigo_grupo, g]));
 
@@ -1208,6 +1229,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         if (!/plan\s*t[aá]ctico.*centro.*p2/i.test(valor)) return false;
         const esVentaExterna = /venta\s*externa/i.test(grupoPorCodigo.get(pg.codigo_grupo)?.nombre_grupo || '');
         if (esVentaExterna && !/rollo/i.test(valor)) return false;
+        if (!esP2ParaModulo(pg, 'LAMINADO')) return false;
         if (soloFecha(pg.fecha_inicio_plan) !== fechaObjetivoP2) return false;
         return true;
       });
@@ -4051,6 +4073,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                     rows={2}
                     className="w-full bg-white border border-gray-200 rounded-lg px-2 py-1.5 text-[10px] text-slate-700 font-bold outline-none focus:border-indigo-500 resize-none"
                   />
+                  <p className="text-[8px] text-slate-400 mt-1">Precargado desde el grupo de correos configurado (Grupo_Correos_Laminado) — editable antes de enviar.</p>
                   <Button
                     onClick={handleEnviarReporte}
                     disabled={isSendingReporte || !destinatariosReporte.trim()}
