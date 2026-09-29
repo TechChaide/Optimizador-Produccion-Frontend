@@ -8,7 +8,7 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { useAppContext } from '@/context/AppProvider';
-import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble, Send } from 'lucide-react';
+import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble, Send, SlidersHorizontal } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -529,6 +529,20 @@ interface PlanningResult {
     // comporte como "Guardar Plan Final" (genera el PlanGrupo PFSM con el Detalle de Planificación
     // Ejecutada, sin volver a guardar P1.3/P1.5/P2).
     planningStepResult: 1 | 2 | 3;
+    // "Calibrar Capacidad" (Paso 2/3, solo con Déficit real): candidatas a mover para acercar la
+    // capacidad utilizada al 100% — NO incluye lo mandatorio (fecha propia = objetivo dentro de la
+    // ventana de prioridad) ni "movableOrders" (esas ya tienen su propio checkbox de simulación en vivo
+    // en "Órdenes que se Pueden Mover"). Ordenadas por fecha de entrega descendente (la más lejana
+    // primero = la más segura de mover sin incumplir una entrega).
+    calibrationCandidates: UnifiedOrder[];
+    // Subconjunto (prefijo) de calibrationCandidates recomendado para mover, calculado para que las horas
+    // restantes queden lo más cerca posible del 100% de la Capacidad Disponible — pedido explícito del
+    // usuario 2026-09-29: si hay que elegir entre quedar justo por debajo (ej. 99%) o justo por encima
+    // (ej. 101%) del 100%, se prefiere quedar por encima. Claves `${source}-${id}-${material}`.
+    calibrationRecommendedKeys: string[];
+    // Órdenes ya excluidas de immediateOrders en ESTE cálculo porque una calibración anterior (botón
+    // "Calibrar Capacidad" de una ejecución previa del Paso 2/3) las confirmó como "a mover".
+    calibratedOutOrders: UnifiedOrder[];
 }
 
 // Pedido de gran volumen (más de MTS_SEGREGATION_LIMIT unidades en una sola línea de un cliente/pedido)
@@ -647,6 +661,21 @@ interface ComponentOrigen {
 function esDescripcionLaminaCilindrica(descripcion: string): boolean {
     return descripcion.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').startsWith('LAMINA CILINDRICA');
 }
+
+// Sufijos con los que se guarda el Plan de Grupo "P2" (Explosión de Materiales — Semielaborados de
+// Espuma), separado en DOS PlanGrupo independientes en vez de uno solo — pedido explícito del usuario
+// 2026-09-29, mismo corte que ya usa la pantalla (foamExplosionLaminaCilindrica/foamExplosionOtrasEspumas
+// más abajo) para poder revisar/gestionar cada grupo por separado en "Plan Grupo Recuperado" y afines.
+const P2_LAMINA_SUFIJO = 'P2 - LAMINA CILINDRICA';
+const P2_ESPUMA_SUFIJO = 'P2 - ESPUMA MUEBLES';
+// Reconoce CUALQUIER PlanGrupo de espuma: el "P2" plano de antes de este cambio (compatibilidad con
+// planes ya guardados con ese nombre) y los dos sufijos nuevos. Usado en expectedDateKeyFor — ambos
+// necesitan la fecha especial de computeFechaP2() en vez de planningTargetDate.
+const P2_VALOR_REGEX = /P2(?:\s*-\s*(?:LAMINA CILINDRICA|ESPUMA MUEBLES))?\s*$/i;
+// Igual que P2_VALOR_REGEX pero combinado con los demás sufijos de PlanGrupo (P1.3/P1.5/PFSM) — usado
+// en handleChooseTables/handleDeleteExistingPlan para detectar y limpiar TODOS los planes hermanos de
+// una fecha, incluyendo ambos sub-planes de espuma.
+const PLAN_GRUPO_SUFIJOS_REGEX = /P1\.3\s*$|P1\.5\s*$|P2(?:\s*-\s*(?:LAMINA CILINDRICA|ESPUMA MUEBLES))?\s*$|PFSM\s*$/i;
 
 // Semielaborado de espuma (Lamina/Espuma) requerido, obtenido de la Explosión de Materiales
 interface FoamComponentNeed {
@@ -825,6 +854,33 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         });
     };
 
+    // "Calibrar Capacidad" (Paso 2/3): selección editable (checkboxes) de la tabla de recomendación,
+    // arranca con la recomendación automática (calibrationRecommendedKeys) cada vez que hay una nueva
+    // planificación. Distinto de `calibratedMovedIds`: esto es solo el borrador visible en pantalla.
+    const [calibrationChecked, setCalibrationChecked] = useState<Set<string>>(new Set());
+    // Claves de órdenes que el usuario CONFIRMÓ mover con el botón "Calibrar Capacidad". A diferencia de
+    // `uncheckedMovableIds` (que se reinicia en cada ejecución y solo afecta el indicador en vivo), esta
+    // selección se aplica DE VERDAD (excluye las órdenes de immediateOrders, no solo del indicador) la
+    // siguiente vez que se presione "PASO 2/3: Ejecutar Planificación Recalculada", y persiste entre
+    // rondas sucesivas hasta que el usuario inicie una "Planificación Nueva".
+    const [calibratedMovedIds, setCalibratedMovedIds] = useState<Set<string>>(new Set());
+
+    const toggleCalibrationChecked = (key: string) => {
+        setCalibrationChecked(prev => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    };
+
+    const handleApplyCalibration = () => {
+        if (!planningResult) return;
+        setCalibratedMovedIds(new Set(calibrationChecked));
+        const pasoLabel = planningStep === 3 ? 'PASO 3 PLANIFICACIÓN FINAL' : 'PASO 2: RECALCULAR PLANIFICACIÓN AJUSTADA';
+        addNotification('info', `Calibración guardada: ${calibrationChecked.size} orden(es) se excluirán del cálculo real la próxima vez que presione "${pasoLabel}".`);
+    };
+
     // "Bloqueadas por Insumo": marca/desmarca una orden para forzar su inclusión pese a que su material
     // padre necesite un insumo que todavía no llega. No recalcula sola — el usuario debe presionar
     // "Forzar Inclusión y Recalcular" para que handleRunPlanning vuelva a correr con el nuevo criterio.
@@ -855,12 +911,18 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         const checkedHoras = planningResult.movableOrders.reduce((sum, o) => {
             return uncheckedMovableIds.has(movableOrderKey(o)) ? sum : sum + o.horas;
         }, 0);
-        const liveTotalHoursRequired = requiredBaseline + checkedHoras;
+        // Horas de "Calibrar Capacidad" marcadas en el borrador (aún sin confirmar con el botón): ya están
+        // incluidas en requiredBaseline (son parte de immediateOrders), así que se restan para que el
+        // usuario vea de inmediato qué tan cerca del 100% quedaría antes de presionar "Calibrar Capacidad".
+        const checkedCalibrationHoras = planningResult.calibrationCandidates.reduce((sum, o) => {
+            return calibrationChecked.has(movableOrderKey(o)) ? sum + o.horas : sum;
+        }, 0);
+        const liveTotalHoursRequired = requiredBaseline + checkedHoras - checkedCalibrationHoras;
         return {
             liveTotalHoursRequired,
             liveDeficit: planningResult.totalCapacityAvailable - liveTotalHoursRequired,
         };
-    }, [planningResult, uncheckedMovableIds]);
+    }, [planningResult, uncheckedMovableIds, calibrationChecked]);
 
     // Estado para la Distribución de Mesas (Diagrama de Gantt de capacidad)
     const [mesaDistribution, setMesaDistribution] = useState<Map<number, MesaDistributionEntry> | null>(null);
@@ -2233,7 +2295,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // planningTargetDate; P2 usa computeFechaP2), para poder comparar cada plan contra la fecha que
     // realmente le corresponde en vez de comparar todos contra una sola fecha.
     const expectedDateKeyFor = useCallback((valor: string): string | null => {
-        if (/P2\s*$/i.test(valor.trim())) return toDateKey(computeFechaP2());
+        if (P2_VALOR_REGEX.test(valor.trim())) return toDateKey(computeFechaP2());
         if (!planningTargetDate) return null;
         return toDateKey(planningTargetDate);
     }, [computeFechaP2, planningTargetDate]);
@@ -2263,7 +2325,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 if (p.codigo_grupo !== mueblesGrupo.codigo_grupo) return false;
                 if (p.estado !== 'A') return false;
                 const valor = String(p.valor || '').trim();
-                if (!/P1\.3\s*$|P1\.5\s*$|P2\s*$|PFSM\s*$/i.test(valor)) return false;
+                if (!PLAN_GRUPO_SUFIJOS_REGEX.test(valor)) return false;
                 const expectedKey = expectedDateKeyFor(valor);
                 if (!expectedKey) return false;
                 return toDateKey(new Date(p.fecha_inicio_plan)) === expectedKey;
@@ -2353,7 +2415,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 if (p.codigo_grupo !== mueblesGrupo.codigo_grupo) return false;
                 if (p.estado !== 'A') return false;
                 const valor = String(p.valor || '').trim();
-                if (!/P1\.3\s*$|P1\.5\s*$|P2\s*$|PFSM\s*$/i.test(valor)) return false;
+                if (!PLAN_GRUPO_SUFIJOS_REGEX.test(valor)) return false;
                 const expectedKey = expectedDateKeyFor(valor);
                 if (!expectedKey) return false;
                 return toDateKey(new Date(p.fecha_inicio_plan)) === expectedKey;
@@ -2629,11 +2691,70 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         // para ajustar por la capacidad real de espuma, así que debe reflejar igual de fielmente lo que
         // realmente hay en SAP para la fecha objetivo.
         const isRecalcLogic = planningStep >= 2;
+        let calibratedOutOrders: UnifiedOrder[] = [];
+        let calibrationCandidates: UnifiedOrder[] = [];
+        let calibrationRecommendedKeys: string[] = [];
         if (isRecalcLogic) {
             immediateOrders = [...immediateOrders, ...deferredByCapacity, ...movableOrders];
+
+            // Aplica la calibración de capacidad ya CONFIRMADA (botón "Calibrar Capacidad" de una ronda
+            // anterior de este mismo Paso 2/3): excluye de verdad esas órdenes de immediateOrders (no solo
+            // del indicador en vivo), para que Distribución de Mesas y Explosión de Materiales de este
+            // cálculo ya no las incluyan — el usuario decidió moverlas para acercar la capacidad utilizada
+            // al 100%.
+            if (calibratedMovedIds.size > 0) {
+                calibratedOutOrders = immediateOrders.filter(o => calibratedMovedIds.has(`${o.source}-${o.id}-${o.material}`));
+                if (calibratedOutOrders.length > 0) {
+                    const calibratedOutKeys = new Set(calibratedOutOrders.map(o => `${o.source}-${o.id}-${o.material}`));
+                    immediateOrders = immediateOrders.filter(o => !calibratedOutKeys.has(`${o.source}-${o.id}-${o.material}`));
+                }
+            }
+
             immediateIds = new Set(immediateOrders.map(o => `${o.source}-${o.id}-${o.material}`));
             finalDeferredByCapacity = [];
             totalHoursRequired = immediateOrders.reduce((s, o) => s + o.horas, 0);
+
+            // "Calibrar Capacidad": si tras aplicar lo ya confirmado sigue habiendo Déficit real, se arma
+            // una recomendación de qué más mover. Candidatas = lo que en este Paso 2/3 se tomó tal cual de
+            // SAP (keptPriority/deferredByCapacity) EXCLUYENDO lo mandatorio (fecha propia = objetivo
+            // dentro de la ventana de prioridad, ver mandatoryByFechaPropia) y lo ya calibrado — las
+            // "Órdenes que se Pueden Mover" (movableOrders) quedan fuera porque ya tienen su propio
+            // checkbox de simulación en vivo más abajo. Se ordenan por fecha de entrega DESCENDENTE (la
+            // más lejana primero = la más segura/conveniente de mover sin incumplir una entrega), misma
+            // lógica de priorización por fecha de entrega que ya usa "Órdenes que se Pueden Mover".
+            if (totalHoursRequired > totalCapacityAvailable) {
+                calibrationCandidates = [...keptPriority, ...deferredByCapacity]
+                    .filter(o => !calibratedMovedIds.has(`${o.source}-${o.id}-${o.material}`))
+                    .sort((a, b) => b.fechaEntregaDate.getTime() - a.fechaEntregaDate.getTime());
+
+                if (calibrationCandidates.length > 0) {
+                    let cumRemovedHoras = 0;
+                    const removedKeysSoFar: string[] = [];
+                    let lastAtOrAboveCapacity: { keys: string[]; remaining: number } = { keys: [], remaining: totalHoursRequired };
+                    let crossedBelow = false;
+                    for (const o of calibrationCandidates) {
+                        cumRemovedHoras += o.horas;
+                        removedKeysSoFar.push(`${o.source}-${o.id}-${o.material}`);
+                        const remaining = totalHoursRequired - cumRemovedHoras;
+                        if (remaining >= totalCapacityAvailable) {
+                            lastAtOrAboveCapacity = { keys: [...removedKeysSoFar], remaining };
+                        } else {
+                            crossedBelow = true;
+                            const diffAbove = Math.abs(lastAtOrAboveCapacity.remaining - totalCapacityAvailable);
+                            const diffBelow = Math.abs(remaining - totalCapacityAvailable);
+                            // Empate o "por encima" queda igual/más cerca -> se prefiere por encima del
+                            // 100% (ej. 101%) sobre quedar por debajo (ej. 99%), pedido explícito del usuario.
+                            calibrationRecommendedKeys = diffBelow < diffAbove ? [...removedKeysSoFar] : lastAtOrAboveCapacity.keys;
+                            break;
+                        }
+                    }
+                    // Ni moviendo TODAS las candidatas se alcanza el 100%: se recomienda moverlas todas —
+                    // es lo más cerca que se puede llegar solo con "Calibrar Capacidad" (falta más capacidad).
+                    if (!crossedBelow) {
+                        calibrationRecommendedKeys = lastAtOrAboveCapacity.keys;
+                    }
+                }
+            }
         }
 
         // Órdenes MTS, ordenadas por antigüedad, solo se incluyen si sobra capacidad (ya excluye las que
@@ -2715,12 +2836,26 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             largeOrders,
             movableOrders,
             planningStepResult: planningStep,
+            calibrationCandidates,
+            calibrationRecommendedKeys,
+            calibratedOutOrders,
         });
         // Una nueva planificación invalida cualquier distribución de mesas previa
         setMesaDistribution(null);
         setUnassignedDistributionOrders([]);
         // Reinicia la simulación de "Órdenes que se Pueden Mover" (todo vuelve a quedar marcado)
         setUncheckedMovableIds(new Set());
+        // Reinicia el borrador de "Calibrar Capacidad" con la nueva recomendación automática (NO reinicia
+        // calibratedMovedIds: lo ya confirmado con el botón sigue aplicándose en las próximas rondas).
+        setCalibrationChecked(new Set(calibrationRecommendedKeys));
+
+        if (calibratedOutOrders.length > 0) {
+            addNotification('info', `Calibración de capacidad aplicada: ${calibratedOutOrders.length} orden(es) confirmada(s) para mover quedaron excluidas de este cálculo.`);
+        }
+
+        if (calibrationRecommendedKeys.length > 0) {
+            addNotification('warning', `Déficit de capacidad tras la calibración ya aplicada: revise la tabla "Calibrar Capacidad" — se recomienda mover ${calibrationRecommendedKeys.length} orden(es) más para acercarse al 100%.`);
+        }
 
         if (ptboAlerts.length > 0) {
             addNotification('warning', `Atención: ${ptboAlerts.length} material(es) con la sigla "PTBO" en su nombre requieren revisión.`);
@@ -3620,7 +3755,11 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         const executedOrders = planningResult ? [...planningResult.immediateOrders, ...planningResult.extraOrders] : [];
         const hayP13 = executedOrders.length > 0;
         const hayP15 = primerNivelExplosionResults.length > 0 || segundoNivelExplosionResults.length > 0;
-        const hayP2 = foamExplosionResults.length > 0;
+        // P2 se guarda como dos PlanGrupo separados (ver P2_LAMINA_SUFIJO/P2_ESPUMA_SUFIJO) — hayP2 sigue
+        // representando "hay algo de espuma que guardar", igual que antes.
+        const hayP2Lamina = foamExplosionLaminaCilindrica.length > 0;
+        const hayP2Espuma = foamExplosionOtrasEspumas.length > 0;
+        const hayP2 = hayP2Lamina || hayP2Espuma;
         // Paso 3 (Final): "Guardar Plan Táctico Final" NO vuelve a guardar P1.3/P1.5/P2 (ya se guardaron
         // en Paso 1/2) — únicamente guarda un Plan de Grupo "PFSM" (Plan Final de Semielaborados de
         // Muebles) con el Detalle de Planificación Ejecutada (mismo contenido que P1.3: cada orden de
@@ -3726,14 +3865,23 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     }
                 }
 
-                // 3. P2 — Explosión de Materiales: Semielaborados de Espuma. Fecha objetivo = el próximo
-                // día LABORABLE (no planningTargetDate, que es el 3er día laborable de la ventana — el
-                // área de espuma programa con horizonte propio, pero igual debe caer en día laborable,
-                // saltando fines de semana y feriados de Ecuador vía workingWindow/holidaysMap).
-                if (hayP2) {
-                    const codigoPlanGrupoP2 = await savePlanGrupo('P2', computeFechaP2());
-                    for (const comp of foamExplosionResults) {
-                        await saveDetalle(codigoPlanGrupoP2, Number(comp.componente) || 0, comp.cantidadNetaAConseguir, '');
+                // 3. P2 — Explosión de Materiales: Semielaborados de Espuma, en DOS PlanGrupo separados
+                // (pedido explícito del usuario 2026-09-29): "P2 - LAMINA CILINDRICA" y "P2 - ESPUMA
+                // MUEBLES", mismo corte que ya usa la pantalla (foamExplosionLaminaCilindrica/
+                // foamExplosionOtrasEspumas). Fecha objetivo = el próximo día LABORABLE (no
+                // planningTargetDate, que es el 3er día laborable de la ventana — el área de espuma
+                // programa con horizonte propio, pero igual debe caer en día laborable, saltando fines de
+                // semana y feriados de Ecuador vía workingWindow/holidaysMap) — igual para ambos.
+                if (hayP2Lamina) {
+                    const codigoPlanGrupoP2Lamina = await savePlanGrupo(P2_LAMINA_SUFIJO, computeFechaP2());
+                    for (const comp of foamExplosionLaminaCilindrica) {
+                        await saveDetalle(codigoPlanGrupoP2Lamina, Number(comp.componente) || 0, comp.cantidadNetaAConseguir, '');
+                    }
+                }
+                if (hayP2Espuma) {
+                    const codigoPlanGrupoP2Espuma = await savePlanGrupo(P2_ESPUMA_SUFIJO, computeFechaP2());
+                    for (const comp of foamExplosionOtrasEspumas) {
+                        await saveDetalle(codigoPlanGrupoP2Espuma, Number(comp.componente) || 0, comp.cantidadNetaAConseguir, '');
                     }
                 }
             }
@@ -3760,7 +3908,8 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 : [
                     hayP13 ? `P1.3 (${executedOrders.length} orden(es))` : null,
                     hayP15 ? `P1.5 (${primerNivelExplosionResults.length + segundoNivelExplosionResults.length} detalle(s))` : null,
-                    hayP2 ? `P2 (${foamExplosionResults.length} detalle(s))` : null,
+                    hayP2Lamina ? `P2 - Lámina Cilíndrica (${foamExplosionLaminaCilindrica.length} detalle(s))` : null,
+                    hayP2Espuma ? `P2 - Espuma Muebles (${foamExplosionOtrasEspumas.length} detalle(s))` : null,
                 ].filter(Boolean);
             addNotification('success', `${esPasoFinal ? 'Plan Táctico Final guardado' : 'Plan Táctico guardado'}: ${partes.join(', ')}.`);
 
@@ -3908,6 +4057,8 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         setActiveTables(new Set(WORK_TABLES.map(t => t.id)));
         setCamasOverflowMesaIds(new Set(CAMAS_OVERFLOW_MESA_IDS));
         setUncheckedMovableIds(new Set());
+        setCalibrationChecked(new Set());
+        setCalibratedMovedIds(new Set());
         setSelectedShift(SHIFT_SCHEDULES[0].id);
         setChosenTables(null);
         setTableAssignments({});
@@ -4346,9 +4497,10 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                         {[...planningResult.immediateOrders, ...planningResult.extraOrders].reduce((s, o) => s + o.cantidadPlanificada, 0).toLocaleString()}
                                     </p>
                                     <p className="text-[10px] text-indigo-400">{planningResult.immediateOrders.length + planningResult.extraOrders.length} órdenes en total</p>
-                                    {(planningResult.deferredByCapacity.length > 0 || planningResult.movableOrders.length > 0) && (
+                                    {(planningResult.deferredByCapacity.length > 0 || planningResult.movableOrders.length > 0 || planningResult.calibratedOutOrders.length > 0) && (
                                         <p className="text-[9px] text-indigo-300 mt-1 pt-1 border-t border-indigo-100">
-                                            Ya excluye {planningResult.deferredByCapacity.length} diferida(s) y {planningResult.movableOrders.length} movible(s)
+                                            Ya excluye {planningResult.deferredByCapacity.length} diferida(s), {planningResult.movableOrders.length} movible(s)
+                                            {planningResult.calibratedOutOrders.length > 0 && <> y {planningResult.calibratedOutOrders.length} calibrada(s)</>}
                                         </p>
                                     )}
                                 </div>
@@ -4532,6 +4684,101 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                     </TableBody>
                                 </Table>
                             </div>
+                        </div>
+                    </div>
+                )}
+
+                {planningResult && (planningResult.calibrationCandidates.length > 0 || planningResult.calibratedOutOrders.length > 0) && (
+                    <div className="bg-white border border-orange-300 rounded-xl shadow-md overflow-hidden">
+                        <div className="flex items-center justify-between gap-2 px-6 py-4 bg-gradient-to-r from-orange-700 to-amber-600">
+                            <div className="flex items-center gap-2">
+                                <SlidersHorizontal className="w-5 h-5 text-orange-100" />
+                                <h3 className="text-sm font-bold text-white uppercase tracking-wide">Calibrar Capacidad (Déficit)</h3>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                {liveCapacityInfo && planningResult.totalCapacityAvailable > 0 && (
+                                    <p className="text-[11px] text-orange-100 font-semibold">
+                                        Con lo marcado quedaría en {((liveCapacityInfo.liveTotalHoursRequired / planningResult.totalCapacityAvailable) * 100).toFixed(1)}% de capacidad utilizada
+                                    </p>
+                                )}
+                                <Button
+                                    onClick={handleApplyCalibration}
+                                    size="sm"
+                                    className="h-8 bg-white text-orange-700 hover:bg-orange-50 gap-1.5 text-xs shrink-0 font-bold"
+                                >
+                                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                                    Calibrar Capacidad
+                                </Button>
+                            </div>
+                        </div>
+                        <div className="p-6 space-y-3">
+                            <p className="text-xs text-gray-600">
+                                Recomendación automática (marcada por defecto) de qué órdenes mover para quedar lo más
+                                cerca posible del 100% de la Capacidad Disponible — tomando en cuenta la fecha de
+                                entrega, misma lógica que "Órdenes que se Pueden Mover": se prioriza mover primero las
+                                de fecha de entrega más lejana. Si hay que elegir entre quedar justo por debajo (ej.
+                                99%) o justo por encima (ej. 101%) del 100%, se prioriza quedar por encima. Marque o
+                                desmarque órdenes y presione "Calibrar Capacidad" para confirmar la selección; luego
+                                presione nuevamente "{planningStep === 3 ? 'PASO 3 PLANIFICACIÓN FINAL' : 'PASO 2: RECALCULAR PLANIFICACIÓN AJUSTADA'}"
+                                para que el cálculo real (Distribución de Mesas, Explosión de Materiales) ya excluya
+                                las órdenes confirmadas.
+                            </p>
+                            {planningResult.calibratedOutOrders.length > 0 && (
+                                <p className="text-[11px] text-orange-800 bg-orange-50 border border-orange-200 rounded-md px-3 py-2 font-semibold">
+                                    Ya excluidas de este cálculo por una calibración confirmada anteriormente: {planningResult.calibratedOutOrders.length} orden(es) ({planningResult.calibratedOutOrders.reduce((s, o) => s + o.horas, 0).toFixed(2)} h).
+                                </p>
+                            )}
+                            {planningResult.calibrationCandidates.length > 0 ? (
+                                <div className="border border-gray-300 rounded-lg overflow-auto max-h-[40vh]">
+                                    <Table>
+                                        <TableHeader>
+                                            <TableRow className="bg-orange-50 hover:bg-orange-50 border-b-2 border-orange-200 sticky top-0">
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200 w-16">Mover</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Origen</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">N° Orden</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Pedido</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Material / Nombre</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Centro</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Fecha Entrega</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center">Horas</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {planningResult.calibrationCandidates.map((o, idx) => {
+                                                const key = `${o.source}-${o.id}-${o.material}`;
+                                                const isChecked = calibrationChecked.has(key);
+                                                const isRecommended = planningResult.calibrationRecommendedKeys.includes(key);
+                                                return (
+                                                    <TableRow key={`${key}-${idx}`} className={cn("border-b border-gray-200", idx % 2 === 1 && "bg-gray-50/70", isChecked && "bg-orange-50/60")}>
+                                                        <TableCell className="text-center border-r border-gray-200">
+                                                            <Checkbox
+                                                                checked={isChecked}
+                                                                onCheckedChange={() => toggleCalibrationChecked(key)}
+                                                                className="data-[state=checked]:bg-orange-600 border-gray-300"
+                                                            />
+                                                        </TableCell>
+                                                        <TableCell className="text-[11px] text-center border-r border-gray-200 font-semibold text-gray-600">{o.source}</TableCell>
+                                                        <TableCell className="text-[11px] border-r border-gray-200 font-mono text-gray-700">{o.id || '—'}</TableCell>
+                                                        <TableCell className="text-[11px] border-r border-gray-200 font-mono">{o.pedido || '—'}</TableCell>
+                                                        <TableCell className="text-[11px] border-r border-gray-200">
+                                                            <span className="font-semibold text-gray-800">{o.material}</span>
+                                                            <span className="block text-gray-500">{o.nombre}</span>
+                                                            {isRecommended && <Badge className="mt-0.5 text-[8px] bg-orange-100 text-orange-700 hover:bg-orange-100">Recomendado</Badge>}
+                                                        </TableCell>
+                                                        <TableCell className="text-[11px] text-center border-r border-gray-200">{o.centro}</TableCell>
+                                                        <TableCell className="text-[11px] text-center border-r border-gray-200 font-mono text-slate-700 font-bold">{o.fechaEntrega}</TableCell>
+                                                        <TableCell className="text-[11px] text-center font-mono font-bold text-blue-700">{o.horas.toFixed(2)}</TableCell>
+                                                    </TableRow>
+                                                );
+                                            })}
+                                        </TableBody>
+                                    </Table>
+                                </div>
+                            ) : (
+                                <p className="text-xs text-emerald-700 font-semibold">
+                                    No hay más órdenes candidatas para mover. Si aún queda Déficit de Capacidad, considere aumentar la capacidad (ver recomendación de mesas/horario arriba).
+                                </p>
+                            )}
                         </div>
                     </div>
                 )}
