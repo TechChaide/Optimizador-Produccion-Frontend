@@ -666,16 +666,23 @@ function esDescripcionLaminaCilindrica(descripcion: string): boolean {
 // Espuma), separado en DOS PlanGrupo independientes en vez de uno solo — pedido explícito del usuario
 // 2026-09-29, mismo corte que ya usa la pantalla (foamExplosionLaminaCilindrica/foamExplosionOtrasEspumas
 // más abajo) para poder revisar/gestionar cada grupo por separado en "Plan Grupo Recuperado" y afines.
-const P2_LAMINA_SUFIJO = 'P2 - LAMINA CILINDRICA';
-const P2_ESPUMA_SUFIJO = 'P2 - ESPUMA MUEBLES';
-// Reconoce CUALQUIER PlanGrupo de espuma: el "P2" plano de antes de este cambio (compatibilidad con
-// planes ya guardados con ese nombre) y los dos sufijos nuevos. Usado en expectedDateKeyFor — ambos
-// necesitan la fecha especial de computeFechaP2() en vez de planningTargetDate.
-const P2_VALOR_REGEX = /P2(?:\s*-\s*(?:LAMINA CILINDRICA|ESPUMA MUEBLES))?\s*$/i;
+// Cortos a propósito ("P2 - LAMINA"/"P2 - ESPUMA", no los nombres completos "LAMINA CILINDRICA"/"ESPUMA
+// MUEBLES"): el campo `valor` del backend (PlanGrupo) trunca/rechaza con "String or binary data would be
+// truncated" a partir de cierto largo (confirmado 2026-09-30 — "Plan Táctico - Centro 1000 - P2 - LAMINA
+// CILINDRICA", 51 caracteres, ya lo rompía). Se usa el mismo largo (~11 caracteres de sufijo) que ya
+// funciona en producción para el PlanGrupo de RESPUESTA de "Corte y Laminado" (ej. "P2 - Rollos",
+// "P3 - Espuma", ver comentario de extractPlanSuffix en PlanGrupoRecuperadoTab.tsx).
+const P2_LAMINA_SUFIJO = 'P2 - LAMINA';
+const P2_ESPUMA_SUFIJO = 'P2 - ESPUMA';
+// Reconoce CUALQUIER PlanGrupo de espuma: el "P2" plano de antes de este cambio, los sufijos cortos
+// actuales, y los nombres largos que se intentaron guardar brevemente el 2026-09-29 (por si alguno
+// alcanzó a guardarse antes de detectar el límite de longitud del backend). Usado en expectedDateKeyFor
+// — todos necesitan la fecha especial de computeFechaP2() en vez de planningTargetDate.
+const P2_VALOR_REGEX = /P2(?:\s*-\s*(?:LAMINA(?:\s+CILINDRICA)?|ESPUMA(?:\s+MUEBLES)?))?\s*$/i;
 // Igual que P2_VALOR_REGEX pero combinado con los demás sufijos de PlanGrupo (P1.3/P1.5/PFSM) — usado
 // en handleChooseTables/handleDeleteExistingPlan para detectar y limpiar TODOS los planes hermanos de
 // una fecha, incluyendo ambos sub-planes de espuma.
-const PLAN_GRUPO_SUFIJOS_REGEX = /P1\.3\s*$|P1\.5\s*$|P2(?:\s*-\s*(?:LAMINA CILINDRICA|ESPUMA MUEBLES))?\s*$|PFSM\s*$/i;
+const PLAN_GRUPO_SUFIJOS_REGEX = /P1\.3\s*$|P1\.5\s*$|P2(?:\s*-\s*(?:LAMINA(?:\s+CILINDRICA)?|ESPUMA(?:\s+MUEBLES)?))?\s*$|PFSM\s*$/i;
 
 // Semielaborado de espuma (Lamina/Espuma) requerido, obtenido de la Explosión de Materiales
 interface FoamComponentNeed {
