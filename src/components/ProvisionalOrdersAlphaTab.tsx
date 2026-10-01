@@ -7,6 +7,7 @@ import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { restriccionService } from '@/services/restriccion.service';
+import { planesArchivosService, getNombreGrupoPlanes } from '@/services/planesArchivos.service';
 import { useAppContext } from '@/context/AppProvider';
 import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble, Send, SlidersHorizontal } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell } from '@/components/ui/table';
@@ -1220,6 +1221,15 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 mesas,
                 resumen,
             };
+
+            // Además de la Restriccion, el mismo snapshot se escribe como .txt en la carpeta compartida
+            // `ruta_planes` (<AAAA>\<Mes>\<Nombre del grupo>\<centro 1000>\<fecha>.txt) — fuente que lee "PLAN".
+            // Independiente del guardado en Restriccion: si uno falla, el otro igual se intenta.
+            const nombreGrupoPlanes = getNombreGrupoPlanes(restricciones as (Restriccion & { grupo?: Grupo })[]);
+            if (nombreGrupoPlanes) planesArchivosService.guardar(fecha, snapshot, nombreGrupoPlanes).catch(error => {
+                console.error('Error al guardar el archivo .txt del Plan Diario:', error);
+                addNotification('error', `No se pudo guardar el archivo del plan (${fecha}) en la ruta de planes: ${(error as Error).message}`);
+            });
 
             const existente = planDiarioSnapshotIds.get(fecha);
             const payload: any = {

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { serviciosService } from '@/services/servicios.service';
+import { planesArchivosService, getNombreGrupoPlanes } from '@/services/planesArchivos.service';
 import { useAppContext } from '@/context/AppProvider';
 import { Package, Check, ChevronsUpDown, Loader2, BellRing, AlertTriangle, Clock, Calendar, CalendarDays, LayoutDashboard, History, ListChecks, ChevronUp, ChevronDown, Calculator, FileJson, Sparkles, CheckCircle2, PieChart, PackageSearch, Mail, ClipboardCheck } from 'lucide-react';
 import type { OrdenFert, ProvisionalOrder, Restriccion } from '@/types/interfaces';
@@ -954,7 +955,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   // vienen dentro de la prop `restricciones` (ya filtrada por el/los Grupo(s) de Muebles), solo hay que
   // separarlos por prefijo y parsear el JSON de `descripcion`. Fuente única de horario/mesas/personal/
   // Gantt para esta pestaña "PLAN" (ver punto 1 del pedido del usuario, 2026-08-25).
-  const planDiarioSnapshotsByDate = useMemo(() => {
+  const snapshotsDesdeRestriccion = useMemo(() => {
     const map = new Map<string, PlanDiarioSnapshot>();
     if (displayMode !== 'plan') return map;
     (restricciones || [])
@@ -969,6 +970,81 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
       });
     return map;
   }, [restricciones, displayMode]);
+
+  // Planes Diarios guardados como .txt en `ruta_planes` (<AAAA>\<Mes>\<Nombre del grupo>\1000\<fecha>.txt, vía /api/planes).
+  // `planesArchivoFechas` alimenta el selector "Fecha(s):"; el contenido de cada archivo se pide solo
+  // al seleccionar esa fecha y se cachea en `planesArchivoSnapshots`.
+  const [planesArchivoFechas, setPlanesArchivoFechas] = useState<string[]>([]);
+  const [planesArchivoSnapshots, setPlanesArchivoSnapshots] = useState<Map<string, PlanDiarioSnapshot>>(new Map());
+  const planesArchivoSolicitadosRef = useRef<Set<string>>(new Set());
+  const respaldoPlanesEjecutadoRef = useRef(false);
+  const nombreGrupoPlanes = useMemo(() => getNombreGrupoPlanes(restricciones || []), [restricciones]);
+
+  useEffect(() => {
+    if (displayMode !== 'plan' || !nombreGrupoPlanes) return;
+    planesArchivosService.listarFechas(nombreGrupoPlanes)
+      .then(setPlanesArchivoFechas)
+      .catch(error => {
+        console.error('Error al listar los planes guardados en archivo:', error);
+        addNotification('error', `No se pudieron listar los planes guardados en la ruta de planes: ${(error as Error).message}`);
+      });
+  }, [displayMode, nombreGrupoPlanes, addNotification]);
+
+  // Respaldo de días pasados: cada snapshot que hoy solo existe como Restriccion "PlanDiarioConfig:<fecha>"
+  // y aún no tiene .txt se escribe una sola vez a la ruta de planes. Corre una vez por montaje, cuando ya
+  // llegaron las restricciones.
+  useEffect(() => {
+    if (displayMode !== 'plan' || !nombreGrupoPlanes || respaldoPlanesEjecutadoRef.current || snapshotsDesdeRestriccion.size === 0) return;
+    respaldoPlanesEjecutadoRef.current = true;
+    (async () => {
+      try {
+        const existentes = new Set(await planesArchivosService.listarFechas(nombreGrupoPlanes));
+        const pendientes = Array.from(snapshotsDesdeRestriccion.entries()).filter(([fecha]) => !existentes.has(fecha));
+        const guardadas: string[] = [];
+        for (const [fecha, snapshot] of pendientes) {
+          try {
+            await planesArchivosService.guardar(fecha, snapshot, nombreGrupoPlanes);
+            guardadas.push(fecha);
+          } catch (error) {
+            console.error(`Error respaldando el plan ${fecha} a archivo:`, error);
+          }
+        }
+        if (guardadas.length > 0) {
+          setPlanesArchivoFechas(prev => Array.from(new Set([...prev, ...guardadas])).sort((a, b) => b.localeCompare(a)));
+          addNotification('success', `Se respaldaron ${guardadas.length} plan(es) de días anteriores en la ruta de planes.`);
+        }
+        if (guardadas.length < pendientes.length) {
+          addNotification('error', `No se pudieron respaldar ${pendientes.length - guardadas.length} plan(es) en la ruta de planes (ver consola).`);
+        }
+      } catch (error) {
+        console.error('Error en el respaldo de planes a archivo:', error);
+      }
+    })();
+  }, [displayMode, nombreGrupoPlanes, snapshotsDesdeRestriccion, addNotification]);
+
+  useEffect(() => {
+    if (displayMode !== 'plan' || !nombreGrupoPlanes) return;
+    const porCargar = selectedDates.filter(f => planesArchivoFechas.includes(f) && !planesArchivoSolicitadosRef.current.has(f));
+    porCargar.forEach(fecha => {
+      planesArchivoSolicitadosRef.current.add(fecha);
+      planesArchivosService.obtener<PlanDiarioSnapshot>(fecha, nombreGrupoPlanes)
+        .then(snapshot => {
+          if (snapshot?.fecha) setPlanesArchivoSnapshots(prev => new Map(prev).set(fecha, snapshot));
+        })
+        .catch(error => {
+          planesArchivoSolicitadosRef.current.delete(fecha);
+          console.error(`Error al leer el plan ${fecha} desde archivo:`, error);
+          addNotification('error', `No se pudo leer el plan del ${fecha}: ${(error as Error).message}`);
+        });
+    });
+  }, [selectedDates, planesArchivoFechas, displayMode, nombreGrupoPlanes, addNotification]);
+
+  // El .txt tiene prioridad; la Restriccion queda como respaldo para fechas aún no leídas/respaldadas.
+  const planDiarioSnapshotsByDate = useMemo(() => {
+    const map = new Map(snapshotsDesdeRestriccion);
+    planesArchivoSnapshots.forEach((snapshot, fecha) => map.set(fecha, snapshot));
+    return map;
+  }, [snapshotsDesdeRestriccion, planesArchivoSnapshots]);
 
   // Capacidad diaria de referencia para "DÍAS CARGA" en CAPACIDAD CONSOLIDADA (TOTAL SISTEMA): promedio
   // de la capacidad total (suma de horas disponibles de todas las mesas) de los Planes Diarios ya
@@ -1196,8 +1272,10 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
 
   const uniqueDates = useMemo(() => {
     const dates = new Set(structuralFilteredOrders.map(order => order.FECHA));
+    // En "PLAN" también se ofrecen las fechas con plan guardado en archivo (aunque ya no tengan órdenes)
+    if (displayMode === 'plan') planesArchivoFechas.forEach(f => dates.add(f));
     return Array.from(dates).sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
-  }, [structuralFilteredOrders]);
+  }, [structuralFilteredOrders, displayMode, planesArchivoFechas]);
 
   useEffect(() => {
     if (!hasSetDefaultDate && uniqueDates.length > 0 && displayMode === 'plan') {

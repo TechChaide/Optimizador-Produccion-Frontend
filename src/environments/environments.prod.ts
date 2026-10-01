@@ -25,4 +25,7 @@ export const environment = {
     apiAuthFacial: 'https://apps.chaide.com/AServiceUth2',
 
     tituloSistema: 'SISTEMA INTEGRADO DE SEGURIDADES',
+
+    ruta_planes:'\\\\192.168.7.51\\Archivos Compartidos\\Aplicativos\\Planificacion\\Optimizador-Produccion'
+
 };
