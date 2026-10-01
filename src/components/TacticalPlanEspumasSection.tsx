@@ -2642,6 +2642,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           diaBruta: hD, nocheBruta: hN,
           diaNeta, nocheNeta,
           paro: c?.paro1 ?? 0,
+          paroNoche: c?.paro2 ?? 0,
+          rendimientoPct: rendimiento * 100,
           mttoReal,
           total: Math.max(0, horasDeMaquina(m.id) - mttoReal),
         };
@@ -2690,6 +2692,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const pctVerticales = r.verticales.capacidad > 0 ? (r.verticales.ocupacion / r.verticales.capacidad) * 100 : 0;
     const pctCnc = r.cnc.capacidad > 0 ? (r.cnc.ocupacion / r.cnc.capacidad) * 100 : 0;
     const tieneCnc = r.cnc.capacidad > 0 || r.cnc.ocupacion > 0 || r.detallePorMaquina.some(m => m.proceso === 'cnc');
+    // CNC muestra su tiempo UTILIZADO cuando le sobra capacidad: ese sobrante ya se suma a Carruseles
+    // (cncRemanente), mostrar aquí la capacidad completa contaba esas horas dos veces en la fila.
+    const cncCedeRemanente = r.cncRemanente > 0.05;
 
     // Detalle por máquina — mismo esquema de 4 columnas (Turno/Horarios/Tiempo Máquina Horas
     // brutas/Horas Efectivas) para Carruseles, CNC y Verticales por igual (pedido por el usuario:
@@ -2705,6 +2710,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         </tr>
         <tr style="background:#ecfdf5;"><td style="padding:7px 12px;font-size:11px;font-weight:700;color:#047857;border-bottom:1px solid #d1d5db;">Día</td><td style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #d1d5db;">${m.diaLabel}</td><td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.diaBruta.toFixed(2)}</td><td align="right" style="padding:7px 12px;font-size:11px;font-weight:700;color:#047857;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.diaNeta.toFixed(2)}</td></tr>
         <tr style="background:#eef2ff;"><td style="padding:7px 12px;font-size:11px;font-weight:700;color:#4338ca;border-bottom:1px solid #d1d5db;">Noche</td><td style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #d1d5db;">${m.nocheLabel}</td><td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.nocheBruta.toFixed(2)}</td><td align="right" style="padding:7px 12px;font-size:11px;font-weight:700;color:#4338ca;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.nocheNeta.toFixed(2)}</td></tr>
+        <tr style="background:#f9fafb;"><td colspan="4" style="padding:6px 12px;font-size:10px;color:#6b7280;border-bottom:1px solid #d1d5db;">Brutas → Efectivas: Paro Día ${m.paro.toFixed(0)}% · Paro Noche ${m.paroNoche.toFixed(0)}% · Rendimiento ${m.rendimientoPct.toFixed(0)}%</td></tr>
         <tr style="background:#fffbeb;"><td colspan="3" style="padding:7px 12px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;">Mantenimiento Programado</td><td align="right" style="padding:7px 12px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.mttoReal > 0 ? m.mttoReal.toFixed(2) : '–'}</td></tr>
         <tr style="background:#ecfdf5;"><td colspan="3" style="padding:8px 12px;font-size:11px;font-weight:800;color:#111827;text-transform:uppercase;">${m.nombre}</td><td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:#111827;font-variant-numeric:tabular-nums;">${m.total.toFixed(2)} h</td></tr>
       </table>`;
@@ -2768,7 +2774,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         <tr>
           <td style="padding:7px 12px;font-size:11px;font-weight:700;color:#1e3a8a;border-bottom:1px solid #eff6ff;">Tiempo Máquina (H)</td>
           <td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${r.carruseles.capacidad.toFixed(2)}</td>
-          ${tieneCnc ? `<td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${r.cnc.capacidad.toFixed(2)}</td>` : ''}
+          ${tieneCnc ? `<td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${cncCedeRemanente ? `${r.cnc.ocupacion.toFixed(2)} <span style="font-size:9px;color:#6b7280;">(usado)</span>` : r.cnc.capacidad.toFixed(2)}</td>` : ''}
           <td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${r.verticales.capacidad.toFixed(2)}</td>
         </tr>
         <tr style="background:#fafafa;">
@@ -2786,11 +2792,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         <tr style="background:#111827;">
           <td style="padding:8px 12px;"></td>
           <td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctCarruseles > 100 ? '#f87171' : '#5eead4'};">${pctCarruseles.toFixed(0)}% ocupado</td>
-          ${tieneCnc ? `<td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctCnc > 100 ? '#f87171' : '#5eead4'};">${pctCnc.toFixed(0)}% ocupado</td>` : ''}
+          ${tieneCnc ? `<td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctCnc > 100 ? '#f87171' : '#5eead4'};">${cncCedeRemanente ? `${r.cnc.ocupacion.toFixed(1)} de ${r.cnc.capacidad.toFixed(1)} h<br/><span style="font-size:10px;font-weight:600;color:#fcd34d;">${r.cncRemanente.toFixed(1)} h → Carruseles</span>` : `${pctCnc.toFixed(0)}% ocupado`}</td>` : ''}
           <td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctVerticales > 100 ? '#f87171' : '#5eead4'};">${pctVerticales.toFixed(0)}% ocupado</td>
         </tr>
       </table>
-      ${r.cncRemanente > 0.05 ? `<p style="margin:8px 0 0;font-size:10px;color:#b45309;">Capacidad de Carruseles incluye +${r.cncRemanente.toFixed(1)}h remanente de CNC (capacidad libre de CNC ese día, que un carrusel puede aprovechar). El recuadro de CNC arriba muestra su capacidad y ocupación propias, sin ese remanente restado.</p>` : ''}
+      ${r.cncRemanente > 0.05 ? `<p style="margin:8px 0 0;font-size:10px;color:#b45309;">Capacidad de Carruseles incluye +${r.cncRemanente.toFixed(1)}h remanente de CNC (capacidad libre de CNC ese día, que un carrusel puede aprovechar). Por eso la columna CNC muestra solo su tiempo utilizado, para no contar esas horas dos veces; el detalle por máquina CNC arriba conserva su tiempo máquina completo.</p>` : ''}
       ${!r.fecha ? '<p style="margin:8px 0 0;font-size:10px;color:#b45309;">Sin fecha seleccionada en Capacidad Operativa — la ocupación mostrada es 0. Selecciona una fecha antes de enviar.</p>' : ''}
     </td>
   </tr>
