@@ -16,6 +16,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
+import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia } from '@/components/ReportePlanTxtFlujo';
 import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, parseISO, addMonths, subMonths, addDays } from 'date-fns';
@@ -347,7 +348,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // genere/guarde el PFD (confirmado por el usuario — Data Aprobada y PFD-VENTA son pasos
   // independientes, "es indistinto" el orden).
   const [destinatariosReporteEmpaque, setDestinatariosReporteEmpaque] = useState('');
-  const [isSendingReporteEmpaque, setIsSendingReporteEmpaque] = useState<{ '1000': boolean; '2000': boolean }>({ '1000': false, '2000': false });
 
   // Destinatarios del "Enviar Reporte" (Empaque): se precargan desde la restricción
   // Grupo_correos_VentaExterna (mismo patrón que Grupo_correos_Laminado en Corte Espuma/Corte y
@@ -1662,7 +1662,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
   // Resumen reactivo para el DASHBOARD en pantalla — usa lo que ya haya en `pfdVentaPreview` (última
   // vez que se generó, en esta sesión o antes); no dispara la explosión BOM en cada render, eso solo
-  // ocurre al pulsar "Generar" o "Enviar Reporte" (ver handleEnviarReporteEmpaque, que refresca la
+  // ocurre al pulsar "Generar" o "Enviar Reporte" (ver reporteFlujoEmpaque, que al guardar refresca la
   // trazabilidad justo antes de armar el correo para no depender de un preview desactualizado).
   const resumenEmpaquePorCentro = useMemo(() => {
     const calcularCentro = (centro: '1000' | '2000') => {
@@ -1680,7 +1680,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Cuerpo del correo — mismo formato ya aprobado en Corte Espuma/Corte y Laminado (banner CHAIDE Y
   // CHAIDE, tarjetas de totales, tabla de detalle, nota final). `previewEspumas` se recibe como
   // parámetro (no se lee de `pfdVentaPreview`/resumenEmpaquePorCentro acá dentro) porque
-  // handleEnviarReporteEmpaque ya lo refrescó con `await generarPfdVentaPreview(centro)` en la MISMA
+  // reporteFlujoEmpaque (construirHtml) ya lo refrescó con `await generarPfdVentaPreview(centro)` en la MISMA
   // corrida — leer el estado en vez del valor devuelto vería la versión vieja por el cierre del
   // render anterior (mismo problema ya documentado en generarPfdVentaPreview).
   const construirReporteHtmlEmpaque = (centro: '1000' | '2000', previewEspumas: PfdVentaPreview | null) => {
@@ -1854,34 +1854,38 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 </table>`;
   };
 
-  const handleEnviarReporteEmpaque = async (centro: '1000' | '2000') => {
-    const destino = destinatariosReporteEmpaque.trim();
-    if (!destino) {
-      addNotification('warning', 'Escribe al menos un correo destinatario antes de enviar.');
-      return;
-    }
-    setIsSendingReporteEmpaque(prev => ({ ...prev, [centro]: true }));
-    try {
-      // Refresca la trazabilidad FERT/PT de Espumas antes de armar el correo — no depende de que el
-      // usuario ya haya visitado "PFD-VENTA" en esta sesión (Data Aprobada/FERT-PT y PFD-VENTA son
-      // pasos independientes, confirmado por el usuario). Si no hay P2/FERT activos,
-      // generarPfdVentaPreview ya notifica el motivo puntual y el correo sigue con lo que haya en
-      // Rollos. Se usa el valor DEVUELTO, no el estado `pfdVentaPreview` (que por el cierre de este
-      // render seguiría viendo la versión vieja hasta el próximo render).
-      const previewFresco = await generarPfdVentaPreview(centro);
-      const resultado = await serviciosService.enviarCorreo({
-        destino,
-        asunto: `Reporte de producción — Empaque Venta Externa / Muebles [Centro ${centro}]`,
-        cuerpo: construirReporteHtmlEmpaque(centro, previewFresco),
-        nota: 'Este correo fue generado automáticamente, favor no responder.',
-      });
-      addNotification('success', `${resultado.message} — ${resultado.destinatarios.join(', ')}`);
-    } catch (error) {
-      addNotification('error', `Error al enviar el reporte: ${(error as Error).message}`);
-    } finally {
-      setIsSendingReporteEmpaque(prev => ({ ...prev, [centro]: false }));
-    }
-  };
+  const asuntoReporteEmpaque = (centro: '1000' | '2000') =>
+    `Reporte de producción — Empaque Venta Externa / Muebles [Centro ${centro}]`;
+
+  // "Enviar Reporte" en 3 pasos (Guardar -> Recuperar/vista previa -> Enviar, ver
+  // ReportePlanTxtFlujo.tsx): el correo sale de la foto guardada, no se recalcula después de exportar
+  // a SAP. Fecha objetivo = día hábil siguiente: Data Aprobada son respuestas P3 que siempre se
+  // fechan a hoy+1 hábil (ver guardado del P3).
+  //
+  // Al GUARDAR se refresca la trazabilidad FERT/PT de Espumas antes de armar el reporte — no depende
+  // de que el usuario ya haya visitado "PFD-VENTA" en esta sesión (Data Aprobada/FERT-PT y PFD-VENTA
+  // son pasos independientes, confirmado por el usuario). Si no hay P2/FERT activos,
+  // generarPfdVentaPreview ya notifica el motivo puntual y el reporte sigue con lo que haya en
+  // Rollos. Se usa el valor DEVUELTO, no el estado `pfdVentaPreview` (que por el cierre de este
+  // render seguiría viendo la versión vieja hasta el próximo render).
+  const fechaObjetivoEmpaque = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
+  const reporteFlujoEmpaque1000 = useReportePlanTxt({
+    modulo: 'venta-espuma',
+    centro: '1000',
+    fechaObjetivo: fechaObjetivoEmpaque,
+    asunto: asuntoReporteEmpaque('1000'),
+    construirHtml: async () => construirReporteHtmlEmpaque('1000', await generarPfdVentaPreview('1000')),
+    etiqueta: 'Centro 1000',
+  });
+  const reporteFlujoEmpaque2000 = useReportePlanTxt({
+    modulo: 'venta-espuma',
+    centro: '2000',
+    fechaObjetivo: fechaObjetivoEmpaque,
+    asunto: asuntoReporteEmpaque('2000'),
+    construirHtml: async () => construirReporteHtmlEmpaque('2000', await generarPfdVentaPreview('2000')),
+    etiqueta: 'Centro 2000',
+  });
+  const reporteFlujoEmpaque = { '1000': reporteFlujoEmpaque1000, '2000': reporteFlujoEmpaque2000 };
 
   const calculateSummary = (data: Record<string, unknown>[], centroId: string) => {
     const lookup = centroId === '1000' ? tiempoLookup1000 : tiempoLookup2000;
@@ -2824,31 +2828,22 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                     <p className="text-xs font-black uppercase tracking-widest text-slate-700">Gestión de tiempos y capacidad de Empaque</p>
                     <p className="text-[10px] text-slate-400 mt-1">Venta Externa / Muebles — datos de Data Aprobada (respuesta ya verificada), no del PFD-VENTA.</p>
                   </div>
-                  <textarea
-                    value={destinatariosReporteEmpaque}
-                    onChange={(e) => setDestinatariosReporteEmpaque(e.target.value)}
-                    placeholder="correo1@chaideychaide.com, correo2@chaideychaide.com"
-                    className="w-full h-20 text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-cyan-400"
-                  />
-                  <p className="text-[9px] text-slate-400 -mt-1">Precargado desde el grupo de correos configurado (Grupo_correos_VentaExterna) — editable antes de enviar.</p>
-                  <div className="grid grid-cols-2 gap-2">
-                    <Button
-                      onClick={() => handleEnviarReporteEmpaque('1000')}
-                      disabled={isSendingReporteEmpaque['1000'] || !destinatariosReporteEmpaque.trim()}
-                      className="w-full bg-cyan-600 hover:bg-cyan-700 text-white text-[10px] font-black uppercase tracking-widest h-9"
-                    >
-                      {isSendingReporteEmpaque['1000'] ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Centro 1000
-                    </Button>
-                    <Button
-                      onClick={() => handleEnviarReporteEmpaque('2000')}
-                      disabled={isSendingReporteEmpaque['2000'] || !destinatariosReporteEmpaque.trim()}
-                      className="w-full bg-cyan-600 hover:bg-cyan-700 text-white text-[10px] font-black uppercase tracking-widest h-9"
-                    >
-                      {isSendingReporteEmpaque['2000'] ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Centro 2000
-                    </Button>
-                  </div>
+                  <p className="text-[10px] text-slate-500">Guarda el plan antes de exportar a SAP y envíalo después desde la vista previa.</p>
+                  <ReportePlanTxtAcciones flujo={reporteFlujoEmpaque['1000']} />
+                  <div className="border-t border-slate-100" />
+                  <ReportePlanTxtAcciones flujo={reporteFlujoEmpaque['2000']} compacto />
+                  <p className="text-[9px] text-slate-400">Destinatarios precargados desde Grupo_correos_VentaExterna — editables en la vista previa.</p>
                 </PopoverContent>
               </Popover>
+              {(['1000', '2000'] as const).map(c => (
+                <ReportePlanTxtVistaPrevia
+                  key={c}
+                  flujo={reporteFlujoEmpaque[c]}
+                  titulo="Empaque Venta Externa / Muebles"
+                  destinatarios={destinatariosReporteEmpaque}
+                  onDestinatariosChange={setDestinatariosReporteEmpaque}
+                />
+              ))}
               <Button onClick={fetchDataAprobada} disabled={isLoadingDataAprobada} variant="outline" className="h-10 px-6 rounded-2xl gap-2 font-bold text-xs uppercase shrink-0 border-indigo-200 text-indigo-700 hover:bg-indigo-50">
                 {isLoadingDataAprobada ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                 Actualizar

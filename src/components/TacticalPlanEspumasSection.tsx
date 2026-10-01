@@ -53,6 +53,7 @@ import type { Grupo, PlanGrupo, DetalleTactico, Restriccion } from '@/types/inte
 import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
 import type { BodyResponse } from '@/types/body-response';
 import { cn } from '@/lib/utils';
+import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia } from '@/components/ReportePlanTxtFlujo';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid } from 'date-fns';
@@ -1347,7 +1348,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Reporte por correo (Capacidad Operativa) — mismo destinatario para ambas plantas, envío
   // independiente por planta (cada una arma y manda su propio cuerpo de correo).
   const [destinatariosReporte, setDestinatariosReporte] = useState('');
-  const [isSendingReporte, setIsSendingReporte] = useState<{ UIO: boolean; GYE: boolean }>({ UIO: false, GYE: false });
 
   // Destinatarios precargados desde la restricción Grupo_Correos_Corte_Espuma (Grupo_Correos_Laminado
   // es la de Corte y Laminado). Se lee al montar, aparte de la sincronización: al volver al módulo
@@ -2811,30 +2811,32 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 </table>`;
   };
 
-  const handleEnviarReporteEspuma = async (planta: 'UIO' | 'GYE') => {
-    const destino = destinatariosReporte.trim();
-    if (!destino) {
-      addNotification('warning', 'Escribe al menos un correo destinatario antes de enviar.');
-      return;
-    }
-    setIsSendingReporte(prev => ({ ...prev, [planta]: true }));
-    try {
-      const resultado = await serviciosService.enviarCorreo({
-        destino,
-        // "Corte y Laminado" es el departamento SAP real que agrupa Carruseles (este módulo) y Looper
-        // (Corte y Laminado) -- confirmado por el usuario, mismo nombre que ambos correos ya deben
-        // usar en el asunto, distinguidos por el proceso entre corchetes, no por el nombre del módulo.
-        asunto: `Reporte de producción — Corte y Laminado [Carruseles]-[${planta === 'UIO' ? 'Quito' : 'Guayaquil'}]`,
-        cuerpo: construirReporteHtmlEspuma(planta),
-        nota: 'Este correo fue generado automáticamente, favor no responder.',
-      });
-      addNotification('success', `${resultado.message} — ${resultado.destinatarios.join(', ')}`);
-    } catch (error) {
-      addNotification('error', `Error al enviar el reporte: ${(error as Error).message}`);
-    } finally {
-      setIsSendingReporte(prev => ({ ...prev, [planta]: false }));
-    }
-  };
+  // "Corte y Laminado" es el departamento SAP real que agrupa Carruseles (este módulo) y Looper
+  // (Corte y Laminado) -- confirmado por el usuario, mismo nombre que ambos correos ya deben
+  // usar en el asunto, distinguidos por el proceso entre corchetes, no por el nombre del módulo.
+  const asuntoReporteEspuma = (planta: 'UIO' | 'GYE') =>
+    `Reporte de producción — Corte y Laminado [Carruseles]-[${planta === 'UIO' ? 'Quito' : 'Guayaquil'}]`;
+
+  // "Enviar Reporte" en 3 pasos (Guardar -> Recuperar/vista previa -> Enviar, ver
+  // ReportePlanTxtFlujo.tsx): el correo sale de la foto guardada, no se recalcula después de exportar
+  // a SAP (las FERT nuevas cambiarían la ocupación). Fecha objetivo = la fecha evaluada en Capacidad
+  // Operativa (la misma del correo); sin fecha no se puede guardar — el reporte saldría en 0 y
+  // quedaría archivado bajo una fecha que nadie eligió.
+  const reporteFlujoUIO = useReportePlanTxt({
+    modulo: 'corte-espuma',
+    centro: '1000',
+    fechaObjetivo: resumenReportePorPlanta.UIO.fecha || null,
+    asunto: asuntoReporteEspuma('UIO'),
+    construirHtml: () => construirReporteHtmlEspuma('UIO'),
+  });
+  const reporteFlujoGYE = useReportePlanTxt({
+    modulo: 'corte-espuma',
+    centro: '2000',
+    fechaObjetivo: resumenReportePorPlanta.GYE.fecha || null,
+    asunto: asuntoReporteEspuma('GYE'),
+    construirHtml: () => construirReporteHtmlEspuma('GYE'),
+  });
+  const reporteFlujo = { UIO: reporteFlujoUIO, GYE: reporteFlujoGYE };
 
   // Materiales de "Laminado Cilíndrico" (descripción "LAMINA CILINDRICA...") — verificado con datos
   // reales: son 6 materiales, todos de Muebles, y ya reciben su respuesta P3 desde el módulo de
@@ -5275,25 +5277,19 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                 </PopoverTrigger>
                 <PopoverContent className="w-80 p-4 space-y-3" align="end">
                   <div>
-                    <p className="text-xs font-black uppercase tracking-widest text-slate-700">Enviar reporte por correo</p>
-                    <p className="text-[10px] text-slate-400 mt-1">Gestión de tiempos y ocupación por proceso — snapshot de {planta === 'UIO' ? 'Quito' : 'Guayaquil'} en este momento.</p>
+                    <p className="text-xs font-black uppercase tracking-widest text-slate-700">Reporte de producción</p>
+                    <p className="text-[10px] text-slate-400 mt-1">Gestión de tiempos y ocupación por proceso — {planta === 'UIO' ? 'Quito' : 'Guayaquil'}. Guarda el plan antes de exportar a SAP y envíalo después desde la vista previa.</p>
                   </div>
-                  <textarea
-                    value={destinatariosReporte}
-                    onChange={(e) => setDestinatariosReporte(e.target.value)}
-                    placeholder="correo1@chaideychaide.com, correo2@chaideychaide.com"
-                    className="w-full h-20 text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-red-400"
-                  />
-                  <p className="text-[9px] text-slate-400 -mt-1">Precargado desde el grupo de correos configurado (Grupo_Correos_Corte_Espuma) — editable antes de enviar.</p>
-                  <Button
-                    onClick={() => handleEnviarReporteEspuma(planta)}
-                    disabled={isSendingReporte[planta] || !destinatariosReporte.trim()}
-                    className="w-full bg-red-600 hover:bg-red-700 text-white text-[10px] font-black uppercase tracking-widest h-9"
-                  >
-                    {isSendingReporte[planta] ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Enviar
-                  </Button>
+                  <ReportePlanTxtAcciones flujo={reporteFlujo[planta]} />
+                  <p className="text-[9px] text-slate-400">Destinatarios precargados desde Grupo_Correos_Corte_Espuma — editables en la vista previa.</p>
                 </PopoverContent>
               </Popover>
+              <ReportePlanTxtVistaPrevia
+                flujo={reporteFlujo[planta]}
+                titulo={`Corte y Laminado [Carruseles] — ${planta === 'UIO' ? 'Quito' : 'Guayaquil'}`}
+                destinatarios={destinatariosReporte}
+                onDestinatariosChange={setDestinatariosReporte}
+              />
               <div title="Elige una fecha para ver la ocupación de Capacidad Operativa: FERT real si ya existe, o el plan (Necesidad) todavía sin ejecutar si no. Elegir otra fecha reemplaza la anterior.">
                 <DateFilterPopover
                   label="Evaluar Capacidad"

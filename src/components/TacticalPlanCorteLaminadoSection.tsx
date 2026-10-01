@@ -55,6 +55,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
 import { cn } from '@/lib/utils';
+import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia } from '@/components/ReportePlanTxtFlujo';
 import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, parseISO, addDays } from 'date-fns';
@@ -713,10 +714,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
   // "Enviar Reporte" (Gestión de Tiempos → correo): destinatarios editables en pantalla, no fijos en
   // código (decisión del usuario) — se guardan tal cual se escriben, sin validar formato acá, el
-  // backend es quien reparte por coma. isSendingReporte cubre solo la llamada real a
-  // serviciosService.enviarCorreo, no el resto del módulo.
+  // backend es quien reparte por coma. El envío ya no es directo: Guardar -> Recuperar/vista
+  // previa -> Enviar (ver reporteFlujo y src/components/ReportePlanTxtFlujo.tsx).
   const [destinatariosReporte, setDestinatariosReporte] = useState('');
-  const [isSendingReporte, setIsSendingReporte] = useState(false);
 
   // Destinatarios precargados desde la restricción Grupo_Correos_Laminado (mismo patrón que
   // Grupo_Correos_Corte_Espuma en Corte Espuma). Se lee al montar, aparte de la sincronización, para
@@ -3483,30 +3483,11 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 </table>`;
   };
 
-  const handleEnviarReporte = async () => {
-    const destino = destinatariosReporte.trim();
-    if (!destino) {
-      addNotification('warning', 'Escribe al menos un correo destinatario antes de enviar.');
-      return;
-    }
-    setIsSendingReporte(true);
-    try {
-      const resultado = await serviciosService.enviarCorreo({
-        destino,
-        // Mismo formato que el correo de Corte Espuma (Carruseles): "Corte y Laminado" es el
-        // departamento SAP real que agrupa ambos procesos, distinguidos por el nombre del proceso
-        // entre corchetes -- Looper solo opera Centro 1000 (Quito), sin variante por planta.
-        asunto: 'Reporte de producción — Corte y Laminado [Looper]-[Quito]',
-        cuerpo: construirReporteHtml(),
-        nota: 'Este correo fue generado automáticamente, favor no responder.',
-      });
-      addNotification('success', `${resultado.message} — ${resultado.destinatarios.join(', ')}`);
-    } catch (error) {
-      addNotification('error', `Error al enviar el reporte: ${(error as Error).message}`);
-    } finally {
-      setIsSendingReporte(false);
-    }
-  };
+  // Mismo formato que el correo de Corte Espuma (Carruseles): "Corte y Laminado" es el
+  // departamento SAP real que agrupa ambos procesos, distinguidos por el nombre del proceso
+  // entre corchetes -- Looper solo opera Centro 1000 (Quito), sin variante por planta.
+  const ASUNTO_REPORTE = 'Reporte de producción — Corte y Laminado [Looper]-[Quito]';
+
 
   // Empaqueta los materiales de un grupo dentro de sus N corridas (bins de 40 un.) usando
   // Best-Fit-Decreasing: cada material entra ENTERO en la corrida donde mejor quepa, y solo
@@ -4064,25 +4045,17 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                 </PopoverTrigger>
                 <PopoverContent className="w-[300px] p-4 bg-white border border-gray-100 rounded-2xl shadow-xl text-slate-800" align="end">
                   <p className="text-[9px] font-black uppercase text-indigo-700 tracking-widest mb-1">Enviar Reporte por Correo</p>
-                  <p className="text-[8px] text-slate-400 font-bold uppercase mb-3">Rollos, Gestión de Tiempos, Ocupación y Disponibilidad — snapshot de este momento</p>
-                  <label className="text-[8px] font-black uppercase text-slate-500 tracking-wider block mb-1">Destinatarios (separados por coma)</label>
-                  <textarea
-                    value={destinatariosReporte}
-                    onChange={(e) => setDestinatariosReporte(e.target.value)}
-                    placeholder="nombre@chaideychaide.com, otro@chaideychaide.com"
-                    rows={2}
-                    className="w-full bg-white border border-gray-200 rounded-lg px-2 py-1.5 text-[10px] text-slate-700 font-bold outline-none focus:border-indigo-500 resize-none"
-                  />
-                  <p className="text-[8px] text-slate-400 mt-1">Precargado desde el grupo de correos configurado (Grupo_Correos_Laminado) — editable antes de enviar.</p>
-                  <Button
-                    onClick={handleEnviarReporte}
-                    disabled={isSendingReporte || !destinatariosReporte.trim()}
-                    className="w-full mt-3 h-9 rounded-xl gap-2 font-black text-[10px] uppercase bg-indigo-600 text-white hover:bg-indigo-700"
-                  >
-                    {isSendingReporte ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Mail className="w-3.5 h-3.5" />} Enviar
-                  </Button>
+                  <p className="text-[8px] text-slate-400 font-bold uppercase mb-3">Rollos, Gestión de Tiempos, Ocupación y Disponibilidad — guarda el plan antes de exportar a SAP y envíalo después desde la vista previa</p>
+                  <ReportePlanTxtAcciones flujo={reporteFlujo} />
+                  <p className="text-[8px] text-slate-400 mt-2">Destinatarios precargados desde Grupo_Correos_Laminado — editables en la vista previa.</p>
                 </PopoverContent>
               </Popover>
+              <ReportePlanTxtVistaPrevia
+                flujo={reporteFlujo}
+                titulo="Corte y Laminado [Looper] — Quito"
+                destinatarios={destinatariosReporte}
+                onDestinatariosChange={setDestinatariosReporte}
+              />
             </div>
             <div className="space-y-3">
               <div className="flex items-center gap-3">
@@ -4278,6 +4251,18 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       </div>
     );
   };
+
+  // "Enviar Reporte" en 3 pasos (Guardar -> Recuperar/vista previa -> Enviar, ver
+  // ReportePlanTxtFlujo.tsx): el correo sale de la foto guardada, no se recalcula después de exportar
+  // a SAP. Fecha objetivo = fecha de ejecución del Plan de Salida (la misma que muestra el correo),
+  // o el día hábil siguiente si no hay corridas.
+  const reporteFlujo = useReportePlanTxt({
+    modulo: 'laminado',
+    centro: '1000',
+    fechaObjetivo: outputPlanRows[0]?.fecha || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd'),
+    asunto: ASUNTO_REPORTE,
+    construirHtml: () => construirReporteHtml(),
+  });
 
   if (!mounted) return <div className="p-4 md:p-6 min-h-screen bg-white" />;
 
