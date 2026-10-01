@@ -6,7 +6,8 @@
  *   1. Guardar reporte   -> foto del plan EN ESE MOMENTO: TXT + HTML del correo en la carpeta
  *                           compartida (ver src/lib/planes-txt.ts / api/planes-txt).
  *   2. Recuperar reporte -> lee lo guardado (no recalcula) y lo muestra en vista previa.
- *   3. Enviar            -> manda por correo exactamente lo recuperado.
+ *   3. Enviar            -> manda por correo exactamente lo recuperado y, si sale bien, borra la
+ *                           foto HTML (el correo ya está en la bandeja); en la carpeta queda solo el TXT.
  *
  * Por qué separado: entre que se arma el plan y se envía el correo, se exporta a SAP y SAP tarda en
  * crear las órdenes FERT. Si el correo se arma al enviar, la necesidad ya se recalculó con esas FERT
@@ -31,7 +32,7 @@ import { useAppContext } from '@/context/AppProvider';
 import { serviciosService } from '@/services/servicios.service';
 import { cn } from '@/lib/utils';
 import {
-  consultarPlanTxt, guardarPlanTxt, obtenerPlanTxt, txtACorreoHtml,
+  consultarPlanTxt, eliminarFotoCorreoPlanTxt, guardarPlanTxt, obtenerPlanTxt,
   type CentroPlanTxt, type ModuloPlanTxt, type PlanTxtRecuperado,
 } from '@/lib/planes-txt';
 
@@ -61,7 +62,8 @@ export interface FlujoReportePlanTxt {
   vista: PlanTxtRecuperado | null;
   vistaAbierta: boolean;
   setVistaAbierta: (v: boolean) => void;
-  guardar: () => Promise<void>;
+  /** true si quedó guardado (false si se canceló o falló). */
+  guardar: () => Promise<boolean>;
   recuperar: () => Promise<void>;
   enviar: (destino: string) => Promise<void>;
 }
@@ -105,16 +107,16 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
     return () => { vigente = false; };
   }, [modulo, centro, fechaObjetivo]);
 
-  const guardar = useCallback(async () => {
+  const guardar = useCallback(async (): Promise<boolean> => {
     const cfg = configRef.current;
     if (!cfg.fechaObjetivo) {
       addNotification('warning', `${prefijo}no hay fecha objetivo para guardar el reporte.`);
-      return;
+      return false;
     }
     if (estado === 'guardado' && !window.confirm(
       `${prefijo}ya hay un reporte guardado el ${horaCorta(guardadoEn)} para el ${cfg.fechaObjetivo}.\n\n` +
       '¿Reemplazarlo con los datos ACTUALES del módulo? Si ya se exportó a SAP, la necesidad puede haber cambiado por las órdenes FERT nuevas.'
-    )) return;
+    )) return false;
     setGuardando(true);
     try {
       const html = await cfg.construirHtml();
@@ -124,9 +126,11 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
       setRuta(res.ruta);
       setVista(null);
       setEnviadoEn(null);
-      addNotification('success', `${prefijo}reporte guardado en ${res.ruta}`);
+      addNotification('success', `${prefijo}reporte guardado (todavía no se envió). Cuando SAP termine las FERT, usa "Recuperar y revisar" para enviarlo. Archivo: ${res.ruta}`);
+      return true;
     } catch (error) {
       addNotification('error', `${prefijo}error al guardar el reporte: ${(error as Error).message}`);
+      return false;
     } finally {
       setGuardando(false);
     }
@@ -152,6 +156,12 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
   const enviar = useCallback(async (destino: string) => {
     const cfg = configRef.current;
     if (!vista) return;
+    // Sin foto HTML no se envía: el TXT en texto plano no es el correo diseñado (lo reportó el
+    // usuario). La vista previa ofrece "Volver a guardar" para regenerarlo.
+    if (!vista.html) {
+      addNotification('warning', `${prefijo}no hay correo con formato guardado: vuelve a guardar el reporte antes de enviar.`);
+      return;
+    }
     if (!destino.trim()) {
       addNotification('warning', 'Escribe al menos un correo destinatario antes de enviar.');
       return;
@@ -162,12 +172,22 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
       const resultado = await serviciosService.enviarCorreo({
         destino: destino.trim(),
         asunto: cfg.asunto,
-        cuerpo: vista.html ?? txtACorreoHtml(vista.contenido),
+        cuerpo: vista.html,
         nota: NOTA_CORREO,
       });
       setEnviadoEn(new Date().toISOString());
       setVistaAbierta(false);
       addNotification('success', `${prefijo}${resultado.message} — ${resultado.destinatarios.join(', ')}`);
+      // Enviado OK: la foto HTML ya cumplió su función (el correo quedó en la bandeja de entrada),
+      // en la carpeta queda solo el TXT. Si la limpieza falla el envío igual fue exitoso: solo avisa.
+      if (cfg.fechaObjetivo) {
+        try {
+          await eliminarFotoCorreoPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: cfg.fechaObjetivo });
+          setVista({ ...vista, html: null });
+        } catch (e) {
+          addNotification('warning', `${prefijo}correo enviado, pero no se pudo borrar la foto del correo: ${(e as Error).message}`);
+        }
+      }
     } catch (error) {
       addNotification('error', `${prefijo}error al enviar el reporte: ${(error as Error).message}`);
     } finally {
@@ -181,131 +201,169 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
   };
 }
 
-/** Botones del flujo (van dentro del Popover "Enviar Reporte" de cada módulo). */
+/**
+ * Pasos del flujo (van dentro del Popover "Enviar Reporte" de cada módulo). Cada paso explica qué
+ * hace: el usuario no tenía claro si "Guardar" avisaba, ni de dónde salía el correo al enviar.
+ */
+const PasoReporte: React.FC<{ n: number; titulo: string; hecho: boolean; activo: boolean; children: React.ReactNode }> = ({ n, titulo, hecho, activo, children }) => (
+  <div className={cn('rounded-lg border p-2 space-y-1.5', activo ? 'border-indigo-200 bg-indigo-50/40' : 'border-slate-100', !activo && !hecho && 'opacity-60')}>
+    <p className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider text-slate-700">
+      <span className={cn('flex h-4 w-4 items-center justify-center rounded-full text-[8px] text-white', hecho ? 'bg-emerald-600' : activo ? 'bg-indigo-600' : 'bg-slate-300')}>
+        {hecho ? '✓' : n}
+      </span>
+      {titulo}
+    </p>
+    {children}
+  </div>
+);
+
 export const ReportePlanTxtAcciones: React.FC<{ flujo: FlujoReportePlanTxt; className?: string; compacto?: boolean }> = ({ flujo, className, compacto }) => {
   const { estado, guardando, recuperando, guardadoEn, enviadoEn, config } = flujo;
   const guardado = estado === 'guardado';
-  const paso = guardado ? (enviadoEn ? 3 : 2) : 1;
 
   return (
-    <div className={cn('space-y-1.5', className)}>
+    <div className={cn('space-y-2', className)}>
       {config.etiqueta && <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">{config.etiqueta}</p>}
-      {!compacto && (
-        <div className="flex items-center gap-1 text-[8px] font-black uppercase tracking-wider">
-          {['Guardar', 'Vista previa', 'Enviar'].map((p, i) => (
-            <React.Fragment key={p}>
-              {i > 0 && <span className="text-slate-300">→</span>}
-              <span className={cn('rounded px-1.5 py-0.5', paso === i + 1 ? 'bg-indigo-600 text-white' : paso > i + 1 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-400')}>
-                {i + 1}. {p}
-              </span>
-            </React.Fragment>
-          ))}
-        </div>
-      )}
 
-      {estado === 'verificando' ? (
-        <Button disabled variant="outline" className="w-full h-9 gap-2 text-[10px] font-black uppercase">
-          <Loader2 className="w-4 h-4 animate-spin" /> Verificando reporte guardado…
-        </Button>
-      ) : guardado ? (
-        <Button
-          onClick={flujo.recuperar}
-          disabled={recuperando || guardando}
-          className="w-full h-9 gap-2 text-[10px] font-black uppercase tracking-widest bg-emerald-600 hover:bg-emerald-700 text-white"
-        >
-          {recuperando ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSearch className="w-4 h-4" />} Recuperar reporte · vista previa
-        </Button>
-      ) : (
-        <Button
-          onClick={flujo.guardar}
-          disabled={guardando || estado === 'sin-fecha'}
-          className="w-full h-9 gap-2 text-[10px] font-black uppercase tracking-widest bg-indigo-600 hover:bg-indigo-700 text-white"
-        >
-          {guardando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Guardar reporte
-        </Button>
-      )}
-
-      {estado === 'sin-fecha' && <p className="text-[9px] text-amber-600">Sin fecha objetivo: selecciona la fecha del plan antes de guardar.</p>}
-      {estado === 'error-carpeta' && <p className="text-[9px] text-red-600">No se pudo consultar la carpeta compartida. Puedes intentar guardar igual.</p>}
-      {guardado && (
-        <div className="flex items-center justify-between gap-2 text-[9px] text-slate-500">
-          <span className="flex items-center gap-1">
-            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-            Guardado {horaCorta(guardadoEn)} · fecha {config.fechaObjetivo}
-            {enviadoEn && <span className="text-emerald-700 font-bold"> · enviado {horaCorta(enviadoEn)}</span>}
-          </span>
-          <button
-            type="button"
-            onClick={flujo.guardar}
-            disabled={guardando}
-            title="Reemplaza el reporte guardado con los datos actuales del módulo"
-            className="flex items-center gap-1 font-bold text-indigo-600 hover:underline disabled:opacity-50"
+      <PasoReporte n={1} titulo="Guardar reporte" hecho={guardado} activo={!guardado}>
+        {!compacto && (
+          <p className="text-[9px] leading-snug text-slate-500">
+            Congela el plan de este momento (correo con formato + TXT) en la carpeta compartida. Hazlo <b>antes</b> de exportar a SAP. Todavía no envía nada.
+          </p>
+        )}
+        {estado === 'verificando' ? (
+          <Button disabled variant="outline" className="w-full h-8 gap-2 text-[10px] font-black uppercase">
+            <Loader2 className="w-4 h-4 animate-spin" /> Verificando…
+          </Button>
+        ) : guardado ? (
+          <div className="flex items-center justify-between gap-2 text-[9px]">
+            <span className="flex items-center gap-1 font-bold text-emerald-700">
+              <CheckCircle2 className="w-3 h-3" /> Guardado {horaCorta(guardadoEn)} · fecha {config.fechaObjetivo}
+            </span>
+            <button
+              type="button"
+              onClick={() => { void flujo.guardar(); }}
+              disabled={guardando}
+              title="Reemplaza el reporte guardado con los datos ACTUALES del módulo"
+              className="flex items-center gap-1 font-bold text-indigo-600 hover:underline disabled:opacity-50"
+            >
+              {guardando ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />} Volver a guardar
+            </button>
+          </div>
+        ) : (
+          <Button
+            onClick={() => { void flujo.guardar(); }}
+            disabled={guardando || estado === 'sin-fecha'}
+            className="w-full h-8 gap-2 text-[10px] font-black uppercase tracking-widest bg-indigo-600 hover:bg-indigo-700 text-white"
           >
-            {guardando ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />} Volver a guardar
-          </button>
-        </div>
-      )}
+            {guardando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Guardar reporte
+          </Button>
+        )}
+        {estado === 'sin-fecha' && <p className="text-[9px] text-amber-600">Sin fecha objetivo: selecciona la fecha del plan antes de guardar.</p>}
+        {estado === 'error-carpeta' && <p className="text-[9px] text-red-600">No se pudo consultar la carpeta compartida. Puedes intentar guardar igual.</p>}
+      </PasoReporte>
+
+      <PasoReporte n={2} titulo="Revisar y enviar" hecho={!!enviadoEn} activo={guardado && !enviadoEn}>
+        {!compacto && (
+          <p className="text-[9px] leading-snug text-slate-500">
+            Cuando SAP termine de crear las órdenes FERT, abre lo guardado: verás el correo tal cual saldrá, podrás editar los destinatarios y enviarlo.
+          </p>
+        )}
+        <Button
+          onClick={() => { void flujo.recuperar(); }}
+          disabled={!guardado || recuperando || guardando}
+          className="w-full h-8 gap-2 text-[10px] font-black uppercase tracking-widest bg-emerald-600 hover:bg-emerald-700 text-white"
+        >
+          {recuperando ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSearch className="w-4 h-4" />} Recuperar y revisar
+        </Button>
+        {enviadoEn && <p className="text-[9px] font-bold text-emerald-700">Enviado {horaCorta(enviadoEn)}</p>}
+      </PasoReporte>
     </div>
   );
 };
 
-/** Diálogo de vista previa + envío. Renderizar FUERA del Popover (ver comentario del archivo). */
+/**
+ * Diálogo de vista previa + envío. Renderizar FUERA del Popover (ver comentario del archivo).
+ * Alto fijo con la vista previa desplazable y el pie (destinatarios + Enviar) siempre visible: antes
+ * el pie quedaba fuera de la pantalla y el botón Enviar no se veía.
+ */
 export const ReportePlanTxtVistaPrevia: React.FC<{
   flujo: FlujoReportePlanTxt;
   titulo: string;
   destinatarios: string;
   onDestinatariosChange: (v: string) => void;
 }> = ({ flujo, titulo, destinatarios, onDestinatariosChange }) => {
-  const { vista, vistaAbierta, setVistaAbierta, enviando, config } = flujo;
-  const html = vista ? (vista.html ?? txtACorreoHtml(vista.contenido)) : '';
+  const { vista, vistaAbierta, setVistaAbierta, enviando, guardando, config } = flujo;
+  const conFormato = !!vista?.html;
+  const nDestinatarios = destinatarios.split(/[,;]/).map(s => s.trim()).filter(Boolean).length;
+
+  // Sin foto HTML no se envía en texto plano: se vuelve a guardar (datos actuales) y se recarga la vista.
+  const regenerar = async () => {
+    if (await flujo.guardar()) await flujo.recuperar();
+  };
 
   return (
     <Dialog open={vistaAbierta} onOpenChange={(v) => { if (!enviando) setVistaAbierta(v); }}>
-      <DialogContent className="max-w-4xl w-[95vw] max-h-[92vh] flex flex-col gap-3">
-        <DialogHeader>
+      <DialogContent className="max-w-4xl w-[95vw] h-[90vh] flex flex-col gap-3 overflow-hidden">
+        <DialogHeader className="shrink-0">
           <DialogTitle className="text-sm font-black uppercase tracking-widest">
             Vista previa — {titulo}{config.etiqueta ? ` · ${config.etiqueta}` : ''}
           </DialogTitle>
           <DialogDescription className="text-[11px]">
-            Reporte guardado el {horaCorta(vista?.modificado ?? null)} para la fecha objetivo {config.fechaObjetivo}. Se envía
-            exactamente esto, sin recalcular con los datos actuales de SAP.
+            Guardado el {horaCorta(vista?.modificado ?? null)} para la fecha objetivo {config.fechaObjetivo}. Se envía exactamente esto,
+            sin recalcular con los datos actuales de SAP.
             {vista && <span className="block font-mono text-[10px] text-slate-400 break-all mt-1">{vista.ruta}</span>}
           </DialogDescription>
         </DialogHeader>
 
         {vista && (
-          <Tabs defaultValue="correo" className="flex-1 min-h-0 flex flex-col">
-            <TabsList className="self-start">
-              <TabsTrigger value="correo" className="text-[10px] font-black uppercase">Correo</TabsTrigger>
-              <TabsTrigger value="txt" className="text-[10px] font-black uppercase">TXT</TabsTrigger>
+          <Tabs key={vista.modificado} defaultValue={conFormato ? 'correo' : 'txt'} className="flex-1 min-h-0 flex flex-col">
+            <TabsList className="self-start shrink-0">
+              <TabsTrigger value="correo" className="text-[10px] font-black uppercase">Correo (lo que se envía)</TabsTrigger>
+              <TabsTrigger value="txt" className="text-[10px] font-black uppercase">TXT (archivo)</TabsTrigger>
             </TabsList>
-            <TabsContent value="correo" className="flex-1 min-h-0">
-              {!vista.html && (
-                <p className="text-[10px] text-amber-600 mb-2">Este reporte se guardó sin foto del correo: se enviará el TXT en formato de texto.</p>
+            <TabsContent value="correo" className="flex-1 min-h-0 mt-2">
+              {conFormato ? (
+                // iframe con sandbox: aísla los estilos inline del correo del resto de la app.
+                <iframe title="Vista previa del correo" sandbox="" srcDoc={vista.html ?? ''} className="w-full h-full rounded-lg border border-slate-200 bg-white" />
+              ) : (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-[11px] text-amber-800 space-y-2">
+                  <p className="font-black uppercase tracking-wider">No hay correo con formato guardado</p>
+                  <p>
+                    Este reporte se guardó sin la copia del correo (versión anterior del módulo), o el correo ya se envió y la copia se
+                    borró. No se envía como texto plano: vuelve a guardarlo para generar el correo con formato. Ojo: se tomarán los
+                    datos <b>actuales</b> del módulo.
+                  </p>
+                  <Button onClick={() => { void regenerar(); }} disabled={guardando} className="h-8 gap-2 text-[10px] font-black uppercase bg-indigo-600 hover:bg-indigo-700 text-white">
+                    {guardando ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Volver a guardar y actualizar vista
+                  </Button>
+                </div>
               )}
-              {/* iframe con sandbox: aísla los estilos inline del correo del resto de la app. */}
-              <iframe title="Vista previa del correo" sandbox="" srcDoc={html} className="w-full h-[55vh] rounded-lg border border-slate-200 bg-white" />
             </TabsContent>
-            <TabsContent value="txt" className="flex-1 min-h-0">
-              <pre className="h-[55vh] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] leading-snug font-mono text-slate-800 whitespace-pre">{vista.contenido}</pre>
+            <TabsContent value="txt" className="flex-1 min-h-0 mt-2">
+              <pre className="h-full overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] leading-snug font-mono text-slate-800 whitespace-pre">{vista.contenido}</pre>
             </TabsContent>
           </Tabs>
         )}
 
-        <DialogFooter className="flex-col sm:flex-col gap-2 sm:space-x-0">
-          <label className="text-[9px] font-black uppercase text-slate-500 tracking-wider">Destinatarios (separados por coma)</label>
+        <DialogFooter className="shrink-0 flex-col sm:flex-col gap-2 sm:space-x-0 border-t border-slate-100 pt-3">
+          <label className="flex justify-between gap-2 text-[9px] font-black uppercase text-slate-500 tracking-wider">
+            <span>Destinatarios — puedes agregar o quitar correos antes de enviar (separados por coma)</span>
+            <span className="text-slate-400 whitespace-nowrap">{nDestinatarios} {nDestinatarios === 1 ? 'correo' : 'correos'}</span>
+          </label>
           <textarea
             value={destinatarios}
             onChange={(e) => onDestinatariosChange(e.target.value)}
             placeholder="correo1@chaideychaide.com, correo2@chaideychaide.com"
             rows={2}
-            className="w-full text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-indigo-400 resize-none"
+            className="w-full text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-indigo-400 resize-y"
           />
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setVistaAbierta(false)} disabled={enviando} className="h-9 text-[10px] font-black uppercase">Cerrar</Button>
             <Button
-              onClick={() => flujo.enviar(destinatarios)}
-              disabled={enviando || !destinatarios.trim() || !vista}
+              onClick={() => { void flujo.enviar(destinatarios); }}
+              disabled={enviando || !destinatarios.trim() || !conFormato}
+              title={conFormato ? undefined : 'Vuelve a guardar el reporte para generar el correo con formato'}
               className="h-9 gap-2 text-[10px] font-black uppercase tracking-widest bg-indigo-600 hover:bg-indigo-700 text-white"
             >
               {enviando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Enviar reporte

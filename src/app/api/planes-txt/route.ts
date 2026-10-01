@@ -12,9 +12,11 @@ import {
 //   POST /api/planes-txt   { modulo, centro, fechaObjetivo, contenido, html? }  -> escribe/sobrescribe
 //   GET  /api/planes-txt?modulo=&centro=&fecha=[&anio=&mes=][&formato=json|meta][&descargar=1]
 //   GET  /api/planes-txt?diagnostico=1   -> qué carpeta usa el servidor y si puede escribir en ella
+//   DELETE /api/planes-txt?modulo=&centro=&fecha=  -> borra solo la foto del correo (tras enviar)
 // `html` es la foto del correo tal como se veía al guardar: se escribe al lado del TXT como
 // {fecha}.correo.html para que el envío posterior (después de crear las FERT en SAP) mande
-// exactamente lo guardado, con el formato del correo, sin recalcular nada. formato=meta solo
+// exactamente lo guardado, con el formato del correo, sin recalcular nada. Es temporal: se borra
+// cuando el envío sale bien (el correo ya queda en la bandeja de entrada). formato=meta solo
 // confirma si existe (ruta + fecha de modificación), sin leer el contenido.
 // La ruta en disco se arma SOLO con valores validados contra listas cerradas (módulo, centro) y
 // formatos fijos (fecha, año, mes): el cliente nunca manda segmentos de ruta libres.
@@ -51,7 +53,7 @@ const verificarRaiz = async (): Promise<string | null> => {
 const rutaPlan = (p: { anio: string; mes: string; modulo: ModuloPlanTxt; centro: CentroPlanTxt; fechaObjetivo: string }) =>
   path.join(raizPlanes(), ...segmentosPlanTxt(p));
 
-const rutaHtml = (rutaTxt: string) => rutaTxt.replace(/\.TXT$/, '.correo.html');
+const rutaHtml = (rutaTxt: string) => rutaTxt.replace(/\.txt$/, '.correo.html');
 
 const errorFs =(e: unknown, accion: string) => {
   const err = e as NodeJS.ErrnoException;
@@ -132,19 +134,24 @@ const diagnostico = async () => {
   }, { status: ok ? 200 : 500 });
 };
 
-export async function GET(req: NextRequest) {
-  const q = req.nextUrl.searchParams;
-  if (q.get('diagnostico') === '1') return diagnostico();
+// Criterios de búsqueda comunes a GET y DELETE -> rutas candidatas del TXT, o la respuesta de error.
+const rutasCandidatas = async (q: URLSearchParams, accion: string): Promise<{ rutas: string[] } | { respuesta: NextResponse }> => {
   const modulo = q.get('modulo');
   const centro = q.get('centro');
   const fecha = q.get('fecha') || q.get('fechaObjetivo');
   const anio = q.get('anio');
   const mes = q.get('mes');
-  if (!esModuloPlanTxt(modulo)) return NextResponse.json({ error: 'Módulo inválido' }, { status: 400 });
-  if (!esCentroPlanTxt(centro)) return NextResponse.json({ error: 'Centro inválido (1000 o 2000)' }, { status: 400 });
-  if (!esFechaPlanTxt(fecha)) return NextResponse.json({ error: 'fecha inválida (yyyy-MM-dd)' }, { status: 400 });
-  if (anio && !/^\d{4}$/.test(anio)) return NextResponse.json({ error: 'anio inválido (yyyy)' }, { status: 400 });
-  if (mes && !/^(0[1-9]|1[0-2])$/.test(mes)) return NextResponse.json({ error: 'mes inválido (01-12)' }, { status: 400 });
+  const malo = (error: string) => ({ respuesta: NextResponse.json({ error }, { status: 400 }) });
+  if (!esModuloPlanTxt(modulo)) return malo('Módulo inválido');
+  if (!esCentroPlanTxt(centro)) return malo('Centro inválido (1000 o 2000)');
+  if (!esFechaPlanTxt(fecha)) return malo('fecha inválida (yyyy-MM-dd)');
+  if (anio && !/^\d{4}$/.test(anio)) return malo('anio inválido (yyyy)');
+  if (mes && !/^(0[1-9]|1[0-2])$/.test(mes)) return malo('mes inválido (01-12)');
+
+  // Sin esto, una raíz inaccesible respondía 404 "no existe" y el botón quedaba en "Guardar
+  // reporte" como si no hubiera nada guardado, en vez de avisar que la carpeta no responde.
+  const errorRaiz = await verificarRaiz();
+  if (errorRaiz) return { respuesta: NextResponse.json({ error: `No se pudo ${accion} el plan TXT: ${errorRaiz}` }, { status: 500 }) };
 
   // Sin año/mes explícitos: el plan se genera antes de su fecha objetivo, así que puede estar en el
   // mes de esa fecha o en el anterior (generado el 30/09 para el 01/10).
@@ -152,12 +159,38 @@ export async function GET(req: NextRequest) {
   const candidatos = anio && mes
     ? [{ anio, mes }]
     : [{ anio: fAnio, mes: fMes }, mesAnterior(fAnio, fMes)];
-  const rutas = candidatos.map(c => rutaPlan({ ...c, modulo, centro, fechaObjetivo: fecha }));
+  return { rutas: candidatos.map(c => rutaPlan({ ...c, modulo, centro, fechaObjetivo: fecha })) };
+};
 
-  // Sin esto, una raíz inaccesible respondía 404 "no existe" y el botón quedaba en "Guardar
-  // reporte" como si no hubiera nada guardado, en vez de avisar que la carpeta no responde.
-  const errorRaiz = await verificarRaiz();
-  if (errorRaiz) return NextResponse.json({ error: `No se pudo consultar el plan TXT: ${errorRaiz}` }, { status: 500 });
+// DELETE ?modulo=&centro=&fecha=  -> borra SOLO la foto del correo ({fecha}.correo.html), nunca el
+// TXT. Se llama después de un envío exitoso: el correo ya quedó en la bandeja de entrada, en la
+// carpeta compartida queda únicamente el TXT (decisión del usuario).
+export async function DELETE(req: NextRequest) {
+  const r = await rutasCandidatas(req.nextUrl.searchParams, 'limpiar');
+  if ('respuesta' in r) return r.respuesta;
+  for (const ruta of r.rutas) {
+    try {
+      await fs.stat(ruta);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      return errorFs(e, 'limpiar');
+    }
+    try {
+      await fs.rm(rutaHtml(ruta), { force: true });
+    } catch (e) {
+      return errorFs(e, 'limpiar');
+    }
+    return NextResponse.json({ ok: true, ruta });
+  }
+  return NextResponse.json({ error: 'No existe un plan TXT para esos criterios', buscado: r.rutas }, { status: 404 });
+}
+
+export async function GET(req: NextRequest) {
+  const q = req.nextUrl.searchParams;
+  if (q.get('diagnostico') === '1') return diagnostico();
+  const r = await rutasCandidatas(q, 'consultar');
+  if ('respuesta' in r) return r.respuesta;
+  const rutas = r.rutas;
 
   const formato = q.get('formato');
   for (const ruta of rutas) {

@@ -2,16 +2,22 @@
  * Planes tácticos en TXT — mismo contenido que el correo "Reporte de producción" de cada módulo,
  * escrito como texto plano en la carpeta compartida `environment.ruta_planes` (o RUTA_PLANES).
  *
- * Estructura de carpetas (la arma la API `/api/planes-txt`, nunca el navegador):
+ * Estructura de carpetas (la arma la API `/api/planes-txt`, nunca el navegador) — MISMA convención
+ * que ya usan en la carpeta compartida los planes de Muebles, FORROS y Ensamblado (otros módulos,
+ * fuera de este repo): año / mes en letras / proceso / centro / fecha.txt, extensión en minúscula.
  *
- *   {ruta_planes}/{año actual}/{mes actual}/{proceso}/{centro}/{módulo}/{fecha_objetivo}.TXT
- *   ej. \\192.168.7.51\...\Optimizador-Produccion\2026\10\Corte y Laminado\1000\Laminado\2026-10-02.TXT
+ *   {ruta_planes}/{año actual}/{Mes actual}/{proceso}/{centro}/{fecha_objetivo}.txt
+ *   ej. \\192.168.7.51\...\Optimizador-Produccion\2026\Octubre\Corte Espuma\1000\2026-10-02.txt
+ *       (al lado, mientras no se envía: 2026-10-02.correo.html — ver api/planes-txt)
+ *
+ * El "proceso" es el módulo (Laminado, Corte Espuma, Venta Espuma, Formulacion), igual que Muebles
+ * o Ensamblado en los otros: así cada módulo tiene su carpeta y no se pisan archivos del mismo día.
+ * "Corte y Laminado" (departamento SAP que agrupa los 4) queda solo en el encabezado del TXT.
  *
  * Año/mes son los de la GENERACIÓN (hora Ecuador), no los de la fecha objetivo: un plan generado el
- * 30/09 para el 01/10 queda en 2026/09. Por eso la búsqueda (GET) prueba el mes de la fecha objetivo
- * y el anterior cuando no se le pasan año/mes. El módulo va como carpeta propia porque los 4 módulos
- * comparten proceso y centro: sin ella, Laminado y Corte Espuma del mismo día se pisarían el archivo.
- * Regenerar el plan para la misma fecha objetivo sobrescribe el archivo (queda la última versión).
+ * 30/09 para el 01/10 queda en 2026/Septiembre. Por eso la búsqueda (GET) prueba el mes de la fecha
+ * objetivo y el anterior cuando no se le pasan año/mes. Regenerar el plan para la misma fecha
+ * objetivo sobrescribe el archivo (queda la última versión).
  *
  * Este archivo lo importan tanto la API (Node) como los componentes (navegador): las constantes y
  * la ruta relativa son isomórficas; htmlReporteATexto/guardarPlanTxt/obtenerPlanTxt solo corren en
@@ -20,7 +26,10 @@
 import { environment } from '@/environments/environments.prod';
 import { toFechaHoraEcuador } from '@/lib/fecha-ecuador';
 
-export const PROCESO_PLANES_TXT = 'Corte y Laminado';
+export const DEPARTAMENTO_PLANES_TXT = 'Corte y Laminado';
+
+// Mismos nombres de carpeta que los planes existentes (2026\Agosto, 2026\Septiembre, 2026\Octubre...).
+const MESES_CARPETA = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 
 export const MODULOS_PLAN_TXT = {
   'laminado': { carpeta: 'Laminado', titulo: 'Plan Táctico Laminado' },
@@ -46,14 +55,16 @@ export const esFechaPlanTxt = (v: unknown): v is string => {
   return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
 };
 
-/** Segmentos de carpeta + nombre de archivo, relativos a ruta_planes (sin unir: cada lado usa su `path`). */
+/**
+ * Segmentos de carpeta + nombre de archivo, relativos a ruta_planes (sin unir: cada lado usa su
+ * `path`). `mes` llega en número '01'..'12' (así lo maneja la API) y se escribe en letras.
+ */
 export const segmentosPlanTxt = (p: { anio: string; mes: string; modulo: ModuloPlanTxt; centro: CentroPlanTxt; fechaObjetivo: string }): string[] => [
   p.anio,
-  p.mes,
-  PROCESO_PLANES_TXT,
-  p.centro,
+  MESES_CARPETA[Number(p.mes) - 1],
   MODULOS_PLAN_TXT[p.modulo].carpeta,
-  `${p.fechaObjetivo}.TXT`,
+  p.centro,
+  `${p.fechaObjetivo}.txt`,
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -236,7 +247,8 @@ export const htmlReporteATexto = (html: string): string => {
 export const armarContenidoPlanTxt = (p: { modulo: ModuloPlanTxt; centro: CentroPlanTxt; fechaObjetivo: string; asunto?: string; cuerpo: string }): string => {
   const titulo = `OPTIMIZADOR DE PRODUCCIÓN — ${MODULOS_PLAN_TXT[p.modulo].titulo.toUpperCase()}`;
   const meta = [
-    `Proceso: ${PROCESO_PLANES_TXT}`,
+    `Departamento: ${DEPARTAMENTO_PLANES_TXT}`,
+    `Proceso: ${MODULOS_PLAN_TXT[p.modulo].carpeta}`,
     `Centro: ${p.centro}`,
     `Fecha objetivo: ${p.fechaObjetivo}`,
     `Generado: ${toFechaHoraEcuador(new Date()).replace('T', ' ')} (hora Ecuador)`,
@@ -301,8 +313,11 @@ export const consultarPlanTxt = async (p: CriteriosPlanTxt): Promise<{ ruta: str
   return data as { ruta: string; modificado: string };
 };
 
-/** Cuerpo de correo a partir del TXT, cuando el plan no tiene foto HTML: texto monoespaciado. */
-export const txtACorreoHtml = (contenido: string): string => {
-  const esc = contenido.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return `<pre style="margin:0;font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.45;color:#111827;white-space:pre;">${esc}</pre>`;
+/** Borra la foto HTML del correo (nunca el TXT). Se usa tras un envío exitoso; lanza Error si falla. */
+export const eliminarFotoCorreoPlanTxt = async (p: CriteriosPlanTxt): Promise<void> => {
+  const res = await fetch(`${urlApiPlanesTxt()}?${qsPlanTxt(p, 'json')}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `No se pudo limpiar la foto del correo (HTTP ${res.status})`);
+  }
 };
