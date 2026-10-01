@@ -3124,8 +3124,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         .flatMap((r) => String(r.valor_restriccion || '').split(/[,&]/).map((v: string) => normalizeName(v)))
         .filter((v: string) => v !== '');
 
-      // El grupo 3 (origen de los P2 "ESPUMA MUEBLES"/"LAMINA CILINDRICA") entra siempre, esté o no
-      // en ALMACEN_CONSUMO — aquí solo se toma su variante "ESPUMA MUEBLES" (ver esP2ParaModulo).
+      // El grupo 3 (origen de los P2 "- ESPUMA"/"- LAMINA") entra siempre, esté o no
+      // en ALMACEN_CONSUMO — aquí solo se toma su variante "- ESPUMA" (ver esP2ParaModulo).
       const gruposFiltrados = (gruposRes.data || []).filter((g) => g.estado === 'A' && (almacenConsumoNames.includes(normalizeName(g.nombre_grupo)) || g.codigo_grupo === CODIGO_GRUPO_P2_MUEBLES));
       const gruposCodigos = gruposFiltrados.map((g) => g.codigo_grupo);
       const grupoPorCodigo = new Map(gruposFiltrados.map((g) => [g.codigo_grupo, g]));
