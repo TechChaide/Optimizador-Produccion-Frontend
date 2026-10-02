@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { ShoppingCart, Package, Loader2, LayoutDashboard, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Filter, TrendingUp, Box, X, Layers, Wand2, Save, ClipboardCheck, RefreshCw, Clock, Search, Mail, AlertCircle } from 'lucide-react';
 import { Card } from '@/components/ui/card';
@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from '@/components/ui/button';
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
+import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario } from '@/lib/restriccionesCapacidad';
 import { serviciosService } from '@/services/servicios.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
@@ -16,7 +17,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia } from '@/components/ReportePlanTxtFlujo';
+import { useReportePlanTxt, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo } from '@/components/ReportePlanTxtFlujo';
 import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, parseISO, addMonths, subMonths, addDays } from 'date-fns';
@@ -365,32 +366,73 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     }
   }, [restricciones]);
 
-  // Catálogo de horarios de Empaque — mismos valores/horas que ya usa Corte Espuma (H3=07:00-18:00,
-  // B21=21:00-05:30, H5=07:00-13:00 sábado corto), reutilizados aquí como consts locales porque
-  // TacticalPlanEspumasSection no las exporta.
-  const shiftOptionsEmpaque = useMemo(() => [
+  // Jornada laboral de Empaque por centro, desde las restricciones HORAS_TRABAJO_DÍA / _NOCHE /
+  // _FINDESEMANA, NUM_TURNOS y Paros _Planificados del grupo Venta Externa de ese centro (ver
+  // restriccionesCapacidad.ts). Sin restricción: jornada estándar (Día 07:00-15:45, Noche
+  // 21:00-05:30, Sábado manual 07:00-13:00).
+  const codigoGrupoVentaExternaDe = useCallback(
+    (centro: '1000' | '2000') => grupos.find(g => String(g.centro) === centro)?.codigo_grupo ?? -1,
+    [grupos]
+  );
+  const jornadaEmpaquePorCentro = useMemo(() => ({
+    '1000': jornadaDesdeRestricciones(restricciones, codigoGrupoVentaExternaDe('1000')),
+    '2000': jornadaDesdeRestricciones(restricciones, codigoGrupoVentaExternaDe('2000')),
+  }), [restricciones, codigoGrupoVentaExternaDe]);
+
+  // Catálogo de horarios de Empaque (mismos valores que Corte Espuma) + los de la restricción,
+  // ordenados de VACÍO a la jornada más larga.
+  const shiftOptionsEmpaque = useMemo(() => opcionesConHorarios([
     { v: 'EMPTY', l: 'VACÍO', h: 0 },
     { v: 'H1', l: '07:00 - 15:45', h: 8.75 },
     { v: 'H2', l: '07:00 - 17:00', h: 10 },
     { v: 'H3', l: '07:00 - 18:00', h: 11 },
     { v: 'H4', l: '07:00 - 19:00', h: 12 },
     { v: 'H5', l: '07:00 - 13:00', h: 6 },
-  ], []);
-  const nightShiftOptionsEmpaque = useMemo(() => [
+  ], [jornadaEmpaquePorCentro['1000'].dia, jornadaEmpaquePorCentro['2000'].dia, jornadaEmpaquePorCentro['1000'].finDeSemana, jornadaEmpaquePorCentro['2000'].finDeSemana]), [jornadaEmpaquePorCentro]);
+  const nightShiftOptionsEmpaque = useMemo(() => opcionesConHorarios([
     { v: 'EMPTY', l: 'VACÍO', h: 0 },
     { v: 'A19', l: '19:00 - 05:30', h: 10.5 },
     { v: 'B21', l: '21:00 - 05:30', h: 8.5 },
-  ], []);
+  ], [jornadaEmpaquePorCentro['1000'].noche, jornadaEmpaquePorCentro['2000'].noche]), [jornadaEmpaquePorCentro]);
 
+  // Valores de respaldo: la precarga de abajo los reemplaza al montar con la jornada del grupo.
   const [empaqueConfig, setEmpaqueConfig] = useState<Record<string, EmpaqueShiftConfig>>({
     EMPACADORA_ELECTROTECKS: {
-      day: 'H3', night: 'B21', saturday: 'H5',
+      day: 'H1', night: 'B21', saturday: 'EMPTY',
       paroDay: 0, paroNight: 0, paroSaturday: 0,
       operadoresDay: 4, operadoresNight: 4, operadoresSaturday: 4,
       mttoPreventivoHoras: 0,
       activa: true,
     },
   });
+
+  // Precarga de turnos y paros por máquina de empaque: Día con su horario, Noche solo si
+  // NUM_TURNOS ≥ 2, Sábado en VACÍO (manual), paro de los 3 turnos = Paros _Planificados (si existe).
+  // Solo se reaplica cuando cambia el valor de la restricción (firma): un ajuste manual no se pisa.
+  const firmaJornadaEmpaque = useRef<Record<'1000' | '2000', string>>({ '1000': '', '2000': '' });
+  useEffect(() => {
+    (['1000', '2000'] as const).forEach(centro => {
+      const jornada = jornadaEmpaquePorCentro[centro];
+      const paro = porcentajeRestriccion(restricciones, codigoGrupoVentaExternaDe(centro), RESTRICCION_CAPACIDAD.parosPlanificados);
+      const firma = JSON.stringify([jornada, paro]);
+      if (firma === firmaJornadaEmpaque.current[centro]) return;
+      firmaJornadaEmpaque.current[centro] = firma;
+      const day = claveDeHorario(shiftOptionsEmpaque, jornada.dia);
+      const night = jornada.numTurnos >= 2 ? claveDeHorario(nightShiftOptionsEmpaque, jornada.noche) : 'EMPTY';
+      setEmpaqueConfig(prev => {
+        const next = { ...prev };
+        EMPAQUE_MACHINES_BY_CENTRO[centro].forEach(m => {
+          if (!next[m.id]) return;
+          next[m.id] = {
+            ...next[m.id],
+            day, night, saturday: 'EMPTY',
+            ...(paro !== null ? { paroDay: paro, paroNight: paro, paroSaturday: paro } : {}),
+          };
+        });
+        return next;
+      });
+    });
+  }, [jornadaEmpaquePorCentro, restricciones, codigoGrupoVentaExternaDe, shiftOptionsEmpaque, nightShiftOptionsEmpaque]);
 
   // Calendario "abierto": sin tope de rango entre la fecha más antigua y la más nueva seleccionada
   // (antes limitado a 3 días). El usuario confirmó liberar esta restricción a propósito — el filtro
@@ -1662,7 +1704,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
   // Resumen reactivo para el DASHBOARD en pantalla — usa lo que ya haya en `pfdVentaPreview` (última
   // vez que se generó, en esta sesión o antes); no dispara la explosión BOM en cada render, eso solo
-  // ocurre al pulsar "Generar" o "Enviar Reporte" (ver reporteFlujoEmpaque, que al guardar refresca la
+  // ocurre al pulsar "Generar" o "Enviar Reporte" (ver reporteGrupoEmpaque, que al guardar refresca la
   // trazabilidad justo antes de armar el correo para no depender de un preview desactualizado).
   const resumenEmpaquePorCentro = useMemo(() => {
     const calcularCentro = (centro: '1000' | '2000') => {
@@ -1680,7 +1722,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Cuerpo del correo — mismo formato ya aprobado en Corte Espuma/Corte y Laminado (banner CHAIDE Y
   // CHAIDE, tarjetas de totales, tabla de detalle, nota final). `previewEspumas` se recibe como
   // parámetro (no se lee de `pfdVentaPreview`/resumenEmpaquePorCentro acá dentro) porque
-  // reporteFlujoEmpaque (construirHtml) ya lo refrescó con `await generarPfdVentaPreview(centro)` en la MISMA
+  // reporteFlujoEmpaque1000/2000 (construirHtml) ya lo refrescó con `await generarPfdVentaPreview(centro)` en la MISMA
   // corrida — leer el estado en vez del valor devuelto vería la versión vieja por el cierre del
   // render anterior (mismo problema ya documentado en generarPfdVentaPreview).
   const construirReporteHtmlEmpaque = (centro: '1000' | '2000', previewEspumas: PfdVentaPreview | null) => {
@@ -1885,7 +1927,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     construirHtml: async () => construirReporteHtmlEmpaque('2000', await generarPfdVentaPreview('2000')),
     etiqueta: 'Centro 2000',
   });
-  const reporteFlujoEmpaque = { '1000': reporteFlujoEmpaque1000, '2000': reporteFlujoEmpaque2000 };
+  // Los dos centros son el mismo reporte: un solo Guardar / Revisar / Enviar para ambos.
+  const reporteGrupoEmpaque = useReportePlanTxtGrupo([reporteFlujoEmpaque1000, reporteFlujoEmpaque2000]);
 
   const calculateSummary = (data: Record<string, unknown>[], centroId: string) => {
     const lookup = centroId === '1000' ? tiempoLookup1000 : tiempoLookup2000;
@@ -2828,22 +2871,16 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                     <p className="text-xs font-black uppercase tracking-widest text-slate-700">Gestión de tiempos y capacidad de Empaque</p>
                     <p className="text-[10px] text-slate-400 mt-1">Venta Externa / Muebles — datos de Data Aprobada (respuesta ya verificada), no del PFD-VENTA.</p>
                   </div>
-                  <p className="text-[10px] text-slate-500">Guarda el plan antes de exportar a SAP y envíalo después desde la vista previa.</p>
-                  <ReportePlanTxtAcciones flujo={reporteFlujoEmpaque['1000']} />
-                  <div className="border-t border-slate-100" />
-                  <ReportePlanTxtAcciones flujo={reporteFlujoEmpaque['2000']} compacto />
+                  <ReportePlanTxtAccionesGrupo grupo={reporteGrupoEmpaque} />
                   <p className="text-[9px] text-slate-400">Destinatarios precargados desde Grupo_correos_VentaExterna — editables en la vista previa.</p>
                 </PopoverContent>
               </Popover>
-              {(['1000', '2000'] as const).map(c => (
-                <ReportePlanTxtVistaPrevia
-                  key={c}
-                  flujo={reporteFlujoEmpaque[c]}
-                  titulo="Empaque Venta Externa / Muebles"
-                  destinatarios={destinatariosReporteEmpaque}
-                  onDestinatariosChange={setDestinatariosReporteEmpaque}
-                />
-              ))}
+              <ReportePlanTxtVistaPreviaGrupo
+                grupo={reporteGrupoEmpaque}
+                titulo="Empaque Venta Externa / Muebles"
+                destinatarios={destinatariosReporteEmpaque}
+                onDestinatariosChange={setDestinatariosReporteEmpaque}
+              />
               <Button onClick={fetchDataAprobada} disabled={isLoadingDataAprobada} variant="outline" className="h-10 px-6 rounded-2xl gap-2 font-bold text-xs uppercase shrink-0 border-indigo-200 text-indigo-700 hover:bg-indigo-50">
                 {isLoadingDataAprobada ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                 Actualizar

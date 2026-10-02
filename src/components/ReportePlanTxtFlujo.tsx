@@ -62,10 +62,12 @@ export interface FlujoReportePlanTxt {
   vista: PlanTxtRecuperado | null;
   vistaAbierta: boolean;
   setVistaAbierta: (v: boolean) => void;
-  /** true si quedó guardado (false si se canceló o falló). */
-  guardar: () => Promise<boolean>;
-  recuperar: () => Promise<void>;
-  enviar: (destino: string) => Promise<void>;
+  /** true si quedó guardado (false si se canceló o falló). sinConfirmar: el grupo ya preguntó una sola vez. */
+  guardar: (opts?: { sinConfirmar?: boolean }) => Promise<boolean>;
+  /** true si se recuperó. abrir=false: no abre el diálogo individual (lo usa el diálogo de grupo). */
+  recuperar: (opts?: { abrir?: boolean }) => Promise<boolean>;
+  /** true si se envió. */
+  enviar: (destino: string) => Promise<boolean>;
 }
 
 const NOTA_CORREO = 'Este correo fue generado automáticamente, favor no responder.';
@@ -107,13 +109,13 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
     return () => { vigente = false; };
   }, [modulo, centro, fechaObjetivo]);
 
-  const guardar = useCallback(async (): Promise<boolean> => {
+  const guardar = useCallback(async (opts?: { sinConfirmar?: boolean }): Promise<boolean> => {
     const cfg = configRef.current;
     if (!cfg.fechaObjetivo) {
       addNotification('warning', `${prefijo}no hay fecha objetivo para guardar el reporte.`);
       return false;
     }
-    if (estado === 'guardado' && !window.confirm(
+    if (estado === 'guardado' && !opts?.sinConfirmar && !window.confirm(
       `${prefijo}ya hay un reporte guardado el ${horaCorta(guardadoEn)} para el ${cfg.fechaObjetivo}.\n\n` +
       '¿Reemplazarlo con los datos ACTUALES del módulo? Si ya se exportó a SAP, la necesidad puede haber cambiado por las órdenes FERT nuevas.'
     )) return false;
@@ -136,35 +138,37 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
     }
   }, [addNotification, estado, guardadoEn, prefijo]);
 
-  const recuperar = useCallback(async () => {
+  const recuperar = useCallback(async (opts?: { abrir?: boolean }): Promise<boolean> => {
     const cfg = configRef.current;
-    if (!cfg.fechaObjetivo) return;
+    if (!cfg.fechaObjetivo) return false;
     setRecuperando(true);
     try {
       const plan = await obtenerPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: cfg.fechaObjetivo });
       setVista(plan);
       setGuardadoEn(plan.modificado);
       setRuta(plan.ruta);
-      setVistaAbierta(true);
+      if (opts?.abrir !== false) setVistaAbierta(true);
+      return true;
     } catch (error) {
       addNotification('error', `${prefijo}error al recuperar el reporte: ${(error as Error).message}`);
+      return false;
     } finally {
       setRecuperando(false);
     }
   }, [addNotification, prefijo]);
 
-  const enviar = useCallback(async (destino: string) => {
+  const enviar = useCallback(async (destino: string): Promise<boolean> => {
     const cfg = configRef.current;
-    if (!vista) return;
+    if (!vista) return false;
     // Sin foto HTML no se envía: el TXT en texto plano no es el correo diseñado (lo reportó el
     // usuario). La vista previa ofrece "Volver a guardar" para regenerarlo.
     if (!vista.html) {
       addNotification('warning', `${prefijo}no hay correo con formato guardado: vuelve a guardar el reporte antes de enviar.`);
-      return;
+      return false;
     }
     if (!destino.trim()) {
       addNotification('warning', 'Escribe al menos un correo destinatario antes de enviar.');
-      return;
+      return false;
     }
     setEnviando(true);
     try {
@@ -188,8 +192,10 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
           addNotification('warning', `${prefijo}correo enviado, pero no se pudo borrar la foto del correo: ${(e as Error).message}`);
         }
       }
+      return true;
     } catch (error) {
       addNotification('error', `${prefijo}error al enviar el reporte: ${(error as Error).message}`);
+      return false;
     } finally {
       setEnviando(false);
     }
@@ -367,6 +373,256 @@ export const ReportePlanTxtVistaPrevia: React.FC<{
               className="h-9 gap-2 text-[10px] font-black uppercase tracking-widest bg-indigo-600 hover:bg-indigo-700 text-white"
             >
               {enviando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Enviar reporte
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// ---------------------------------------------------------------------------------------------
+// Grupo de centros (Venta Externa, Formulación): el mismo reporte para Centro 1000 y 2000 — un solo
+// clic guarda ambos, una sola ventana los revisa (pestaña por centro) y un solo "Enviar" manda los
+// dos correos (uno por centro, cada uno con su asunto) a la misma lista. Pedido del usuario: con los
+// centros separados cada acción se repetía dos veces. Cada centro sigue siendo su propio archivo y
+// su propio flujo por debajo (useReportePlanTxt), así un centro sin plan o sin correo con formato
+// no bloquea al otro.
+// ---------------------------------------------------------------------------------------------
+
+export interface GrupoReportePlanTxt {
+  flujos: FlujoReportePlanTxt[];
+  abierta: boolean;
+  setAbierta: (v: boolean) => void;
+  guardando: boolean;
+  recuperando: boolean;
+  enviando: boolean;
+  guardarTodos: () => Promise<void>;
+  recuperarTodos: () => Promise<void>;
+  enviarTodos: (destino: string) => Promise<void>;
+}
+
+export function useReportePlanTxtGrupo(flujos: FlujoReportePlanTxt[]): GrupoReportePlanTxt {
+  const { addNotification } = useAppContext();
+  const [abierta, setAbierta] = useState(false);
+  const [enviando, setEnviando] = useState(false);
+  const etiquetas = (fs: FlujoReportePlanTxt[]) => fs.map(f => f.config.etiqueta || `Centro ${f.config.centro}`).join(' y ');
+
+  const guardarTodos = async () => {
+    const yaGuardados = flujos.filter(f => f.estado === 'guardado');
+    // Una sola confirmación para todo el grupo (en vez de una por centro).
+    if (yaGuardados.length > 0 && !window.confirm(
+      `Ya hay reporte guardado para ${etiquetas(yaGuardados)}.\n\n` +
+      '¿Reemplazar con los datos ACTUALES del módulo? Si ya se exportó a SAP, la necesidad puede haber cambiado por las órdenes FERT nuevas.'
+    )) return;
+    // Secuencial, no en paralelo: construirHtml puede refrescar estado del módulo (ej. el preview
+    // FERT/PT de Venta Externa) y dos refrescos simultáneos se pisarían.
+    for (const f of flujos) await f.guardar({ sinConfirmar: true });
+  };
+
+  const recuperarTodos = async () => {
+    const guardados = flujos.filter(f => f.estado === 'guardado');
+    if (guardados.length === 0) return;
+    const ok = await Promise.all(guardados.map(f => f.recuperar({ abrir: false })));
+    if (ok.some(Boolean)) setAbierta(true);
+  };
+
+  const enviarTodos = async (destino: string) => {
+    const listos = flujos.filter(f => f.vista?.html);
+    if (listos.length === 0) {
+      addNotification('warning', 'No hay ningún centro con correo con formato guardado: vuelve a guardar el reporte.');
+      return;
+    }
+    setEnviando(true);
+    try {
+      const resultados: boolean[] = [];
+      for (const f of listos) resultados.push(await f.enviar(destino));
+      if (resultados.every(Boolean)) setAbierta(false);
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  return {
+    flujos, abierta, setAbierta, enviando,
+    guardando: flujos.some(f => f.guardando),
+    recuperando: flujos.some(f => f.recuperando),
+    guardarTodos, recuperarTodos, enviarTodos,
+  };
+}
+
+/** Pasos unificados del grupo (dentro del Popover). Muestra el estado de cada centro en una línea. */
+export const ReportePlanTxtAccionesGrupo: React.FC<{ grupo: GrupoReportePlanTxt; className?: string }> = ({ grupo, className }) => {
+  const { flujos, guardando, recuperando } = grupo;
+  const verificando = flujos.some(f => f.estado === 'verificando');
+  const nGuardados = flujos.filter(f => f.estado === 'guardado').length;
+  const todosGuardados = nGuardados === flujos.length;
+  const todosEnviados = flujos.every(f => !!f.enviadoEn);
+  const sinFecha = flujos.every(f => f.estado === 'sin-fecha');
+  const centros = flujos.map(f => f.config.centro).join(' y ');
+
+  return (
+    <div className={cn('space-y-2', className)}>
+      <PasoReporte n={1} titulo={`Guardar reporte — Centro ${centros}`} hecho={todosGuardados} activo={!todosGuardados}>
+        <p className="text-[9px] leading-snug text-slate-500">
+          Un clic guarda los {flujos.length} centros: congela el plan de este momento (correo con formato + TXT). Hazlo <b>antes</b> de exportar a SAP. Todavía no envía nada.
+        </p>
+        {verificando ? (
+          <Button disabled variant="outline" className="w-full h-8 gap-2 text-[10px] font-black uppercase">
+            <Loader2 className="w-4 h-4 animate-spin" /> Verificando…
+          </Button>
+        ) : todosGuardados ? null : (
+          <Button
+            onClick={() => { void grupo.guardarTodos(); }}
+            disabled={guardando || sinFecha}
+            className="w-full h-8 gap-2 text-[10px] font-black uppercase tracking-widest bg-indigo-600 hover:bg-indigo-700 text-white"
+          >
+            {guardando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Guardar reporte ({flujos.length} centros)
+          </Button>
+        )}
+        {!verificando && (
+          <ul className="space-y-0.5 text-[9px]">
+            {flujos.map(f => (
+              <li key={f.config.centro} className="flex items-center gap-1">
+                {f.estado === 'guardado'
+                  ? <><CheckCircle2 className="w-3 h-3 text-emerald-600" /><span className="font-bold text-emerald-700">Centro {f.config.centro}: guardado {horaCorta(f.guardadoEn)}</span>{f.enviadoEn && <span className="text-emerald-700"> · enviado {horaCorta(f.enviadoEn)}</span>}</>
+                  : f.estado === 'error-carpeta'
+                    ? <span className="text-red-600">Centro {f.config.centro}: no se pudo consultar la carpeta</span>
+                    : f.estado === 'sin-fecha'
+                      ? <span className="text-amber-600">Centro {f.config.centro}: sin fecha objetivo</span>
+                      : <span className="text-slate-400">Centro {f.config.centro}: sin guardar</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+        {todosGuardados && (
+          <button
+            type="button"
+            onClick={() => { void grupo.guardarTodos(); }}
+            disabled={guardando}
+            title="Reemplaza el reporte guardado de ambos centros con los datos ACTUALES del módulo"
+            className="flex items-center gap-1 text-[9px] font-bold text-indigo-600 hover:underline disabled:opacity-50"
+          >
+            {guardando ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />} Volver a guardar ({flujos.length} centros)
+          </button>
+        )}
+      </PasoReporte>
+
+      <PasoReporte n={2} titulo="Revisar y enviar" hecho={todosEnviados} activo={nGuardados > 0 && !todosEnviados}>
+        <p className="text-[9px] leading-snug text-slate-500">
+          Cuando SAP termine de crear las órdenes FERT, abre lo guardado: una pestaña por centro con el correo tal cual saldrá. Un solo envío manda el correo de cada centro a la misma lista.
+        </p>
+        <Button
+          onClick={() => { void grupo.recuperarTodos(); }}
+          disabled={nGuardados === 0 || recuperando || guardando}
+          className="w-full h-8 gap-2 text-[10px] font-black uppercase tracking-widest bg-emerald-600 hover:bg-emerald-700 text-white"
+        >
+          {recuperando ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSearch className="w-4 h-4" />} Recuperar y revisar
+        </Button>
+      </PasoReporte>
+    </div>
+  );
+};
+
+/** Vista previa unificada (una pestaña por centro) + un solo envío. Renderizar FUERA del Popover. */
+export const ReportePlanTxtVistaPreviaGrupo: React.FC<{
+  grupo: GrupoReportePlanTxt;
+  titulo: string;
+  destinatarios: string;
+  onDestinatariosChange: (v: string) => void;
+}> = ({ grupo, titulo, destinatarios, onDestinatariosChange }) => {
+  const { flujos, abierta, setAbierta, enviando, guardando } = grupo;
+  const conVista = flujos.filter(f => f.vista);
+  const listos = flujos.filter(f => f.vista?.html);
+  const faltantes = flujos.filter(f => !f.vista?.html);
+  const nDestinatarios = destinatarios.split(/[,;]/).map(s => s.trim()).filter(Boolean).length;
+  const primero = conVista[0]?.config.centro;
+
+  const regenerar = async (f: FlujoReportePlanTxt) => {
+    if (await f.guardar()) await f.recuperar({ abrir: false });
+  };
+
+  return (
+    <Dialog open={abierta} onOpenChange={(v) => { if (!enviando) setAbierta(v); }}>
+      <DialogContent className="max-w-4xl w-[95vw] h-[90vh] flex flex-col gap-3 overflow-hidden">
+        <DialogHeader className="shrink-0">
+          <DialogTitle className="text-sm font-black uppercase tracking-widest">Vista previa — {titulo}</DialogTitle>
+          <DialogDescription className="text-[11px]">
+            Una pestaña por centro. Se envía exactamente lo guardado, sin recalcular con los datos actuales de SAP: un correo por centro, a la misma lista.
+          </DialogDescription>
+        </DialogHeader>
+
+        {primero && (
+          <Tabs key={conVista.map(f => f.vista?.modificado).join('|')} defaultValue={primero} className="flex-1 min-h-0 flex flex-col">
+            <TabsList className="self-start shrink-0">
+              {flujos.map(f => (
+                <TabsTrigger key={f.config.centro} value={f.config.centro} disabled={!f.vista} className="text-[10px] font-black uppercase gap-1">
+                  Centro {f.config.centro}
+                  {f.vista?.html
+                    ? <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                    : <span className="text-amber-600">{f.vista ? '· sin formato' : '· sin guardar'}</span>}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            {conVista.map(f => (
+              <TabsContent key={f.config.centro} value={f.config.centro} className="flex-1 min-h-0 mt-2 flex flex-col gap-1">
+                <p className="shrink-0 text-[10px] text-slate-500">
+                  Guardado el {horaCorta(f.vista?.modificado ?? null)} · fecha objetivo {f.config.fechaObjetivo}
+                  <span className="block font-mono text-[10px] text-slate-400 break-all">{f.vista?.ruta}</span>
+                </p>
+                <Tabs defaultValue={f.vista?.html ? 'correo' : 'txt'} className="flex-1 min-h-0 flex flex-col">
+                  <TabsList className="self-start shrink-0 h-7">
+                    <TabsTrigger value="correo" className="text-[9px] font-black uppercase h-5">Correo (lo que se envía)</TabsTrigger>
+                    <TabsTrigger value="txt" className="text-[9px] font-black uppercase h-5">TXT (archivo)</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="correo" className="flex-1 min-h-0 mt-2">
+                    {f.vista?.html ? (
+                      <iframe title={`Vista previa del correo — Centro ${f.config.centro}`} sandbox="" srcDoc={f.vista.html} className="w-full h-full rounded-lg border border-slate-200 bg-white" />
+                    ) : (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-[11px] text-amber-800 space-y-2">
+                        <p className="font-black uppercase tracking-wider">Centro {f.config.centro}: no hay correo con formato guardado</p>
+                        <p>Se guardó sin la copia del correo o ya se envió. Este centro no se enviará: vuelve a guardarlo (tomará los datos <b>actuales</b> del módulo).</p>
+                        <Button onClick={() => { void regenerar(f); }} disabled={guardando} className="h-8 gap-2 text-[10px] font-black uppercase bg-indigo-600 hover:bg-indigo-700 text-white">
+                          {f.guardando ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Volver a guardar Centro {f.config.centro}
+                        </Button>
+                      </div>
+                    )}
+                  </TabsContent>
+                  <TabsContent value="txt" className="flex-1 min-h-0 mt-2">
+                    <pre className="h-full overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] leading-snug font-mono text-slate-800 whitespace-pre">{f.vista?.contenido}</pre>
+                  </TabsContent>
+                </Tabs>
+              </TabsContent>
+            ))}
+          </Tabs>
+        )}
+
+        <DialogFooter className="shrink-0 flex-col sm:flex-col gap-2 sm:space-x-0 border-t border-slate-100 pt-3">
+          <label className="flex justify-between gap-2 text-[9px] font-black uppercase text-slate-500 tracking-wider">
+            <span>Destinatarios — puedes agregar o quitar correos antes de enviar (separados por coma)</span>
+            <span className="text-slate-400 whitespace-nowrap">{nDestinatarios} {nDestinatarios === 1 ? 'correo' : 'correos'}</span>
+          </label>
+          <textarea
+            value={destinatarios}
+            onChange={(e) => onDestinatariosChange(e.target.value)}
+            placeholder="correo1@chaideychaide.com, correo2@chaideychaide.com"
+            rows={2}
+            className="w-full text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-indigo-400 resize-y"
+          />
+          {faltantes.length > 0 && listos.length > 0 && (
+            <p className="text-[10px] text-amber-600">
+              Se enviará solo {listos.map(f => `Centro ${f.config.centro}`).join(' y ')}; {faltantes.map(f => `Centro ${f.config.centro}`).join(' y ')} no tiene correo con formato.
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setAbierta(false)} disabled={enviando} className="h-9 text-[10px] font-black uppercase">Cerrar</Button>
+            <Button
+              onClick={() => { void grupo.enviarTodos(destinatarios); }}
+              disabled={enviando || !destinatarios.trim() || listos.length === 0}
+              className="h-9 gap-2 text-[10px] font-black uppercase tracking-widest bg-indigo-600 hover:bg-indigo-700 text-white"
+            >
+              {enviando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+              Enviar reporte ({listos.map(f => f.config.centro).join(' + ') || '—'})
             </Button>
           </div>
         </DialogFooter>

@@ -18,6 +18,7 @@ import {
   TrendingUp,
   Table as TableIcon,
   Info,
+  Clock,
   Mail
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
@@ -31,13 +32,14 @@ import {
 } from "@/components/ui/popover";
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
+import { useJornadaGrupo, type JornadaGrupoEditable } from '@/hooks/useJornadaGrupo';
 import { serviciosService } from '@/services/servicios.service';
 import { useRuntimeInspector } from '@/services/RuntimeInspector';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion } from '@/types/interfaces';
 import type { CuboInventariosItem } from '@/types/types';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia } from '@/components/ReportePlanTxtFlujo';
+import { useReportePlanTxt, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo } from '@/components/ReportePlanTxtFlujo';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -640,14 +642,57 @@ interface SnapshotFormulacion {
   consumoBloqueFormulado: ConsumoBloqueRow[];
 }
 
+// Jornada laboral de Formulación por centro — turnos editables precargados desde las restricciones
+// del grupo (HORAS_TRABAJO_DÍA / _NOCHE / _FINDESEMANA, NUM_TURNOS, Paros _Planificados; ver
+// useJornadaGrupo). Todavía no alimenta ningún cálculo: queda lista para cuando el módulo incorpore
+// capacidad / tiempos, sin rehacer la lectura de restricciones.
+const JornadaCentroPanel: React.FC<{ titulo: string; jornada: JornadaGrupoEditable; sinGrupo: boolean }> = ({ titulo, jornada, sinGrupo }) => (
+  <div className="space-y-2">
+    <p className="text-[10px] font-black uppercase tracking-widest text-slate-700">{titulo}</p>
+    {sinGrupo && <p className="text-[9px] text-amber-600 font-bold">Sin grupo para este centro — jornada estándar.</p>}
+    {([
+      { etiqueta: 'Día', valor: jornada.dia, set: jornada.setDia, opciones: jornada.opcionesDia, horas: jornada.horasBrutas.dia },
+      { etiqueta: 'Noche', valor: jornada.noche, set: jornada.setNoche, opciones: jornada.opcionesNoche, horas: jornada.horasBrutas.noche },
+      { etiqueta: 'Sábado', valor: jornada.sabado, set: jornada.setSabado, opciones: jornada.opcionesDia, horas: jornada.horasBrutas.sabado },
+    ]).map(t => (
+      <div key={t.etiqueta} className="flex items-center gap-2">
+        <span className="text-[9px] font-black text-slate-400 uppercase w-12">{t.etiqueta}</span>
+        <select value={t.valor} onChange={e => t.set(e.target.value)} className="flex-1 bg-white border border-gray-200 rounded-md px-2 py-1 text-[10px] font-black text-indigo-700 outline-none">
+          {t.opciones.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+        </select>
+        <span className="text-[10px] font-black text-slate-500 tabular-nums w-10 text-right">{t.horas}h</span>
+      </div>
+    ))}
+    <div className="flex items-center gap-2">
+      <span className="text-[9px] font-black text-slate-400 uppercase w-12">Paros %</span>
+      <input type="number" min={0} max={100} value={jornada.paroPct} onChange={e => jornada.setParoPct(Math.min(100, Math.max(0, Number(e.target.value) || 0)))} className="w-16 bg-white border border-gray-200 rounded-md px-2 py-1 text-[10px] font-black text-slate-700 outline-none" />
+    </div>
+    <p className="text-[9px] font-bold text-slate-500">
+      Brutas {jornada.horasBrutas.total.toFixed(2)} h → Efectivas <span className="text-emerald-600">{jornada.horasEfectivas.total.toFixed(2)} h</span>
+    </p>
+    {jornada.numTurnos >= 3 && <p className="text-[9px] text-amber-600 font-bold">NUM_TURNOS = 3: el tercer turno aún no tiene horario propio.</p>}
+  </div>
+);
+
 export const TacticalPlanFormulacionSection: React.FC = () => {
   const inspector = useRuntimeInspector('TacticalPlanFormulacion');
   useAppContext();
 
   const [mounted, setMounted] = useState(false);
   const [activeTab, setActiveTab] = useState('resumen');
-  const [, setGrupos] = useState<Grupo[]>([]);
+  const [grupos, setGrupos] = useState<Grupo[]>([]);
   const [restricciones, setRestricciones] = useState<Restriccion[]>([]);
+  // Grupo de Formulación de cada centro (el de nombre "formulación"; si no hay, el de "espuma" del
+  // mismo centro — los dos que ya trae handleSincronizarYGenerar) para leer su jornada laboral.
+  const codigoGrupoFormulacionDe = (centro: string): number | null => {
+    const delCentro = grupos.filter(g => String(g.centro) === centro);
+    const g = delCentro.find(x => /formulaci/i.test(x.nombre_grupo || '')) ?? delCentro[0];
+    return g ? g.codigo_grupo : null;
+  };
+  const codigoGrupoFormulacion1000 = codigoGrupoFormulacionDe('1000');
+  const codigoGrupoFormulacion2000 = codigoGrupoFormulacionDe('2000');
+  const jornada1000 = useJornadaGrupo(restricciones, codigoGrupoFormulacion1000);
+  const jornada2000 = useJornadaGrupo(restricciones, codigoGrupoFormulacion2000);
   const [ordenes, setOrders] = useState<RawApiRow[]>([]);
   const [ordenesFert, setOrdersFert] = useState<RawApiRow[]>([]);
   const [cuboInventarios, setCuboInventarios] = useState<CuboInventariosItem[]>([]);
@@ -1047,7 +1092,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     construirHtml: () => construirReporteHtmlFormulacion('2000', fechaObjetivoReporte),
     etiqueta: 'Centro 2000',
   });
-  const reporteFlujo = { '1000': reporteFlujo1000, '2000': reporteFlujo2000 };
+  // Los dos centros son el mismo reporte: un solo Guardar / Revisar / Enviar para ambos.
+  const reporteGrupo = useReportePlanTxtGrupo([reporteFlujo1000, reporteFlujo2000]);
 
   // Consumo trazado (COD_FORMULADO -> intermedio -> componente final), acotado por los
   // responsables de control de producción que corresponden a cada centro — este es el
@@ -1663,20 +1709,34 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                 <p className="text-xs font-black uppercase tracking-widest text-slate-700">Reporte de producción <span className="text-amber-600">(en desarrollo)</span></p>
                 <p className="text-[10px] text-slate-400 mt-1">Bloque Formulado — necesidad, stock y plan de reposición. Guarda el plan y envíalo después desde la vista previa.</p>
               </div>
-              <ReportePlanTxtAcciones flujo={reporteFlujo['1000']} />
-              <div className="border-t border-slate-100" />
-              <ReportePlanTxtAcciones flujo={reporteFlujo['2000']} compacto />
+              <ReportePlanTxtAccionesGrupo grupo={reporteGrupo} />
             </PopoverContent>
           </Popover>
-          {(['1000', '2000'] as const).map(c => (
-            <ReportePlanTxtVistaPrevia
-              key={c}
-              flujo={reporteFlujo[c]}
-              titulo="Formulación [Bloque Formulado]"
-              destinatarios={destinatariosReporte}
-              onDestinatariosChange={setDestinatariosReporte}
-            />
-          ))}
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                title="Turnos y % de paros por centro — precargados desde las restricciones del grupo (HORAS_TRABAJO_*, NUM_TURNOS, Paros _Planificados), editables"
+                className="h-10 px-4 rounded-xl gap-2 font-black text-[10px] uppercase border-slate-200 text-slate-700 hover:bg-slate-50"
+              >
+                <Clock className="w-4 h-4" /> Jornada
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-[520px] p-4" align="end">
+              <p className="text-xs font-black uppercase tracking-widest text-slate-700 mb-1">Jornada laboral</p>
+              <p className="text-[10px] text-slate-400 mb-3">Precargada desde las restricciones del grupo; puedes ajustarla. Aún no entra en ningún cálculo del módulo.</p>
+              <div className="grid grid-cols-2 gap-4">
+                <JornadaCentroPanel titulo="Quito (1000)" jornada={jornada1000} sinGrupo={codigoGrupoFormulacion1000 === null} />
+                <JornadaCentroPanel titulo="Guayaquil (2000)" jornada={jornada2000} sinGrupo={codigoGrupoFormulacion2000 === null} />
+              </div>
+            </PopoverContent>
+          </Popover>
+          <ReportePlanTxtVistaPreviaGrupo
+            grupo={reporteGrupo}
+            titulo="Formulación [Bloque Formulado]"
+            destinatarios={destinatariosReporte}
+            onDestinatariosChange={setDestinatariosReporte}
+          />
           <Popover>
             <PopoverTrigger asChild>
               <Button variant="outline" className="h-9 px-5 rounded-xl border-gray-200 gap-2 font-black text-[10px] uppercase shadow-sm transition-all hover:border-primary/50">

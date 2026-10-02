@@ -1,7 +1,7 @@
 
 'use client';
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { 
   Scissors,
@@ -46,6 +46,8 @@ import {
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
+import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
+import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario } from '@/lib/restriccionesCapacidad';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { useAppContext } from '@/context/AppProvider';
@@ -1023,6 +1025,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // un P2 que otra rama/módulo actualizó), no un segundo paso del mismo cálculo.
   const [autoGenerarPendiente, setAutoGenerarPendiente] = useState(false);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
+  const panelProgreso = usePanelProgreso();
   const [ordenesProvisionales, setOrdenesProvisionales] = useState<RawApiRow[]>([]);
   const [ordenesFert, setOrdenesFert] = useState<RawApiRow[]>([]);
   // "Pendientes Totales" (pedidos de venta pendientes de entrega, sector "09 ESPUMAS" — mismo dato
@@ -1369,6 +1372,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   }, []);
 
   // --- CONFIGURACIÓN DASHBOARDS ---
+  // Valores iniciales de respaldo: al montar, la precarga desde restricciones (ver jornadaPorPlanta,
+  // más abajo) reemplaza horarios, paros y rendimiento con los del grupo o la jornada estándar.
   const [uioConfig, setUioConfig] = useState<PlantaConfig>({
     performance: 90,
     performanceCNC: 90,
@@ -1397,9 +1402,18 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     }
   });
 
-  // useMemo: son constantes, pero al recrearse en cada render invalidaban las dependencias de
-  // rellenarTurnoVacio (que las usa para la etiqueta de la notificación).
-  const shiftOptions = useMemo(() => [
+  // Jornada laboral por planta, desde las restricciones HORAS_TRABAJO_DÍA / _NOCHE / _FINDESEMANA y
+  // NUM_TURNOS del grupo Corte y Laminado de cada centro (ver restriccionesCapacidad.ts). Sin
+  // restricción: jornada estándar (Día 07:00-15:45, Noche 21:00-05:30, Sábado 07:00-13:00).
+  const jornadaPorPlanta = useMemo(() => ({
+    UIO: jornadaDesdeRestricciones(restriccionesCorte, CODIGO_GRUPO_CORTE_POR_CENTRO['1000']),
+    GYE: jornadaDesdeRestricciones(restriccionesCorte, CODIGO_GRUPO_CORTE_POR_CENTRO['2000']),
+  }), [restriccionesCorte]);
+
+  // Catálogo de horarios: los fijos + los que traigan las restricciones, ordenados de VACÍO a la
+  // jornada más larga (todo sigue editable en el dashboard). Memoizado: al recrearse en cada render
+  // invalidaban las dependencias de rellenarTurnoVacio (que las usa para la etiqueta de la notificación).
+  const shiftOptions = useMemo(() => opcionesConHorarios([
     { v: 'EMPTY', l: 'VACÍO', h: 0 },
     { v: 'H1', l: '07:00 - 15:45', h: 8.75 },
     { v: 'H2', l: '07:00 - 17:00', h: 10 },
@@ -1407,17 +1421,59 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     { v: 'H4', l: '07:00 - 19:00', h: 12 },
     // Turno corto para sábado, activación manual cuando se necesita capacidad extra (mismo criterio
     // que Corte y Laminado) -- el sábado no se trata como laborable por defecto; se elige este
-    // horario solo el día puntual en que se decide producir. Requiere generar en 2 pasadas (viernes+
-    // sábado con este turno, lunes aparte con el normal) porque el módulo no tiene un turno distinto
-    // por día de la semana en una misma corrida.
+    // horario solo el día puntual en que se decide producir.
     { v: 'H5', l: '07:00 - 13:00', h: 6 }
-  ], []);
+  ], [jornadaPorPlanta.UIO.dia, jornadaPorPlanta.GYE.dia, jornadaPorPlanta.UIO.finDeSemana, jornadaPorPlanta.GYE.finDeSemana]), [jornadaPorPlanta]);
 
-  const nightShiftOptions = useMemo(() => [
+  const nightShiftOptions = useMemo(() => opcionesConHorarios([
     { v: 'EMPTY', l: 'VACÍO', h: 0 },
     { v: 'A19', l: '19:00 - 05:30', h: 10.5 },
     { v: 'B21', l: '21:00 - 05:30', h: 8.5 }
-  ], []);
+  ], [jornadaPorPlanta.UIO.noche, jornadaPorPlanta.GYE.noche]), [jornadaPorPlanta]);
+
+  // Precarga desde restricciones: horarios (Día; Noche solo si NUM_TURNOS ≥ 2 y la máquina opera de
+  // noche; Sábado siempre VACÍO — es manual), Paros _Planificados y Rendimiento_Carruseles / _Cnc.
+  // Verticales siguen al 100% de rendimiento. Se aplica solo cuando el VALOR de alguna restricción
+  // cambia (firma), no en cada recarga: un ajuste manual en el dashboard no se pisa al sincronizar,
+  // pero si el negocio cambia la restricción, el nuevo valor sí entra.
+  const firmaParosAplicada = useRef<Record<'UIO' | 'GYE', string>>({ UIO: '', GYE: '' });
+  useEffect(() => {
+    (['UIO', 'GYE'] as const).forEach(planta => {
+      const codigoGrupo = CODIGO_GRUPO_CORTE_POR_CENTRO[planta === 'UIO' ? '1000' : '2000'];
+      const paro = porcentajeRestriccion(restriccionesCorte, codigoGrupo, RESTRICCION_CAPACIDAD.parosPlanificados);
+      const rendCarrusel = porcentajeRestriccion(restriccionesCorte, codigoGrupo, RESTRICCION_CAPACIDAD.rendimientoCarruseles);
+      const rendCnc = porcentajeRestriccion(restriccionesCorte, codigoGrupo, RESTRICCION_CAPACIDAD.rendimientoCnc);
+      const jornada = jornadaPorPlanta[planta];
+
+      const firma = JSON.stringify([paro, rendCarrusel, rendCnc, jornada]);
+      if (firma === firmaParosAplicada.current[planta]) return;
+      firmaParosAplicada.current[planta] = firma;
+
+      const claveDia = claveDeHorario(shiftOptions, jornada.dia);
+      const claveNoche = jornada.numTurnos >= 2 ? claveDeHorario(nightShiftOptions, jornada.noche) : 'EMPTY';
+      const aplicar = (prev: PlantaConfig): PlantaConfig => {
+        const shifts = { ...prev.shifts };
+        MACHINES_BY_PLANTA[planta].forEach(m => {
+          if (!shifts[m.id]) return;
+          shifts[m.id] = {
+            ...shifts[m.id],
+            day: claveDia,
+            night: m.sinTurnoNoche ? 'EMPTY' : claveNoche,
+            saturday: 'EMPTY',
+            ...(paro !== null ? { paro1: paro, paro2: paro, paro3: paro } : {}),
+          };
+        });
+        return {
+          ...prev,
+          performance: rendCarrusel ?? prev.performance,
+          performanceCNC: rendCnc ?? prev.performanceCNC,
+          shifts,
+        };
+      };
+      if (planta === 'UIO') setUioConfig(aplicar);
+      else setGyeConfig(aplicar);
+    });
+  }, [restriccionesCorte, jornadaPorPlanta, shiftOptions, nightShiftOptions]);
 
   // Capacidad instalada NOMINAL por día y por proceso (Carrusel/CNC/Vertical), independiente de la
   // fecha seleccionada en "Evaluar Capacidad" — mismo cálculo que capacidadPorProceso dentro de
@@ -2696,23 +2752,27 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // (cncRemanente), mostrar aquí la capacidad completa contaba esas horas dos veces en la fila.
     const cncCedeRemanente = r.cncRemanente > 0.05;
 
-    // Detalle por máquina — mismo esquema de 4 columnas (Turno/Horarios/Tiempo Máquina Horas
-    // brutas/Horas Efectivas) para Carruseles, CNC y Verticales por igual (pedido por el usuario:
-    // antes Carruseles tenía un bloque expandido y CNC/Verticales una tabla compacta distinta —
-    // ahora los tres usan el mismo formato, ver esquema compartido).
+    // Detalle por máquina — mismo esquema para Carruseles, CNC y Verticales: Turno / Horarios /
+    // Tiempo Máquina (Horas brutas) / Paros Planificados (%) / Rendimiento Máquina (%) / Tiempo
+    // Máquina (Horas Efectivas). Paro y rendimiento van como columnas por turno (antes eran una
+    // leyenda "Brutas → Efectivas" debajo); salen de config, que se inicializa con las restricciones
+    // Paros _Planificados / Rendimiento_* del grupo Corte y Laminado. Turno vacío: % en blanco.
+    const thDet = 'padding:7px 10px;font-size:9px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #d1d5db;';
+    const tdDet = 'padding:7px 10px;font-size:11px;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;';
+    const filaTurnoHtml = (etiqueta: string, horario: string, bruta: number, paroPct: number, rendPct: number, neta: number, fondo: string, color: string) => `
+        <tr style="background:${fondo};"><td style="${tdDet}font-weight:700;color:${color};">${etiqueta}</td><td style="${tdDet}color:#374151;">${horario}</td><td align="right" style="${tdDet}color:#374151;">${bruta.toFixed(2)}</td><td align="right" style="${tdDet}color:#374151;">${bruta > 0 ? `${paroPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdDet}color:#374151;">${bruta > 0 ? `${rendPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdDet}font-weight:700;color:${color};">${neta.toFixed(2)}</td></tr>`;
     const detalleMaquinaHtml = (m: typeof r.detallePorMaquina[number]) => `
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:2px solid #111827;border-radius:10px;overflow:hidden;">
         <tr style="background:#f9fafb;">
-          <td style="padding:7px 12px;font-size:9px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #d1d5db;">Turno</td>
-          <td style="padding:7px 12px;font-size:9px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #d1d5db;">Horarios</td>
-          <td align="right" style="padding:7px 12px;font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #d1d5db;">Tiempo Máquina<br/>(Horas brutas)</td>
-          <td align="right" style="padding:7px 12px;font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #d1d5db;">Tiempo Máquina<br/>(Horas Efectivas)</td>
-        </tr>
-        <tr style="background:#ecfdf5;"><td style="padding:7px 12px;font-size:11px;font-weight:700;color:#047857;border-bottom:1px solid #d1d5db;">Día</td><td style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #d1d5db;">${m.diaLabel}</td><td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.diaBruta.toFixed(2)}</td><td align="right" style="padding:7px 12px;font-size:11px;font-weight:700;color:#047857;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.diaNeta.toFixed(2)}</td></tr>
-        <tr style="background:#eef2ff;"><td style="padding:7px 12px;font-size:11px;font-weight:700;color:#4338ca;border-bottom:1px solid #d1d5db;">Noche</td><td style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #d1d5db;">${m.nocheLabel}</td><td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.nocheBruta.toFixed(2)}</td><td align="right" style="padding:7px 12px;font-size:11px;font-weight:700;color:#4338ca;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.nocheNeta.toFixed(2)}</td></tr>
-        <tr style="background:#f9fafb;"><td colspan="4" style="padding:6px 12px;font-size:10px;color:#6b7280;border-bottom:1px solid #d1d5db;">Brutas → Efectivas: Paro Día ${m.paro.toFixed(0)}% · Paro Noche ${m.paroNoche.toFixed(0)}% · Rendimiento ${m.rendimientoPct.toFixed(0)}%</td></tr>
-        <tr style="background:#fffbeb;"><td colspan="3" style="padding:7px 12px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;">Mantenimiento Programado</td><td align="right" style="padding:7px 12px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.mttoReal > 0 ? m.mttoReal.toFixed(2) : '–'}</td></tr>
-        <tr style="background:#ecfdf5;"><td colspan="3" style="padding:8px 12px;font-size:11px;font-weight:800;color:#111827;text-transform:uppercase;">${m.nombre}</td><td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:#111827;font-variant-numeric:tabular-nums;">${m.total.toFixed(2)} h</td></tr>
+          <td style="${thDet}">Turno</td>
+          <td style="${thDet}">Horarios</td>
+          <td align="right" style="${thDet}">Tiempo Máquina<br/>(Horas brutas)</td>
+          <td align="right" style="${thDet}">Paros<br/>Planificados (%)</td>
+          <td align="right" style="${thDet}">Rendimiento<br/>Máquina (%)</td>
+          <td align="right" style="${thDet}">Tiempo Máquina<br/>(Horas Efectivas)</td>
+        </tr>${filaTurnoHtml('Día', m.diaLabel, m.diaBruta, m.paro, m.rendimientoPct, m.diaNeta, '#ecfdf5', '#047857')}${filaTurnoHtml('Noche', m.nocheLabel, m.nocheBruta, m.paroNoche, m.rendimientoPct, m.nocheNeta, '#eef2ff', '#4338ca')}
+        <tr style="background:#fffbeb;"><td colspan="5" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;">Mantenimiento Programado</td><td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.mttoReal > 0 ? m.mttoReal.toFixed(2) : '–'}</td></tr>
+        <tr style="background:#ecfdf5;"><td colspan="5" style="padding:8px 10px;font-size:11px;font-weight:800;color:#111827;text-transform:uppercase;">${m.nombre}</td><td align="right" style="padding:8px 10px;font-size:11px;font-weight:800;color:#111827;font-variant-numeric:tabular-nums;">${m.total.toFixed(2)} h</td></tr>
       </table>`;
     const listaDetalleHtml = (lista: typeof r.detallePorMaquina) => lista.map((m, idx) => `
       <div style="${idx < lista.length - 1 ? 'margin-bottom:12px;' : ''}">${detalleMaquinaHtml(m)}</div>`).join('');
@@ -3029,8 +3089,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return { data: resArr.flatMap(r => r.data?.data || r.data || []) };
   }, []);
 
-  const fetchDataAsync = useCallback(async () => {
+  // onConsulta (opcional): avisa cada consulta SAP terminada — la usa el panel de progreso de
+  // "Sincronizar y generar necesidades" para mostrar el avance (x/9) y cuáles fallaron. Devuelve
+  // false si la sincronización se cortó por un error.
+  const fetchDataAsync = useCallback(async (onConsulta?: (nombre: string, ok: boolean) => void): Promise<boolean> => {
     setIsLoading(true);
+    const seguir = <T,>(nombre: string, promesa: Promise<T>): Promise<T> => promesa.then(
+      r => { onConsulta?.(nombre, true); return r; },
+      e => { onConsulta?.(nombre, false); throw e; }
+    );
     try {
       const groupsRes = await grupoService.getAll();
       const filteredGroups = (groupsRes.data || []).filter(g => {
@@ -3053,16 +3120,16 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // dentro del mismo Promise.all (con un tipo de retorno distinto a las demás llamadas, que son
       // todas BodyResponse<any> vía su propio .catch inline) rompía la inferencia de tipos del tuple
       // completo — TS colapsaba TODAS las posiciones al tipo del array interno. Aparte, sin tocar.
-      const timesPromise = fetchTiemposCorteYLaminado();
+      const timesPromise = seguir('Tiempos de corte', fetchTiemposCorteYLaminado());
       const [provsRes, fertsRes, invRes, skillsRes, maintRes, kpiRes, carruselesRes, cuboRes] = await Promise.all([
-        serviciosService.OrdenesProvisionalesPaginados(1, 20000).catch(() => ({ data: [] })),
-        serviciosService.getOrdenesFert(1, 20000).catch(() => ({ data: [] })),
-        serviciosService.getInventarioAñoActual().catch(() => ({ data: [] })),
-        serviciosService.getCuboHabilidadesOP().catch(() => ({ data: [] })),
-        serviciosService.ListarMantenimientoPreventivosProgramados().catch(() => ({ data: [] })),
-        serviciosService.getKPIMaestroLooper().catch(() => ({ data: [] })),
-        serviciosService.getKPIMaestroCarruseles().catch(() => ({ data: [] })),
-        serviciosService.getCuboInventarios(1, 50000).catch(() => ({ data: [] }))
+        seguir('Órdenes provisionales', serviciosService.OrdenesProvisionalesPaginados(1, 20000)).catch(() => ({ data: [] })),
+        seguir('Órdenes FERT', serviciosService.getOrdenesFert(1, 20000)).catch(() => ({ data: [] })),
+        seguir('Inventario SAP', serviciosService.getInventarioAñoActual()).catch(() => ({ data: [] })),
+        seguir('Habilidades de operadores', serviciosService.getCuboHabilidadesOP()).catch(() => ({ data: [] })),
+        seguir('Mantenimientos', serviciosService.ListarMantenimientoPreventivosProgramados()).catch(() => ({ data: [] })),
+        seguir('KPI Looper', serviciosService.getKPIMaestroLooper()).catch(() => ({ data: [] })),
+        seguir('KPI Carruseles', serviciosService.getKPIMaestroCarruseles()).catch(() => ({ data: [] })),
+        seguir('Cubo de inventarios', serviciosService.getCuboInventarios(1, 50000)).catch(() => ({ data: [] }))
       ]);
       const timesRes = await timesPromise;
 
@@ -3101,8 +3168,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
 
       setDatosCargados(true);
+      return true;
     } catch (e) {
       console.error('Error sincronización', e);
+      return false;
     } finally {
       setIsLoading(false);
     }
@@ -3581,7 +3650,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Y Ensamblado - Guayaquil (2000, grupo 6) en la misma acción. A diferencia de Corte y Laminado
   // (que solo tiene flujo de guardado para Centro 1000), Corte Espuma ya soporta la Respuesta P3
   // completa para ambos centros, así que ambos resultados alimentan por igual el prorateo real.
-  const calcularNecesidadPFF = useCallback(async () => {
+  const calcularNecesidadPFF = useCallback(async (): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string }> => {
     setIsCalculandoPFF(true);
     setPffDiagnostico({ sinMatch: [], conError: [] });
     try {
@@ -3637,7 +3706,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
       if (resultado1000.filas.length === 0 && resultado2000.filas.length === 0 && sinMatch.length === 0 && conError.length === 0) {
         addNotification('warning', 'No hay ningún Plan Grupo "P1"/"PFF" activo con materiales, ni en Quito ni en Guayaquil.');
-        return;
+        return { estado: 'aviso', mensaje: 'Sin Plan Grupo "P1"/"PFF" activo en ningún centro.' };
       }
 
       const incidencias = [
@@ -3645,12 +3714,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         conError.length > 0 ? `${conError.length} material(es) con error al consultar el BOM` : null,
       ].filter(Boolean).join(' · ');
       const etiquetaTipo = (t: 'P1' | 'PFF' | null) => t ? ` (${t})` : '';
-      addNotification(
-        conError.length > 0 ? 'warning' : 'success',
-        `Necesidad calculada: ${resultado1000.filas.length} línea(s) Quito${etiquetaTipo(resultado1000.tipoPlan)}, ${resultado2000.filas.length} línea(s) Guayaquil${etiquetaTipo(resultado2000.tipoPlan)}.${incidencias ? ' ' + incidencias : ''}`
-      );
+      const mensajePFF = `${resultado1000.filas.length} línea(s) Quito${etiquetaTipo(resultado1000.tipoPlan)}, ${resultado2000.filas.length} línea(s) Guayaquil${etiquetaTipo(resultado2000.tipoPlan)}.${incidencias ? ' ' + incidencias : ''}`;
+      addNotification(conError.length > 0 ? 'warning' : 'success', `Necesidad calculada: ${mensajePFF}`);
+      return { estado: conError.length > 0 || sinMatch.length > 0 ? 'aviso' : 'ok', mensaje: mensajePFF };
     } catch (e) {
       addNotification('error', `Error al calcular la Necesidad PFF: ${(e as Error).message}`);
+      return { estado: 'error', mensaje: (e as Error).message };
     } finally {
       setIsCalculandoPFF(false);
     }
@@ -3664,8 +3733,20 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     if (!autoGenerarPendiente) return;
     setAutoGenerarPendiente(false);
     setSyncStep('generando');
-    calcularNecesidadPFF().finally(() => setSyncStep('idle'));
-  }, [autoGenerarPendiente, calcularNecesidadPFF]);
+    panelProgreso.actualizar('pff', { estado: 'en_curso' });
+    calcularNecesidadPFF()
+      .then(r => {
+        panelProgreso.actualizar('pff', { estado: r.estado, detalle: r.mensaje });
+        panelProgreso.concluir();
+      })
+      .finally(() => setSyncStep('idle'));
+  }, [autoGenerarPendiente, calcularNecesidadPFF, panelProgreso]);
+
+  // Avance del cálculo PFF (materiales explotados / total) reflejado en el panel mientras corre.
+  useEffect(() => {
+    if (syncStep !== 'generando' || pffProgress.total === 0) return;
+    panelProgreso.actualizar('pff', { progreso: { actual: pffProgress.current, total: pffProgress.total } });
+  }, [syncStep, pffProgress, panelProgreso.actualizar]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Arma la vista previa de la Respuesta P3 (cobertura) de UN centro — no toca el estado, la decisión
   // de abrir el diálogo (y con qué centros, y junto con qué PFD) queda en manos de quien llama
@@ -4485,13 +4566,51 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // (setState no actualiza el closure de forma síncrona) y buscaría el P2 en un día feriado — que es
   // exactamente el desfase que se quería eliminar: el origen graba el plan saltando el feriado y
   // aquí se lo buscaría un día antes, sin encontrarlo nunca.
+  // Panel flotante de progreso (ver PanelProgreso): Calendario → Datos SAP (x/9 consultas) →
+  // Necesidades planta (P2) → Necesidad PFF. La última fase corre en el efecto autoGenerarPendiente,
+  // que es quien cierra el panel.
   const handleSincronizarYGenerar = useCallback(async () => {
     setSyncStep('sincronizando');
+    panelProgreso.iniciar('Corte Espuma — Sincronizar y generar', [
+      { id: 'calendario', etiqueta: 'Calendario laboral' },
+      { id: 'sap', etiqueta: 'Sincronizando datos SAP' },
+      { id: 'p2', etiqueta: 'Necesidades planta (P2)' },
+      { id: 'pff', etiqueta: 'Generando necesidades (PFF)' },
+    ]);
     try {
+      panelProgreso.actualizar('calendario', { estado: 'en_curso' });
       const { noLaborables, laborablesExtra } = await cargarDiasNoLaborables();
       setDiasNoLaborables(noLaborables);
       setDiasLaborablesExtra(laborablesExtra);
-      await Promise.all([fetchDataAsync(), fetchNecesidadesPlanta(noLaborables, laborablesExtra)]);
+      panelProgreso.actualizar('calendario', { estado: 'ok' });
+
+      const TOTAL_CONSULTAS_SAP = 9;
+      let hechas = 0;
+      const fallidas: string[] = [];
+      panelProgreso.actualizar('sap', { estado: 'en_curso', progreso: { actual: 0, total: TOTAL_CONSULTAS_SAP } });
+      panelProgreso.actualizar('p2', { estado: 'en_curso' });
+      const [sapOk] = await Promise.all([
+        fetchDataAsync((nombre, ok) => {
+          hechas += 1;
+          if (!ok) fallidas.push(nombre);
+          panelProgreso.actualizar('sap', { progreso: { actual: hechas, total: TOTAL_CONSULTAS_SAP } });
+        }).then(ok => {
+          panelProgreso.actualizar('sap', ok
+            ? { estado: fallidas.length > 0 ? 'aviso' : 'ok', detalle: fallidas.length > 0 ? `Sin respuesta: ${fallidas.join(', ')} — se siguió con datos vacíos.` : undefined }
+            : { estado: 'error', detalle: 'La sincronización se cortó; revisa la consola o vuelve a intentar.' });
+          return ok;
+        }),
+        fetchNecesidadesPlanta(noLaborables, laborablesExtra).then(
+          () => panelProgreso.actualizar('p2', { estado: 'ok' }),
+          e => { panelProgreso.actualizar('p2', { estado: 'error', detalle: (e as Error).message }); throw e; }
+        ),
+      ]);
+      if (!sapOk) {
+        panelProgreso.actualizar('pff', { estado: 'omitido' });
+        panelProgreso.concluir();
+        setSyncStep('idle');
+        return;
+      }
       // calcularNecesidadPFF hace su propia consulta fresca a planGrupoService/detalleTacticoService
       // (no depende de closures de fetchDataAsync), pero SÍ depende de materialDescMap/inventarioSAP
       // ya reflejados en el render — se dispara desde el efecto de más abajo (declarado después de
@@ -4500,9 +4619,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       setAutoGenerarPendiente(true);
     } catch (e) {
       addNotification('error', `Error al sincronizar: ${(e as Error).message}`);
+      panelProgreso.actualizar('pff', { estado: 'omitido' });
+      panelProgreso.concluir(`Error al sincronizar: ${(e as Error).message}`);
       setSyncStep('idle');
     }
-  }, [fetchDataAsync, fetchNecesidadesPlanta, addNotification]);
+  }, [fetchDataAsync, fetchNecesidadesPlanta, addNotification, panelProgreso]);
 
   // "Pendientes Totales" (+20K registros) sigue siendo perezoso, pero ahora solo se carga si el
   // usuario ya sincronizó: abrir el tab sin datos base no debe disparar una consulta pesada sola.
@@ -6844,6 +6965,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <PanelProgreso panel={panelProgreso} />
     </div>
   );
 };

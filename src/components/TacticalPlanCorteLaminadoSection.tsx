@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/popover";
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
+import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario } from '@/lib/restriccionesCapacidad';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
@@ -898,7 +899,15 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     }
   }, [proximoSabadoJornada, addNotification]);
 
-  const diaShiftOptions = [
+  // Jornada laboral desde las restricciones HORAS_TRABAJO_DÍA / _NOCHE / _FINDESEMANA y NUM_TURNOS
+  // del grupo Corte y Laminado (ver restriccionesCapacidad.ts); sin restricción, jornada estándar.
+  const jornadaLaminado = useMemo(
+    () => jornadaDesdeRestricciones(restriccionesArray, CODIGO_GRUPO_LAMINADO),
+    [restriccionesArray]
+  );
+
+  // Catálogo de horarios: los fijos + los de la restricción, de VACÍO a la jornada más larga.
+  const diaShiftOptions = useMemo(() => opcionesConHorarios([
     { v: 'EMPTY', l: 'VACÍO', h: 0 },
     { v: 'H1', l: '07:00 - 15:45', h: 8.75 },
     { v: 'H2', l: '07:00 - 17:00', h: 10 },
@@ -909,13 +918,26 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // El turno noche del viernes (21:00-05:30, H1 de nocheShiftOptions) ya cubre la madrugada del
     // sábado sin necesitar una opción nueva; el lunes vuelve al horario normal (H1, 07:00-15:45).
     { v: 'H5', l: '07:00 - 13:00', h: 6 }
-  ];
+  ], [jornadaLaminado.dia, jornadaLaminado.finDeSemana]), [jornadaLaminado]);
 
-  const nocheShiftOptions = [
+  const nocheShiftOptions = useMemo(() => opcionesConHorarios([
     { v: 'EMPTY', l: 'VACÍO', h: 0 },
     { v: 'H1', l: '21:00 - 05:30', h: 8.5 },
     { v: 'H2', l: '19:00 - 05:30', h: 10.5 }
-  ];
+  ], [jornadaLaminado.noche]), [jornadaLaminado]);
+
+  // Precarga de turnos: Día con su horario, Noche solo si NUM_TURNOS ≥ 2, Sábado en VACÍO (manual).
+  // Antes arrancaban todos en VACÍO; ahora parten de la jornada del grupo y siguen editables. Solo
+  // se reaplica si cambia el valor de la restricción (firma): un ajuste manual no se pisa al sincronizar.
+  const firmaJornadaLaminado = useRef('');
+  useEffect(() => {
+    const firma = JSON.stringify(jornadaLaminado);
+    if (firma === firmaJornadaLaminado.current) return;
+    firmaJornadaLaminado.current = firma;
+    setSelectedDiaShift(claveDeHorario(diaShiftOptions, jornadaLaminado.dia));
+    setSelectedNocheShift(jornadaLaminado.numTurnos >= 2 ? claveDeHorario(nocheShiftOptions, jornadaLaminado.noche) : 'EMPTY');
+    setSelectedSabadoShift('EMPTY');
+  }, [jornadaLaminado, diaShiftOptions, nocheShiftOptions]);
 
   // Auto-asignar Personal — Laminado Cilíndrico: exige haber escogido al menos un horario (Día y/o
   // Noche) antes de asignar, y respeta cuáles turnos están realmente activos — antes asignaba
@@ -3291,23 +3313,42 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     [mttoPreventivoTasks]
   );
 
-  // Disponibilidad neta OEE calculada de forma independiente por turno (cada turno descuenta
-  // su propio 13% de pérdidas estándar) para poder evaluar la disponibilidad real de cada turno
+  // Paros Planificados y Rendimiento del Looper — salen de las restricciones "Paros _Planificados" y
+  // "Rendimiento_Looper" del grupo Corte y Laminado (ver restriccionesCapacidad.ts) y quedan editables
+  // en Gestión de Tiempos. Sin restricción: 13% de paros (el 0.87 que estaba fijo) y 100% rendimiento.
+  // Se aplican solo cuando el VALOR de la restricción cambia (firma): un ajuste manual no se pisa al
+  // sincronizar de nuevo.
+  const [paroLooperPct, setParoLooperPct] = useState(13);
+  const [rendimientoLooperPct, setRendimientoLooperPct] = useState(100);
+  const firmaParoLooper = useRef('');
+  useEffect(() => {
+    const paro = porcentajeRestriccion(restriccionesArray, CODIGO_GRUPO_LAMINADO, RESTRICCION_CAPACIDAD.parosPlanificados);
+    const rend = porcentajeRestriccion(restriccionesArray, CODIGO_GRUPO_LAMINADO, RESTRICCION_CAPACIDAD.rendimientoLooper);
+    const firma = JSON.stringify([paro, rend]);
+    if (firma === firmaParoLooper.current) return;
+    firmaParoLooper.current = firma;
+    if (paro !== null) setParoLooperPct(paro);
+    if (rend !== null) setRendimientoLooperPct(rend);
+  }, [restriccionesArray]);
+  const factorEfectivoLooper = (1 - paroLooperPct / 100) * (rendimientoLooperPct / 100);
+
+  // Disponibilidad neta calculada de forma independiente por turno (cada turno descuenta su propio
+  // % de paros y el rendimiento del Looper) para poder evaluar la disponibilidad real de cada turno
   // por separado. El MTTO Preventivo se sigue descontando una sola vez sobre la suma de ambos turnos.
   const diaDisponibleOEE = useMemo(() => {
     const diaH = diaShiftOptions.find(o => o.v === selectedDiaShift)?.h || 0;
-    return diaH * 0.87;
-  }, [selectedDiaShift]);
+    return diaH * factorEfectivoLooper;
+  }, [selectedDiaShift, factorEfectivoLooper, diaShiftOptions]);
 
   const nocheDisponibleOEE = useMemo(() => {
     const nocheH = nocheShiftOptions.find(o => o.v === selectedNocheShift)?.h || 0;
-    return nocheH * 0.87;
-  }, [selectedNocheShift]);
+    return nocheH * factorEfectivoLooper;
+  }, [selectedNocheShift, factorEfectivoLooper, nocheShiftOptions]);
 
   const sabadoDisponibleOEE = useMemo(() => {
     const sabadoH = diaShiftOptions.find(o => o.v === selectedSabadoShift)?.h || 0;
-    return sabadoH * 0.87;
-  }, [selectedSabadoShift]);
+    return sabadoH * factorEfectivoLooper;
+  }, [selectedSabadoShift, factorEfectivoLooper, diaShiftOptions]);
 
   const tDisponible = useMemo(() => {
     return Math.max(0, (diaDisponibleOEE + nocheDisponibleOEE + sabadoDisponibleOEE) - mttoPreventivoHoras); // + descuento del MTTO Preventivo (Operación Adicional)
@@ -3326,6 +3367,17 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     const fechaHoy = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
     const diaLabel = diaShiftOptions.find(o => o.v === selectedDiaShift)?.l || '—';
     const nocheLabel = nocheShiftOptions.find(o => o.v === selectedNocheShift)?.l || '—';
+    const sabadoLabel = diaShiftOptions.find(o => o.v === selectedSabadoShift)?.l || '—';
+    const diaBruta = diaShiftOptions.find(o => o.v === selectedDiaShift)?.h || 0;
+    const nocheBruta = nocheShiftOptions.find(o => o.v === selectedNocheShift)?.h || 0;
+    const sabadoBruta = diaShiftOptions.find(o => o.v === selectedSabadoShift)?.h || 0;
+    // Gestión de tiempos: mismo esquema que el detalle por máquina de Corte Espuma — horas brutas,
+    // % de paros y rendimiento (restricciones del grupo) como columnas, y horas efectivas. Turno
+    // vacío: % en blanco.
+    const thTiempos = 'padding:7px 10px;font-size:9px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;';
+    const tdTiempos = 'padding:10px 10px;font-size:12px;border-bottom:1px solid #e5e7eb;font-variant-numeric:tabular-nums;';
+    const filaTurnoTiempos = (etiqueta: string, horario: string, bruta: number, neta: number, fondo: string, color: string) => `
+        <tr style="background:${fondo};"><td style="${tdTiempos}font-weight:700;color:${color};">${etiqueta}</td><td style="${tdTiempos}color:#374151;">${horario}</td><td align="right" style="${tdTiempos}color:#374151;">${bruta.toFixed(2)}</td><td align="right" style="${tdTiempos}color:#374151;">${bruta > 0 ? `${paroLooperPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdTiempos}color:#374151;">${bruta > 0 ? `${rendimientoLooperPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdTiempos}font-weight:700;color:${color};">${neta.toFixed(2)} h</td></tr>`;
     const critico = ocupacionPorc > 100;
     const ocupacionColor = critico ? '#7f1d1d' : '#065f46';
     // Plan de Salida — detalle completo por material (no resumen): el operador necesita saber
@@ -3412,20 +3464,17 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     <td style="padding:22px 28px 4px;">
       <p style="margin:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Gestión de tiempos</p>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
-        <tr style="background:#ecfdf5;">
-          <td style="padding:10px 14px;font-size:12px;font-weight:700;color:#047857;border-bottom:1px solid #e5e7eb;">Día</td>
-          <td style="padding:10px 14px;font-size:12px;color:#374151;border-bottom:1px solid #e5e7eb;font-variant-numeric:tabular-nums;">${diaLabel}</td>
-          <td align="right" style="padding:10px 14px;font-size:12px;font-weight:700;color:#047857;border-bottom:1px solid #e5e7eb;font-variant-numeric:tabular-nums;">${diaDisponibleOEE.toFixed(2)} h</td>
-        </tr>
-        <tr style="background:#eef2ff;">
-          <td style="padding:10px 14px;font-size:12px;font-weight:700;color:#4338ca;border-bottom:1px solid #e5e7eb;">Noche</td>
-          <td style="padding:10px 14px;font-size:12px;color:#374151;border-bottom:1px solid #e5e7eb;font-variant-numeric:tabular-nums;">${nocheLabel}</td>
-          <td align="right" style="padding:10px 14px;font-size:12px;font-weight:700;color:#4338ca;border-bottom:1px solid #e5e7eb;font-variant-numeric:tabular-nums;">${nocheDisponibleOEE.toFixed(2)} h</td>
-        </tr>
+        <tr style="background:#f9fafb;">
+          <td style="${thTiempos}">Turno</td>
+          <td style="${thTiempos}">Horarios</td>
+          <td align="right" style="${thTiempos}">Tiempo Máquina<br/>(Horas brutas)</td>
+          <td align="right" style="${thTiempos}">Paros<br/>Planificados (%)</td>
+          <td align="right" style="${thTiempos}">Rendimiento<br/>Máquina (%)</td>
+          <td align="right" style="${thTiempos}">Tiempo Máquina<br/>(Horas Efectivas)</td>
+        </tr>${filaTurnoTiempos('Día', diaLabel, diaBruta, diaDisponibleOEE, '#ecfdf5', '#047857')}${filaTurnoTiempos('Noche', nocheLabel, nocheBruta, nocheDisponibleOEE, '#eef2ff', '#4338ca')}${sabadoBruta > 0 ? filaTurnoTiempos('Sábado', sabadoLabel, sabadoBruta, sabadoDisponibleOEE, '#fffbeb', '#b45309') : ''}
         <tr style="background:#fffbeb;">
-          <td style="padding:10px 14px;font-size:12px;font-weight:700;color:#b45309;">Mantenimiento Programado</td>
-          <td style="padding:10px 14px;font-size:12px;color:#374151;">—</td>
-          <td align="right" style="padding:10px 14px;font-size:12px;font-weight:700;color:#b45309;font-variant-numeric:tabular-nums;">${mttoPreventivoHoras.toFixed(2)} h</td>
+          <td colspan="5" style="padding:10px 12px;font-size:12px;font-weight:700;color:#b45309;">Mantenimiento Programado</td>
+          <td align="right" style="padding:10px 12px;font-size:12px;font-weight:700;color:#b45309;font-variant-numeric:tabular-nums;">${mttoPreventivoHoras.toFixed(2)} h</td>
         </tr>
       </table>
     </td>
@@ -4058,26 +4107,44 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               />
             </div>
             <div className="space-y-3">
+              {/* Valor inicial desde las restricciones "Paros _Planificados" / "Rendimiento_Looper"
+                  del grupo Corte y Laminado; editable para un ajuste puntual. */}
+              <div className="flex items-center gap-3" title="Valor inicial tomado de las restricciones del grupo Corte y Laminado (Paros _Planificados / Rendimiento_Looper). Puedes ajustarlo para esta corrida.">
+                <span className="text-[9px] font-black text-slate-400 w-12">PAROS %:</span>
+                <input
+                  type="number"
+                  value={paroLooperPct}
+                  onChange={e => setParoLooperPct(Math.min(100, Math.max(0, safeNum(e.target.value))))}
+                  className="w-14 bg-white border border-gray-200 rounded-lg px-2 py-1 text-[10px] font-black text-slate-700 outline-none focus:border-indigo-400"
+                />
+                <span className="text-[9px] font-black text-slate-400">REND. %:</span>
+                <input
+                  type="number"
+                  value={rendimientoLooperPct}
+                  onChange={e => setRendimientoLooperPct(Math.min(100, Math.max(0, safeNum(e.target.value))))}
+                  className="w-14 bg-white border border-gray-200 rounded-lg px-2 py-1 text-[10px] font-black text-slate-700 outline-none focus:border-indigo-400"
+                />
+              </div>
               <div className="flex items-center gap-3">
                 <span className="text-[9px] font-black text-slate-400 w-12">DÍA:</span>
                 <select value={selectedDiaShift} onChange={(e) => setSelectedDiaShift(e.target.value)} className="bg-white border border-gray-200 rounded-lg px-2 py-1.5 text-[10px] text-indigo-700 flex-1 font-black outline-none appearance-none cursor-pointer">
                   {diaShiftOptions.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
                 </select>
-                <span className="text-[8px] font-black text-indigo-700 whitespace-nowrap tabular-nums" title="Disponibilidad neta del turno Día (-13% OEE)">{diaDisponibleOEE.toFixed(2)}h</span>
+                <span className="text-[8px] font-black text-indigo-700 whitespace-nowrap tabular-nums" title={`Disponibilidad neta del turno Día (−${paroLooperPct}% paros × ${rendimientoLooperPct}% rendimiento)`}>{diaDisponibleOEE.toFixed(2)}h</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-[9px] font-black text-slate-400 w-12">NOCHE:</span>
                 <select value={selectedNocheShift} onChange={(e) => setSelectedNocheShift(e.target.value)} className="bg-white border border-gray-200 rounded-lg px-2 py-1.5 text-[10px] text-indigo-700 flex-1 font-black outline-none appearance-none cursor-pointer">
                   {nocheShiftOptions.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
                 </select>
-                <span className="text-[8px] font-black text-purple-700 whitespace-nowrap tabular-nums" title="Disponibilidad neta del turno Noche (-13% OEE)">{nocheDisponibleOEE.toFixed(2)}h</span>
+                <span className="text-[8px] font-black text-purple-700 whitespace-nowrap tabular-nums" title={`Disponibilidad neta del turno Noche (−${paroLooperPct}% paros × ${rendimientoLooperPct}% rendimiento)`}>{nocheDisponibleOEE.toFixed(2)}h</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-[9px] font-black text-slate-400 w-12">SÁBADO:</span>
                 <select value={selectedSabadoShift} onChange={(e) => setSelectedSabadoShift(e.target.value)} className="bg-white border border-gray-200 rounded-lg px-2 py-1.5 text-[10px] text-amber-700 flex-1 font-black outline-none appearance-none cursor-pointer">
                   {diaShiftOptions.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
                 </select>
-                <span className="text-[8px] font-black text-amber-700 whitespace-nowrap tabular-nums" title="Disponibilidad neta del turno Sábado (-13% OEE) -- se suma aparte de Día, no lo reemplaza">{sabadoDisponibleOEE.toFixed(2)}h</span>
+                <span className="text-[8px] font-black text-amber-700 whitespace-nowrap tabular-nums" title={`Disponibilidad neta del turno Sábado (−${paroLooperPct}% paros × ${rendimientoLooperPct}% rendimiento) -- se suma aparte de Día, no lo reemplaza`}>{sabadoDisponibleOEE.toFixed(2)}h</span>
               </div>
               {selectedSabadoShift !== 'EMPTY' && !diasLaborablesExtra.has(proximoSabadoJornada) && (
                 <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
@@ -4237,7 +4304,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <div className="col-span-2 p-4 border-r border-gray-100 flex flex-col items-center justify-center">
             <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter mb-1">DISPONIBILIDAD TOTAL (H)</p>
             <span className="text-2xl font-black text-amber-600 leading-none tabular-nums">{tDisponible.toFixed(2)}</span>
-            <p className="text-[7px] font-bold text-slate-400 uppercase tracking-tighter mt-1">Día {diaDisponibleOEE.toFixed(2)}h + Noche {nocheDisponibleOEE.toFixed(2)}h{selectedSabadoShift !== 'EMPTY' ? ` + Sábado ${sabadoDisponibleOEE.toFixed(2)}h` : ''} (-13% OEE c/u) -{mttoPreventivoHoras.toFixed(2)}h MTTO</p>
+            <p className="text-[7px] font-bold text-slate-400 uppercase tracking-tighter mt-1">Día {diaDisponibleOEE.toFixed(2)}h + Noche {nocheDisponibleOEE.toFixed(2)}h{selectedSabadoShift !== 'EMPTY' ? ` + Sábado ${sabadoDisponibleOEE.toFixed(2)}h` : ''} (-{paroLooperPct}% paros · {rendimientoLooperPct}% rend. c/u) -{mttoPreventivoHoras.toFixed(2)}h MTTO</p>
           </div>
           <div className="col-span-5 flex items-center px-6">
              {isSaturated && (
