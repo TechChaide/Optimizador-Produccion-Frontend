@@ -47,7 +47,8 @@ import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
-import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario } from '@/lib/restriccionesCapacidad';
+import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario, intervaloDeHorario, horasSolapadas } from '@/lib/restriccionesCapacidad';
+import { ejecucionPlanHtml, fechaHoraEjecucion } from '@/lib/ventana-plan';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { useAppContext } from '@/context/AppProvider';
@@ -58,7 +59,7 @@ import { cn } from '@/lib/utils';
 import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia } from '@/components/ReportePlanTxtFlujo';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid } from 'date-fns';
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
 
 // --- CONSTANTES TÉCNICAS PLANTA ---
@@ -1423,13 +1424,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // que Corte y Laminado) -- el sábado no se trata como laborable por defecto; se elige este
     // horario solo el día puntual en que se decide producir.
     { v: 'H5', l: '07:00 - 13:00', h: 6 }
-  ], [jornadaPorPlanta.UIO.dia, jornadaPorPlanta.GYE.dia, jornadaPorPlanta.UIO.finDeSemana, jornadaPorPlanta.GYE.finDeSemana]), [jornadaPorPlanta]);
+  ], [jornadaPorPlanta.UIO.dia, jornadaPorPlanta.GYE.dia, jornadaPorPlanta.UIO.finDeSemana, jornadaPorPlanta.GYE.finDeSemana, ...jornadaPorPlanta.UIO.catalogo.dia, ...jornadaPorPlanta.GYE.catalogo.dia, ...jornadaPorPlanta.UIO.catalogo.finDeSemana, ...jornadaPorPlanta.GYE.catalogo.finDeSemana]), [jornadaPorPlanta]);
 
   const nightShiftOptions = useMemo(() => opcionesConHorarios([
     { v: 'EMPTY', l: 'VACÍO', h: 0 },
     { v: 'A19', l: '19:00 - 05:30', h: 10.5 },
     { v: 'B21', l: '21:00 - 05:30', h: 8.5 }
-  ], [jornadaPorPlanta.UIO.noche, jornadaPorPlanta.GYE.noche]), [jornadaPorPlanta]);
+  ], [jornadaPorPlanta.UIO.noche, jornadaPorPlanta.GYE.noche, ...jornadaPorPlanta.UIO.catalogo.noche, ...jornadaPorPlanta.GYE.catalogo.noche]), [jornadaPorPlanta]);
 
   // Precarga desde restricciones: horarios (Día; Noche solo si NUM_TURNOS ≥ 2 y la máquina opera de
   // noche; Sábado siempre VACÍO — es manual), Paros _Planificados y Rendimiento_Carruseles / _Cnc.
@@ -2554,17 +2555,88 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // restar mantenimiento real de la capacidad de Capacidad Operativa y del reporte por correo
   // (antes solo se mostraba informativo, sin afectar el cálculo — confirmado por el usuario que
   // debe afectar el tiempo de la máquina, según fecha).
+  // Ventana del plan de UNA máquina (pedido del usuario 2026-10-02, mismo concepto que Corte
+  // Laminado): la fecha de Capacidad Operativa es el DÍA DEL PLAN, y ese plan se produce desde la
+  // NOCHE del día hábil anterior hasta el fin del turno DÍA del plan — ej. plan lun 05/10: Noche
+  // vie 02/10 19:00 → sáb 05:30, (Sábado si su turno está activo), Día lun 05/10 07:00 → 19:00.
+  // Cada máquina con sus propios horarios (config.shifts); fuera de servicio = sin turnos.
+  // Días que arma la ventana de un plan: la NOCHE es la del último día hábil de lunes a viernes antes
+  // del plan (si un sábado está marcado como Jornada, restarDiasHabiles devolvería ese sábado, pero
+  // la noche sigue siendo la del viernes y el sábado entra como Turno Sábado), y los sábados que caen
+  // entre esa noche y el día del plan.
+  const diasVentanaPlan = useCallback((fecha: string) => {
+    const diaPlan = parseFechaLocal(fecha);
+    if (!isValid(diaPlan)) return null;
+    let noche = restarDiasHabiles(diaPlan, 1);
+    while (getDay(noche) === 6 || getDay(noche) === 0) noche = restarDiasHabiles(noche, 1);
+    const sabados: Date[] = [];
+    for (let d = addDays(noche, 1); d < diaPlan; d = addDays(d, 1)) if (getDay(d) === 6) sabados.push(d);
+    return { diaPlan, noche, sabados };
+  }, [restarDiasHabiles]);
+
+  const turnosVentanaMaquina = useCallback((planta: 'UIO' | 'GYE', machineId: string, fecha: string) => {
+    const c = (planta === 'UIO' ? uioConfig : gyeConfig).shifts[machineId];
+    const dias = diasVentanaPlan(fecha);
+    if (!c || c.activa === false || !dias) return [];
+    const etiqueta = (opciones: { v: string; l: string }[], v: string) => (v === 'EMPTY' ? null : opciones.find(o => o.v === v)?.l ?? null);
+    const turnos: { turno: 'Noche' | 'Sábado' | 'Día'; ini: Date; fin: Date }[] = [];
+    const agregar = (turno: 'Noche' | 'Sábado' | 'Día', dia: Date, l: string | null) => {
+      const iv = l ? intervaloDeHorario(dia, l) : null;
+      if (iv) turnos.push({ turno, ...iv });
+    };
+    agregar('Noche', dias.noche, etiqueta(nightShiftOptions, c.night));
+    dias.sabados.forEach(d => agregar('Sábado', d, etiqueta(shiftOptions, c.saturday)));
+    agregar('Día', dias.diaPlan, etiqueta(shiftOptions, c.day));
+    return turnos;
+  }, [uioConfig, gyeConfig, shiftOptions, nightShiftOptions, diasVentanaPlan]);
+
+  // ¿Suma el Turno Sábado a la capacidad? Con UNA fecha evaluada, solo si un sábado cae dentro de la
+  // ventana de ese plan (ej. plan del lunes: sí; plan del miércoles: no, aunque el turno esté activo).
+  // Con varias fechas o sin fecha, como antes (siempre que el turno esté activo). Pedido del usuario
+  // 2026-10-02: "es indispensable que se considere si se activan los sábados".
+  const sabadoCuentaEnPlanta = useCallback((planta: 'UIO' | 'GYE') => {
+    const fechas = Array.from(selectedDatesCapacidad[planta]);
+    if (fechas.length !== 1) return true;
+    return (diasVentanaPlan(fechas[0])?.sabados.length ?? 0) > 0;
+  }, [selectedDatesCapacidad, diasVentanaPlan]);
+
+  // Con la ventana del plan, el mantenimiento cuenta solo las horas que caen DENTRO de los turnos de
+  // esa máquina (ej. el viernes en la noche o el lunes en la mañana sí; un sábado sin turno no).
+  // Antes: todo el mantenimiento que EMPEZABA el día del plan, aunque cayera fuera de turno, y nada
+  // del de la noche anterior. Sin turnos (máquina apagada o sin horario) queda el criterio anterior.
   const getMttoTimeParaFecha = useCallback((machineId: string, planta: string, fecha: string): number => {
     const target = machineId.trim().toUpperCase();
-    return uniqueMantenimientosSAP
-      .filter(m => {
-        const idMaquina = getProp(m, ['ID_MAQUINA', 'MAQUINA']);
-        const link = resolveMachineLink(idMaquina, getProp(m, ['Centro', 'CENTRO']), getProp(m, ['PLANTA']));
-        if (!link || link.id !== target || link.planta !== planta) return false;
-        return fechaLocalEcuador(getProp(m, ['FECHA_OT_PRG_INI'])) === fecha;
-      })
-      .reduce((sum, row) => sum + getMttoDurationH(row), 0);
-  }, [uniqueMantenimientosSAP]);
+    const filas = uniqueMantenimientosSAP.filter(m => {
+      const idMaquina = getProp(m, ['ID_MAQUINA', 'MAQUINA']);
+      const link = resolveMachineLink(idMaquina, getProp(m, ['Centro', 'CENTRO']), getProp(m, ['PLANTA']));
+      return !!link && link.id === target && link.planta === planta;
+    });
+    const turnos = planta === 'UIO' || planta === 'GYE' ? turnosVentanaMaquina(planta, target, fecha) : [];
+    const delDia = (m: RawApiRow) => fechaLocalEcuador(getProp(m, ['FECHA_OT_PRG_INI'])) === fecha;
+    if (turnos.length === 0) return filas.filter(delDia).reduce((sum, row) => sum + getMttoDurationH(row), 0);
+    return filas.reduce((sum, row) => {
+      const ini = new Date(getProp(row, ['FECHA_OT_PRG_INI']));
+      const fin = new Date(getProp(row, ['FECHA_OT_PRG_FIN']));
+      if (!isValid(ini) || !isValid(fin) || fin <= ini) return sum + (delDia(row) ? getMttoDurationH(row) : 0);
+      const enVentana = turnos.reduce((s, t) => s + horasSolapadas(ini, fin, t.ini, t.fin), 0);
+      return sum + Math.min(getMttoDurationH(row), enVentana);
+    }, 0);
+  }, [uniqueMantenimientosSAP, turnosVentanaMaquina]);
+
+  // Ventana del plan de la PLANTA para mostrarla (inicio más temprano / fin más tardío de sus
+  // máquinas en servicio) — solo con UNA fecha evaluada.
+  const ventanaPlanPorPlanta = useMemo(() => {
+    const calcular = (planta: 'UIO' | 'GYE') => {
+      const fechas = Array.from(selectedDatesCapacidad[planta]).sort();
+      if (fechas.length !== 1) return null;
+      const turnos = MACHINES_BY_PLANTA[planta].flatMap(m => turnosVentanaMaquina(planta, m.id, fechas[0]));
+      if (turnos.length === 0) return null;
+      const inicio = new Date(Math.min(...turnos.map(t => t.ini.getTime())));
+      const fin = new Date(Math.max(...turnos.map(t => t.fin.getTime())));
+      return { fecha: fechas[0], inicio, fin, noche: diasVentanaPlan(fechas[0])?.noche ?? restarDiasHabiles(parseFechaLocal(fechas[0]), 1) };
+    };
+    return { UIO: calcular('UIO'), GYE: calcular('GYE') };
+  }, [selectedDatesCapacidad, turnosVentanaMaquina, restarDiasHabiles, diasVentanaPlan]);
 
   // Resumen de capacidad para el reporte por correo (Capacidad Operativa) — reusa los mismos hooks
   // pesados que ya alimentan renderDashboard (necesidad, faltante neto de stock, etc.), sin duplicar
@@ -2629,7 +2701,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const proceso = machines.find(m => m.id === id)?.proceso ?? 'carrusel';
         const hD = shiftOptions.find(o => o.v === c.day)?.h || 0;
         const hN = nightShiftOptions.find(o => o.v === c.night)?.h || 0;
-        const hS = shiftOptions.find(o => o.v === c.saturday)?.h || 0;
+        const hS = sabadoCuentaEnPlanta(planta) ? (shiftOptions.find(o => o.v === c.saturday)?.h || 0) : 0;
         return ((hD * (1 - c.paro1 / 100)) + (hN * (1 - c.paro2 / 100)) + (hS * (1 - c.paro3 / 100))) * rendimientoDe(proceso);
       };
       const capacidadPorProceso = machines.reduce<Record<ProcesoCorte, number>>((acc, m) => {
@@ -2645,7 +2717,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (!c || c.activa === false) return 0;
         const hD = shiftOptions.find(o => o.v === c.day)?.h || 0;
         const hN = nightShiftOptions.find(o => o.v === c.night)?.h || 0;
-        const hS = shiftOptions.find(o => o.v === c.saturday)?.h || 0;
+        const hS = sabadoCuentaEnPlanta(planta) ? (shiftOptions.find(o => o.v === c.saturday)?.h || 0) : 0;
         return hD + hN + hS;
       };
       const tiempoMaquinaPorProceso = machines.reduce<Record<ProcesoCorte, number>>((acc, m) => {
@@ -2680,25 +2752,37 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // Detalle por máquina — para el correo (bloque expandido por carrusel, tabla compacta para
       // CNC/Verticales, ver construirReporteHtmlEspuma): cada máquina con su turno, paro, mtto real
       // ya restado, y el total neto.
+      // Con UNA fecha evaluada, cada turno lleva su fecha real en una columna propia (pedido del
+      // usuario 2026-10-02): Noche = último día hábil L-V antes del plan, Sábado(s) en medio, Día = plan.
+      const fechaCorta = (d: Date | null | undefined) => (d ? format(d, 'EEE dd/MM', { locale: es }) : '');
+      const diasPlan = fechasSel.length === 1 ? diasVentanaPlan(fechasSel[0]) : null;
+      const sabadoCuenta = sabadoCuentaEnPlanta(planta);
       const detallePorMaquina = machines.map(m => {
         const c = config.shifts[m.id];
         const diaLabel = shiftOptions.find(o => o.v === c?.day)?.l || '—';
         const nocheLabel = nightShiftOptions.find(o => o.v === c?.night)?.l || '—';
+        const sabadoLabel = shiftOptions.find(o => o.v === c?.saturday)?.l || '—';
         const hD = shiftOptions.find(o => o.v === c?.day)?.h || 0;
         const hN = nightShiftOptions.find(o => o.v === c?.night)?.h || 0;
+        const hS = sabadoCuenta ? (shiftOptions.find(o => o.v === c?.saturday)?.h || 0) : 0;
         const rendimiento = rendimientoDe(m.proceso);
         const diaNeta = hD * (1 - (c?.paro1 ?? 0) / 100) * rendimiento;
         const nocheNeta = hN * (1 - (c?.paro2 ?? 0) / 100) * rendimiento;
+        const sabadoNeta = hS * (1 - (c?.paro3 ?? 0) / 100) * rendimiento;
         const mttoReal = mttoDeMaquina(m.id);
         return {
           id: m.id,
           nombre: m.n,
           proceso: m.proceso,
-          diaLabel, nocheLabel,
-          diaBruta: hD, nocheBruta: hN,
-          diaNeta, nocheNeta,
+          diaLabel, nocheLabel, sabadoLabel,
+          diaFecha: fechaCorta(diasPlan?.diaPlan),
+          nocheFecha: fechaCorta(diasPlan?.noche),
+          sabadoFecha: (diasPlan?.sabados ?? []).map(fechaCorta).join(', '),
+          diaBruta: hD, nocheBruta: hN, sabadoBruta: hS,
+          diaNeta, nocheNeta, sabadoNeta,
           paro: c?.paro1 ?? 0,
           paroNoche: c?.paro2 ?? 0,
+          paroSabado: c?.paro3 ?? 0,
           rendimientoPct: rendimiento * 100,
           mttoReal,
           total: Math.max(0, horasDeMaquina(m.id) - mttoReal),
@@ -2732,7 +2816,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     fertAuditAllUIO, fertAuditAllGYE, provAuditAllUIO, provAuditAllGYE, sinProvisionalesTransformadas,
     filasCentroEnFecha, calcularFaltanteNecesidadPlanta, necesidadPorMaterialCombinadoPorCentro,
     selectedDatesCapacidad, uioConfig, gyeConfig, shiftOptions, nightShiftOptions, responsablesPorCentro,
-    restarDiasHabiles, getMttoTimeParaFecha,
+    restarDiasHabiles, getMttoTimeParaFecha, sabadoCuentaEnPlanta, diasVentanaPlan,
   ]);
 
   // Cuerpo del correo — mismo formato ya aprobado en Artifact (Día/Noche/Mtto simple, Carruseles y
@@ -2743,7 +2827,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const construirReporteHtmlEspuma = (planta: 'UIO' | 'GYE') => {
     const r = resumenReportePorPlanta[planta];
     const nombrePlanta = planta === 'UIO' ? 'Quito' : 'Guayaquil';
-    const fechaLabel = r.fecha ? format(parseFechaLocal(r.fecha), "EEEE d 'de' MMMM 'de' yyyy", { locale: es }) : format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
+    const ventana = ventanaPlanPorPlanta[planta];
+    const ventanaHtml = ventana ? ejecucionPlanHtml(ventana.inicio, ventana.fin) : '';
+    // Fecha de LIBERACIÓN del plan (el día en que se genera y guarda el reporte), no la del plan:
+    // pedido del usuario 2026-10-02 — la fecha del plan ya se lee en la ejecución (inicio → fin).
+    const fechaLabel = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
     const pctCarruseles = r.carruseles.capacidad > 0 ? (r.carruseles.ocupacion / r.carruseles.capacidad) * 100 : 0;
     const pctVerticales = r.verticales.capacidad > 0 ? (r.verticales.ocupacion / r.verticales.capacidad) * 100 : 0;
     const pctCnc = r.cnc.capacidad > 0 ? (r.cnc.ocupacion / r.cnc.capacidad) * 100 : 0;
@@ -2759,20 +2847,24 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // Paros _Planificados / Rendimiento_* del grupo Corte y Laminado. Turno vacío: % en blanco.
     const thDet = 'padding:7px 10px;font-size:9px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #d1d5db;';
     const tdDet = 'padding:7px 10px;font-size:11px;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;';
-    const filaTurnoHtml = (etiqueta: string, horario: string, bruta: number, paroPct: number, rendPct: number, neta: number, fondo: string, color: string) => `
-        <tr style="background:${fondo};"><td style="${tdDet}font-weight:700;color:${color};">${etiqueta}</td><td style="${tdDet}color:#374151;">${horario}</td><td align="right" style="${tdDet}color:#374151;">${bruta.toFixed(2)}</td><td align="right" style="${tdDet}color:#374151;">${bruta > 0 ? `${paroPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdDet}color:#374151;">${bruta > 0 ? `${rendPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdDet}font-weight:700;color:${color};">${neta.toFixed(2)}</td></tr>`;
+    // Turno | Fecha | Horario en columnas separadas, en el orden en que se ejecuta el plan: Noche →
+    // Sábado (solo si aplica) → Día (pedido del usuario 2026-10-02). "07:00 - 19:00" → "07:00 a 19:00".
+    const horarioTexto = (l: string) => l.replace(' - ', ' a ');
+    const filaTurnoHtml = (etiqueta: string, fecha: string, horario: string, bruta: number, paroPct: number, rendPct: number, neta: number, fondo: string, color: string) => `
+        <tr style="background:${fondo};"><td style="${tdDet}font-weight:700;color:${color};">${etiqueta}</td><td style="${tdDet}color:#374151;text-transform:capitalize;white-space:nowrap;">${fecha || '—'}</td><td style="${tdDet}color:#374151;white-space:nowrap;">${horarioTexto(horario)}</td><td align="right" style="${tdDet}color:#374151;">${bruta.toFixed(2)}</td><td align="right" style="${tdDet}color:#374151;">${bruta > 0 ? `${paroPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdDet}color:#374151;">${bruta > 0 ? `${rendPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdDet}font-weight:700;color:${color};">${neta.toFixed(2)}</td></tr>`;
     const detalleMaquinaHtml = (m: typeof r.detallePorMaquina[number]) => `
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:2px solid #111827;border-radius:10px;overflow:hidden;">
         <tr style="background:#f9fafb;">
           <td style="${thDet}">Turno</td>
-          <td style="${thDet}">Horarios</td>
+          <td style="${thDet}">Fecha</td>
+          <td style="${thDet}">Horario</td>
           <td align="right" style="${thDet}">Tiempo Máquina<br/>(Horas brutas)</td>
           <td align="right" style="${thDet}">Paros<br/>Planificados (%)</td>
           <td align="right" style="${thDet}">Rendimiento<br/>Máquina (%)</td>
           <td align="right" style="${thDet}">Tiempo Máquina<br/>(Horas Efectivas)</td>
-        </tr>${filaTurnoHtml('Día', m.diaLabel, m.diaBruta, m.paro, m.rendimientoPct, m.diaNeta, '#ecfdf5', '#047857')}${filaTurnoHtml('Noche', m.nocheLabel, m.nocheBruta, m.paroNoche, m.rendimientoPct, m.nocheNeta, '#eef2ff', '#4338ca')}
-        <tr style="background:#fffbeb;"><td colspan="5" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;">Mantenimiento Programado</td><td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.mttoReal > 0 ? m.mttoReal.toFixed(2) : '–'}</td></tr>
-        <tr style="background:#ecfdf5;"><td colspan="5" style="padding:8px 10px;font-size:11px;font-weight:800;color:#111827;text-transform:uppercase;">${m.nombre}</td><td align="right" style="padding:8px 10px;font-size:11px;font-weight:800;color:#111827;font-variant-numeric:tabular-nums;">${m.total.toFixed(2)} h</td></tr>
+        </tr>${filaTurnoHtml('Noche', m.nocheFecha, m.nocheLabel, m.nocheBruta, m.paroNoche, m.rendimientoPct, m.nocheNeta, '#eef2ff', '#4338ca')}${m.sabadoBruta > 0 ? filaTurnoHtml('Sábado', m.sabadoFecha, m.sabadoLabel, m.sabadoBruta, m.paroSabado, m.rendimientoPct, m.sabadoNeta, '#fffbeb', '#b45309') : ''}${filaTurnoHtml('Día', m.diaFecha, m.diaLabel, m.diaBruta, m.paro, m.rendimientoPct, m.diaNeta, '#ecfdf5', '#047857')}
+        <tr style="background:#fffbeb;"><td colspan="6" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;">Mantenimiento Programado</td><td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${m.mttoReal > 0 ? m.mttoReal.toFixed(2) : '–'}</td></tr>
+        <tr style="background:#ecfdf5;"><td colspan="6" style="padding:8px 10px;font-size:11px;font-weight:800;color:#111827;text-transform:uppercase;">${m.nombre}</td><td align="right" style="padding:8px 10px;font-size:11px;font-weight:800;color:#111827;font-variant-numeric:tabular-nums;">${m.total.toFixed(2)} h</td></tr>
       </table>`;
     const listaDetalleHtml = (lista: typeof r.detallePorMaquina) => lista.map((m, idx) => `
       <div style="${idx < lista.length - 1 ? 'margin-bottom:12px;' : ''}">${detalleMaquinaHtml(m)}</div>`).join('');
@@ -2799,7 +2891,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     <td style="padding:26px 28px 6px;">
       <p style="margin:0;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Corte Espuma · ${nombrePlanta} · Reporte diario</p>
       <h1 style="margin:4px 0 0;font-size:20px;font-weight:700;color:#111827;">Gestión de tiempos y capacidad de carrusel</h1>
-      <p style="margin:6px 0 0;font-size:12px;color:#6b7280;text-transform:capitalize;">${fechaLabel} · Correo automático, no responder</p>
+      <p style="margin:6px 0 0;font-size:12px;color:#6b7280;text-transform:capitalize;">${fechaLabel} · Correo automático, no responder</p>${ventanaHtml}
     </td>
   </tr>
   <tr>
@@ -3650,7 +3742,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Y Ensamblado - Guayaquil (2000, grupo 6) en la misma acción. A diferencia de Corte y Laminado
   // (que solo tiene flujo de guardado para Centro 1000), Corte Espuma ya soporta la Respuesta P3
   // completa para ambos centros, así que ambos resultados alimentan por igual el prorateo real.
-  const calcularNecesidadPFF = useCallback(async (): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string }> => {
+  // El resultado lo muestra el panel de progreso (único llamador), sin toast aparte que lo tape.
+  const calcularNecesidadPFF = useCallback(async (): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string; progreso?: { actual: number; total: number } }> => {
     setIsCalculandoPFF(true);
     setPffDiagnostico({ sinMatch: [], conError: [] });
     try {
@@ -3705,7 +3798,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       setPffDiagnostico({ sinMatch, conError });
 
       if (resultado1000.filas.length === 0 && resultado2000.filas.length === 0 && sinMatch.length === 0 && conError.length === 0) {
-        addNotification('warning', 'No hay ningún Plan Grupo "P1"/"PFF" activo con materiales, ni en Quito ni en Guayaquil.');
         return { estado: 'aviso', mensaje: 'Sin Plan Grupo "P1"/"PFF" activo en ningún centro.' };
       }
 
@@ -3715,15 +3807,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       ].filter(Boolean).join(' · ');
       const etiquetaTipo = (t: 'P1' | 'PFF' | null) => t ? ` (${t})` : '';
       const mensajePFF = `${resultado1000.filas.length} línea(s) Quito${etiquetaTipo(resultado1000.tipoPlan)}, ${resultado2000.filas.length} línea(s) Guayaquil${etiquetaTipo(resultado2000.tipoPlan)}.${incidencias ? ' ' + incidencias : ''}`;
-      addNotification(conError.length > 0 ? 'warning' : 'success', `Necesidad calculada: ${mensajePFF}`);
-      return { estado: conError.length > 0 || sinMatch.length > 0 ? 'aviso' : 'ok', mensaje: mensajePFF };
+      return { estado: conError.length > 0 || sinMatch.length > 0 ? 'aviso' : 'ok', mensaje: mensajePFF, progreso: { actual: current, total } };
     } catch (e) {
-      addNotification('error', `Error al calcular la Necesidad PFF: ${(e as Error).message}`);
       return { estado: 'error', mensaje: (e as Error).message };
     } finally {
       setIsCalculandoPFF(false);
     }
-  }, [addNotification, explotarPFFParaCentro, explotarPFFParaCentroConFecha, sumarDiasHabiles]);
+  }, [explotarPFFParaCentro, explotarPFFParaCentroConFecha, sumarDiasHabiles]);
 
   // Segunda fase de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar): corre
   // calcularNecesidadPFF automáticamente en cuanto el render con los datos recién sincronizados ya
@@ -3736,7 +3826,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     panelProgreso.actualizar('pff', { estado: 'en_curso' });
     calcularNecesidadPFF()
       .then(r => {
-        panelProgreso.actualizar('pff', { estado: r.estado, detalle: r.mensaje });
+        // El conteo final llega en r.progreso: el último setPffProgress se aplica en el mismo render
+        // que syncStep vuelve a 'idle', así que el efecto de avance no alcanza a reflejarlo (quedaba N-1/N).
+        panelProgreso.actualizar('pff', { estado: r.estado, detalle: r.mensaje, ...(r.progreso ? { progreso: r.progreso } : {}) });
         panelProgreso.concluir();
       })
       .finally(() => setSyncStep('idle'));
@@ -4566,23 +4658,22 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // (setState no actualiza el closure de forma síncrona) y buscaría el P2 en un día feriado — que es
   // exactamente el desfase que se quería eliminar: el origen graba el plan saltando el feriado y
   // aquí se lo buscaría un día antes, sin encontrarlo nunca.
-  // Panel flotante de progreso (ver PanelProgreso): Calendario → Datos SAP (x/9 consultas) →
-  // Necesidades planta (P2) → Necesidad PFF. La última fase corre en el efecto autoGenerarPendiente,
+  // Panel flotante de progreso (ver PanelProgreso), tras confirmar fechas en handleSincronizarYGenerar:
+  // Fecha evaluada → Datos SAP (x/9 consultas) → Necesidades planta (P2) → Necesidad PFF. La última fase corre en el efecto autoGenerarPendiente,
   // que es quien cierra el panel.
-  const handleSincronizarYGenerar = useCallback(async () => {
+  const ejecutarSincronizacion = useCallback(async (noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
     setSyncStep('sincronizando');
+    const fmt = (d: Date) => format(d, 'dd/MM/yyyy');
     panelProgreso.iniciar('Corte Espuma — Sincronizar y generar', [
-      { id: 'calendario', etiqueta: 'Calendario laboral' },
+      { id: 'fecha', etiqueta: `Fecha evaluada: ${format(new Date(), 'EEE dd/MM/yyyy', { locale: es })}` },
       { id: 'sap', etiqueta: 'Sincronizando datos SAP' },
-      { id: 'p2', etiqueta: 'Necesidades planta (P2)' },
-      { id: 'pff', etiqueta: 'Generando necesidades (PFF)' },
+      { id: 'p2', etiqueta: `Necesidades planta (P2 del ${fmt(nextBusinessDayCal(new Date(), noLaborables, laborablesExtra))})` },
+      { id: 'pff', etiqueta: `Generando necesidades (PFF, PT ${fmt(addBusinessDaysCal(new Date(), DIAS_HABILES_PT_ENSAMBLADO, noLaborables, laborablesExtra))})` },
     ]);
+    panelProgreso.actualizar('fecha', { estado: 'ok' });
     try {
-      panelProgreso.actualizar('calendario', { estado: 'en_curso' });
-      const { noLaborables, laborablesExtra } = await cargarDiasNoLaborables();
       setDiasNoLaborables(noLaborables);
       setDiasLaborablesExtra(laborablesExtra);
-      panelProgreso.actualizar('calendario', { estado: 'ok' });
 
       const TOTAL_CONSULTAS_SAP = 9;
       let hechas = 0;
@@ -4618,12 +4709,37 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // de que el siguiente render las recalcule (mismo criterio que Corte y Laminado).
       setAutoGenerarPendiente(true);
     } catch (e) {
-      addNotification('error', `Error al sincronizar: ${(e as Error).message}`);
       panelProgreso.actualizar('pff', { estado: 'omitido' });
       panelProgreso.concluir(`Error al sincronizar: ${(e as Error).message}`);
       setSyncStep('idle');
     }
-  }, [fetchDataAsync, fetchNecesidadesPlanta, addNotification, panelProgreso]);
+  }, [fetchDataAsync, fetchNecesidadesPlanta, panelProgreso]);
+
+  // Botón "Sincronizar y Generar Necesidades": antes de tocar SAP, el panel muestra sobre qué fechas
+  // se va a trabajar para confirmarlas. En Espuma la fecha NO se elige: sale de la regla (hoy → P2
+  // hoy+1 hábil, PT hoy+2 hábiles), que también usa el tablero de Capacidad — decisión del usuario
+  // 2026-10-02 (opción "mostrar para confirmar"; en Laminado sí se elige, ahí es filtro real).
+  const handleSincronizarYGenerar = useCallback(async () => {
+    let noLaborables: DiasNoLaborables;
+    let laborablesExtra: DiasNoLaborables;
+    try {
+      ({ noLaborables, laborablesExtra } = await cargarDiasNoLaborables());
+    } catch (e) {
+      addNotification('error', `No se pudo cargar el calendario laboral: ${(e as Error).message}`);
+      return;
+    }
+    const fmt = (d: Date) => format(d, 'EEE dd/MM/yyyy', { locale: es });
+    panelProgreso.pedirFecha({
+      titulo: 'Corte Espuma — Sincronizar y generar',
+      fechaInicial: format(new Date(), 'yyyy-MM-dd'),
+      fija: true,
+      detalle: () => [
+        { etiqueta: 'P2 (necesidad planta) del', valor: fmt(nextBusinessDayCal(new Date(), noLaborables, laborablesExtra)) },
+        { etiqueta: 'PFF / P1 Ensamblado, PT del', valor: fmt(addBusinessDaysCal(new Date(), DIAS_HABILES_PT_ENSAMBLADO, noLaborables, laborablesExtra)) },
+      ],
+      onConfirmar: () => { void ejecutarSincronizacion(noLaborables, laborablesExtra); },
+    });
+  }, [panelProgreso, ejecutarSincronizacion, addNotification]);
 
   // "Pendientes Totales" (+20K registros) sigue siendo perezoso, pero ahora solo se carga si el
   // usuario ya sincronizó: abrir el tab sin datos base no debe disparar una consulta pesada sola.
@@ -4855,7 +4971,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const proceso = machines.find(m => m.id === id)?.proceso ?? 'carrusel';
       const hD = shiftOptions.find(o => o.v === c.day)?.h || 0;
       const hN = nightShiftOptions.find(o => o.v === c.night)?.h || 0;
-      const hS = shiftOptions.find(o => o.v === c.saturday)?.h || 0;
+      const hS = sabadoCuentaEnPlanta(planta) ? (shiftOptions.find(o => o.v === c.saturday)?.h || 0) : 0;
       return ((hD * (1 - c.paro1 / 100)) + (hN * (1 - c.paro2 / 100)) + (hS * (1 - c.paro3 / 100))) * rendimientoDe(proceso);
     };
     // Tiempo Máquina BRUTO por recurso (Día+Noche+Sábado, SIN paros ni rendimiento) — pedido por el
@@ -4865,7 +4981,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       if (!c || c.activa === false) return 0;
       const hD = shiftOptions.find(o => o.v === c.day)?.h || 0;
       const hN = nightShiftOptions.find(o => o.v === c.night)?.h || 0;
-      const hS = shiftOptions.find(o => o.v === c.saturday)?.h || 0;
+      const hS = sabadoCuentaEnPlanta(planta) ? (shiftOptions.find(o => o.v === c.saturday)?.h || 0) : 0;
       return hD + hN + hS;
     };
     const totalH = Object.keys(config.shifts).reduce((s, m) => s + horasDeMaquina(m), 0);
@@ -5426,6 +5542,27 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             </div>
           </div>
         </div>
+        {/* Ventana del plan (ver turnosVentanaMaquina): cuándo empieza y termina la producción del
+            plan evaluado — el mantenimiento de cada máquina se descuenta solo dentro de esos turnos. */}
+        {ventanaPlanPorPlanta[planta] && (() => {
+          const v = ventanaPlanPorPlanta[planta]!;
+          return (
+            <div
+              className="mx-8 mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 bg-blue-50/50 border border-blue-100 rounded-lg px-3 py-1.5"
+              title="Desde la noche del día hábil anterior hasta el fin del turno día del plan, con los horarios de cada máquina. El MTTO de cada máquina solo resta si cae dentro de sus turnos."
+            >
+              <span className="text-[8px] font-black uppercase tracking-widest text-blue-700">Ejecución del plan de producción</span>
+              <span className="text-[11px] font-black text-slate-700 tabular-nums">
+                INICIO: <span className="text-blue-700">{fechaHoraEjecucion(v.inicio)}</span> ⇒ FIN: <span className="text-blue-700">{fechaHoraEjecucion(v.fin)}</span>
+              </span>
+              {machines.some(m => (config.shifts[m.id]?.saturday ?? 'EMPTY') !== 'EMPTY') && (
+                sabadoCuentaEnPlanta(planta)
+                  ? <span className="text-[9px] font-black text-emerald-700">Turno Sábado incluido</span>
+                  : <span className="text-[9px] font-black text-amber-700">Turno Sábado activo, pero no cae en esta ventana: no suma horas</span>
+              )}
+            </div>
+          );
+        })()}
         {/* Aviso de calendario para el Turno Sábado (ver marcarDiaComoJornada en @/lib/dias-laborables):
             si alguna máquina de esta planta ya tiene Sábado activo, pero el sábado relevante (el
             elegido en "Evaluar Capacidad", o si no el próximo) no está marcado como Jornada en el

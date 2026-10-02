@@ -9,7 +9,7 @@ import {
 } from '@/lib/planes-txt';
 
 // API de planes tácticos en TXT (ver src/lib/planes-txt.ts para la estructura de carpetas).
-//   POST /api/planes-txt   { modulo, centro, fechaObjetivo, contenido, html? }  -> escribe/sobrescribe
+//   POST /api/planes-txt   { modulo, centro, fechaObjetivo, contenido, html?, estado? }  -> escribe/sobrescribe
 //   GET  /api/planes-txt?modulo=&centro=&fecha=[&anio=&mes=][&formato=json|meta][&descargar=1]
 //   GET  /api/planes-txt?diagnostico=1   -> qué carpeta usa el servidor y si puede escribir en ella
 //   DELETE /api/planes-txt?modulo=&centro=&fecha=  -> borra solo la foto del correo (tras enviar)
@@ -18,6 +18,9 @@ import {
 // exactamente lo guardado, con el formato del correo, sin recalcular nada. Es temporal: se borra
 // cuando el envío sale bien (el correo ya queda en la bandeja de entrada). formato=meta solo
 // confirma si existe (ruta + fecha de modificación), sin leer el contenido.
+// `estado` es el respaldo del módulo (lo planificado: turnos, corridas, ajustes manuales) para volver
+// a cargarlo en pantalla desde "Recuperar y revisar" — {fecha}.estado.json. A diferencia de la foto
+// del correo, NO se borra al enviar: es el registro de lo que se planificó.
 // La ruta en disco se arma SOLO con valores validados contra listas cerradas (módulo, centro) y
 // formatos fijos (fecha, año, mes): el cliente nunca manda segmentos de ruta libres.
 
@@ -54,6 +57,7 @@ const rutaPlan = (p: { anio: string; mes: string; modulo: ModuloPlanTxt; centro:
   path.join(raizPlanes(), ...segmentosPlanTxt(p));
 
 const rutaHtml = (rutaTxt: string) => rutaTxt.replace(/\.txt$/, '.correo.html');
+const rutaEstado = (rutaTxt: string) => rutaTxt.replace(/\.txt$/, '.estado.json');
 
 const errorFs =(e: unknown, accion: string) => {
   const err = e as NodeJS.ErrnoException;
@@ -72,13 +76,15 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: 'Cuerpo JSON inválido' }, { status: 400 });
   }
-  const { modulo, centro, fechaObjetivo, contenido, html } = body;
+  const { modulo, centro, fechaObjetivo, contenido, html, estado } = body;
   if (!esModuloPlanTxt(modulo)) return NextResponse.json({ error: 'Módulo inválido' }, { status: 400 });
   if (!esCentroPlanTxt(centro)) return NextResponse.json({ error: 'Centro inválido (1000 o 2000)' }, { status: 400 });
   if (!esFechaPlanTxt(fechaObjetivo)) return NextResponse.json({ error: 'fechaObjetivo inválida (yyyy-MM-dd)' }, { status: 400 });
   if (typeof contenido !== 'string' || !contenido.trim()) return NextResponse.json({ error: 'Contenido vacío' }, { status: 400 });
   if (contenido.length > MAX_CONTENIDO) return NextResponse.json({ error: 'Contenido demasiado grande' }, { status: 413 });
   if (html !== undefined && (typeof html !== 'string' || html.length > MAX_CONTENIDO)) return NextResponse.json({ error: 'html inválido o demasiado grande' }, { status: 400 });
+  const estadoJson = estado !== undefined && estado !== null ? JSON.stringify(estado) : null;
+  if (estadoJson !== null && (typeof estado !== 'object' || estadoJson.length > MAX_CONTENIDO)) return NextResponse.json({ error: 'estado inválido o demasiado grande' }, { status: 400 });
 
   // Año/mes de la GENERACIÓN en hora Ecuador (no de la fecha objetivo, ver planes-txt.ts).
   const errorRaiz = await verificarRaiz();
@@ -94,6 +100,9 @@ export async function POST(req: NextRequest) {
     // correo de otro momento que ya no coincide con el TXT recién escrito.
     if (typeof html === 'string' && html.trim()) await fs.writeFile(rutaHtml(ruta), html, 'utf8');
     else await fs.rm(rutaHtml(ruta), { force: true });
+    // Mismo criterio: un respaldo de otro guardado no debe quedar junto a un TXT que no le corresponde.
+    if (estadoJson !== null) await fs.writeFile(rutaEstado(ruta), estadoJson, 'utf8');
+    else await fs.rm(rutaEstado(ruta), { force: true });
   } catch (e) {
     return errorFs(e, 'guardar');
   }
@@ -215,7 +224,9 @@ export async function GET(req: NextRequest) {
     contenido = contenido.replace(/^﻿/, '');
     if (formato === 'json') {
       const html = await fs.readFile(rutaHtml(ruta), 'utf8').catch(() => null);
-      return NextResponse.json({ ruta, modificado, contenido, html });
+      // Respaldo ausente o ilegible = null: el reporte se revisa/envía igual, solo no se carga en el módulo.
+      const estado = await fs.readFile(rutaEstado(ruta), 'utf8').then(t => JSON.parse(t) as unknown).catch(() => null);
+      return NextResponse.json({ ruta, modificado, contenido, html, estado });
     }
     const headers: Record<string, string> = { 'Content-Type': 'text/plain; charset=utf-8', 'X-Ruta-Plan': encodeURI(ruta) };
     if (q.get('descargar') === '1') headers['Content-Disposition'] = `attachment; filename="${path.basename(ruta)}"`;

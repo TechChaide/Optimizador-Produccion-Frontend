@@ -9,7 +9,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from '@/components/ui/button';
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
-import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario } from '@/lib/restriccionesCapacidad';
+import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario, intervaloDeHorario, horasSolapadas } from '@/lib/restriccionesCapacidad';
+import { ejecucionPlanHtml, fechaHoraEjecucion } from '@/lib/ventana-plan';
 import { serviciosService } from '@/services/servicios.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
@@ -18,7 +19,8 @@ import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/inte
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useReportePlanTxt, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo } from '@/components/ReportePlanTxtFlujo';
-import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
+import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, esDiaNoLaborable, cargarDiasNoLaborables, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, parseISO, addMonths, subMonths, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -59,13 +61,19 @@ interface EmpaqueShiftConfig {
   operadoresNight: number;
   operadoresSaturday: number;
   mttoPreventivoHoras: number;
+  // true = el planificador escribió el mantenimiento a mano; false = se usa lo que trae SAP para la
+  // ventana del plan (máquinas de la restricción MANTENIMIENTO, ver mttoSAPEmpaque).
+  mttoManual: boolean;
+  // Rendimiento de la máquina (%), precargado desde la restricción Rendimiento_<máquina> del grupo.
+  rendimiento: number;
   activa: boolean;
 }
 
 // Solo Centro 1000 (Quito) tiene una empacadora registrada hoy — se agrega aquí la de Guayaquil el
 // día que exista, sin tocar el resto del cálculo (ya está escrito por centro).
-const EMPAQUE_MACHINES_BY_CENTRO: Record<'1000' | '2000', { id: string; nombre: string }[]> = {
-  '1000': [{ id: 'EMPACADORA_ELECTROTECKS', nombre: 'Empacadora Electrotecks' }],
+// restriccionRendimiento: nombre de la restricción del grupo con el % de rendimiento de esa máquina.
+const EMPAQUE_MACHINES_BY_CENTRO: Record<'1000' | '2000', { id: string; nombre: string; restriccionRendimiento: string }[]> = {
+  '1000': [{ id: 'EMPACADORA_ELECTROTECKS', nombre: 'Empacadora Electrotecks', restriccionRendimiento: 'Rendimiento_Electrotecks' }],
   '2000': [],
 };
 
@@ -185,6 +193,7 @@ interface SnapshotVentaExterna {
   ordenes: Record<string, unknown>[];
   ordenesFert: Record<string, unknown>[];
   tiemposEnsamblado: Record<string, unknown>[];
+  mantenimientosSAP?: Record<string, unknown>[];
   diasNoLaborables: string[];
   diasLaborablesExtra: string[];
   // Resultado YA CALCULADO del tab "Data Aprobada" (ver fetchDataAprobada) — a diferencia del resto
@@ -228,11 +237,16 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // se desactivó como corresponde.
   const [autoGenerarP2Pendiente, setAutoGenerarP2Pendiente] = useState(false);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
+  // Panel flotante de progreso de "Sincronizar" (ver handleSincronizarYGenerar y sus fases).
+  const panelProgreso = usePanelProgreso();
   const [grupos, setGrupos] = useState<Grupo[]>([]);
   const [restricciones, setRestricciones] = useState<Restriccion[]>([]);
   const [ordenes, setOrders] = useState<Record<string, unknown>[]>([]);
   const [ordenesFert, setOrdersFert] = useState<Record<string, unknown>[]>([]);
   const [tiemposEnsamblado, setTiemposEnsamblado] = useState<Record<string, unknown>[]>([]);
+  // Mantenimiento preventivo programado en SAP (ListarMantenimientoPreventivosProgramados), solo para
+  // las máquinas de Empaque (ver mttoSAPEmpaque).
+  const [mantenimientosSAP, setMantenimientosSAP] = useState<Record<string, unknown>[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   // Días NO laborables (feriados + días que la planta decide no trabajar) del calendario configurado.
   // Vacío = solo se saltan fines de semana. Se carga en el init de abajo.
@@ -388,12 +402,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     { v: 'H3', l: '07:00 - 18:00', h: 11 },
     { v: 'H4', l: '07:00 - 19:00', h: 12 },
     { v: 'H5', l: '07:00 - 13:00', h: 6 },
-  ], [jornadaEmpaquePorCentro['1000'].dia, jornadaEmpaquePorCentro['2000'].dia, jornadaEmpaquePorCentro['1000'].finDeSemana, jornadaEmpaquePorCentro['2000'].finDeSemana]), [jornadaEmpaquePorCentro]);
+  ], [jornadaEmpaquePorCentro['1000'].dia, jornadaEmpaquePorCentro['2000'].dia, jornadaEmpaquePorCentro['1000'].finDeSemana, jornadaEmpaquePorCentro['2000'].finDeSemana, ...jornadaEmpaquePorCentro['1000'].catalogo.dia, ...jornadaEmpaquePorCentro['2000'].catalogo.dia, ...jornadaEmpaquePorCentro['1000'].catalogo.finDeSemana, ...jornadaEmpaquePorCentro['2000'].catalogo.finDeSemana]), [jornadaEmpaquePorCentro]);
   const nightShiftOptionsEmpaque = useMemo(() => opcionesConHorarios([
     { v: 'EMPTY', l: 'VACÍO', h: 0 },
     { v: 'A19', l: '19:00 - 05:30', h: 10.5 },
     { v: 'B21', l: '21:00 - 05:30', h: 8.5 },
-  ], [jornadaEmpaquePorCentro['1000'].noche, jornadaEmpaquePorCentro['2000'].noche]), [jornadaEmpaquePorCentro]);
+  ], [jornadaEmpaquePorCentro['1000'].noche, jornadaEmpaquePorCentro['2000'].noche, ...jornadaEmpaquePorCentro['1000'].catalogo.noche, ...jornadaEmpaquePorCentro['2000'].catalogo.noche]), [jornadaEmpaquePorCentro]);
 
   // Valores de respaldo: la precarga de abajo los reemplaza al montar con la jornada del grupo.
   const [empaqueConfig, setEmpaqueConfig] = useState<Record<string, EmpaqueShiftConfig>>({
@@ -402,6 +416,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       paroDay: 0, paroNight: 0, paroSaturday: 0,
       operadoresDay: 4, operadoresNight: 4, operadoresSaturday: 4,
       mttoPreventivoHoras: 0,
+      mttoManual: false,
+      rendimiento: 100,
       activa: true,
     },
   });
@@ -414,19 +430,21 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     (['1000', '2000'] as const).forEach(centro => {
       const jornada = jornadaEmpaquePorCentro[centro];
       const paro = porcentajeRestriccion(restricciones, codigoGrupoVentaExternaDe(centro), RESTRICCION_CAPACIDAD.parosPlanificados);
-      const firma = JSON.stringify([jornada, paro]);
+      const rendimientos = EMPAQUE_MACHINES_BY_CENTRO[centro].map(m => porcentajeRestriccion(restricciones, codigoGrupoVentaExternaDe(centro), m.restriccionRendimiento));
+      const firma = JSON.stringify([jornada, paro, rendimientos]);
       if (firma === firmaJornadaEmpaque.current[centro]) return;
       firmaJornadaEmpaque.current[centro] = firma;
       const day = claveDeHorario(shiftOptionsEmpaque, jornada.dia);
       const night = jornada.numTurnos >= 2 ? claveDeHorario(nightShiftOptionsEmpaque, jornada.noche) : 'EMPTY';
       setEmpaqueConfig(prev => {
         const next = { ...prev };
-        EMPAQUE_MACHINES_BY_CENTRO[centro].forEach(m => {
+        EMPAQUE_MACHINES_BY_CENTRO[centro].forEach((m, i) => {
           if (!next[m.id]) return;
           next[m.id] = {
             ...next[m.id],
             day, night, saturday: 'EMPTY',
             ...(paro !== null ? { paroDay: paro, paroNight: paro, paroSaturday: paro } : {}),
+            ...(rendimientos[i] !== null ? { rendimiento: rendimientos[i]! } : {}),
           };
         });
         return next;
@@ -478,10 +496,16 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     }
   };
 
-  const fetchOrdenes = async () => {
+  const fetchOrdenes = async (onConsulta?: (nombre: string, ok: boolean) => void) => {
     try {
-      const pProv = serviciosService.OrdenesProvisionalesPaginados(1, 20000).catch(() => ({ data: [] }));
-      const pFert = serviciosService.getOrdenesFert(1, 20000).catch(() => ({ data: [] }));
+      const pProv = serviciosService.OrdenesProvisionalesPaginados(1, 20000).then(
+        r => { onConsulta?.('Órdenes provisionales', true); return r; },
+        () => { onConsulta?.('Órdenes provisionales', false); return { data: [] }; }
+      );
+      const pFert = serviciosService.getOrdenesFert(1, 20000).then(
+        r => { onConsulta?.('Órdenes FERT', true); return r; },
+        () => { onConsulta?.('Órdenes FERT', false); return { data: [] }; }
+      );
       
       const [resProv, resFert] = await Promise.all([pProv, pFert]);
       
@@ -518,20 +542,50 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Sincronización manual: se dispara con el botón "Sincronizar" del encabezado, no al abrir el
   // módulo — mismo criterio que Corte Espuma (ver [[carga_manual_modulos_tacticos]]). Entrar a mirar
   // no debe costar 4 llamadas pesadas a SAP (Provisionales/FERT ~20K filas cada una) cada vez.
-  const handleSincronizarYGenerar = useCallback(async () => {
+  // Antes de tocar SAP, el panel pide la "Ventana de Producción" (desde/hasta) — que acá ya era un
+  // paso obligatorio para generar — y muestra para qué fecha se graba cada P2. Luego: Ventana →
+  // Datos (x/5) → Necesidad BOM → Generar P2 (x/3); las dos últimas corren en sus efectos.
+  const ejecutarSincronizacion = useCallback(async (desde: string, hasta: string, noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
     setIsLoading(true);
     setSyncStep('sincronizando');
+    const fechas = eachDayOfInterval({ start: parseISO(desde), end: parseISO(hasta) }).map(d => format(d, 'yyyy-MM-dd'));
+    setSelectedDates(fechas);
+    setViewDate(parseISO(desde));
+    const corta = (f: string) => format(parseISO(f), 'EEE dd/MM', { locale: es });
+    panelProgreso.iniciar('Venta Externa — Sincronizar y generar', [
+      { id: 'fecha', etiqueta: desde === hasta ? `Ventana de producción: ${corta(desde)}` : `Ventana de producción: ${corta(desde)} → ${corta(hasta)}` },
+      { id: 'datos', etiqueta: 'Sincronizando datos' },
+      { id: 'bom', etiqueta: 'Necesidad BOM (FERT)' },
+      { id: 'p2gen', etiqueta: 'Generando P2 (Espumas / Rollos)' },
+    ]);
+    panelProgreso.actualizar('fecha', { estado: 'ok' });
+    const TOTAL_CONSULTAS = 6;
+    let hechas = 0;
+    const fallidas: string[] = [];
+    const contar = (nombre: string, ok: boolean) => {
+      hechas += 1;
+      if (!ok) fallidas.push(nombre);
+      panelProgreso.actualizar('datos', { progreso: { actual: hechas, total: TOTAL_CONSULTAS } });
+    };
+    panelProgreso.actualizar('datos', { estado: 'en_curso', progreso: { actual: 0, total: TOTAL_CONSULTAS } });
     try {
-      const [groups, { noLaborables, laborablesExtra }] = await Promise.all([
-        fetchGrupos(),
-        cargarDiasNoLaborables(),
-      ]);
+      const groups = await fetchGrupos();
+      contar('Grupos', groups.length > 0);
       const ids = groups.map(g => g.codigo_grupo);
-      const [restrs, ordenesRes, tiempos] = await Promise.all([
-        fetchRestricciones(ids),
-        fetchOrdenes(),
-        fetchTiemposEnsamblado(groups),
+      const [restrs, ordenesRes, tiempos, mttos] = await Promise.all([
+        fetchRestricciones(ids).then(r => { contar('Restricciones', true); return r; }),
+        fetchOrdenes(contar),
+        fetchTiemposEnsamblado(groups).then(r => { contar('Tiempos de ensamblado', true); return r; }),
+        serviciosService.ListarMantenimientoPreventivosProgramados().then(
+          r => { contar('Mantenimientos', true); return (Array.isArray(r.data) ? r.data : r.data?.data || []) as Record<string, unknown>[]; },
+          () => { contar('Mantenimientos', false); return [] as Record<string, unknown>[]; }
+        ),
       ]);
+      setMantenimientosSAP(mttos);
+      panelProgreso.actualizar('datos', {
+        estado: fallidas.length > 0 ? 'aviso' : 'ok',
+        detalle: fallidas.length > 0 ? `Sin respuesta: ${fallidas.join(', ')} — se siguió con datos vacíos.` : undefined,
+      });
       setDiasNoLaborables(noLaborables);
       setDiasLaborablesExtra(laborablesExtra);
       setDatosCargados(true);
@@ -541,6 +595,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         ordenes: ordenesRes.ordenes,
         ordenesFert: ordenesRes.ordenesFert,
         tiemposEnsamblado: tiempos,
+        mantenimientosSAP: mttos,
         diasNoLaborables: [...noLaborables],
         diasLaborablesExtra: [...laborablesExtra],
         // Data Aprobada y la Necesidad BOM se sincronizan aparte (ver fetchDataAprobada y
@@ -557,10 +612,52 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // vieja. Se dispara desde el efecto de más abajo, que ve la versión fresca una vez que el
       // siguiente render ya ocurrió (mismo criterio que Corte y Laminado/Corte Espuma).
       setAutoGenerarPendiente(true);
+    } catch (e) {
+      panelProgreso.actualizar('datos', { estado: 'error', detalle: (e as Error).message });
+      panelProgreso.actualizar('bom', { estado: 'omitido' });
+      panelProgreso.actualizar('p2gen', { estado: 'omitido' });
+      panelProgreso.concluir(`Error al sincronizar: ${(e as Error).message}`);
+      setSyncStep('idle');
     } finally {
       setIsLoading(false);
     }
-  }, [dataAprobada, necesidadEspumas1000, necesidadEspumas2000, necesidadRollos1000, necesidadRollos2000]);
+  }, [dataAprobada, necesidadEspumas1000, necesidadEspumas2000, necesidadRollos1000, necesidadRollos2000, panelProgreso]);
+
+  const handleSincronizarYGenerar = useCallback(async () => {
+    let noLaborables: DiasNoLaborables;
+    let laborablesExtra: DiasNoLaborables;
+    try {
+      ({ noLaborables, laborablesExtra } = await cargarDiasNoLaborables());
+    } catch (e) {
+      addNotification('error', `No se pudo cargar el calendario laboral: ${(e as Error).message}`);
+      return;
+    }
+    const siguienteHabil = format(nextBusinessDayCal(new Date(), noLaborables, laborablesExtra), 'yyyy-MM-dd');
+    const actuales = [...selectedDates].sort();
+    const larga = (f: string) => format(parseISO(f), 'EEE dd/MM/yyyy', { locale: es });
+    panelProgreso.pedirFecha({
+      titulo: 'Venta Externa — Sincronizar y generar',
+      fechaInicial: actuales[0] ?? siguienteHabil,
+      hastaInicial: actuales[actuales.length - 1] ?? siguienteHabil,
+      detalle: (desde, hasta) => {
+        const fin = hasta ?? desde ?? siguienteHabil;
+        return [
+          { etiqueta: 'Órdenes FERT / provisionales', valor: desde && desde !== fin ? `${larga(desde)} → ${larga(fin)}` : larga(fin) },
+          { etiqueta: 'P2 Espumas se graba para', valor: larga(fin) },
+          { etiqueta: 'P2 Rollos se graba para', valor: larga(siguienteHabil) },
+        ];
+      },
+      aviso: (desde, hasta) => {
+        const dias = desde && hasta ? eachDayOfInterval({ start: parseISO(desde), end: parseISO(hasta) }) : [];
+        return dias.length > 0 && dias.every(d => esDiaNoLaborable(d, noLaborables, laborablesExtra))
+          ? 'Todas las fechas son no laborables según el calendario; puede no haber órdenes.'
+          : null;
+      },
+      onConfirmar: (desde, hasta) => {
+        if (desde) void ejecutarSincronizacion(desde, hasta ?? desde, noLaborables, laborablesExtra);
+      },
+    });
+  }, [selectedDates, panelProgreso, ejecutarSincronizacion, addNotification]);
 
   // Rehidratación: si ya se había sincronizado en esta sesión, se recupera lo trabajado en vez de
   // dejar el módulo vacío al volver de otro módulo (ver @/lib/cache-modulos). Incluye Data Aprobada
@@ -575,6 +672,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       setOrders(snap.ordenes);
       setOrdersFert(snap.ordenesFert);
       setTiemposEnsamblado(snap.tiemposEnsamblado);
+      setMantenimientosSAP(snap.mantenimientosSAP || []);
       setDiasNoLaborables(new Set(snap.diasNoLaborables));
       setDiasLaborablesExtra(new Set(snap.diasLaborablesExtra || []));
       setDataAprobada(snap.dataAprobada || {});
@@ -1031,10 +1129,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     };
   };
 
-  const handleCalcularNecesidadRollos = useCallback(async () => {
+  // silencioso: desde el panel de progreso (Sincronizar) el resultado se muestra en el panel, sin
+  // toast aparte que lo tape; desde el botón manual "Generar Necesidades · BOM FERT" sigue el toast.
+  const handleCalcularNecesidadRollos = useCallback(async (silencioso = false): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string; progreso?: { actual: number; total: number } }> => {
     if (selectedDates.length === 0) {
-      addNotification('warning', 'Selecciona al menos una fecha (filtro "Fecha") antes de calcular la necesidad.');
-      return;
+      const mensaje = 'Selecciona al menos una fecha (filtro "Fecha") antes de calcular la necesidad.';
+      if (!silencioso) addNotification('warning', mensaje);
+      return { estado: 'aviso', mensaje };
     }
     setIsExplodingBom(true);
     setBomDiagnostico({ sinMatch: [], conError: [] });
@@ -1071,9 +1172,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         conError.length > 0 ? `${conError.length} FERT con error al consultar el BOM` : null,
       ].filter(Boolean).join(' · ');
       const nivel = sinMatch.length + conError.length > 0 ? 'warning' : 'success';
-      addNotification(nivel, `Necesidad calculada (ventana ${ventanaP2.inicio} → ${ventanaP2.fin}) — Centro 1000: ${n1000.espumas.length} espumas / ${n1000.rollos.length} rollos. Centro 2000: ${n2000.espumas.length} espumas / ${n2000.rollos.length} rollos.${incidencias ? ` (${incidencias})` : ''}`);
+      const resumen = `Centro 1000: ${n1000.espumas.length} espumas / ${n1000.rollos.length} rollos. Centro 2000: ${n2000.espumas.length} espumas / ${n2000.rollos.length} rollos.${incidencias ? ` (${incidencias})` : ''}`;
+      if (!silencioso) addNotification(nivel, `Necesidad calculada (ventana ${ventanaP2.inicio} → ${ventanaP2.fin}) — ${resumen}`);
+      return { estado: nivel === 'warning' ? 'aviso' : 'ok', mensaje: resumen, progreso: { actual: current, total } };
     } catch (error) {
-      addNotification('error', `Error al calcular la necesidad: ${(error as Error).message}`);
+      if (!silencioso) addNotification('error', `Error al calcular la necesidad: ${(error as Error).message}`);
+      return { estado: 'error', mensaje: (error as Error).message };
     } finally {
       setIsExplodingBom(false);
     }
@@ -1093,15 +1197,34 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // Sin Ventana de Producción elegida no se calculó necesidad fresca — encadenar la generación de
       // P2 acá usaría necesidad vieja (o vacía) para decidir qué desactivar, así que se deja tal como
       // antes: el usuario elige fecha y dispara "Generar Todos los P2" a mano.
+      panelProgreso.actualizar('bom', { estado: 'omitido', detalle: 'Sin Ventana de Producción elegida.' });
+      panelProgreso.actualizar('p2gen', { estado: 'omitido' });
+      panelProgreso.concluir();
       setSyncStep('idle');
       return;
     }
     setSyncStep('generando');
-    handleCalcularNecesidadRollos().finally(() => {
+    panelProgreso.actualizar('bom', { estado: 'en_curso' });
+    handleCalcularNecesidadRollos(true).then(r => {
+      // Conteo final en r.progreso: el último setBomProgress cae en el mismo render que syncStep
+      // vuelve a 'idle' y el efecto de avance no lo alcanza (quedaba 76/77).
+      panelProgreso.actualizar('bom', { estado: r.estado, detalle: r.mensaje, ...(r.progreso ? { progreso: r.progreso } : {}) });
       setSyncStep('idle');
+      if (r.estado === 'error') {
+        // Sin necesidad fresca no se generan P2: decidirían qué desactivar con datos viejos.
+        panelProgreso.actualizar('p2gen', { estado: 'omitido', detalle: 'No se generaron P2 porque falló el cálculo de necesidad.' });
+        panelProgreso.concluir();
+        return;
+      }
       setAutoGenerarP2Pendiente(true);
     });
-  }, [autoGenerarPendiente, handleCalcularNecesidadRollos, selectedDates]);
+  }, [autoGenerarPendiente, handleCalcularNecesidadRollos, selectedDates, panelProgreso]);
+
+  // Avance de la explosión BOM (materiales explotados / total) reflejado en el panel mientras corre.
+  useEffect(() => {
+    if (syncStep !== 'generando' || bomProgress.total === 0) return;
+    panelProgreso.actualizar('bom', { progreso: { actual: bomProgress.current, total: bomProgress.total } });
+  }, [syncStep, bomProgress, panelProgreso.actualizar]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Consulta inversa: antes de (re)generar un P2, revisa si ya existe uno activo para ese centro+tipo
   // y, de existir, si algún plan P3 (u otro consumidor) ya ejecutó contra él — un DetalleTactico
@@ -1496,7 +1619,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // condiciones de carrera sobre el mismo PlanGrupo activo), y consolida los resultados en un único
   // resumen — no dispara notificaciones sueltas. Rollos - Centro 2000 no aplica: no hay actividad de
   // Corte y Laminado en ese centro.
-  const handleGenerarTodosPlanesP2 = useCallback(async () => {
+  // silencioso / onAvance: desde el panel de progreso (Sincronizar) el resumen y el avance (x/3) se
+  // muestran en el panel; desde el botón manual sigue el toast de siempre.
+  const handleGenerarTodosPlanesP2 = useCallback(async (silencioso = false, onAvance?: (hechos: number, total: number) => void): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string }> => {
     setIsSavingAllPlanP2(true);
     try {
       const combos: Array<{ centro: '1000' | '2000'; tipo: 'ESPUMAS' | 'ROLLOS' }> = [
@@ -1519,6 +1644,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           }
         }
         resultados.push(resultado);
+        onAvance?.(resultados.length, combos.length);
       }
 
       const ok = resultados.filter(r => r.status === 'ok');
@@ -1528,10 +1654,16 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
       const resumen = resultados.map(r => `[${r.status.toUpperCase()}] ${r.mensaje}`).join(' | ');
       if (errores.length === 0 && bloqueados.length === 0) {
-        addNotification('success', `Generación completa: ${ok.length} plan(es) guardado(s), ${sinDatos.length} sin datos. ${resumen}`);
-      } else {
-        addNotification('warning', `Generación con incidencias: ${ok.length} ok, ${bloqueados.length} bloqueado(s), ${sinDatos.length} sin datos, ${errores.length} error(es). ${resumen}`);
+        const mensaje = `${ok.length} plan(es) guardado(s), ${sinDatos.length} sin datos.`;
+        if (!silencioso) addNotification('success', `Generación completa: ${mensaje} ${resumen}`);
+        return { estado: 'ok', mensaje };
       }
+      const mensaje = `${ok.length} ok, ${bloqueados.length} bloqueado(s), ${sinDatos.length} sin datos, ${errores.length} error(es). ${resumen}`;
+      if (!silencioso) addNotification('warning', `Generación con incidencias: ${mensaje}`);
+      return { estado: errores.length > 0 ? 'error' : 'aviso', mensaje };
+    } catch (e) {
+      if (!silencioso) addNotification('error', `Error al generar los P2: ${(e as Error).message}`);
+      return { estado: 'error', mensaje: (e as Error).message };
     } finally {
       setIsSavingAllPlanP2(false);
     }
@@ -1547,8 +1679,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   useEffect(() => {
     if (!autoGenerarP2Pendiente) return;
     setAutoGenerarP2Pendiente(false);
-    handleGenerarTodosPlanesP2();
-  }, [autoGenerarP2Pendiente, handleGenerarTodosPlanesP2]);
+    panelProgreso.actualizar('p2gen', { estado: 'en_curso', progreso: { actual: 0, total: 3 } });
+    handleGenerarTodosPlanesP2(true, (hechos, total) => panelProgreso.actualizar('p2gen', { progreso: { actual: hechos, total } }))
+      .then(r => {
+        panelProgreso.actualizar('p2gen', { estado: r.estado, detalle: r.mensaje });
+        panelProgreso.concluir();
+      });
+  }, [autoGenerarP2Pendiente, handleGenerarTodosPlanesP2, panelProgreso]);
 
   // "Data Aprobada": por cada P2 propio activo (Espumas/Rollos por centro), recupera qué respondió
   // el plan consumidor "P3" (nunca "PFD" — ver esPlanP3) — un DetalleTactico con
@@ -1650,18 +1787,101 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // config, menos % de paro y mantenimiento preventivo real). Operadores por turno son informativos
   // (no multiplican la capacidad), mismo criterio que Corte Espuma ya aplica a su propio campo de
   // operador (ver comentario "el campo ni se muestra ni ocupa espacio" en ese módulo).
+  // Ventana del plan de Empaque (mismo concepto que Corte Espuma / Laminado, pedido del usuario
+  // 2026-10-02): el plan es del siguiente día hábil y se ejecuta desde la NOCHE del último día hábil
+  // L-V anterior, pasando por el sábado (solo si su turno está activo), hasta el fin del turno DÍA
+  // del plan. Ej. hoy vie 02/10 → plan lun 05/10: Noche vie 02/10 → (Sábado 03/10) → Día lun 05/10.
+  const ventanaEmpaque = useMemo(() => {
+    const diaPlan = siguienteDiaHabil(new Date());
+    let noche = addBusinessDaysCal(diaPlan, -1, diasNoLaborables, diasLaborablesExtra);
+    while (getDay(noche) === 6 || getDay(noche) === 0) noche = addBusinessDaysCal(noche, -1, diasNoLaborables, diasLaborablesExtra);
+    const sabados: Date[] = [];
+    for (let d = addDays(noche, 1); d < diaPlan; d = addDays(d, 1)) if (getDay(d) === 6) sabados.push(d);
+    const etiqueta = (opciones: { v: string; l: string }[], v: string) => (v === 'EMPTY' ? null : opciones.find(o => o.v === v)?.l ?? null);
+    const turnosDe = (machineId: string) => {
+      const c = empaqueConfig[machineId];
+      if (!c || !c.activa) return [];
+      const turnos: { turno: 'Noche' | 'Sábado' | 'Día'; ini: Date; fin: Date }[] = [];
+      const agregar = (turno: 'Noche' | 'Sábado' | 'Día', dia: Date, l: string | null) => {
+        const iv = l ? intervaloDeHorario(dia, l) : null;
+        if (iv) turnos.push({ turno, ...iv });
+      };
+      agregar('Noche', noche, etiqueta(nightShiftOptionsEmpaque, c.night));
+      sabados.forEach(d => agregar('Sábado', d, etiqueta(shiftOptionsEmpaque, c.saturday)));
+      agregar('Día', diaPlan, etiqueta(shiftOptionsEmpaque, c.day));
+      return turnos;
+    };
+    const porCentro = (centro: '1000' | '2000') => {
+      const turnos = EMPAQUE_MACHINES_BY_CENTRO[centro].flatMap(m => turnosDe(m.id));
+      if (turnos.length === 0) return null;
+      return {
+        inicio: new Date(Math.min(...turnos.map(t => t.ini.getTime()))),
+        fin: new Date(Math.max(...turnos.map(t => t.fin.getTime()))),
+      };
+    };
+    return { diaPlan, noche, sabados, sabadoCuenta: sabados.length > 0, turnosDe, '1000': porCentro('1000'), '2000': porCentro('2000') };
+  }, [siguienteDiaHabil, diasNoLaborables, diasLaborablesExtra, empaqueConfig, shiftOptionsEmpaque, nightShiftOptionsEmpaque]);
+
+  // Mantenimiento de Empaque desde SAP: la restricción MANTENIMIENTO del grupo de cada centro dice qué
+  // máquina(s) SAP son las de empaque (ej. "MEE01", o varias separadas por "&"); de sus órdenes de
+  // mantenimiento programado se cuentan solo las horas que caen DENTRO de los turnos de la ventana
+  // del plan (mismo criterio que Corte Espuma / Laminado). SAP sugiere; el planificador puede ajustar
+  // (mttoManual), igual que la corrida pendiente de Laminado.
+  const mttoSAPEmpaque = useMemo(() => {
+    const norm = (v: unknown) => String(v ?? '').trim().toUpperCase();
+    // Primer campo con valor (los endpoints de SAP varían mayúsculas/nombres entre versiones).
+    const getProp = (row: Record<string, unknown>, keys: string[]) => {
+      for (const k of keys) if (row[k] !== undefined && row[k] !== null && row[k] !== '') return row[k];
+      return '';
+    };
+    const resultado: Record<string, { horas: number; maquinas: string[]; ordenes: { maquina: string; inicio: string; horas: number }[] }> = {};
+    (['1000', '2000'] as const).forEach(centro => {
+      const grupo = codigoGrupoVentaExternaDe(centro);
+      const maquinasSAP = restricciones
+        .filter(r => r.codigo_grupo === grupo && r.estado === 'A' && norm(r.nombre_restriccion) === 'MANTENIMIENTO')
+        .flatMap(r => String(r.valor_restriccion || '').split(/[&,;]/).map(norm))
+        .filter(Boolean);
+      EMPAQUE_MACHINES_BY_CENTRO[centro].forEach(m => {
+        const turnos = ventanaEmpaque.turnosDe(m.id);
+        const ordenes = maquinasSAP.length === 0 ? [] : mantenimientosSAP.flatMap(row => {
+          const maquina = norm(getProp(row, ['ID_MAQUINA', 'MAQUINA']));
+          if (!maquinasSAP.includes(maquina)) return [];
+          const ini = new Date(String(getProp(row, ['FECHA_OT_PRG_INI'])));
+          const fin = new Date(String(getProp(row, ['FECHA_OT_PRG_FIN'])));
+          if (isNaN(ini.getTime()) || isNaN(fin.getTime()) || fin <= ini) return [];
+          const enVentana = turnos.reduce((acc, t) => acc + horasSolapadas(ini, fin, t.ini, t.fin), 0);
+          if (enVentana <= 0) return [];
+          const durMin = Number(getProp(row, ['Duracion_Minutos'])) || 0;
+          const horas = durMin > 0 ? Math.min(durMin / 60, enVentana) : enVentana;
+          return [{ maquina, inicio: format(ini, 'EEE dd/MM HH:mm', { locale: es }), horas }];
+        });
+        resultado[m.id] = { horas: ordenes.reduce((acc, o) => acc + o.horas, 0), maquinas: maquinasSAP, ordenes };
+      });
+    });
+    return resultado;
+  }, [restricciones, codigoGrupoVentaExternaDe, mantenimientosSAP, ventanaEmpaque]);
+  // Mantenimiento que se descuenta: el ajustado a mano, o el que trae SAP para la ventana.
+  const mttoEmpaqueDe = useCallback((id: string) => {
+    const c = empaqueConfig[id];
+    if (!c) return 0;
+    return c.mttoManual ? c.mttoPreventivoHoras : (mttoSAPEmpaque[id]?.horas ?? 0);
+  }, [empaqueConfig, mttoSAPEmpaque]);
+
   const capacidadEmpaquePorCentro = useMemo(() => {
     const calcular = (centro: '1000' | '2000') => EMPAQUE_MACHINES_BY_CENTRO[centro].reduce((total, m) => {
       const c = empaqueConfig[m.id];
       if (!c || !c.activa) return total;
       const hDay = shiftOptionsEmpaque.find(o => o.v === c.day)?.h || 0;
       const hNight = nightShiftOptionsEmpaque.find(o => o.v === c.night)?.h || 0;
-      const hSat = shiftOptionsEmpaque.find(o => o.v === c.saturday)?.h || 0;
-      const bruto = hDay * (1 - c.paroDay / 100) + hNight * (1 - c.paroNight / 100) + hSat * (1 - c.paroSaturday / 100);
-      return total + Math.max(0, bruto - c.mttoPreventivoHoras);
+      // El Turno Sábado solo suma si un sábado cae dentro de la ventana del plan (ver ventanaEmpaque).
+      const hSat = ventanaEmpaque.sabadoCuenta ? (shiftOptionsEmpaque.find(o => o.v === c.saturday)?.h || 0) : 0;
+      // Rendimiento de la máquina (Rendimiento_<máquina>, ej. Electrotecks 56%) sobre las horas netas
+      // de paros; luego se descuenta el mantenimiento — mismo orden que Corte Espuma.
+      const neto = (hDay * (1 - c.paroDay / 100) + hNight * (1 - c.paroNight / 100) + hSat * (1 - c.paroSaturday / 100)) * (c.rendimiento / 100);
+      return total + Math.max(0, neto - mttoEmpaqueDe(m.id));
     }, 0);
     return { '1000': calcular('1000'), '2000': calcular('2000') };
-  }, [empaqueConfig, shiftOptionsEmpaque, nightShiftOptionsEmpaque]);
+  }, [empaqueConfig, shiftOptionsEmpaque, nightShiftOptionsEmpaque, ventanaEmpaque.sabadoCuenta, mttoEmpaqueDe]);
 
   // Bloque Espumas del resumen de Empaque: nivel FERT/PT (producto TERMINADO que de verdad se empaca),
   // no el componente/semi-elaborado — sube desde Data Aprobada "completo" hasta su FERT/PT padre
@@ -1786,38 +2006,51 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
     // Turnos/operadores de Empaque — mismo esquema ya aprobado (imagen compartida): Día/Noche/Sábado,
     // operadores por turno (informativo) y mantenimiento preventivo real.
+    // Detalle de la máquina — misma estructura que Corte Espuma / Laminado (pedido del usuario
+    // 2026-10-02): Turno | Fecha | Horario | horas brutas | paros | horas efectivas | operadores, en el
+    // orden en que se ejecuta el plan (Noche → Sábado si aplica → Día), luego Mantenimiento y el total
+    // de la máquina. Rendimiento = restricción Rendimiento_<máquina>; los operadores son informativos.
+    const fechaCorta = (d: Date) => format(d, 'EEE dd/MM', { locale: es });
+    const th = (t: string, align: 'left' | 'right' | 'center' = 'left') => `<td${align !== 'left' ? ` align="${align}"` : ''} style="padding:7px 10px;font-size:9px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #d1d5db;">${t}</td>`;
+    const tdBase = 'padding:7px 10px;font-size:11px;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;';
     const turnosHtml = EMPAQUE_MACHINES_BY_CENTRO[centro].map(m => {
       const c = empaqueConfig[m.id];
       if (!c) return '';
-      const filaTurno = (label: string, horarioLabel: string, operadores: number, color: string) => `
-        <tr>
-          <td style="padding:7px 10px;font-size:11px;font-weight:700;color:${color};border-bottom:1px solid #f3f4f6;">${label}</td>
-          <td style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;">${horarioLabel}</td>
-          <td align="center" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;">${operadores}</td>
+      const filaTurno = (label: string, fecha: string, horarioLabel: string, bruta: number, paroPct: number, operadores: number, fondo: string, color: string) => {
+        const neta = bruta * (1 - paroPct / 100) * (c.rendimiento / 100);
+        return `
+        <tr style="background:${fondo};">
+          <td style="${tdBase}font-weight:700;color:${color};">${label}</td>
+          <td style="${tdBase}color:#374151;text-transform:capitalize;white-space:nowrap;">${fecha || '—'}</td>
+          <td style="${tdBase}color:#374151;white-space:nowrap;">${horarioLabel.replace(' - ', ' a ')}</td>
+          <td align="right" style="${tdBase}color:#374151;">${bruta.toFixed(2)}</td>
+          <td align="right" style="${tdBase}color:#374151;">${bruta > 0 ? `${paroPct.toFixed(0)}%` : ''}</td>
+          <td align="right" style="${tdBase}color:#374151;">${bruta > 0 ? `${c.rendimiento.toFixed(0)}%` : ''}</td>
+          <td align="right" style="${tdBase}font-weight:700;color:${color};">${neta.toFixed(2)}</td>
+          <td align="center" style="${tdBase}color:#374151;">${bruta > 0 ? operadores : ''}</td>
         </tr>`;
+      };
+      const hDay = c.activa ? shiftOptionsEmpaque.find(o => o.v === c.day)?.h || 0 : 0;
+      const hNight = c.activa ? nightShiftOptionsEmpaque.find(o => o.v === c.night)?.h || 0 : 0;
+      const hSat = c.activa && ventanaEmpaque.sabadoCuenta ? shiftOptionsEmpaque.find(o => o.v === c.saturday)?.h || 0 : 0;
+      const mtto = mttoEmpaqueDe(m.id);
+      const total = Math.max(0, (hDay * (1 - c.paroDay / 100) + hNight * (1 - c.paroNight / 100) + hSat * (1 - c.paroSaturday / 100)) * (c.rendimiento / 100) - mtto);
       return `
   <tr>
     <td style="padding:18px 28px 4px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
-        <tr><td style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">${m.nombre} — turnos y operadores</td></tr>
-      </table>
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
+      <p style="margin:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Detalle por máquina — empaque</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:2px solid #111827;border-radius:10px;overflow:hidden;">
         <tr style="background:#f9fafb;">
-          <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Turno</td>
-          <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Horario</td>
-          <td align="center" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Operadores</td>
-        </tr>
-        ${filaTurno('Día', shiftOptionsEmpaque.find(o => o.v === c.day)?.l || '—', c.operadoresDay, '#047857')}
-        ${filaTurno('Noche', nightShiftOptionsEmpaque.find(o => o.v === c.night)?.l || '—', c.operadoresNight, '#4338ca')}
-        ${c.saturday === 'EMPTY' ? '' : filaTurno('Sábado', shiftOptionsEmpaque.find(o => o.v === c.saturday)?.l || '—', c.operadoresSaturday, '#b45309')}
-        <tr style="background:#fffbeb;">
-          <td colspan="2" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;">Mantenimiento Preventivo</td>
-          <td align="center" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;">${c.mttoPreventivoHoras.toFixed(2)} h</td>
-        </tr>
+          ${th('Turno')}${th('Fecha')}${th('Horario')}${th('Tiempo Máquina<br/>(Horas brutas)', 'right')}${th('Paros<br/>Planificados (%)', 'right')}${th('Rendimiento<br/>Máquina (%)', 'right')}${th('Tiempo Máquina<br/>(Horas Efectivas)', 'right')}${th('Operadores', 'center')}
+        </tr>${filaTurno('Noche', fechaCorta(ventanaEmpaque.noche), nightShiftOptionsEmpaque.find(o => o.v === c.night)?.l || '—', hNight, c.paroNight, c.operadoresNight, '#eef2ff', '#4338ca')}${hSat > 0 ? filaTurno('Sábado', ventanaEmpaque.sabados.map(fechaCorta).join(', '), shiftOptionsEmpaque.find(o => o.v === c.saturday)?.l || '—', hSat, c.paroSaturday, c.operadoresSaturday, '#fffbeb', '#b45309') : ''}${filaTurno('Día', fechaCorta(ventanaEmpaque.diaPlan), shiftOptionsEmpaque.find(o => o.v === c.day)?.l || '—', hDay, c.paroDay, c.operadoresDay, '#ecfdf5', '#047857')}
+        <tr style="background:#fffbeb;"><td colspan="7" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;">Mantenimiento Programado</td><td align="center" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #d1d5db;font-variant-numeric:tabular-nums;">${mtto > 0 ? `${mtto.toFixed(2)} h` : '–'}</td></tr>
+        <tr style="background:#ecfdf5;"><td colspan="7" style="padding:8px 10px;font-size:11px;font-weight:800;color:#111827;text-transform:uppercase;">${m.nombre}${c.activa ? '' : ' (fuera de servicio)'}</td><td align="center" style="padding:8px 10px;font-size:11px;font-weight:800;color:#111827;font-variant-numeric:tabular-nums;">${total.toFixed(2)} h</td></tr>
       </table>
     </td>
   </tr>`;
     }).join('');
+    const ventanaCentro = ventanaEmpaque[centro];
+    const ventanaHtml = ventanaCentro ? ejecucionPlanHtml(ventanaCentro.inicio, ventanaCentro.fin) : '';
 
     return `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#ffffff;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
@@ -1835,7 +2068,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     <td style="padding:26px 28px 6px;">
       <p style="margin:0;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Venta Externa / Muebles · Centro ${centro} · Producto Terminado de Empaque</p>
       <h1 style="margin:4px 0 0;font-size:20px;font-weight:700;color:#111827;">Gestión de tiempos y capacidad de Empaque Venta Externa / Muebles</h1>
-      <p style="margin:6px 0 0;font-size:12px;color:#6b7280;text-transform:capitalize;">${fechaLabel} · Correo automático, no responder</p>
+      <p style="margin:6px 0 0;font-size:12px;color:#6b7280;text-transform:capitalize;">${fechaLabel} · Correo automático, no responder</p>${ventanaHtml}
     </td>
   </tr>${bloqueCategoriaHtml('Detalle por categoría — Espumas (FERT/PT)', espumas)}${bloqueRollosHtml}${turnosHtml}
   ${!espumas && !rollos ? `
@@ -2745,12 +2978,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                 {/* Familia "Generar Necesidades": trae/calcula datos (sync o explosión BOM) sin
                     escribir nada — outline, tono índigo. "Generar Respuestas" (escribe Plan Grupo/
                     Detalle Táctico real) es sólido/primario. Mismos 2 niveles en los 4 módulos tácticos. */}
-                <Button onClick={handleCalcularNecesidadRollos} disabled={isExplodingBom || selectedDates.length === 0} variant="outline" className="h-10 px-6 rounded-2xl gap-2 font-bold text-xs uppercase border-indigo-200 text-indigo-700 hover:bg-indigo-50">
+                <Button onClick={() => handleCalcularNecesidadRollos()} disabled={isExplodingBom || selectedDates.length === 0} variant="outline" className="h-10 px-6 rounded-2xl gap-2 font-bold text-xs uppercase border-indigo-200 text-indigo-700 hover:bg-indigo-50">
                   {isExplodingBom ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
                   {isExplodingBom ? `Explotando BOM ${bomProgress.current}/${bomProgress.total}` : 'Generar Necesidades · BOM FERT'}
                 </Button>
                 <Button
-                  onClick={handleGenerarTodosPlanesP2}
+                  onClick={() => handleGenerarTodosPlanesP2()}
                   disabled={isSavingAllPlanP2 || isExplodingBom || (necesidadEspumas1000.length === 0 && necesidadEspumas2000.length === 0 && necesidadRollos1000.length === 0)}
                   className="h-10 px-6 rounded-2xl gap-2 font-bold text-xs uppercase bg-slate-900 hover:bg-slate-800 text-white"
                 >
@@ -3005,6 +3238,23 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                     </div>
                   </div>
 
+                  {ventanaEmpaque[centro] && (
+                    <div
+                      className="mx-6 mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 bg-blue-50/50 border border-blue-100 rounded-lg px-3 py-1.5"
+                      title="Desde la noche del día hábil anterior hasta el fin del turno día del plan (siguiente día hábil). El Turno Sábado solo suma si un sábado cae dentro."
+                    >
+                      <span className="text-[8px] font-black uppercase tracking-widest text-blue-700">Ejecución del plan de producción</span>
+                      <span className="text-[11px] font-black text-slate-700 tabular-nums">
+                        INICIO: <span className="text-blue-700">{fechaHoraEjecucion(ventanaEmpaque[centro]!.inicio)}</span> ⇒ FIN: <span className="text-blue-700">{fechaHoraEjecucion(ventanaEmpaque[centro]!.fin)}</span>
+                      </span>
+                      {maquinas.some(m => (empaqueConfig[m.id]?.saturday ?? 'EMPTY') !== 'EMPTY') && (
+                        ventanaEmpaque.sabadoCuenta
+                          ? <span className="text-[9px] font-black text-emerald-700">Turno Sábado incluido</span>
+                          : <span className="text-[9px] font-black text-amber-700">Turno Sábado activo, pero no cae en esta ventana: no suma horas</span>
+                      )}
+                    </div>
+                  )}
+
                   <div className="p-4 space-y-4">
                     {maquinas.length === 0 ? (
                       <p className="text-[10px] text-gray-300 font-bold uppercase tracking-widest text-center py-6">Sin máquina de empaque registrada en este centro</p>
@@ -3070,17 +3320,50 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                               </div>
                             ))}
                           </div>
-                          <div className="flex items-center justify-between gap-2 border-t border-gray-100 pt-2.5">
-                            <span className="text-[9px] font-black text-slate-500 uppercase tracking-wide">Mantenimiento Preventivo</span>
-                            <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">
-                              <input
-                                type="number" min={0} step={0.25} value={c.mttoPreventivoHoras}
-                                onChange={(e) => setC({ mttoPreventivoHoras: Number(e.target.value) || 0 })}
-                                className="w-14 bg-transparent text-[10px] font-black text-indigo-700 outline-none text-right"
-                              />
-                              <span className="text-[9px] font-black text-indigo-700">h</span>
-                            </div>
+                          <div
+                            className="flex items-center justify-between gap-2 border-t border-gray-100 pt-2.5"
+                            title={`Precargado desde la restricción ${m.restriccionRendimiento} del grupo; editable para un ajuste puntual.`}
+                          >
+                            <span className="text-[9px] font-black text-slate-500 uppercase tracking-wide">Rendimiento máquina %</span>
+                            <input
+                              type="number" min={0} max={100} value={c.rendimiento}
+                              onChange={(e) => setC({ rendimiento: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })}
+                              className="w-16 bg-white border border-gray-200 rounded px-1.5 py-1 text-[10px] font-black text-slate-700 outline-none text-right"
+                            />
                           </div>
+                          {(() => {
+                            const sap = mttoSAPEmpaque[m.id];
+                            return (
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[9px] font-black text-slate-500 uppercase tracking-wide">
+                                    Mantenimiento Preventivo{c.mttoManual ? ' (ajustado)' : sap && sap.maquinas.length > 0 ? ` (SAP ${sap.maquinas.join(', ')})` : ''}
+                                  </span>
+                                  <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">
+                                    <input
+                                      type="number" min={0} step={0.25} value={Number(mttoEmpaqueDe(m.id).toFixed(2))}
+                                      onChange={(e) => setC({ mttoPreventivoHoras: Number(e.target.value) || 0, mttoManual: true })}
+                                      className="w-14 bg-transparent text-[10px] font-black text-indigo-700 outline-none text-right"
+                                    />
+                                    <span className="text-[9px] font-black text-indigo-700">h</span>
+                                  </div>
+                                </div>
+                                {sap && sap.ordenes.length > 0 && (
+                                  <p className="text-[9px] text-slate-500">
+                                    SAP en la ventana: {sap.ordenes.map(o => `${o.maquina} ${o.inicio} (${o.horas.toFixed(2)} h)`).join(' · ')}
+                                  </p>
+                                )}
+                                {sap && sap.maquinas.length === 0 && (
+                                  <p className="text-[9px] text-amber-600">Sin restricción MANTENIMIENTO en el grupo: el mantenimiento se escribe a mano.</p>
+                                )}
+                                {c.mttoManual && sap && sap.maquinas.length > 0 && (
+                                  <button type="button" onClick={() => setC({ mttoManual: false })} className="text-[9px] font-black uppercase text-indigo-700 hover:underline">
+                                    Volver a lo de SAP ({sap.horas.toFixed(2)} h)
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
                       );
                     })}
@@ -3350,6 +3633,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           })}
         </TabsContent>
       </Tabs>
+      <PanelProgreso panel={panelProgreso} />
     </div>
   );
 };

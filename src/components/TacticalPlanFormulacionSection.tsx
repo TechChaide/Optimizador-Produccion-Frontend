@@ -19,7 +19,8 @@ import {
   Table as TableIcon,
   Info,
   Clock,
-  Mail
+  Mail,
+  FileText,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -39,7 +40,8 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion } from '@/types/interfaces';
 import type { CuboInventariosItem } from '@/types/types';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo } from '@/components/ReportePlanTxtFlujo';
+import { useReportePlanTxt, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
+import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -674,6 +676,17 @@ const JornadaCentroPanel: React.FC<{ titulo: string; jornada: JornadaGrupoEditab
   </div>
 );
 
+// Respaldo de lo planificado guardado junto al TXT ({fecha}.estado.json), ver capturarEstadoPlan.
+// Cambiar su forma exige subir `version` (los respaldos viejos dejan de cargarse).
+interface EstadoPlanFormulacion {
+  tipo: 'formulacion-salida';
+  version: 1;
+  rangeStart: string | null;
+  rangeEnd: string | null;
+  unifiedSummaryData: FormuladoSummaryRow[];
+  consumoBloqueFormulado: ConsumoBloqueRow[];
+}
+
 export const TacticalPlanFormulacionSection: React.FC = () => {
   const inspector = useRuntimeInspector('TacticalPlanFormulacion');
   useAppContext();
@@ -706,10 +719,14 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // Laminado (ver [[modulos_tacticos_sincronizar_y_generar_combinado]]).
   const [autoGenerarPendiente, setAutoGenerarPendiente] = useState(false);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
+  // Panel flotante de progreso de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar).
+  const panelProgreso = usePanelProgreso();
 
   const [isProcessingResumen, setIsProcessingResumen] = useState(false);
   const [resumenProgress, setResumenProgress] = useState({ current: 0, total: 0 });
   const [unifiedSummaryData, setUnifiedSummaryData] = useState<FormuladoSummaryRow[]>([]);
+  // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
+  const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
   const [consumoBloqueFormulado, setConsumoBloqueFormulado] = useState<ConsumoBloqueRow[]>([]);
 
   // Rango de fechas (reemplaza el multi-select de días sueltos que había antes): con ambos extremos
@@ -844,7 +861,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // reposición solo cubre el faltante, no la necesidad bruta. Solo se acumulan órdenes cuyo
   // responsable de Control de Producción está autorizado para el centro (respPorCentroDinamico)
   // — una orden de un responsable no listado no debe inflar la necesidad de Formulación.
-  const handleProcessResumen = useCallback(async () => {
+  const handleProcessResumen = useCallback(async (): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string; progreso?: { actual: number; total: number } }> => {
     const buildEntry = (o: RawApiRow, origin: 'prov' | 'fert') => ({
       order: o,
       origin,
@@ -858,7 +875,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     if (allOrders.length === 0) {
       setUnifiedSummaryData([]);
       setConsumoBloqueFormulado([]);
-      return;
+      return { estado: 'aviso', mensaje: 'Sin órdenes FERT/provisionales de los responsables de Formulación en el rango elegido.' };
     }
     setIsProcessingResumen(true);
     const groupsMap = new Map<string, FormuladoSummaryRow>();
@@ -993,6 +1010,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       consumoBloqueFormulado: consumoRows,
     });
     setIsProcessingResumen(false);
+    return { estado: 'ok', mensaje: `${allOrders.length} orden(es) → ${summaryOrdenado.length} bloque(s) formulado(s) en el resumen.`, progreso: { actual: allOrders.length, total: allOrders.length } };
   }, [provFiltradas, prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico]);
 
   // Segunda fase de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar): corre
@@ -1004,8 +1022,24 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     if (!autoGenerarPendiente) return;
     setAutoGenerarPendiente(false);
     setSyncStep('generando');
-    handleProcessResumen().finally(() => setSyncStep('idle'));
-  }, [autoGenerarPendiente, handleProcessResumen]);
+    panelProgreso.actualizar('resumen', { estado: 'en_curso' });
+    handleProcessResumen()
+      .then(
+        // Conteo final en r.progreso: el avance solo se publica cada 10 órdenes y el efecto no alcanza el último.
+        r => panelProgreso.actualizar('resumen', { estado: r.estado, detalle: r.mensaje, ...(r.progreso ? { progreso: r.progreso } : {}) }),
+        e => panelProgreso.actualizar('resumen', { estado: 'error', detalle: (e as Error).message })
+      )
+      .finally(() => {
+        panelProgreso.concluir();
+        setSyncStep('idle');
+      });
+  }, [autoGenerarPendiente, handleProcessResumen, panelProgreso]);
+
+  // Avance de la explosión BOM (órdenes procesadas / total) reflejado en el panel mientras corre.
+  useEffect(() => {
+    if (syncStep !== 'generando' || resumenProgress.total === 0) return;
+    panelProgreso.actualizar('resumen', { progreso: { actual: resumenProgress.current, total: resumenProgress.total } });
+  }, [syncStep, resumenProgress, panelProgreso.actualizar]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Resumen dividido en dos secciones según el tipo de Bloque Formulado, derivado directamente
   // de la apertura ya extraída del material (no depende de que exista match en Control Curado,
@@ -1076,6 +1110,30 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
 
   const fechaObjetivoReporte = rangeStart || format(new Date(), 'yyyy-MM-dd');
   const asuntoReporteFormulacion = (centro: '1000' | '2000') => `Reporte de producción — Formulación [Bloque Formulado]-[Centro ${centro}]`;
+  // Respaldo de "Salida de Datos" que viaja junto al TXT ({fecha}.estado.json) para volver a cargar
+  // lo planificado desde "Recuperar y revisar" (mismo flujo que Corte Laminado). Cubre ambos centros:
+  // se guarda una sola vez, en el reporte del Centro 1000.
+  const capturarEstadoPlan = (): EstadoPlanFormulacion => ({
+    tipo: 'formulacion-salida',
+    version: 1,
+    rangeStart,
+    rangeEnd,
+    unifiedSummaryData,
+    consumoBloqueFormulado,
+  });
+  const restaurarEstadoPlan = (crudo: unknown, origen: OrigenEstadoPlan): boolean => {
+    const e = crudo as Partial<EstadoPlanFormulacion> | null;
+    if (!e || e.tipo !== 'formulacion-salida' || e.version !== 1 || !Array.isArray(e.unifiedSummaryData)) return false;
+    setRangeStart(e.rangeStart ?? null);
+    setRangeEnd(e.rangeEnd ?? null);
+    if (e.rangeStart) setViewDate(new Date(e.rangeStart + 'T00:00:00'));
+    setUnifiedSummaryData(e.unifiedSummaryData);
+    setConsumoBloqueFormulado(e.consumoBloqueFormulado ?? []);
+    setPlanCargadoDe(origen);
+    setActiveTab('resumen');
+    return true;
+  };
+
   const reporteFlujo1000 = useReportePlanTxt({
     modulo: 'formulacion',
     centro: '1000',
@@ -1083,6 +1141,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     asunto: asuntoReporteFormulacion('1000'),
     construirHtml: () => construirReporteHtmlFormulacion('1000', fechaObjetivoReporte),
     etiqueta: 'Centro 1000',
+    capturarEstado: capturarEstadoPlan,
+    restaurarEstado: restaurarEstadoPlan,
   });
   const reporteFlujo2000 = useReportePlanTxt({
     modulo: 'formulacion',
@@ -1165,9 +1225,31 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       .sort(compareAperturaDensidad);
   }, [filteredInventario, getStockEnCurado]);
 
-  const handleSincronizarYGenerar = useCallback(async () => {
+  // Panel: Rango evaluado → Datos SAP (x/5) → Generando necesidades (fase en el efecto
+  // autoGenerarPendiente, que cierra el panel). El rango se elige antes, en handleSincronizarYGenerar.
+  const ejecutarSincronizacion = useCallback(async (desde: string | null, hasta: string | null) => {
     setIsLoading(true);
     setSyncStep('sincronizando');
+    // El rango escogido ES el filtro de fechas del resumen (sin rango = Plan Maestro).
+    setRangeStart(desde);
+    setPlanCargadoDe(null);
+    setRangeEnd(hasta);
+    if (desde) setViewDate(new Date(desde + 'T00:00:00'));
+    const corta = (f: string) => format(new Date(f + 'T00:00:00'), 'EEE dd/MM', { locale: es });
+    panelProgreso.iniciar('Formulación — Sincronizar y generar', [
+      { id: 'fecha', etiqueta: !desde ? 'Plan Maestro (todas las fechas)' : desde === hasta ? `Fecha evaluada: ${corta(desde)}` : `Rango evaluado: ${corta(desde)} → ${corta(hasta || desde)}` },
+      { id: 'sap', etiqueta: 'Sincronizando datos SAP' },
+      { id: 'resumen', etiqueta: 'Generando necesidades' },
+    ]);
+    panelProgreso.actualizar('fecha', { estado: 'ok' });
+    const TOTAL_CONSULTAS_SAP = 5;
+    let hechas = 0;
+    const fallidas: string[] = [];
+    const seguir = <T,>(nombre: string, promesa: Promise<T>): Promise<T> => promesa.then(
+      r => { hechas += 1; panelProgreso.actualizar('sap', { progreso: { actual: hechas, total: TOTAL_CONSULTAS_SAP } }); return r; },
+      e => { hechas += 1; fallidas.push(nombre); panelProgreso.actualizar('sap', { progreso: { actual: hechas, total: TOTAL_CONSULTAS_SAP } }); throw e; }
+    );
+    panelProgreso.actualizar('sap', { estado: 'en_curso', progreso: { actual: 0, total: TOTAL_CONSULTAS_SAP } });
     try {
       const groupsRes = await grupoService.getAll();
       const filteredGroups = (groupsRes.data || []).filter(g => {
@@ -1177,12 +1259,16 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       setGrupos(filteredGroups);
       const groupsIds = filteredGroups.map(g => g.codigo_grupo);
       const [restrsRes, provsRes, curadoRes, fertsRes, cuboRes] = await Promise.all([
-        restriccionService.getAll(),
-        serviciosService.OrdenesProvisionalesPaginados(1, 20000).catch(() => ({ data: [] })),
-        serviciosService.getTiemposCuradoBloqueFormulado(1, 10000).catch(() => ({ data: [] })),
-        serviciosService.getOrdenesFert(1, 20000).catch(() => ({ data: [] })),
-        serviciosService.getCuboInventarios(1, 50000).catch(() => ({ data: [] }))
+        seguir('Restricciones', restriccionService.getAll()),
+        seguir('Órdenes provisionales', serviciosService.OrdenesProvisionalesPaginados(1, 20000)).catch(() => ({ data: [] })),
+        seguir('Tiempos de curado', serviciosService.getTiemposCuradoBloqueFormulado(1, 10000)).catch(() => ({ data: [] })),
+        seguir('Órdenes FERT', serviciosService.getOrdenesFert(1, 20000)).catch(() => ({ data: [] })),
+        seguir('Cubo de inventarios', serviciosService.getCuboInventarios(1, 50000)).catch(() => ({ data: [] }))
       ]);
+      panelProgreso.actualizar('sap', {
+        estado: fallidas.length > 0 ? 'aviso' : 'ok',
+        detalle: fallidas.length > 0 ? `Sin respuesta: ${fallidas.join(', ')} — se siguió con datos vacíos.` : undefined,
+      });
       setRestricciones((restrsRes.data || []).filter((r) => groupsIds.includes(r.codigo_grupo)));
       setOrders(provsRes.data?.data || provsRes.data || []);
       setOrdersFert(fertsRes.data?.data || fertsRes.data || []);
@@ -1248,13 +1334,37 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       // el efecto de más abajo, que ve la versión fresca una vez que el siguiente render ya ocurrió
       // (mismo criterio que Corte Espuma/Venta Externa/Laminado).
       setAutoGenerarPendiente(true);
-    } catch {
+    } catch (e) {
       console.error('Error sincronizando datos formulacion');
+      panelProgreso.actualizar('sap', { estado: 'error', detalle: (e as Error).message });
+      panelProgreso.actualizar('resumen', { estado: 'omitido' });
+      panelProgreso.concluir(`Error al sincronizar: ${(e as Error).message}`);
       setSyncStep('idle');
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [panelProgreso]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Botón "Sincronizar y Generar Necesidades": antes de tocar SAP, el panel pide el rango a evaluar
+  // (por defecto el del filtro actual, hoy → hoy+CURADO_DIAS_ESPERA) o Plan Maestro, y muestra qué
+  // fecha llevará el reporte — pedido del usuario: al sincronizar no quedaba claro sobre qué fechas.
+  const handleSincronizarYGenerar = useCallback(() => {
+    const hoy = new Date();
+    const horizonte = new Date(hoy);
+    horizonte.setDate(horizonte.getDate() + CURADO_DIAS_ESPERA);
+    const larga = (f: string) => format(new Date(f + 'T00:00:00'), 'EEE dd/MM/yyyy', { locale: es });
+    panelProgreso.pedirFecha({
+      titulo: 'Formulación — Sincronizar y generar',
+      fechaInicial: rangeStart || format(hoy, 'yyyy-MM-dd'),
+      hastaInicial: rangeEnd || rangeStart || format(horizonte, 'yyyy-MM-dd'),
+      sinFecha: 'Plan Maestro (todas las fechas)',
+      detalle: (desde, hasta) => [
+        { etiqueta: 'Órdenes FERT / provisionales', valor: !desde ? 'Todas las fechas' : desde === hasta ? larga(desde) : `${larga(desde)} → ${larga(hasta || desde)}` },
+        { etiqueta: 'Reporte (TXT) con fecha', valor: larga(desde || format(hoy, 'yyyy-MM-dd')) },
+      ],
+      onConfirmar: (desde, hasta) => { void ejecutarSincronizacion(desde, desde ? (hasta ?? desde) : null); },
+    });
+  }, [rangeStart, rangeEnd, panelProgreso, ejecutarSincronizacion]);
 
   // Rehidratación: si ya se había sincronizado en esta sesión, se recupera lo trabajado (datos crudos
   // Y el resumen ya procesado) en vez de dejar el módulo vacío al volver de otro módulo — mismo
@@ -1821,7 +1931,19 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       {/* Estado vacío inicial: el módulo no consulta SAP al abrirse. Mismo criterio y misma
           redacción compacta que Corte Espuma/Venta Externa/Laminado (ver
           [[carga_manual_modulos_tacticos]]). */}
-      {!datosCargados && !isLoading && (
+      {planCargadoDe && (
+        <div
+          className="flex items-center gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50/50 px-4 py-2.5 text-left"
+          title="Lo que se ve en Salida de Datos viene del respaldo guardado junto al reporte, no de SAP. Sincronizar recalcula con los datos actuales."
+        >
+          <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
+          <p className="text-[11px] font-bold text-slate-600">
+            Plan cargado del reporte del <span className="font-black text-emerald-700">{format(new Date(planCargadoDe.fechaObjetivo + 'T00:00:00'), 'EEE dd/MM/yyyy', { locale: es })}</span>
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — Salida de Datos tal como se planificó; <span className="font-black text-blue-700">Sincronizar</span> lo recalcula con SAP.
+          </p>
+        </div>
+      )}
+      {!datosCargados && !isLoading && !planCargadoDe && (
         <div
           className="flex items-center gap-2.5 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-4 py-2.5 text-left"
           title="Este módulo no consulta SAP al abrirse. Sincronizar y Generar Necesidades trae Provisionales, FERT, Curado e Inventarios, y calcula el resumen automáticamente al terminar."
@@ -1859,6 +1981,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
         .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
       `}</style>
+      <PanelProgreso panel={panelProgreso} />
     </div>
   );
 };

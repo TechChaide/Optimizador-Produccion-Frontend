@@ -266,12 +266,12 @@ export interface ResultadoGuardarPlanTxt { ok: true; ruta: string; }
  * la foto HTML del correo (ver route.ts). Devuelve la ruta completa del TXT; lanza Error con el
  * mensaje de la API si falla.
  */
-export const guardarPlanTxt = async (p: { modulo: ModuloPlanTxt; centro: CentroPlanTxt; fechaObjetivo: string; html: string; asunto?: string }): Promise<ResultadoGuardarPlanTxt> => {
+export const guardarPlanTxt = async (p: { modulo: ModuloPlanTxt; centro: CentroPlanTxt; fechaObjetivo: string; html: string; asunto?: string; estado?: unknown }): Promise<ResultadoGuardarPlanTxt> => {
   const contenido = armarContenidoPlanTxt({ ...p, cuerpo: htmlReporteATexto(p.html) });
   const res = await fetch(urlApiPlanesTxt(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ modulo: p.modulo, centro: p.centro, fechaObjetivo: p.fechaObjetivo, contenido, html: p.html }),
+    body: JSON.stringify({ modulo: p.modulo, centro: p.centro, fechaObjetivo: p.fechaObjetivo, contenido, html: p.html, estado: p.estado ?? null }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `No se pudo guardar el TXT (HTTP ${res.status})`);
@@ -294,6 +294,8 @@ export interface PlanTxtRecuperado {
   contenido: string;
   /** Foto HTML del correo al guardar; null si el plan se guardó sin ella (versión anterior). */
   html: string | null;
+  /** Respaldo del módulo ({fecha}.estado.json) para recargar lo planificado en pantalla; null si no hay. */
+  estado: unknown | null;
 }
 
 /** Recupera un plan TXT (y su foto de correo) por módulo + centro + fecha objetivo (año/mes opcionales). */

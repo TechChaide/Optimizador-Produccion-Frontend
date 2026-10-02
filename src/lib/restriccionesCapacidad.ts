@@ -81,6 +81,22 @@ export const parseHorario = (valor: unknown): Horario | null => {
   return { l: `${hhmm(ini)} - ${hhmm(fin)}`, h: Math.round((dur / 60) * 100) / 100 };
 };
 
+// Ubica un horario en un día real: "21:00 - 05:30" sobre vie 02/10 → vie 02/10 21:00 → sáb 03/10
+// 05:30 (cruza la medianoche si el fin es menor al inicio). Base de la "ventana del plan".
+export const intervaloDeHorario = (dia: Date, etiqueta: string): { ini: Date; fin: Date } | null => {
+  const hr = parseHorario(etiqueta);
+  if (!hr) return null;
+  const [iniTxt] = hr.l.split(' - ');
+  const iniMin = minutos(iniTxt);
+  if (iniMin === null) return null;
+  const ini = new Date(dia.getFullYear(), dia.getMonth(), dia.getDate(), Math.floor(iniMin / 60), iniMin % 60);
+  return { ini, fin: new Date(ini.getTime() + hr.h * 3600000) };
+};
+
+// Horas de [ini, fin] que caen dentro de [a, b].
+export const horasSolapadas = (ini: Date, fin: Date, a: Date, b: Date): number =>
+  Math.max(0, (Math.min(fin.getTime(), b.getTime()) - Math.max(ini.getTime(), a.getTime())) / 3600000);
+
 export interface JornadaRestriccion {
   dia: Horario;
   noche: Horario;
@@ -90,13 +106,37 @@ export interface JornadaRestriccion {
   numTurnos: number;
   // Qué valores vinieron de una restricción (true) y cuáles son la jornada estándar (false).
   desdeRestriccion: { dia: boolean; noche: boolean; finDeSemana: boolean; numTurnos: boolean };
+  // TODOS los horarios permitidos por la restricción (puede ser una lista, ver horariosDeValor) —
+  // van al selector de cada turno; `dia`/`noche`/`finDeSemana` es solo el que se precarga.
+  catalogo: { dia: Horario[]; noche: Horario[]; finDeSemana: Horario[] };
 }
 
+// Una restricción HORAS_TRABAJO_* puede traer un solo horario ("07:00 - 15:45") o la LISTA de
+// horarios permitidos separados por "&" (o ";" / "|"): "07:00 - 13:00 & 07:00 - 15:45 & 07:00 - 19:00".
+// Antes una lista no se reconocía y el módulo caía en silencio a la jornada estándar.
+export const horariosDeValor = (valor: unknown): Horario[] => {
+  const vistos = new Set<string>();
+  return String(valor ?? '').split(/[&;|]/).map(parseHorario).filter((h): h is Horario => {
+    if (!h || vistos.has(h.l)) return false;
+    vistos.add(h.l);
+    return true;
+  });
+};
+
+// Horario que se precarga de una lista: la jornada estándar si está permitida; si no, el primero.
+const horarioPorDefecto = (lista: Horario[], estandar: Horario): Horario | null =>
+  lista.length === 0 ? null : lista.find(h => h.l === estandar.l) ?? lista[0];
+
 export const jornadaDesdeRestricciones = (restricciones: Restriccion[], codigoGrupo: number): JornadaRestriccion => {
-  const horario = (nombre: string) => parseHorario(buscarRestriccion(restricciones, codigoGrupo, nombre)?.valor_restriccion);
-  const dia = horario(RESTRICCION_CAPACIDAD.horasTrabajoDia);
-  const noche = horario(RESTRICCION_CAPACIDAD.horasTrabajoNoche);
-  const finDeSemana = horario(RESTRICCION_CAPACIDAD.horasTrabajoFinDeSemana);
+  const lista = (nombre: string) => horariosDeValor(buscarRestriccion(restricciones, codigoGrupo, nombre)?.valor_restriccion);
+  const catalogo = {
+    dia: lista(RESTRICCION_CAPACIDAD.horasTrabajoDia),
+    noche: lista(RESTRICCION_CAPACIDAD.horasTrabajoNoche),
+    finDeSemana: lista(RESTRICCION_CAPACIDAD.horasTrabajoFinDeSemana),
+  };
+  const dia = horarioPorDefecto(catalogo.dia, HORARIO_ESTANDAR.dia);
+  const noche = horarioPorDefecto(catalogo.noche, HORARIO_ESTANDAR.noche);
+  const finDeSemana = horarioPorDefecto(catalogo.finDeSemana, HORARIO_ESTANDAR.finDeSemana);
   const nt = Math.trunc(Number(String(buscarRestriccion(restricciones, codigoGrupo, RESTRICCION_CAPACIDAD.numTurnos)?.valor_restriccion ?? '').trim()));
   const numTurnosValido = Number.isFinite(nt) && nt >= 1 && nt <= 3;
   return {
@@ -105,6 +145,7 @@ export const jornadaDesdeRestricciones = (restricciones: Restriccion[], codigoGr
     finDeSemana: finDeSemana ?? HORARIO_ESTANDAR.finDeSemana,
     numTurnos: numTurnosValido ? nt : 2,
     desdeRestriccion: { dia: !!dia, noche: !!noche, finDeSemana: !!finDeSemana, numTurnos: numTurnosValido },
+    catalogo,
   };
 };
 

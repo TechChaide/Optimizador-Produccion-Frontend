@@ -5,6 +5,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useRouter } from 'next/navigation';
 import {
   Scissors,
+  FileText,
   Loader2,
   LayoutDashboard,
   RefreshCw,
@@ -48,7 +49,8 @@ import {
 } from "@/components/ui/popover";
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
-import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario } from '@/lib/restriccionesCapacidad';
+import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario, intervaloDeHorario, horasSolapadas } from '@/lib/restriccionesCapacidad';
+import { ejecucionPlanHtml, fechaHoraEjecucion } from '@/lib/ventana-plan';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
@@ -56,8 +58,9 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia } from '@/components/ReportePlanTxtFlujo';
-import { nextBusinessDay as nextBusinessDayCal, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
+import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
+import { nextBusinessDay as nextBusinessDayCal, esDiaNoLaborable, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, parseISO, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -676,6 +679,27 @@ interface SnapshotCorteLaminado {
   approvedDeficitRows: string[];
 }
 
+// Respaldo de lo planificado que se guarda junto al TXT ({fecha}.estado.json) para volver a cargarlo
+// en la pestaña "Resumen Necesidades" desde "Recuperar y revisar" (ver capturarEstadoPlan).
+// Cambiar la forma de este objeto exige subir `version` (los respaldos viejos dejan de cargarse).
+interface EstadoPlanLaminado {
+  tipo: 'laminado-resumen';
+  version: 1;
+  selectedDates: string[];
+  turnos: Record<'dia' | 'noche' | 'sabado', { v: string; l: string }>;
+  paroLooperPct: number;
+  rendimientoLooperPct: number;
+  corridaPendienteHoras: number;
+  assignedPersonnel: { diaOp1: string; diaOp2: string; nocheOp1: string; nocheOp2: string };
+  unifiedNeeds: UnifiedNeedRow[];
+  planManualOverrides: Record<string, number>;
+  corridasManualOverrides: Record<string, number>;
+  approvedDeficitRows: string[];
+  corridaFechas: Record<string, string>;
+  necesidadesPlantaData: Record<string, NecesidadPlantaRow[]>;
+  mantenimientosLooper: RawApiRow[];
+}
+
 export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const { addNotification } = useAppContext();
   const router = useRouter();
@@ -712,6 +736,11 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set());
   const [viewDate, setViewDate] = useState<Date>(new Date());
+  // Fecha escogida en el panel al sincronizar (null = hoy / Plan Maestro): base del P2 (= su
+  // siguiente día hábil), también para "Actualizar P2" y las recargas tras guardar.
+  const [fechaEvaluada, setFechaEvaluada] = useState<string | null>(null);
+  // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
+  const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
 
   // "Enviar Reporte" (Gestión de Tiempos → correo): destinatarios editables en pantalla, no fijos en
   // código (decisión del usuario) — se guardan tal cual se escriben, sin validar formato acá, el
@@ -918,13 +947,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // El turno noche del viernes (21:00-05:30, H1 de nocheShiftOptions) ya cubre la madrugada del
     // sábado sin necesitar una opción nueva; el lunes vuelve al horario normal (H1, 07:00-15:45).
     { v: 'H5', l: '07:00 - 13:00', h: 6 }
-  ], [jornadaLaminado.dia, jornadaLaminado.finDeSemana]), [jornadaLaminado]);
+  ], [jornadaLaminado.dia, jornadaLaminado.finDeSemana, ...jornadaLaminado.catalogo.dia, ...jornadaLaminado.catalogo.finDeSemana]), [jornadaLaminado]);
 
   const nocheShiftOptions = useMemo(() => opcionesConHorarios([
     { v: 'EMPTY', l: 'VACÍO', h: 0 },
     { v: 'H1', l: '21:00 - 05:30', h: 8.5 },
     { v: 'H2', l: '19:00 - 05:30', h: 10.5 }
-  ], [jornadaLaminado.noche]), [jornadaLaminado]);
+  ], [jornadaLaminado.noche, ...jornadaLaminado.catalogo.noche]), [jornadaLaminado]);
 
   // Precarga de turnos: Día con su horario, Noche solo si NUM_TURNOS ≥ 2, Sábado en VACÍO (manual).
   // Antes arrancaban todos en VACÍO; ahora parten de la jornada del grupo y siguen editables. Solo
@@ -1136,7 +1165,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return resultado;
   }, [fetchVersionConReintentos, puestoTrabajoPorMaterial]);
 
-  const initData = useCallback(async () => {
+  // onConsulta (opcional): avisa cada consulta SAP terminada — la usa el panel de progreso de
+  // "Sincronizar y generar necesidades" para mostrar el avance (x/7) y cuáles fallaron.
+  const initData = useCallback(async (onConsulta?: (nombre: string, ok: boolean) => void) => {
+    const seguir = <T,>(nombre: string, promesa: Promise<T>): Promise<T> => promesa.then(
+      r => { onConsulta?.(nombre, true); return r; },
+      e => { onConsulta?.(nombre, false); throw e; }
+    );
     try {
       const groupsRes = await grupoService.getAll();
       const filteredGroups = (groupsRes.data || []).filter(g => {
@@ -1148,13 +1183,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
       const [restrs, provs, kpiLooper, invSAP, ferts, skills, maint, tiempos] = await Promise.all([
         restriccionService.getAll(),
-        serviciosService.OrdenesProvisionalesPaginados(1, 20000).catch(() => ({ data: [] })),
-        serviciosService.getKPIMaestroLooper().catch(() => ({ data: [] })),
-        serviciosService.getInventarioAñoActual().catch(() => ({ data: [] })),
-        serviciosService.getOrdenesFert(1, 20000).catch(() => ({ data: [] })),
-        serviciosService.getCuboHabilidadesOP().catch(() => ({ data: [] })),
-        serviciosService.ListarMantenimientoPreventivosProgramados().catch(() => ({ data: [] })),
-        serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo('1000', CODIGO_GRUPO_LAMINADO).catch(() => ({ data: [] }))
+        seguir('Órdenes provisionales', serviciosService.OrdenesProvisionalesPaginados(1, 20000)).catch(() => ({ data: [] })),
+        seguir('KPI Looper', serviciosService.getKPIMaestroLooper()).catch(() => ({ data: [] })),
+        seguir('Inventario SAP', serviciosService.getInventarioAñoActual()).catch(() => ({ data: [] })),
+        seguir('Órdenes FERT', serviciosService.getOrdenesFert(1, 20000)).catch(() => ({ data: [] })),
+        seguir('Habilidades de operadores', serviciosService.getCuboHabilidadesOP()).catch(() => ({ data: [] })),
+        seguir('Mantenimientos', serviciosService.ListarMantenimientoPreventivosProgramados()).catch(() => ({ data: [] })),
+        seguir('Tiempos de laminado', serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo('1000', CODIGO_GRUPO_LAMINADO)).catch(() => ({ data: [] }))
       ]);
 
       const restriccionesFiltradas = (restrs.data || []).filter((r) => ids.includes(r.codigo_grupo));
@@ -1198,7 +1233,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // Mismo criterio del tab "Necesidades Planta" de Corte Espuma: filtra los grupos referenciados
   // por la restricción ALMACEN_CONSUMO, ubica sus PlanGrupo activos de "Plan Táctico - Centro <centro> - P2"
   // y trae el DetalleTactico asociado, agrupado por área (nombre de grupo).
-  const fetchNecesidadesPlanta = useCallback(async (diasOverride?: DiasNoLaborables, laborablesExtraOverride?: DiasNoLaborables): Promise<Record<string, NecesidadPlantaRow[]>> => {
+  const fetchNecesidadesPlanta = useCallback(async (diasOverride?: DiasNoLaborables, laborablesExtraOverride?: DiasNoLaborables, fechaBaseOverride?: string | null): Promise<Record<string, NecesidadPlantaRow[]>> => {
     setNecesidadesPlantaLoading(true);
     try {
       const [restrsRes, gruposRes] = await Promise.all([
@@ -1242,7 +1277,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       // diasOverride: al inicializar, el calendario de feriados se acaba de cargar y el estado
       //  todavía no se refleja en este closure — se recibe el Set directo para no
       // calcular la fecha objetivo con feriados vacíos (ver el useEffect de arranque).
-      const fechaObjetivoP2 = format(nextBusinessDayCal(new Date(), diasOverride ?? diasNoLaborables, laborablesExtraOverride ?? diasLaborablesExtra), 'yyyy-MM-dd');
+      // Base = fecha evaluada (escogida al sincronizar); sin ella, hoy. fechaBaseOverride llega
+      // explícito desde el sync porque el estado recién fijado aún no se refleja en este closure.
+      const fechaBase = fechaBaseOverride !== undefined ? fechaBaseOverride : fechaEvaluada;
+      const fechaObjetivoP2 = format(nextBusinessDayCal(fechaBase ? parseISO(fechaBase) : new Date(), diasOverride ?? diasNoLaborables, laborablesExtraOverride ?? diasLaborablesExtra), 'yyyy-MM-dd');
 
       const planGruposRes = await planGrupoService.getAll();
       const planesActivosCrudo = (planGruposRes.data || []).filter((pg) => {
@@ -1306,7 +1344,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     } finally {
       setNecesidadesPlantaLoading(false);
     }
-  }, [diasNoLaborables, diasLaborablesExtra]);
+  }, [diasNoLaborables, diasLaborablesExtra, fechaEvaluada]);
 
   // Sincronización manual: se dispara con el botón "Sincronizar" del encabezado, no al abrir el
   // módulo — mismo criterio que Corte Espuma y Venta Externa (ver [[carga_manual_modulos_tacticos]]).
@@ -1325,14 +1363,52 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const [autoGenerarPendiente, setAutoGenerarPendiente] = useState(false);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
 
-  const handleSincronizarYGenerar = useCallback(async () => {
+  // Panel flotante de progreso (ver PanelProgreso). Primero pregunta la fecha a evaluar (ver
+  // handleSincronizarYGenerar) y luego: Fecha evaluada → Datos SAP (x/7 consultas) → Necesidades
+  // planta (P2) → Generando necesidades. La última fase corre en el efecto autoGenerarPendiente,
+  // que es quien cierra el panel (mismo flujo que Corte Espuma).
+  const panelProgreso = usePanelProgreso();
+  const ejecutarSincronizacion = useCallback(async (fecha: string | null, noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
     setIsLoading(true);
     setSyncStep('sincronizando');
+    // La fecha escogida ES el filtro del resumen (FERT de ese día); sin fecha = Plan Maestro.
+    setFechaEvaluada(fecha);
+    setPlanCargadoDe(null);
+    setSelectedDates(fecha ? new Set([fecha]) : new Set());
+    if (fecha) setViewDate(parseISO(fecha));
+    const fechaP2 = format(nextBusinessDayCal(fecha ? parseISO(fecha) : new Date(), noLaborables, laborablesExtra), 'dd/MM/yyyy');
+    panelProgreso.iniciar('Corte Laminado — Sincronizar y generar', [
+      { id: 'fecha', etiqueta: fecha ? `Fecha evaluada: ${format(parseISO(fecha), 'EEE dd/MM/yyyy', { locale: es })}` : 'Plan Maestro (todas las fechas)' },
+      { id: 'sap', etiqueta: 'Sincronizando datos SAP' },
+      { id: 'p2', etiqueta: `Necesidades planta (P2 del ${fechaP2})` },
+      { id: 'resumen', etiqueta: 'Generando necesidades' },
+    ]);
+    panelProgreso.actualizar('fecha', { estado: 'ok' });
     try {
-      const { noLaborables, laborablesExtra } = await cargarDiasNoLaborables();
       setDiasNoLaborables(noLaborables);
       setDiasLaborablesExtra(laborablesExtra);
-      const [snapshotInit, necesidadesPlanta] = await Promise.all([initData(), fetchNecesidadesPlanta(noLaborables, laborablesExtra)]);
+
+      const TOTAL_CONSULTAS_SAP = 7;
+      let hechas = 0;
+      const fallidas: string[] = [];
+      panelProgreso.actualizar('sap', { estado: 'en_curso', progreso: { actual: 0, total: TOTAL_CONSULTAS_SAP } });
+      panelProgreso.actualizar('p2', { estado: 'en_curso' });
+      const [snapshotInit, necesidadesPlanta] = await Promise.all([
+        initData((nombre, ok) => {
+          hechas += 1;
+          if (!ok) fallidas.push(nombre);
+          panelProgreso.actualizar('sap', { progreso: { actual: hechas, total: TOTAL_CONSULTAS_SAP } });
+        }).then(snap => {
+          panelProgreso.actualizar('sap', snap
+            ? { estado: fallidas.length > 0 ? 'aviso' : 'ok', detalle: fallidas.length > 0 ? `Sin respuesta: ${fallidas.join(', ')} — se siguió con datos vacíos.` : undefined }
+            : { estado: 'error', detalle: 'La sincronización se cortó; revisa la consola o vuelve a intentar.' });
+          return snap;
+        }),
+        fetchNecesidadesPlanta(noLaborables, laborablesExtra, fecha).then(
+          r => { panelProgreso.actualizar('p2', { estado: 'ok' }); return r; },
+          e => { panelProgreso.actualizar('p2', { estado: 'error', detalle: (e as Error).message }); throw e; }
+        ),
+      ]);
       setDatosCargados(true);
       if (snapshotInit) {
         guardarEnCache<SnapshotCorteLaminado>(CACHE_CORTE_LAMINADO, {
@@ -1355,11 +1431,52 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       // versión fresca de handleProcessResumen una vez que ese render ya ocurrió.
       setAutoGenerarPendiente(true);
     } catch (e) {
-      addNotification('error', `Error al sincronizar: ${(e as Error).message}`);
+      panelProgreso.actualizar('resumen', { estado: 'omitido' });
+      panelProgreso.concluir(`Error al sincronizar: ${(e as Error).message}`);
       setIsLoading(false);
       setSyncStep('idle');
     }
-  }, [initData, fetchNecesidadesPlanta, unifiedNeeds, planManualOverrides, corridasManualOverrides, approvedDeficitRows, addNotification]);
+  }, [initData, fetchNecesidadesPlanta, unifiedNeeds, planManualOverrides, corridasManualOverrides, approvedDeficitRows, panelProgreso]);
+
+  // Botón "Sincronizar y Generar Necesidades": antes de tocar SAP, el panel pregunta qué fecha se
+  // evalúa (por defecto la del filtro actual, o hoy) y muestra qué P2 le corresponde — pedido del
+  // usuario: al sincronizar no quedaba claro sobre qué día se estaba capturando la data. El
+  // calendario se carga primero para que el P2 mostrado ya salte feriados.
+  const handleSincronizarYGenerar = useCallback(async () => {
+    let noLaborables: DiasNoLaborables;
+    let laborablesExtra: DiasNoLaborables;
+    try {
+      ({ noLaborables, laborablesExtra } = await cargarDiasNoLaborables());
+    } catch (e) {
+      addNotification('error', `No se pudo cargar el calendario laboral: ${(e as Error).message}`);
+      return;
+    }
+    const filtro = Array.from(selectedDates).sort();
+    const fmt = (f: string) => format(parseISO(f), 'EEE dd/MM/yyyy', { locale: es });
+    panelProgreso.pedirFecha({
+      titulo: 'Corte Laminado — Sincronizar y generar',
+      fechaInicial: filtro.length === 1 ? filtro[0] : format(new Date(), 'yyyy-MM-dd'),
+      sinFecha: 'Plan Maestro (todas las fechas)',
+      detalle: fecha => {
+        const p2 = format(nextBusinessDayCal(fecha ? parseISO(fecha) : new Date(), noLaborables, laborablesExtra), 'yyyy-MM-dd');
+        const lineas = [
+          { etiqueta: 'Órdenes FERT del', valor: fecha ? fmt(fecha) : 'Todas las fechas' },
+          { etiqueta: 'P2 (necesidad planta) del', valor: fmt(p2) },
+        ];
+        // Ventana del plan con los turnos elegidos hoy en Gestión de Tiempos (ver ventanaPlan).
+        const noche = fecha && selectedNocheShift !== 'EMPTY' ? intervaloDeHorario(parseISO(fecha), nocheShiftOptions.find(o => o.v === selectedNocheShift)?.l ?? '') : null;
+        const dia = fecha && selectedDiaShift !== 'EMPTY' ? intervaloDeHorario(parseISO(p2), diaShiftOptions.find(o => o.v === selectedDiaShift)?.l ?? '') : null;
+        const ini = noche?.ini ?? dia?.ini;
+        const fin = dia?.fin ?? noche?.fin;
+        if (ini && fin) lineas.push({ etiqueta: 'Ventana de turnos', valor: `${format(ini, 'EEE dd/MM HH:mm', { locale: es })} → ${format(fin, 'EEE dd/MM HH:mm', { locale: es })}` });
+        return lineas;
+      },
+      aviso: fecha => fecha && esDiaNoLaborable(parseISO(fecha), noLaborables, laborablesExtra)
+        ? 'Esa fecha es no laborable según el calendario; puede no haber órdenes.'
+        : null,
+      onConfirmar: fecha => { void ejecutarSincronizacion(fecha, noLaborables, laborablesExtra); },
+    });
+  }, [selectedDates, panelProgreso, ejecutarSincronizacion, addNotification, selectedDiaShift, selectedNocheShift, diaShiftOptions, nocheShiftOptions]);
 
   // Rehidratación: si ya se había sincronizado en esta sesión, se recupera lo trabajado en vez de
   // dejar el módulo vacío al volver de otro módulo (ver @/lib/cache-modulos). Incluye el resumen ya
@@ -1981,12 +2098,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     }
   }, [planActivoPendienteConfirmacion, materialNecesidadesPlantaMap, materialOrigenesPlantaMap, reconciliarDetallesParaPlan, persistirFilasEditables, desactivarPlanGrupo, fetchNecesidadesPlanta, addNotification]);
 
-  const handleProcessResumen = useCallback(async () => {
+  // El resultado lo muestra el panel de progreso (único llamador), sin toast aparte que lo tape.
+  const handleProcessResumen = useCallback(async (): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string; progreso?: { actual: number; total: number } }> => {
     // Ambos turnos en "VACÍO" (default desde ahora) significa que todavía no se definió capacidad
     // operativa para ningún horario — bloquea y pide escoger antes de generar (Gestión de Tiempos).
     if (selectedDiaShift === 'EMPTY' && selectedNocheShift === 'EMPTY') {
-      addNotification('warning', 'Escoja un horario de Turno Día y/o Turno Noche (Gestión de Tiempos) antes de generar necesidades.');
-      return;
+      return { estado: 'aviso', mensaje: 'Escoja un horario de Turno Día y/o Turno Noche (Gestión de Tiempos) antes de generar necesidades.' };
     }
     if (filteredOrders.length === 0 && filteredFertOrders.length === 0) {
       setUnifiedNeeds([]);
@@ -1995,8 +2112,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       // con fecha exacta = la(s) fecha(s) seleccionada(s) arriba (ver "Ver Todo el Plan" para quitar
       // el filtro de fecha y confirmarlo).
       const fechasTxt = selectedDates.size > 0 ? Array.from(selectedDates).sort().join(', ') : 'seleccionada';
-      addNotification('warning', `Datos a la fecha ${fechasTxt} no existen — sin Órdenes FERT/Provisionales en SAP para ese día. Prueba "Ver Todo el Plan" o cambia la fecha en el filtro.`);
-      return;
+      return { estado: 'aviso', mensaje: `Datos a la fecha ${fechasTxt} no existen — sin Órdenes FERT/Provisionales en SAP para ese día. Prueba "Ver Todo el Plan" o cambia la fecha en el filtro.` };
     }
 
     setIsProcessingResumen(true);
@@ -2438,7 +2554,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
     setUnifiedNeeds(finalArray);
     setIsProcessingResumen(false);
-  }, [filteredOrders, filteredFertOrders, materialProd014FertMap, materialNecesidadesPlantaMap, materialNecesidadVentaExternaMap, kpiLooperData, inventarioSAP, extractMaterialInfo, planManualOverrides, corridasManualOverrides, selectedDates, evaluarModificacionAutomaticaPlanActivo, addNotification, selectedDiaShift, selectedNocheShift]);
+    return { estado: 'ok', mensaje: `${finalArray.length} material(es) en el resumen.`, progreso: { actual: totalToProcess, total: totalToProcess } };
+  }, [filteredOrders, filteredFertOrders, materialProd014FertMap, materialNecesidadesPlantaMap, materialNecesidadVentaExternaMap, kpiLooperData, inventarioSAP, extractMaterialInfo, planManualOverrides, corridasManualOverrides, selectedDates, evaluarModificacionAutomaticaPlanActivo, selectedDiaShift, selectedNocheShift]);
 
   // Segunda fase de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar): corre
   // handleProcessResumen automáticamente en cuanto el render que refleja los datos recién
@@ -2449,11 +2566,25 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     if (!autoGenerarPendiente) return;
     setAutoGenerarPendiente(false);
     setSyncStep('generando');
-    handleProcessResumen().finally(() => {
-      setSyncStep('idle');
-      setIsLoading(false);
-    });
-  }, [autoGenerarPendiente, handleProcessResumen]);
+    panelProgreso.actualizar('resumen', { estado: 'en_curso' });
+    handleProcessResumen()
+      .then(
+        // Conteo final en r.progreso (el efecto de avance no alcanza el último paso, ver Corte Espuma).
+        r => panelProgreso.actualizar('resumen', { estado: r.estado, detalle: r.mensaje, ...(r.progreso ? { progreso: r.progreso } : {}) }),
+        e => panelProgreso.actualizar('resumen', { estado: 'error', detalle: (e as Error).message })
+      )
+      .finally(() => {
+        panelProgreso.concluir();
+        setSyncStep('idle');
+        setIsLoading(false);
+      });
+  }, [autoGenerarPendiente, handleProcessResumen, panelProgreso]);
+
+  // Avance del cálculo (materiales explotados / total) reflejado en el panel mientras corre.
+  useEffect(() => {
+    if (syncStep !== 'generando' || resumenProgress.total === 0) return;
+    panelProgreso.actualizar('resumen', { progreso: { actual: resumenProgress.current, total: resumenProgress.total } });
+  }, [syncStep, resumenProgress, panelProgreso.actualizar]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Recalcula planKg/tProceso de una fila para un planUn dado (misma fórmula usada en handleProcessResumen).
   // setupContribution ya viene calculado por el caller (participación viva en unidades del bloque,
@@ -3282,11 +3413,64 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return { ...base, totalRuns };
   }, [unifiedNeeds, groupedNeeds]);
 
+  // Ventana del plan (pedido del usuario 2026-10-02): el plan del siguiente día hábil se produce desde
+  // la NOCHE de la fecha evaluada hasta el fin del turno DÍA del día del plan — ej. evaluada vie 02/10:
+  // Noche vie 02/10 21:00 → sáb 05:30, (Sábado si su turno está activo), Día lun 05/10 07:00 → 18:00.
+  // Antes la disponibilidad era una suma fija Día + Noche sin fechas: no se sabía cuándo empezaba ni
+  // terminaba, y el MTTO del lunes quedaba fuera. Solo aplica con UNA fecha evaluada; con varias o
+  // Plan Maestro se mantiene el cálculo anterior.
+  const ventanaPlan = useMemo(() => {
+    if (selectedDates.size !== 1) return null;
+    const baseStr = Array.from(selectedDates)[0];
+    const base = parseISO(baseStr);
+    if (!isValid(base)) return null;
+    const diaPlan = siguienteDiaHabil(base);
+    const etiqueta = (opciones: { v: string; l: string }[], v: string) => (v === 'EMPTY' ? null : opciones.find(o => o.v === v)?.l ?? null);
+    const turnos: { turno: 'Noche' | 'Sábado' | 'Día'; ini: Date; fin: Date }[] = [];
+    const agregar = (turno: 'Noche' | 'Sábado' | 'Día', dia: Date, l: string | null) => {
+      const iv = l ? intervaloDeHorario(dia, l) : null;
+      if (iv) turnos.push({ turno, ...iv });
+    };
+    agregar('Noche', base, etiqueta(nocheShiftOptions, selectedNocheShift));
+    const sabadoLbl = etiqueta(diaShiftOptions, selectedSabadoShift);
+    for (let d = addDays(base, 1); d < diaPlan; d = addDays(d, 1)) {
+      if (getDay(d) === 6) agregar('Sábado', d, sabadoLbl);
+    }
+    agregar('Día', diaPlan, etiqueta(diaShiftOptions, selectedDiaShift));
+    return {
+      baseStr,
+      diaPlan,
+      turnos,
+      inicio: turnos[0]?.ini ?? null,
+      fin: turnos[turnos.length - 1]?.fin ?? null,
+      // El Sábado solo suma si de verdad cae dentro de la ventana (ej. no en una ventana mar → mié).
+      incluyeSabado: turnos.some(t => t.turno === 'Sábado'),
+    };
+  }, [selectedDates, siguienteDiaHabil, diaShiftOptions, nocheShiftOptions, selectedDiaShift, selectedNocheShift, selectedSabadoShift]);
+
   // Operación Adicional: agrupa las tareas de MTTO preventivo de la Laminadora Looper Fecken
-  // y el Transportador de ingreso a Looper (ambas contienen "LOOPER" en la maestra SAP)
+  // y el Transportador de ingreso a Looper (ambas contienen "LOOPER" en la maestra SAP).
+  // Con ventana del plan, cuenta solo las horas de MTTO que caen DENTRO de sus turnos (ej. el lunes
+  // en la mañana sí, un sábado sin turno no); sin ventana, el filtro por fecha de siempre.
   const mttoPreventivoTasks = useMemo(() => {
-    return mantenimientosSAP
-      .filter(m => String(getProp(m, ['MAQUINA'])).toUpperCase().includes('LOOPER'))
+    const looper = mantenimientosSAP.filter(m => String(getProp(m, ['MAQUINA'])).toUpperCase().includes('LOOPER'));
+    if (ventanaPlan) {
+      return looper.flatMap(m => {
+        const iniStr = getProp(m, ['FECHA_OT_PRG_INI']).trim();
+        const ini = new Date(iniStr);
+        const fin = new Date(getProp(m, ['FECHA_OT_PRG_FIN']).trim());
+        if (!isValid(ini) || !isValid(fin) || fin <= ini) return [];
+        const enVentana = ventanaPlan.turnos.reduce((s, t) => s + horasSolapadas(ini, fin, t.ini, t.fin), 0);
+        if (enVentana <= 0) return [];
+        const planificadas = safeNum(getProp(m, ['T_MTTO_PLANIFICADO', 't_mtto_planificado']));
+        return [{
+          maquina: getProp(m, ['MAQUINA']),
+          fecha: `${fechaLocalEcuador(iniStr)} ${format(ini, 'HH:mm')}`,
+          horas: planificadas > 0 ? Math.min(planificadas, enVentana) : enVentana,
+        }];
+      });
+    }
+    return looper
       .filter(m => {
         if (selectedDates.size === 0) return true;
         // fechaLocalEcuador, no split('T')[0]: FECHA_OT_PRG_INI es UTC real, selectedDates son
@@ -3306,12 +3490,49 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           horas
         };
       });
-  }, [mantenimientosSAP, selectedDates]);
+  }, [mantenimientosSAP, selectedDates, ventanaPlan]);
 
   const mttoPreventivoHoras = useMemo(
     () => mttoPreventivoTasks.reduce((sum, t) => sum + t.horas, 0),
     [mttoPreventivoTasks]
   );
+
+  // Corrida pendiente: órdenes propias de Laminado (responsables 014/031, Centro 1000) con fecha
+  // ANTERIOR a la fecha evaluada que todavía tienen cantidad pendiente — siguen ocupando el Looper
+  // al arrancar la ventana. Horas = unidades × TiempoRolloMin del KPI Looper (KG → UN con PesoUN).
+  // SAP sugiere; el planificador ajusta (ej. si en planta ya avanzó) — decisión del usuario 2026-10-02.
+  const corridaPendienteSAP = useMemo(() => {
+    if (!ventanaPlan) return { horas: 0, ordenes: [] as { material: string; fecha: string; un: number; horas: number }[] };
+    const ordenes = ordenesFert.flatMap(o => {
+      if (getProp(o, ['CENTRO', 'Centro', 'centro']).trim() === '2000') return [];
+      const responsable = getProp(o, ['RESPCTRLPROD', 'RESP_CONTROL_PROD', 'RESPCONTROLPROD', 'RespControlProd', 'RESPONSABLE']).trim();
+      if (!RESP_PRODUCCION_DIARIA.includes(responsable)) return [];
+      const fechaRaw = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']).trim();
+      const fecha = fechaRaw.includes('T') ? fechaRaw.split('T')[0] : fechaRaw;
+      if (!fecha || fecha >= ventanaPlan.baseStr) return [];
+      const pendiente = safeNum(getProp(o, ['CANTPENDIENTE']));
+      if (pendiente <= 0) return [];
+      const material = String(Number(getProp(o, ['MATERIAL', 'CodMaterial'])));
+      const looper = kpiLooperData.find(k => cleanCode(k.Material) === material);
+      const minRollo = looper ? safeNum(looper.TiempoRolloMin) : 0;
+      const pesoUN = looper ? safeNum(looper.PesoUN) : 0;
+      const unidad = getProp(o, ['UNIDAD', 'Unidad', 'UNIDAD_MEDIDA']).trim().toUpperCase();
+      const un = unidad === 'KG' ? (pesoUN > 0 ? pendiente / pesoUN : 0) : pendiente;
+      return [{ material, fecha, un, horas: (un * minRollo) / 60 }];
+    });
+    return { horas: ordenes.reduce((s, o) => s + o.horas, 0), ordenes };
+  }, [ventanaPlan, ordenesFert, kpiLooperData]);
+  // null = usar lo que sugiere SAP; un número = ajuste manual del planificador. Se reinicia al
+  // cambiar la fecha evaluada (otra ventana, otra sugerencia).
+  const [corridaPendienteManual, setCorridaPendienteManual] = useState<number | null>(null);
+  // Al cargar un plan guardado (ver restaurarEstadoPlan) la fecha cambia en el mismo paso: el valor
+  // restaurado espera acá para no ser borrado por el reinicio de abajo.
+  const corridaPendienteRestaurada = useRef<number | null>(null);
+  useEffect(() => {
+    setCorridaPendienteManual(corridaPendienteRestaurada.current);
+    corridaPendienteRestaurada.current = null;
+  }, [ventanaPlan?.baseStr]);
+  const corridaPendienteHoras = ventanaPlan ? (corridaPendienteManual ?? corridaPendienteSAP.horas) : 0;
 
   // Paros Planificados y Rendimiento del Looper — salen de las restricciones "Paros _Planificados" y
   // "Rendimiento_Looper" del grupo Corte y Laminado (ver restriccionesCapacidad.ts) y quedan editables
@@ -3346,13 +3567,16 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   }, [selectedNocheShift, factorEfectivoLooper, nocheShiftOptions]);
 
   const sabadoDisponibleOEE = useMemo(() => {
+    // Con ventana del plan, el Sábado solo suma si cae dentro de ella (ver ventanaPlan).
+    if (ventanaPlan && !ventanaPlan.incluyeSabado) return 0;
     const sabadoH = diaShiftOptions.find(o => o.v === selectedSabadoShift)?.h || 0;
     return sabadoH * factorEfectivoLooper;
-  }, [selectedSabadoShift, factorEfectivoLooper, diaShiftOptions]);
+  }, [selectedSabadoShift, factorEfectivoLooper, diaShiftOptions, ventanaPlan]);
 
   const tDisponible = useMemo(() => {
-    return Math.max(0, (diaDisponibleOEE + nocheDisponibleOEE + sabadoDisponibleOEE) - mttoPreventivoHoras); // + descuento del MTTO Preventivo (Operación Adicional)
-  }, [diaDisponibleOEE, nocheDisponibleOEE, sabadoDisponibleOEE, mttoPreventivoHoras]);
+    // − MTTO Preventivo (Operación Adicional) − corrida pendiente al arrancar la ventana.
+    return Math.max(0, (diaDisponibleOEE + nocheDisponibleOEE + sabadoDisponibleOEE) - mttoPreventivoHoras - corridaPendienteHoras);
+  }, [diaDisponibleOEE, nocheDisponibleOEE, sabadoDisponibleOEE, mttoPreventivoHoras, corridaPendienteHoras]);
 
   const ocupacionPorc = useMemo(() => {
     if (tDisponible <= 0) return 0;
@@ -3365,19 +3589,33 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // panel en pantalla (rojo cuando ocupacionPorc > 100, ver isSaturated más abajo).
   const construirReporteHtml = () => {
     const fechaHoy = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
+    // Con ventana del plan, cada turno lleva su fecha real en una columna propia (mismo formato que
+    // Corte Espuma, pedido del usuario 2026-10-02).
+    const fechaTurno = (turno: 'Día' | 'Noche' | 'Sábado') => {
+      const t = ventanaPlan?.turnos.find(x => x.turno === turno);
+      return t ? format(t.ini, 'EEE dd/MM', { locale: es }) : '';
+    };
     const diaLabel = diaShiftOptions.find(o => o.v === selectedDiaShift)?.l || '—';
     const nocheLabel = nocheShiftOptions.find(o => o.v === selectedNocheShift)?.l || '—';
     const sabadoLabel = diaShiftOptions.find(o => o.v === selectedSabadoShift)?.l || '—';
     const diaBruta = diaShiftOptions.find(o => o.v === selectedDiaShift)?.h || 0;
     const nocheBruta = nocheShiftOptions.find(o => o.v === selectedNocheShift)?.h || 0;
-    const sabadoBruta = diaShiftOptions.find(o => o.v === selectedSabadoShift)?.h || 0;
+    const sabadoBruta = ventanaPlan && !ventanaPlan.incluyeSabado ? 0 : (diaShiftOptions.find(o => o.v === selectedSabadoShift)?.h || 0);
+    const ventanaHtml = ventanaPlan?.inicio && ventanaPlan.fin
+      ? `<div style="margin:0 0 12px;">${ejecucionPlanHtml(ventanaPlan.inicio, ventanaPlan.fin)}</div>`
+      : '';
+    const pendienteHtml = corridaPendienteHoras > 0 ? `
+        <tr style="background:#fff7ed;">
+          <td colspan="6" style="padding:10px 12px;font-size:12px;font-weight:700;color:#c2410c;">Corrida pendiente (en proceso al iniciar la ventana)</td>
+          <td align="right" style="padding:10px 12px;font-size:12px;font-weight:700;color:#c2410c;font-variant-numeric:tabular-nums;">${corridaPendienteHoras.toFixed(2)} h</td>
+        </tr>` : '';
     // Gestión de tiempos: mismo esquema que el detalle por máquina de Corte Espuma — horas brutas,
     // % de paros y rendimiento (restricciones del grupo) como columnas, y horas efectivas. Turno
     // vacío: % en blanco.
     const thTiempos = 'padding:7px 10px;font-size:9px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;';
     const tdTiempos = 'padding:10px 10px;font-size:12px;border-bottom:1px solid #e5e7eb;font-variant-numeric:tabular-nums;';
-    const filaTurnoTiempos = (etiqueta: string, horario: string, bruta: number, neta: number, fondo: string, color: string) => `
-        <tr style="background:${fondo};"><td style="${tdTiempos}font-weight:700;color:${color};">${etiqueta}</td><td style="${tdTiempos}color:#374151;">${horario}</td><td align="right" style="${tdTiempos}color:#374151;">${bruta.toFixed(2)}</td><td align="right" style="${tdTiempos}color:#374151;">${bruta > 0 ? `${paroLooperPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdTiempos}color:#374151;">${bruta > 0 ? `${rendimientoLooperPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdTiempos}font-weight:700;color:${color};">${neta.toFixed(2)} h</td></tr>`;
+    const filaTurnoTiempos = (etiqueta: string, fecha: string, horario: string, bruta: number, neta: number, fondo: string, color: string) => `
+        <tr style="background:${fondo};"><td style="${tdTiempos}font-weight:700;color:${color};">${etiqueta}</td><td style="${tdTiempos}color:#374151;text-transform:capitalize;white-space:nowrap;">${fecha || '—'}</td><td style="${tdTiempos}color:#374151;white-space:nowrap;">${horario.replace(' - ', ' a ')}</td><td align="right" style="${tdTiempos}color:#374151;">${bruta.toFixed(2)}</td><td align="right" style="${tdTiempos}color:#374151;">${bruta > 0 ? `${paroLooperPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdTiempos}color:#374151;">${bruta > 0 ? `${rendimientoLooperPct.toFixed(0)}%` : ''}</td><td align="right" style="${tdTiempos}font-weight:700;color:${color};">${neta.toFixed(2)} h</td></tr>`;
     const critico = ocupacionPorc > 100;
     const ocupacionColor = critico ? '#7f1d1d' : '#065f46';
     // Plan de Salida — detalle completo por material (no resumen): el operador necesita saber
@@ -3462,20 +3700,21 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   </tr>
   <tr>
     <td style="padding:22px 28px 4px;">
-      <p style="margin:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Gestión de tiempos</p>
+      <p style="margin:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Gestión de tiempos</p>${ventanaHtml}
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
         <tr style="background:#f9fafb;">
           <td style="${thTiempos}">Turno</td>
-          <td style="${thTiempos}">Horarios</td>
+          <td style="${thTiempos}">Fecha</td>
+          <td style="${thTiempos}">Horario</td>
           <td align="right" style="${thTiempos}">Tiempo Máquina<br/>(Horas brutas)</td>
           <td align="right" style="${thTiempos}">Paros<br/>Planificados (%)</td>
           <td align="right" style="${thTiempos}">Rendimiento<br/>Máquina (%)</td>
           <td align="right" style="${thTiempos}">Tiempo Máquina<br/>(Horas Efectivas)</td>
-        </tr>${filaTurnoTiempos('Día', diaLabel, diaBruta, diaDisponibleOEE, '#ecfdf5', '#047857')}${filaTurnoTiempos('Noche', nocheLabel, nocheBruta, nocheDisponibleOEE, '#eef2ff', '#4338ca')}${sabadoBruta > 0 ? filaTurnoTiempos('Sábado', sabadoLabel, sabadoBruta, sabadoDisponibleOEE, '#fffbeb', '#b45309') : ''}
+        </tr>${filaTurnoTiempos('Noche', fechaTurno('Noche'), nocheLabel, nocheBruta, nocheDisponibleOEE, '#eef2ff', '#4338ca')}${sabadoBruta > 0 ? filaTurnoTiempos('Sábado', fechaTurno('Sábado'), sabadoLabel, sabadoBruta, sabadoDisponibleOEE, '#fffbeb', '#b45309') : ''}${filaTurnoTiempos('Día', fechaTurno('Día'), diaLabel, diaBruta, diaDisponibleOEE, '#ecfdf5', '#047857')}
         <tr style="background:#fffbeb;">
-          <td colspan="5" style="padding:10px 12px;font-size:12px;font-weight:700;color:#b45309;">Mantenimiento Programado</td>
+          <td colspan="6" style="padding:10px 12px;font-size:12px;font-weight:700;color:#b45309;">Mantenimiento Programado</td>
           <td align="right" style="padding:10px 12px;font-size:12px;font-weight:700;color:#b45309;font-variant-numeric:tabular-nums;">${mttoPreventivoHoras.toFixed(2)} h</td>
-        </tr>
+        </tr>${pendienteHtml}
       </table>
     </td>
   </tr>${planSalidaHtml}
@@ -4193,6 +4432,61 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                   </PopoverContent>
                 </Popover>
               </div>
+              {ventanaPlan && (
+                <div className="flex items-center gap-3">
+                  <span className="text-[9px] font-black text-slate-400 w-12">PEND.:</span>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button type="button" className="flex-1 bg-orange-50/60 border border-orange-200 rounded-lg px-2 py-1.5 flex items-center justify-between hover:bg-orange-50 transition-colors cursor-pointer">
+                        <span className="text-[8px] font-black text-orange-700 uppercase flex items-center gap-1">
+                          <Info className="w-3 h-3" /> Corrida pendiente{corridaPendienteManual !== null ? ' (ajustada)' : ''}
+                        </span>
+                        <span className="text-[10px] font-black text-orange-700">{corridaPendienteHoras.toFixed(2)} H</span>
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[320px] p-4 bg-white border border-gray-100 rounded-2xl shadow-xl text-slate-800" align="start">
+                      <p className="text-[9px] font-black uppercase text-orange-700 tracking-widest mb-1">Corrida pendiente — Looper</p>
+                      <p className="text-[8px] text-slate-400 font-bold uppercase mb-3">
+                        Órdenes 014/031 anteriores al {format(parseISO(ventanaPlan.baseStr), 'dd/MM')} con cantidad pendiente en SAP: siguen ocupando el Looper al iniciar la ventana
+                      </p>
+                      {corridaPendienteSAP.ordenes.length === 0 ? (
+                        <p className="text-[10px] text-slate-400 italic mb-3">SAP no reporta órdenes pendientes anteriores.</p>
+                      ) : (
+                        <div className="space-y-1.5 max-h-40 overflow-y-auto mb-3">
+                          {corridaPendienteSAP.ordenes.map((o, i) => (
+                            <div key={i} className="flex items-center justify-between gap-2 text-[9px] border-b border-gray-100 pb-1">
+                              <span className="font-bold text-slate-600">{o.material}</span>
+                              <span className="text-slate-400 font-mono">{o.fecha}</span>
+                              <span className="text-slate-500">{o.un.toFixed(0)} UN</span>
+                              <span className="font-black text-orange-700 whitespace-nowrap">{o.horas.toFixed(2)}h</span>
+                            </div>
+                          ))}
+                          <div className="flex justify-between pt-1 text-[9px] font-black">
+                            <span className="uppercase">Sugerido SAP</span>
+                            <span className="text-orange-700">{corridaPendienteSAP.horas.toFixed(2)}h</span>
+                          </div>
+                        </div>
+                      )}
+                      <label className="flex items-center gap-2 text-[9px] font-black uppercase text-slate-500">
+                        Horas a descontar
+                        <input
+                          type="number"
+                          min={0}
+                          step={0.25}
+                          value={Number(corridaPendienteHoras.toFixed(2))}
+                          onChange={e => setCorridaPendienteManual(Math.max(0, Number(e.target.value) || 0))}
+                          className="w-20 h-7 px-2 border border-gray-200 rounded-md text-[11px] font-black text-slate-700"
+                        />
+                      </label>
+                      {corridaPendienteManual !== null && (
+                        <button type="button" onClick={() => setCorridaPendienteManual(null)} className="mt-2 text-[8px] font-black uppercase text-orange-700 hover:underline">
+                          Volver a lo sugerido por SAP ({corridaPendienteSAP.horas.toFixed(2)}h)
+                        </button>
+                      )}
+                    </PopoverContent>
+                  </Popover>
+                </div>
+              )}
             </div>
           </div>
 
@@ -4304,9 +4598,30 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <div className="col-span-2 p-4 border-r border-gray-100 flex flex-col items-center justify-center">
             <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter mb-1">DISPONIBILIDAD TOTAL (H)</p>
             <span className="text-2xl font-black text-amber-600 leading-none tabular-nums">{tDisponible.toFixed(2)}</span>
-            <p className="text-[7px] font-bold text-slate-400 uppercase tracking-tighter mt-1">Día {diaDisponibleOEE.toFixed(2)}h + Noche {nocheDisponibleOEE.toFixed(2)}h{selectedSabadoShift !== 'EMPTY' ? ` + Sábado ${sabadoDisponibleOEE.toFixed(2)}h` : ''} (-{paroLooperPct}% paros · {rendimientoLooperPct}% rend. c/u) -{mttoPreventivoHoras.toFixed(2)}h MTTO</p>
+            <p className="text-[7px] font-bold text-slate-400 uppercase tracking-tighter mt-1">Día {diaDisponibleOEE.toFixed(2)}h + Noche {nocheDisponibleOEE.toFixed(2)}h{sabadoDisponibleOEE > 0 ? ` + Sábado ${sabadoDisponibleOEE.toFixed(2)}h` : ''} (-{paroLooperPct}% paros · {rendimientoLooperPct}% rend. c/u) -{mttoPreventivoHoras.toFixed(2)}h MTTO{corridaPendienteHoras > 0 ? ` -${corridaPendienteHoras.toFixed(2)}h pendiente` : ''}</p>
           </div>
-          <div className="col-span-5 flex items-center px-6">
+          <div className="col-span-5 flex flex-col justify-center gap-2 px-6 py-3">
+             {ventanaPlan && ventanaPlan.inicio && ventanaPlan.fin && (
+               <div title="Turnos en los que se produce el plan: desde la noche de la fecha evaluada hasta el fin del turno día del día del plan. El MTTO y la corrida pendiente se descuentan dentro de esta ventana.">
+                 <p className="text-[8px] font-black uppercase text-blue-700 tracking-widest">
+                   Ejecución del plan de producción · P2 {format(ventanaPlan.diaPlan, 'EEE dd/MM', { locale: es })}
+                 </p>
+                 <p className="text-[11px] font-black text-slate-700 tabular-nums">
+                   INICIO: <span className="text-blue-700">{fechaHoraEjecucion(ventanaPlan.inicio)}</span>
+                   {' ⇒ '}FIN: <span className="text-blue-700">{fechaHoraEjecucion(ventanaPlan.fin)}</span>
+                 </p>
+                 <div className="flex flex-wrap gap-1.5 mt-1">
+                   {ventanaPlan.turnos.map(t => (
+                     <span key={t.turno + t.ini.toISOString()} className="text-[8px] font-bold uppercase bg-white border border-gray-200 rounded px-1.5 py-0.5 text-slate-600">
+                       {t.turno} {format(t.ini, 'EEE dd/MM HH:mm', { locale: es })}–{format(t.fin, 'HH:mm')}
+                     </span>
+                   ))}
+                 </div>
+               </div>
+             )}
+             {ventanaPlan && ventanaPlan.turnos.length === 0 && (
+               <p className="text-[9px] font-black uppercase text-amber-700">Sin turnos elegidos: la ventana del plan no tiene horas.</p>
+             )}
              {isSaturated && (
                <div className="flex items-center gap-3 text-red-600 animate-pulse">
                   <AlertCircle className="w-6 h-6 flex-shrink-0" />
@@ -4323,12 +4638,79 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // ReportePlanTxtFlujo.tsx): el correo sale de la foto guardada, no se recalcula después de exportar
   // a SAP. Fecha objetivo = fecha de ejecución del Plan de Salida (la misma que muestra el correo),
   // o el día hábil siguiente si no hay corridas.
+  // Respaldo de la pestaña "Resumen Necesidades" que viaja junto al TXT ({fecha}.estado.json): lo
+  // necesario para que, al recuperar el reporte, la pantalla vuelva a mostrar EXACTAMENTE lo que se
+  // planificó (turnos/horarios, paros, corridas, ajustes manuales, fechas de corrida, MTTO y corrida
+  // pendiente de la ventana, personal) sin volver a consultar SAP. Pedido del usuario 2026-10-02.
+  const capturarEstadoPlan = (): EstadoPlanLaminado => {
+    const turno = (opciones: { v: string; l: string }[], v: string) => ({ v, l: opciones.find(o => o.v === v)?.l ?? '' });
+    return {
+      tipo: 'laminado-resumen',
+      version: 1,
+      selectedDates: Array.from(selectedDates),
+      turnos: {
+        dia: turno(diaShiftOptions, selectedDiaShift),
+        noche: turno(nocheShiftOptions, selectedNocheShift),
+        sabado: turno(diaShiftOptions, selectedSabadoShift),
+      },
+      paroLooperPct,
+      rendimientoLooperPct,
+      corridaPendienteHoras,
+      assignedPersonnel,
+      unifiedNeeds,
+      planManualOverrides,
+      corridasManualOverrides,
+      approvedDeficitRows: Array.from(approvedDeficitRows),
+      corridaFechas,
+      necesidadesPlantaData,
+      // Solo el MTTO del Looper (lo único que usa este cálculo), no toda la maestra de SAP.
+      mantenimientosLooper: mantenimientosSAP.filter(m => String(getProp(m, ['MAQUINA'])).toUpperCase().includes('LOOPER')),
+    };
+  };
+
+  const restaurarEstadoPlan = (crudo: unknown, origen: OrigenEstadoPlan): boolean => {
+    const e = crudo as Partial<EstadoPlanLaminado> | null;
+    if (!e || e.tipo !== 'laminado-resumen' || e.version !== 1 || !Array.isArray(e.unifiedNeeds)) return false;
+    // Turno por horario (texto), no por clave: el catálogo puede haber cambiado si cambió la restricción.
+    const clave = (opciones: { v: string; l: string }[], t?: { v: string; l: string }) => {
+      if (!t || t.v === 'EMPTY') return 'EMPTY';
+      return opciones.find(o => o.l === t.l)?.v ?? opciones.find(o => o.v === t.v)?.v ?? 'EMPTY';
+    };
+    const fechas = e.selectedDates ?? [];
+    corridaPendienteRestaurada.current = e.corridaPendienteHoras ?? null;
+    setSelectedDates(new Set(fechas));
+    if (fechas.length === 1) {
+      setFechaEvaluada(fechas[0]);
+      setViewDate(parseISO(fechas[0]));
+    }
+    setSelectedDiaShift(clave(diaShiftOptions, e.turnos?.dia));
+    setSelectedNocheShift(clave(nocheShiftOptions, e.turnos?.noche));
+    setSelectedSabadoShift(clave(diaShiftOptions, e.turnos?.sabado));
+    if (typeof e.paroLooperPct === 'number') setParoLooperPct(e.paroLooperPct);
+    if (typeof e.rendimientoLooperPct === 'number') setRendimientoLooperPct(e.rendimientoLooperPct);
+    if (e.assignedPersonnel) setAssignedPersonnel(e.assignedPersonnel);
+    setUnifiedNeeds(e.unifiedNeeds);
+    setPlanOverrides(e.planManualOverrides ?? {});
+    setCorridasOverrides(e.corridasManualOverrides ?? {});
+    setApprovedDeficitRows(new Set(e.approvedDeficitRows ?? []));
+    setCorridaFechas(e.corridaFechas ?? {});
+    if (e.necesidadesPlantaData) setNecesidadesPlantaData(e.necesidadesPlantaData);
+    if (e.mantenimientosLooper) setMantenimientosSAP(e.mantenimientosLooper);
+    // Si la fecha no cambió, el efecto de reinicio no corre: se aplica directo.
+    setCorridaPendienteManual(e.corridaPendienteHoras ?? null);
+    setPlanCargadoDe(origen);
+    setActiveTab('resumen');
+    return true;
+  };
+
   const reporteFlujo = useReportePlanTxt({
     modulo: 'laminado',
     centro: '1000',
     fechaObjetivo: outputPlanRows[0]?.fecha || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd'),
     asunto: ASUNTO_REPORTE,
     construirHtml: () => construirReporteHtml(),
+    capturarEstado: capturarEstadoPlan,
+    restaurarEstado: restaurarEstadoPlan,
   });
 
   if (!mounted) return <div className="p-4 md:p-6 min-h-screen bg-white" />;
@@ -4409,7 +4791,19 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
       {/* Estado vacío inicial: el módulo no consulta SAP al abrirse. Mismo criterio y misma
           redacción compacta que Corte Espuma y Venta Externa (ver [[carga_manual_modulos_tacticos]]). */}
-      {!datosCargados && !isLoading && (
+      {planCargadoDe && (
+        <div
+          className="flex items-center gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50/50 px-4 py-2.5 text-left"
+          title="Lo que se ve viene del respaldo guardado junto al reporte, no de SAP. Sincronizar recalcula con los datos actuales."
+        >
+          <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
+          <p className="text-[11px] font-bold text-slate-600">
+            Plan cargado del reporte del <span className="font-black text-emerald-700">{format(parseISO(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — solo lectura de lo planificado; <span className="font-black text-blue-700">Sincronizar</span> lo recalcula con SAP.
+          </p>
+        </div>
+      )}
+      {!datosCargados && !isLoading && !planCargadoDe && (
         <div
           className="flex items-center gap-2.5 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-4 py-2.5 text-left"
           title="Este módulo no consulta SAP al abrirse. Sincronizar trae Grupos, Restricciones, Provisionales, FERT, KPI Looper, Inventario, Habilidades y Mantenimiento, y calcula el resumen automáticamente al terminar."
@@ -5491,6 +5885,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <PanelProgreso panel={panelProgreso} />
     </div>
   );
 };

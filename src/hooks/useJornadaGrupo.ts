@@ -48,8 +48,8 @@ export function useJornadaGrupo(restricciones: Restriccion[], codigoGrupo: numbe
     () => porcentajeRestriccion(restricciones, grupo, RESTRICCION_CAPACIDAD.parosPlanificados),
     [restricciones, grupo]
   );
-  const opcionesDia = useMemo(() => opcionesConHorarios(DIA_BASE, [jornada.dia, jornada.finDeSemana]), [jornada]);
-  const opcionesNoche = useMemo(() => opcionesConHorarios(NOCHE_BASE, [jornada.noche]), [jornada]);
+  const opcionesDia = useMemo(() => opcionesConHorarios(DIA_BASE, [jornada.dia, jornada.finDeSemana, ...jornada.catalogo.dia, ...jornada.catalogo.finDeSemana]), [jornada]);
+  const opcionesNoche = useMemo(() => opcionesConHorarios(NOCHE_BASE, [jornada.noche, ...jornada.catalogo.noche]), [jornada]);
 
   const [dia, setDia] = useState('EMPTY');
   const [noche, setNoche] = useState('EMPTY');

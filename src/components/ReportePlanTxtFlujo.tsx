@@ -24,7 +24,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { format } from 'date-fns';
-import { CheckCircle2, FileSearch, Loader2, Mail, RotateCcw, Save } from 'lucide-react';
+import { CheckCircle2, FileSearch, Loader2, Mail, RotateCcw, Save, Upload } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -38,6 +38,9 @@ import {
 
 export type EstadoReportePlanTxt = 'sin-fecha' | 'verificando' | 'sin-guardar' | 'guardado' | 'error-carpeta';
 
+/** De qué reporte guardado viene el plan que se carga en el módulo (para avisarlo en pantalla). */
+export interface OrigenEstadoPlan { fechaObjetivo: string; guardadoEn: string }
+
 export interface ConfigReportePlanTxt {
   modulo: ModuloPlanTxt;
   centro: CentroPlanTxt;
@@ -48,6 +51,10 @@ export interface ConfigReportePlanTxt {
   construirHtml: () => string | Promise<string>;
   /** Texto corto para notificaciones/diálogo cuando hay varios flujos en el mismo módulo (ej. "Centro 1000"). */
   etiqueta?: string;
+  /** Respaldo de lo planificado (turnos, corridas, ajustes) que se guarda junto al TXT como {fecha}.estado.json. */
+  capturarEstado?: () => unknown;
+  /** Vuelve a cargar ese respaldo en la pantalla del módulo; devuelve false si no lo reconoce. */
+  restaurarEstado?: (estado: unknown, origen: OrigenEstadoPlan) => boolean;
 }
 
 export interface FlujoReportePlanTxt {
@@ -65,9 +72,15 @@ export interface FlujoReportePlanTxt {
   /** true si quedó guardado (false si se canceló o falló). sinConfirmar: el grupo ya preguntó una sola vez. */
   guardar: (opts?: { sinConfirmar?: boolean }) => Promise<boolean>;
   /** true si se recuperó. abrir=false: no abre el diálogo individual (lo usa el diálogo de grupo). */
-  recuperar: (opts?: { abrir?: boolean }) => Promise<boolean>;
+  recuperar: (opts?: { abrir?: boolean; fecha?: string }) => Promise<boolean>;
+  /** Fecha objetivo del reporte abierto en la vista previa. */
+  fechaVista: string | null;
   /** true si se envió. */
   enviar: (destino: string) => Promise<boolean>;
+  /** Hay respaldo recuperado y el módulo sabe cargarlo. */
+  puedeCargar: boolean;
+  /** Carga en el módulo lo planificado que se recuperó (cierra la vista previa). */
+  cargarEnModulo: () => boolean;
 }
 
 const NOTA_CORREO = 'Este correo fue generado automáticamente, favor no responder.';
@@ -84,6 +97,8 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
   const [enviando, setEnviando] = useState(false);
   const [vista, setVista] = useState<PlanTxtRecuperado | null>(null);
   const [vistaAbierta, setVistaAbierta] = useState(false);
+  // Fecha objetivo del reporte abierto en la vista previa (puede ser otra que la del módulo).
+  const [fechaVista, setFechaVista] = useState<string | null>(null);
 
   // construirHtml cambia en cada render del módulo (cierra sobre su estado): se lee del ref al
   // guardar para usar siempre los datos vigentes sin re-disparar la verificación.
@@ -94,6 +109,7 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
   const { modulo, centro, fechaObjetivo } = config;
   useEffect(() => {
     setVista(null);
+    setFechaVista(null);
     setEnviadoEn(null);
     if (!fechaObjetivo) { setEstado('sin-fecha'); setGuardadoEn(null); setRuta(null); return; }
     let vigente = true;
@@ -122,7 +138,8 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
     setGuardando(true);
     try {
       const html = await cfg.construirHtml();
-      const res = await guardarPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: cfg.fechaObjetivo, html, asunto: cfg.asunto });
+      const estadoModulo = cfg.capturarEstado?.();
+      const res = await guardarPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: cfg.fechaObjetivo, html, asunto: cfg.asunto, estado: estadoModulo });
       setEstado('guardado');
       setGuardadoEn(new Date().toISOString());
       setRuta(res.ruta);
@@ -138,15 +155,21 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
     }
   }, [addNotification, estado, guardadoEn, prefijo]);
 
-  const recuperar = useCallback(async (opts?: { abrir?: boolean }): Promise<boolean> => {
+  const recuperar = useCallback(async (opts?: { abrir?: boolean; fecha?: string }): Promise<boolean> => {
     const cfg = configRef.current;
-    if (!cfg.fechaObjetivo) return false;
+    // fecha: abrir el plan de OTRA fecha objetivo (ej. el lunes, revisar lo que se guardó el viernes
+    // para el lunes, cuando el módulo ya apunta al martes).
+    const fecha = opts?.fecha || cfg.fechaObjetivo;
+    if (!fecha) return false;
     setRecuperando(true);
     try {
-      const plan = await obtenerPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: cfg.fechaObjetivo });
+      const plan = await obtenerPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: fecha });
       setVista(plan);
-      setGuardadoEn(plan.modificado);
-      setRuta(plan.ruta);
+      setFechaVista(fecha);
+      if (fecha === cfg.fechaObjetivo) {
+        setGuardadoEn(plan.modificado);
+        setRuta(plan.ruta);
+      }
       if (opts?.abrir !== false) setVistaAbierta(true);
       return true;
     } catch (error) {
@@ -184,9 +207,10 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
       addNotification('success', `${prefijo}${resultado.message} — ${resultado.destinatarios.join(', ')}`);
       // Enviado OK: la foto HTML ya cumplió su función (el correo quedó en la bandeja de entrada),
       // en la carpeta queda solo el TXT. Si la limpieza falla el envío igual fue exitoso: solo avisa.
-      if (cfg.fechaObjetivo) {
+      const fechaEnviada = fechaVista || cfg.fechaObjetivo;
+      if (fechaEnviada) {
         try {
-          await eliminarFotoCorreoPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: cfg.fechaObjetivo });
+          await eliminarFotoCorreoPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: fechaEnviada });
           setVista({ ...vista, html: null });
         } catch (e) {
           addNotification('warning', `${prefijo}correo enviado, pero no se pudo borrar la foto del correo: ${(e as Error).message}`);
@@ -199,11 +223,25 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
     } finally {
       setEnviando(false);
     }
-  }, [addNotification, prefijo, vista]);
+  }, [addNotification, prefijo, vista, fechaVista]);
+
+  const puedeCargar = !!vista?.estado && !!config.restaurarEstado;
+  const cargarEnModulo = useCallback((): boolean => {
+    const cfg = configRef.current;
+    if (!vista?.estado || !cfg.restaurarEstado) return false;
+    const ok = cfg.restaurarEstado(vista.estado, { fechaObjetivo: fechaVista || cfg.fechaObjetivo || '', guardadoEn: vista.modificado });
+    if (ok) {
+      setVistaAbierta(false);
+      addNotification('success', `${prefijo}plan guardado el ${horaCorta(vista.modificado)} cargado en el módulo (turnos, corridas y ajustes). Si sincronizas, se recalcula con datos actuales de SAP.`);
+    } else {
+      addNotification('warning', `${prefijo}el respaldo guardado no es compatible con esta versión del módulo; solo se puede revisar el reporte.`);
+    }
+    return ok;
+  }, [vista, fechaVista, addNotification, prefijo]);
 
   return {
     config, estado, guardadoEn, ruta, enviadoEn, guardando, recuperando, enviando,
-    vista, vistaAbierta, setVistaAbierta, guardar, recuperar, enviar,
+    vista, vistaAbierta, setVistaAbierta, guardar, recuperar, enviar, puedeCargar, cargarEnModulo, fechaVista,
   };
 }
 
@@ -283,7 +321,33 @@ export const ReportePlanTxtAcciones: React.FC<{ flujo: FlujoReportePlanTxt; clas
           {recuperando ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSearch className="w-4 h-4" />} Recuperar y revisar
         </Button>
         {enviadoEn && <p className="text-[9px] font-bold text-emerald-700">Enviado {horaCorta(enviadoEn)}</p>}
+        {config.restaurarEstado && <AbrirOtraFecha recuperando={recuperando} onAbrir={fecha => { void flujo.recuperar({ fecha }); }} />}
       </PasoReporte>
+    </div>
+  );
+};
+
+// Abre el reporte de otra fecha objetivo (ej. el lunes, el plan guardado el viernes para el lunes)
+// para revisarlo o cargarlo en el módulo. Solo en módulos que saben restaurar su respaldo.
+const AbrirOtraFecha: React.FC<{ recuperando: boolean; onAbrir: (fecha: string) => void }> = ({ recuperando, onAbrir }) => {
+  const [fecha, setFecha] = useState('');
+  return (
+    <div className="flex items-center gap-1.5 pt-1 border-t border-slate-100">
+      <span className="text-[8px] font-black uppercase text-slate-400 whitespace-nowrap">Otra fecha</span>
+      <input
+        type="date"
+        value={fecha}
+        onChange={e => setFecha(e.target.value)}
+        className="flex-1 min-w-0 h-7 px-1.5 rounded-md border border-slate-200 text-[10px] font-bold text-slate-700"
+      />
+      <button
+        type="button"
+        disabled={!fecha || recuperando}
+        onClick={() => onAbrir(fecha)}
+        className="h-7 px-2 rounded-md border border-emerald-200 text-[9px] font-black uppercase text-emerald-700 hover:bg-emerald-50 disabled:opacity-40"
+      >
+        Abrir
+      </button>
     </div>
   );
 };
@@ -304,7 +368,10 @@ export const ReportePlanTxtVistaPrevia: React.FC<{
   const nDestinatarios = destinatarios.split(/[,;]/).map(s => s.trim()).filter(Boolean).length;
 
   // Sin foto HTML no se envía en texto plano: se vuelve a guardar (datos actuales) y se recarga la vista.
+  // Solo para la fecha del módulo: guardar toma los datos ACTUALES, nunca debe pisar un plan de otra fecha.
+  const otraFecha = !!flujo.fechaVista && flujo.fechaVista !== config.fechaObjetivo;
   const regenerar = async () => {
+    if (otraFecha) return;
     if (await flujo.guardar()) await flujo.recuperar();
   };
 
@@ -316,7 +383,7 @@ export const ReportePlanTxtVistaPrevia: React.FC<{
             Vista previa — {titulo}{config.etiqueta ? ` · ${config.etiqueta}` : ''}
           </DialogTitle>
           <DialogDescription className="text-[11px]">
-            Guardado el {horaCorta(vista?.modificado ?? null)} para la fecha objetivo {config.fechaObjetivo}. Se envía exactamente esto,
+            Guardado el {horaCorta(vista?.modificado ?? null)} para la fecha objetivo {flujo.fechaVista || config.fechaObjetivo}. Se envía exactamente esto,
             sin recalcular con los datos actuales de SAP.
             {vista && <span className="block font-mono text-[10px] text-slate-400 break-all mt-1">{vista.ruta}</span>}
           </DialogDescription>
@@ -340,7 +407,7 @@ export const ReportePlanTxtVistaPrevia: React.FC<{
                     borró. No se envía como texto plano: vuelve a guardarlo para generar el correo con formato. Ojo: se tomarán los
                     datos <b>actuales</b> del módulo.
                   </p>
-                  <Button onClick={() => { void regenerar(); }} disabled={guardando} className="h-8 gap-2 text-[10px] font-black uppercase bg-indigo-600 hover:bg-indigo-700 text-white">
+                  <Button onClick={() => { void regenerar(); }} disabled={guardando || otraFecha} title={otraFecha ? "Es el reporte de otra fecha: no se puede regenerar con los datos actuales" : undefined} className="h-8 gap-2 text-[10px] font-black uppercase bg-indigo-600 hover:bg-indigo-700 text-white">
                     {guardando ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Volver a guardar y actualizar vista
                   </Button>
                 </div>
@@ -365,6 +432,19 @@ export const ReportePlanTxtVistaPrevia: React.FC<{
             className="w-full text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-indigo-400 resize-y"
           />
           <div className="flex justify-end gap-2">
+            {config.restaurarEstado && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  if (window.confirm('Se reemplazará lo que hay en pantalla (turnos, corridas, ajustes y resumen) por lo planificado en este reporte. ¿Continuar?')) flujo.cargarEnModulo();
+                }}
+                disabled={enviando || !flujo.puedeCargar}
+                title={flujo.puedeCargar ? 'Vuelve a mostrar en la pestaña lo que se planificó al guardar' : 'Este reporte se guardó sin respaldo del módulo (antes de esta versión): vuelve a guardarlo para poder cargarlo'}
+                className="mr-auto h-9 gap-2 text-[10px] font-black uppercase border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+              >
+                <Upload className="w-4 h-4" /> Cargar en el módulo
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setVistaAbierta(false)} disabled={enviando} className="h-9 text-[10px] font-black uppercase">Cerrar</Button>
             <Button
               onClick={() => { void flujo.enviar(destinatarios); }}
@@ -398,8 +478,13 @@ export interface GrupoReportePlanTxt {
   recuperando: boolean;
   enviando: boolean;
   guardarTodos: () => Promise<void>;
-  recuperarTodos: () => Promise<void>;
+  /** fecha: abre los reportes de OTRA fecha objetivo (ver AbrirOtraFecha). */
+  recuperarTodos: (fecha?: string) => Promise<void>;
   enviarTodos: (destino: string) => Promise<void>;
+  /** El respaldo del módulo vive en UN flujo del grupo (el que declara capturarEstado). */
+  puedeCargar: boolean;
+  sabeCargar: boolean;
+  cargarEnModulo: () => void;
 }
 
 export function useReportePlanTxtGrupo(flujos: FlujoReportePlanTxt[]): GrupoReportePlanTxt {
@@ -420,11 +505,17 @@ export function useReportePlanTxtGrupo(flujos: FlujoReportePlanTxt[]): GrupoRepo
     for (const f of flujos) await f.guardar({ sinConfirmar: true });
   };
 
-  const recuperarTodos = async () => {
-    const guardados = flujos.filter(f => f.estado === 'guardado');
+  const recuperarTodos = async (fecha?: string) => {
+    // Otra fecha: no se sabe de antemano qué centros tienen reporte; se intenta con todos.
+    const guardados = fecha ? flujos : flujos.filter(f => f.estado === 'guardado');
     if (guardados.length === 0) return;
-    const ok = await Promise.all(guardados.map(f => f.recuperar({ abrir: false })));
+    const ok = await Promise.all(guardados.map(f => f.recuperar({ abrir: false, fecha })));
     if (ok.some(Boolean)) setAbierta(true);
+  };
+
+  const conRespaldo = flujos.find(f => f.puedeCargar);
+  const cargarEnModulo = () => {
+    if (conRespaldo?.cargarEnModulo()) setAbierta(false);
   };
 
   const enviarTodos = async (destino: string) => {
@@ -448,6 +539,9 @@ export function useReportePlanTxtGrupo(flujos: FlujoReportePlanTxt[]): GrupoRepo
     guardando: flujos.some(f => f.guardando),
     recuperando: flujos.some(f => f.recuperando),
     guardarTodos, recuperarTodos, enviarTodos,
+    puedeCargar: !!conRespaldo,
+    sabeCargar: flujos.some(f => !!f.config.restaurarEstado),
+    cargarEnModulo,
   };
 }
 
@@ -519,6 +613,7 @@ export const ReportePlanTxtAccionesGrupo: React.FC<{ grupo: GrupoReportePlanTxt;
         >
           {recuperando ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSearch className="w-4 h-4" />} Recuperar y revisar
         </Button>
+        {grupo.sabeCargar && <AbrirOtraFecha recuperando={recuperando} onAbrir={fecha => { void grupo.recuperarTodos(fecha); }} />}
       </PasoReporte>
     </div>
   );
@@ -538,7 +633,10 @@ export const ReportePlanTxtVistaPreviaGrupo: React.FC<{
   const nDestinatarios = destinatarios.split(/[,;]/).map(s => s.trim()).filter(Boolean).length;
   const primero = conVista[0]?.config.centro;
 
+  // Solo para la fecha del módulo: guardar toma los datos ACTUALES, nunca debe pisar un plan de otra fecha.
+  const esOtraFecha = (f: FlujoReportePlanTxt) => !!f.fechaVista && f.fechaVista !== f.config.fechaObjetivo;
   const regenerar = async (f: FlujoReportePlanTxt) => {
+    if (esOtraFecha(f)) return;
     if (await f.guardar()) await f.recuperar({ abrir: false });
   };
 
@@ -567,7 +665,7 @@ export const ReportePlanTxtVistaPreviaGrupo: React.FC<{
             {conVista.map(f => (
               <TabsContent key={f.config.centro} value={f.config.centro} className="flex-1 min-h-0 mt-2 flex flex-col gap-1">
                 <p className="shrink-0 text-[10px] text-slate-500">
-                  Guardado el {horaCorta(f.vista?.modificado ?? null)} · fecha objetivo {f.config.fechaObjetivo}
+                  Guardado el {horaCorta(f.vista?.modificado ?? null)} · fecha objetivo {f.fechaVista || f.config.fechaObjetivo}
                   <span className="block font-mono text-[10px] text-slate-400 break-all">{f.vista?.ruta}</span>
                 </p>
                 <Tabs defaultValue={f.vista?.html ? 'correo' : 'txt'} className="flex-1 min-h-0 flex flex-col">
@@ -582,7 +680,7 @@ export const ReportePlanTxtVistaPreviaGrupo: React.FC<{
                       <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-[11px] text-amber-800 space-y-2">
                         <p className="font-black uppercase tracking-wider">Centro {f.config.centro}: no hay correo con formato guardado</p>
                         <p>Se guardó sin la copia del correo o ya se envió. Este centro no se enviará: vuelve a guardarlo (tomará los datos <b>actuales</b> del módulo).</p>
-                        <Button onClick={() => { void regenerar(f); }} disabled={guardando} className="h-8 gap-2 text-[10px] font-black uppercase bg-indigo-600 hover:bg-indigo-700 text-white">
+                        <Button onClick={() => { void regenerar(f); }} disabled={guardando || esOtraFecha(f)} className="h-8 gap-2 text-[10px] font-black uppercase bg-indigo-600 hover:bg-indigo-700 text-white">
                           {f.guardando ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Volver a guardar Centro {f.config.centro}
                         </Button>
                       </div>
@@ -615,6 +713,19 @@ export const ReportePlanTxtVistaPreviaGrupo: React.FC<{
             </p>
           )}
           <div className="flex justify-end gap-2">
+            {grupo.sabeCargar && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  if (window.confirm('Se reemplazará lo que hay en pantalla (ambos centros) por lo planificado en este reporte. ¿Continuar?')) grupo.cargarEnModulo();
+                }}
+                disabled={enviando || !grupo.puedeCargar}
+                title={grupo.puedeCargar ? 'Vuelve a mostrar en el módulo lo que se planificó al guardar' : 'Este reporte se guardó sin respaldo del módulo (antes de esta versión): vuelve a guardarlo para poder cargarlo'}
+                className="mr-auto h-9 gap-2 text-[10px] font-black uppercase border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+              >
+                <Upload className="w-4 h-4" /> Cargar en el módulo
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setAbierta(false)} disabled={enviando} className="h-9 text-[10px] font-black uppercase">Cerrar</Button>
             <Button
               onClick={() => { void grupo.enviarTodos(destinatarios); }}
