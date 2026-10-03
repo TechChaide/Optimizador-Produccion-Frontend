@@ -5,10 +5,8 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useRouter } from 'next/navigation';
 import { 
   Scissors,
-  Package,
   Loader2,
   LayoutDashboard,
-  ShoppingCart,
   RefreshCw,
   Wrench,
   Minus,
@@ -1076,6 +1074,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const [autoGenerarPendiente, setAutoGenerarPendiente] = useState(false);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
   const panelProgreso = usePanelProgreso();
+  // Fase 2 del panel (2026-10-03): tras confirmar P3/PFD, el reporte de cada centro se guarda solo.
+  // Lo corre un efecto (ver más abajo, junto a reporteFlujo) para que construirHtml lea el render
+  // posterior a guardar el P3/PFD y refrescar necesidades, no un cierre viejo.
+  const [reportesPorGuardar, setReportesPorGuardar] = useState<('1000' | '2000')[] | null>(null);
   const [ordenesProvisionales, setOrdenesProvisionales] = useState<RawApiRow[]>([]);
   const [ordenesFert, setOrdenesFert] = useState<RawApiRow[]>([]);
   // "Pendientes Totales" (pedidos de venta pendientes de entrega, sector "09 ESPUMAS" — mismo dato
@@ -3139,6 +3141,39 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   });
   const reporteFlujo = { UIO: reporteFlujoUIO, GYE: reporteFlujoGYE };
 
+  // Fase 2 del panel: guarda el reporte de cada centro confirmado en P3/PFD (sin preguntar si ya
+  // había uno: el P3 recién confirmado lo reemplaza) y deja "Ver reporte y enviar" como siguiente
+  // paso. El envío sigue siendo manual, desde la vista previa.
+  useEffect(() => {
+    if (!reportesPorGuardar) return;
+    const centros = reportesPorGuardar;
+    setReportesPorGuardar(null);
+    void (async () => {
+      const guardados: ('UIO' | 'GYE')[] = [];
+      for (const centro of centros) {
+        const planta = centro === '1000' ? 'UIO' : 'GYE';
+        const flujo = reporteFlujo[planta];
+        if (!flujo.config.fechaObjetivo) {
+          panelProgreso.actualizar(`rep-${centro}`, { estado: 'aviso', detalle: 'Sin fecha en "Evaluar Capacidad": elige la fecha y guárdalo desde "Enviar Reporte".' });
+          continue;
+        }
+        panelProgreso.actualizar(`rep-${centro}`, { estado: 'en_curso' });
+        const ok = await flujo.guardar({ sinConfirmar: true, silencioso: true });
+        panelProgreso.actualizar(`rep-${centro}`, ok
+          ? { estado: 'ok', detalle: `Plan del ${flujo.config.fechaObjetivo} guardado en la carpeta compartida (todavía no se envió).` }
+          : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
+        if (ok) guardados.push(planta);
+      }
+      panelProgreso.concluir(
+        guardados.length > 0 ? 'P3/PFD y reporte guardados. Exporta a SAP si corresponde y luego revisa y envía el reporte.' : undefined,
+        guardados.map(planta => ({
+          etiqueta: guardados.length > 1 ? `Ver reporte ${planta === 'UIO' ? 'Quito' : 'Guayaquil'}` : 'Ver reporte y enviar',
+          onClick: () => { setActiveTab('resumen'); void reporteFlujo[planta].recuperar(); },
+        })),
+      );
+    })();
+  }, [reportesPorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Materiales de "Laminado Cilíndrico" (descripción "LAMINA CILINDRICA...") — verificado con datos
   // reales: son 6 materiales, todos de Muebles, y ya reciben su respuesta P3 desde el módulo de
   // Laminado. Se excluyen de la Respuesta P3 de Corte Espuma (ni se muestran ni se guardan) para no
@@ -4436,37 +4471,48 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Confirmación del paso combinado: por cada centro de la vista previa, guarda el P3 y (si existe)
   // el PFD en secuencia — un centro/canal que falle no bloquea a los demás, se reporta por separado
   // en el mismo mensaje final.
+  // Fase 2 del panel: el avance va al panel flotante (no a toasts) y al terminar se guarda el reporte
+  // de cada centro (reportesPorGuardar), que cierra con "Ver reporte y enviar".
   const handleConfirmarRespuestaP3PFD = useCallback(async () => {
     if (!planPreviewP3PFD || planPreviewP3PFD.length === 0) return;
+    const previews = planPreviewP3PFD;
+    const nombrePlanta = (c: '1000' | '2000') => (c === '1000' ? 'Quito' : 'Guayaquil');
     setIsSavingPlanP3PFD(true);
+    setPlanPreviewP3PFD(null);
+    panelProgreso.iniciar('Corte Espuma — Respuesta P3/PFD y reporte', [
+      ...previews.flatMap(({ centro, pfd }) => [
+        { id: `p3-${centro}`, etiqueta: `Guardando P3 · ${nombrePlanta(centro)}` },
+        ...(pfd ? [{ id: `pfd-${centro}`, etiqueta: `Guardando PFD · ${nombrePlanta(centro)}` }] : []),
+      ]),
+      { id: 'nec', etiqueta: 'Actualizando necesidades' },
+      ...previews.map(({ centro }) => ({ id: `rep-${centro}`, etiqueta: `Guardando reporte · ${nombrePlanta(centro)}` })),
+    ]);
     try {
       const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
       const usuario = user?.name || 'admin';
-
-      const resultados: string[] = [];
-      let huboError = false;
-
-      for (const { p3, pfd } of planPreviewP3PFD) {
+      for (const { centro, p3, pfd } of previews) {
+        panelProgreso.actualizar(`p3-${centro}`, { estado: 'en_curso' });
         const resP3 = await guardarPlanGrupoEspuma(p3, usuario, false);
-        resultados.push(resP3.mensaje);
-        if (resP3.huboError) huboError = true;
-
+        panelProgreso.actualizar(`p3-${centro}`, { estado: resP3.huboError ? 'error' : 'ok', detalle: resP3.mensaje });
         if (pfd) {
+          panelProgreso.actualizar(`pfd-${centro}`, { estado: 'en_curso' });
           const resPfd = await guardarPlanGrupoEspuma(pfd, usuario, true);
-          resultados.push(resPfd.mensaje);
-          if (resPfd.huboError) huboError = true;
+          panelProgreso.actualizar(`pfd-${centro}`, { estado: resPfd.huboError ? 'error' : 'ok', detalle: resPfd.mensaje });
         }
       }
-
-      addNotification(huboError ? 'warning' : 'success', `Respuesta P3/PFD guardada. ${resultados.join(' | ')}`);
-      fetchNecesidadesPlanta();
-      setPlanPreviewP3PFD(null);
+      panelProgreso.actualizar('nec', { estado: 'en_curso' });
+      await fetchNecesidadesPlanta();
+      panelProgreso.actualizar('nec', { estado: 'ok' });
+      // El reporte (capacidad + correo) no depende de que el P3 haya salido bien: se guarda igual.
+      setReportesPorGuardar(previews.map(x => x.centro));
     } catch (e) {
-      addNotification('error', `Error al guardar la Respuesta P3/PFD: ${(e as Error).message}`);
+      panelProgreso.actualizar('nec', { estado: 'error', detalle: (e as Error).message });
+      previews.forEach(({ centro }) => panelProgreso.actualizar(`rep-${centro}`, { estado: 'omitido' }));
+      panelProgreso.concluir(`Error al guardar la Respuesta P3/PFD: ${(e as Error).message}`);
     } finally {
       setIsSavingPlanP3PFD(false);
     }
-  }, [planPreviewP3PFD, addNotification, fetchNecesidadesPlanta, guardarPlanGrupoEspuma]);
+  }, [planPreviewP3PFD, fetchNecesidadesPlanta, guardarPlanGrupoEspuma, panelProgreso]);
 
   // ------------------------------------------------------------------------------------------------
   // Exportar a SAP (InsertarSolicitudProduccionHB) — primer esquema, replicando el patrón ya
@@ -6410,14 +6456,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid grid-cols-7 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
-          {[ { v: 'resumen', l: 'Capacidad Operativa', i: LayoutDashboard }, { v: 'necesidadesPlanta', l: 'Necesidades Planta', i: Database }, { v: 'respuestaP3', l: 'Respuesta P3', i: Save }, { v: 'ordenes', l: 'Provisionales', i: Package }, { v: 'ordenesFert', l: 'Órdenes FERT', i: ShoppingCart }, { v: 'mantenimiento', l: 'Mantenimiento SAP', i: Wrench },
-            // Tab de solo validación/auditoría — no participa del cálculo del plan. Muestra la data
-            // cruda tal cual la devuelve /InventarioAnioActual, sin pasar por el filtro de
-            // ALMACENES_STOCK_POR_CENTRO, para poder confirmar contra el origen casos como stock=0 en
-            // la Respuesta P3 pese a tener LIBREUTILIZACION real en SAP (mismo criterio que "Validar
-            // PR2" en Corte y Laminado).
-            { v: 'debugStock', l: 'Validar Stock', i: Info }
+        {/* Pestañas visibles = las de acción del flujo (mismo criterio que Venta Externa / Laminado,
+            pedido del usuario 2026-10-03). Provisionales, Órdenes FERT y Validar Stock (solo consulta/
+            auditoría: la data cruda de SAP, ver sus TabsContent más abajo) quedan OCULTAS pero su
+            contenido se conserva para consultas internas: para volver a mostrarlas basta agregarlas a
+            esta lista y subir grid-cols. */}
+        <TabsList className="grid grid-cols-4 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
+          {[ { v: 'resumen', l: 'Capacidad Operativa', i: LayoutDashboard }, { v: 'necesidadesPlanta', l: 'Necesidades Planta', i: Database }, { v: 'respuestaP3', l: 'Respuesta P3', i: Save }, { v: 'mantenimiento', l: 'Mantenimiento SAP', i: Wrench },
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[10px] font-black uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-lg data-[state=active]:text-red-600 rounded-xl"><tab.i className="w-4 h-4" /> {tab.l}</TabsTrigger>
           ))}

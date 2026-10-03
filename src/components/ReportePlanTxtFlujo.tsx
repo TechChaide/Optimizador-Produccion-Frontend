@@ -69,8 +69,9 @@ export interface FlujoReportePlanTxt {
   vista: PlanTxtRecuperado | null;
   vistaAbierta: boolean;
   setVistaAbierta: (v: boolean) => void;
-  /** true si quedó guardado (false si se canceló o falló). sinConfirmar: el grupo ya preguntó una sola vez. */
-  guardar: (opts?: { sinConfirmar?: boolean }) => Promise<boolean>;
+  /** true si quedó guardado (false si se canceló o falló). sinConfirmar: el grupo ya preguntó una sola vez.
+   *  silencioso: sin aviso de éxito (lo muestra el panel de progreso del módulo). */
+  guardar: (opts?: { sinConfirmar?: boolean; silencioso?: boolean }) => Promise<boolean>;
   /** true si se recuperó. abrir=false: no abre el diálogo individual (lo usa el diálogo de grupo). */
   recuperar: (opts?: { abrir?: boolean; fecha?: string }) => Promise<boolean>;
   /** Fecha objetivo del reporte abierto en la vista previa. */
@@ -125,7 +126,7 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
     return () => { vigente = false; };
   }, [modulo, centro, fechaObjetivo]);
 
-  const guardar = useCallback(async (opts?: { sinConfirmar?: boolean }): Promise<boolean> => {
+  const guardar = useCallback(async (opts?: { sinConfirmar?: boolean; silencioso?: boolean }): Promise<boolean> => {
     const cfg = configRef.current;
     if (!cfg.fechaObjetivo) {
       addNotification('warning', `${prefijo}no hay fecha objetivo para guardar el reporte.`);
@@ -145,7 +146,7 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
       setRuta(res.ruta);
       setVista(null);
       setEnviadoEn(null);
-      addNotification('success', `${prefijo}reporte guardado (todavía no se envió). Cuando SAP termine las FERT, usa "Recuperar y revisar" para enviarlo. Archivo: ${res.ruta}`);
+      if (!opts?.silencioso) addNotification('success', `${prefijo}reporte guardado (todavía no se envió). Cuando SAP termine las FERT, usa "Recuperar y revisar" para enviarlo. Archivo: ${res.ruta}`);
       return true;
     } catch (error) {
       addNotification('error', `${prefijo}error al guardar el reporte: ${(error as Error).message}`);

@@ -14,7 +14,8 @@ import { cn } from '@/lib/utils';
  * Opcionalmente arranca con pedirFecha(): pregunta la fecha a evaluar antes de sincronizar.
  *
  * Al concluir sin avisos ni errores muestra "Concluido" y se cierra solo. Con algún aviso o error
- * queda abierto para que el usuario lo lea y lo cierre a mano.
+ * queda abierto para que el usuario lo lea y lo cierre a mano. Si concluir() recibe acciones (ej.
+ * "Ver reporte y enviar"), se muestran como botones al pie y el panel tampoco se cierra solo.
  */
 
 export type EstadoPaso = 'pendiente' | 'en_curso' | 'ok' | 'aviso' | 'error' | 'omitido';
@@ -50,18 +51,24 @@ export interface PreparacionFecha {
   onConfirmar: (fecha: string | null, hasta?: string) => void;
 }
 
+/** Botón al pie del panel cuando el flujo termina (siguiente paso sugerido). */
+export interface AccionPanel {
+  etiqueta: string;
+  onClick: () => void;
+}
+
 export interface PanelProgresoControl {
   abierto: boolean;
   titulo: string;
   pasos: PasoProgreso[];
-  resultado: { tipo: 'ok' | 'aviso' | 'error'; mensaje: string } | null;
+  resultado: { tipo: 'ok' | 'aviso' | 'error'; mensaje: string; acciones?: AccionPanel[] } | null;
   enCurso: boolean;
   preparacion: PreparacionFecha | null;
   pedirFecha: (p: PreparacionFecha) => void;
   iniciar: (titulo: string, pasos: { id: string; etiqueta: string }[]) => void;
   actualizar: (id: string, cambios: Partial<Omit<PasoProgreso, 'id' | 'etiqueta'>>) => void;
   // Cierra el flujo: el resultado (ok / aviso / error) se deduce del estado final de los pasos.
-  concluir: (mensaje?: string) => void;
+  concluir: (mensaje?: string, acciones?: AccionPanel[]) => void;
   cerrar: () => void;
 }
 
@@ -117,8 +124,8 @@ export function usePanelProgreso(): PanelProgresoControl {
 
   // El resultado se deduce de los pasos (error > aviso > ok) en un efecto, DESPUÉS de que se
   // apliquen los últimos actualizar() del mismo tick; el mensaje lo pone el módulo.
-  const [porConcluir, setPorConcluir] = useState<{ mensaje?: string } | null>(null);
-  const concluir = useCallback((mensaje?: string) => setPorConcluir({ mensaje }), []);
+  const [porConcluir, setPorConcluir] = useState<{ mensaje?: string; acciones?: AccionPanel[] } | null>(null);
+  const concluir = useCallback((mensaje?: string, acciones?: AccionPanel[]) => setPorConcluir({ mensaje, acciones }), []);
   useEffect(() => {
     if (!porConcluir) return;
     const tipo: 'ok' | 'aviso' | 'error' = pasos.some(p => p.estado === 'error')
@@ -127,9 +134,10 @@ export function usePanelProgreso(): PanelProgresoControl {
     setResultado({
       tipo,
       mensaje: porConcluir.mensaje || (tipo === 'ok' ? 'Concluido' : tipo === 'aviso' ? 'Concluido con avisos' : 'Terminó con errores'),
+      acciones: porConcluir.acciones,
     });
     setPorConcluir(null);
-    if (tipo === 'ok') {
+    if (tipo === 'ok' && !porConcluir.acciones?.length) {
       limpiarTimer();
       timer.current = setTimeout(() => setAbierto(false), CIERRE_AUTOMATICO_MS);
     }
@@ -314,6 +322,20 @@ export const PanelProgreso: React.FC<{ panel: PanelProgresoControl }> = ({ panel
         )}>
           <IconoPaso estado={r.tipo} />
           <span className="flex-1">{r.mensaje}</span>
+        </div>
+      )}
+      {r?.acciones && r.acciones.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-4 py-2.5 border-t border-gray-100 bg-white">
+          {r.acciones.map(a => (
+            <button
+              key={a.etiqueta}
+              type="button"
+              onClick={() => { a.onClick(); panel.cerrar(); }}
+              className="flex-1 min-w-[140px] h-8 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase tracking-widest"
+            >
+              {a.etiqueta}
+            </button>
+          ))}
         </div>
       )}
     </div>
