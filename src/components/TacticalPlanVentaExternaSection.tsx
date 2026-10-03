@@ -214,19 +214,31 @@ interface SnapshotVentaExterna {
   necesidadRollos2000: NecesidadMaterial[];
 }
 
-// Respaldo de lo planificado guardado junto al TXT ({fecha}.estado.json) para volver a cargarlo desde
-// "Recuperar y revisar". Decisión del usuario 2026-10-02: guardar los DATOS SAP del módulo (ya
-// filtrados a Venta Externa) para que todas sus pestañas se recalculen solas igual que el día que se
-// planificó. Cambiar su forma exige subir `version`.
+// Respaldo de lo planificado guardado junto al TXT ({fecha}.estado.json) para volver a mostrar el
+// Resumen desde "Recuperar y revisar". Mismo modelo que Laminado (decisión del usuario 2026-10-02):
+// se guarda el RESULTADO ya calculado (Carga Operativa ejecutada, bloque Rollos de Empaque con sus
+// horas, PFD-VENTA, Data Aprobada, configuración de Empaque) — no las órdenes SAP (v1 las guardaba).
+// Al cargar no se consulta SAP ni se reprocesa; es solo consulta: generar P2 / PFD-VENTA queda
+// bloqueado hasta Sincronizar. Cambiar su forma exige subir `version`.
+interface BloqueRollosEmpaque {
+  filas: (DataAprobadaRow & { estado: string; horas: number })[];
+  totalCantidad: number;
+  totalHoras: number;
+}
+interface ResultadoResumenVentaExterna {
+  // "Hoy" del día en que se guardó: fija la ventana de Empaque (PT) que se ve al cargar.
+  hoy: string;
+  // Filas de "Carga Operativa ejecutada" (calculateSummary), ya con sus horas de empaque.
+  summaryData: Record<'1000' | '2000', unknown[]>;
+  bloqueRollos1000: BloqueRollosEmpaque | null;
+}
 interface EstadoPlanVentaExterna {
   tipo: 'venta-externa';
-  version: 1;
+  version: 2;
   grupos: Grupo[];
   restricciones: Restriccion[];
-  ordenes: Record<string, unknown>[];
-  ordenesFert: Record<string, unknown>[];
-  tiemposEnsamblado: Record<string, unknown>[];
-  mantenimientosSAP: Record<string, unknown>[];
+  // Solo los MTTO de la empacadora (MEE01) — horas de mantenimiento en la ventana de Empaque.
+  mantenimientosEmpaque: Record<string, unknown>[];
   selectedDates: string[];
   selectedDatesResumen: string[];
   empaqueConfig: Record<string, EmpaqueShiftConfig>;
@@ -236,6 +248,7 @@ interface EstadoPlanVentaExterna {
   necesidadRollos1000: NecesidadMaterial[];
   necesidadRollos2000: NecesidadMaterial[];
   pfdVentaPreview: Record<string, PfdVentaPreview>;
+  resultado: ResultadoResumenVentaExterna;
 }
 
 export const TacticalPlanVentaExternaSection: React.FC = () => {
@@ -249,6 +262,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const [datosCargados, setDatosCargados] = useState(false);
   // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
   const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
+  // Resultado del Resumen cargado desde un reporte guardado (ver EstadoPlanVentaExterna): mientras no
+  // sea null, el Resumen lee esto en vez de procesar órdenes SAP. Se limpia al sincronizar.
+  const [resultadoRestaurado, setResultadoRestaurado] = useState<ResultadoResumenVentaExterna | null>(null);
   // "Sincronizar" dispara además "Generar Necesidades · BOM FERT" automáticamente (antes 2 clics) —
   // SOLO si ya hay una "Ventana de Producción" (selectedDates) elegida, igual que la validación
   // manual del botón; si no, se deja para que el usuario elija fecha y lo dispare a mano (el botón
@@ -287,14 +303,16 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Fechas del P2 de Venta Externa (regla del usuario 2026-10-02, "horizonte 2 días"): se planifica
   // HOY; Corte Espuma / Laminado recuperan y producen hoy+1 hábil; el PT se produce (y se empaca)
   // hoy+2 hábiles. El P2 graba fecha_inicio_plan = recuperación y fecha_fin_plan = PT.
-  const fechasHorizonteDe = (noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
+  const fechasHorizonteDe = (noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables, hoy?: string) => {
     const extra = laborablesHorizonte(laborablesExtra);
+    const base = hoy ? parseISO(hoy) : new Date();
     return {
-      recuperacion: format(addBusinessDaysCal(new Date(), 1, noLaborables, extra), 'yyyy-MM-dd'),
-      pt: format(addBusinessDaysCal(new Date(), 2, noLaborables, extra), 'yyyy-MM-dd'),
+      recuperacion: format(addBusinessDaysCal(base, 1, noLaborables, extra), 'yyyy-MM-dd'),
+      pt: format(addBusinessDaysCal(base, 2, noLaborables, extra), 'yyyy-MM-dd'),
     };
   };
-  const fechasHorizonte = fechasHorizonteDe(diasNoLaborables, diasLaborablesExtra);
+  // Con un plan cargado, el horizonte es el del día en que se guardó (ventana de Empaque tal cual).
+  const fechasHorizonte = fechasHorizonteDe(diasNoLaborables, diasLaborablesExtra, resultadoRestaurado?.hoy);
   // Recuperación (día de Corte/Laminado) de un PT dado: el día hábil anterior del horizonte.
   const recuperacionDePT = (pt: string) => format(addBusinessDaysCal(parseISO(pt), -1, diasNoLaborables, laborablesHorizonte(diasLaborablesExtra)), 'yyyy-MM-dd');
   // Materiales DIFERIDOS (decisión del usuario 2026-10-02): "Diferir →" en Corte Espuma (candidatos a
@@ -634,6 +652,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     const fechas = eachDayOfInterval({ start: parseISO(desde), end: parseISO(hasta) }).map(d => format(d, 'yyyy-MM-dd'));
     setSelectedDates(fechas);
     setPlanCargadoDe(null);
+    setResultadoRestaurado(null);
     empaqueConfigRestaurada.current = null;
     setViewDate(parseISO(desde));
     const corta = (f: string) => format(parseISO(f), 'EEE dd/MM', { locale: es });
@@ -1657,6 +1676,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // P2 + (solo Espumas, si hay materiales diferidos) su P2 DIFERIDO. Si el P2 normal pide
   // confirmación o falla, el diferido no se toca hasta resolverlo.
   const generarPlanP2Core = useCallback(async (centro: '1000' | '2000', tipo: 'ESPUMAS' | 'ROLLOS', forzar = false): Promise<ResultadoGeneracionP2> => {
+    if (resultadoRestaurado) return { centro, tipo, status: 'error', mensaje: 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P2 o PFD-VENTA con datos vigentes.' };
     const r = await generarPlanP2Base(centro, tipo, forzar);
     if (tipo !== 'ESPUMAS' || (r.status !== 'ok' && r.status !== 'sin-datos')) return r;
     if (materialesDiferidos[centro].length === 0) return r;
@@ -1665,7 +1685,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     } catch (error) {
       return { ...r, mensaje: `${r.mensaje} No se pudo grabar el P2 DIFERIDO: ${(error as Error).message}` };
     }
-  }, [generarPlanP2Base, guardarP2Diferido, materialesDiferidos]);
+  }, [generarPlanP2Base, guardarP2Diferido, materialesDiferidos, resultadoRestaurado]);
 
   // "PFD - VENTA": mismo grupo (18/19) y patrón de guardado que el P2 (generarPlanP2Core arriba), pero
   // el valor lleva el token compuesto "PFD-VENTA" (no "PFD" suelto, para no chocar con el /pfd/i que ya
@@ -1679,6 +1699,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // pfdVentaPreview del estado, que todavía no refleja el setState de ese mismo ciclo.
   const guardarPfdVentaCore = useCallback(async (centro: '1000' | '2000', lineasOverride?: PfdVentaLinea[]): Promise<ResultadoGeneracionP2> => {
     const tipo = 'ESPUMAS' as const;
+    if (resultadoRestaurado) return { centro, tipo, status: 'error', mensaje: 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P2 o PFD-VENTA con datos vigentes.' };
     const key = `PFD-${centro}`;
     const lineas = lineasOverride ?? (pfdVentaPreview[centro]?.lineas || []);
     if (lineas.length === 0) {
@@ -1762,7 +1783,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     } finally {
       setSavingPfdVenta(prev => ({ ...prev, [key]: false }));
     }
-  }, [pfdVentaPreview, siguienteDiaHabil, tiempoLookup1000, tiempoLookup2000]);
+  }, [pfdVentaPreview, siguienteDiaHabil, tiempoLookup1000, tiempoLookup2000, resultadoRestaurado]);
 
   // Botón individual por bloque: genera un solo subgrupo y notifica su resultado puntual.
   // 'confirmar-reemplazo' (solo ESPUMAS, ver generarPlanP2Core): se cortó ANTES de escribir porque la
@@ -2077,8 +2098,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // estándar por material) porque hoy no existe trazabilidad componente→FERT/PT para Rollos (mismo
   // límite ya documentado en generarPfdVentaPreview: "Rollos no tiene Data Aprobada con datos reales
   // hoy") — se muestra igual, marcado aparte, en vez de omitirlo silenciosamente.
-  const bloqueRollosEmpaque = (centro: '1000' | '2000') => {
+  const bloqueRollosEmpaque = (centro: '1000' | '2000'): BloqueRollosEmpaque | null => {
     if (centro !== '1000') return null;
+    if (resultadoRestaurado) return resultadoRestaurado.bloqueRollos1000;
     const lookup = tiempoLookup1000;
     const rows = dataAprobada['1000-ROLLOS'] || [];
     const verificadas = rows.filter(r => r.respuestaCant > 0);
@@ -2106,7 +2128,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     };
     return { '1000': calcularCentro('1000'), '2000': calcularCentro('2000') };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pfdVentaPreview, dataAprobada, tiempoLookup1000, tiempoLookup2000, capacidadEmpaquePorCentro]);
+  }, [pfdVentaPreview, dataAprobada, tiempoLookup1000, tiempoLookup2000, capacidadEmpaquePorCentro, resultadoRestaurado]);
 
   // Cuerpo del correo — mismo formato ya aprobado en Corte Espuma/Corte y Laminado (banner CHAIDE Y
   // CHAIDE, tarjetas de totales, tabla de detalle, nota final). `previewEspumas` se recibe como
@@ -2315,40 +2337,40 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const fechaObjetivoEmpaque = fechasHorizonte.pt;
   // Ambos centros en un solo respaldo, guardado en el reporte del Centro 1000 (ver grupo de reportes).
   const capturarEstadoPlan = (): EstadoPlanVentaExterna => {
-    const unicas = (filas: Record<string, unknown>[]) => Array.from(new Set(filas));
     const maquinasMtto = new Set(Object.values(mttoSAPEmpaque).flatMap(x => x.maquinas));
     return {
       tipo: 'venta-externa',
-      version: 1,
+      version: 2,
       grupos,
       restricciones,
-      // Solo las órdenes del módulo (centro + RESPCTRLPROD/ALMACEN/SECTOR, sin filtro de fecha): con
-      // eso las pestañas se recalculan igual, sin cargar las ~20K filas de SAP.
-      ordenes: unicas([...filterData(ordenes, '1000', false), ...filterData(ordenes, '2000', false)]),
-      ordenesFert: unicas([...filterData(ordenesFert, '1000', false), ...filterData(ordenesFert, '2000', false)]),
-      tiemposEnsamblado,
-      mantenimientosSAP: mantenimientosSAP.filter(m => maquinasMtto.has(String(m.ID_MAQUINA ?? m.MAQUINA ?? '').trim().toUpperCase())),
+      mantenimientosEmpaque: mantenimientosSAP.filter(m => maquinasMtto.has(String(m.ID_MAQUINA ?? m.MAQUINA ?? '').trim().toUpperCase())),
       selectedDates,
       selectedDatesResumen,
       empaqueConfig,
       dataAprobada,
       necesidadEspumas1000, necesidadEspumas2000, necesidadRollos1000, necesidadRollos2000,
       pfdVentaPreview,
+      resultado: {
+        hoy: resultadoRestaurado?.hoy ?? format(new Date(), 'yyyy-MM-dd'),
+        summaryData: { '1000': summaryData1000, '2000': summaryData2000 },
+        bloqueRollos1000: bloqueRollosEmpaque('1000'),
+      },
     };
   };
   const restaurarEstadoPlan = (crudo: unknown, origen: OrigenEstadoPlan): boolean => {
     const e = crudo as Partial<EstadoPlanVentaExterna> | null;
-    if (!e || e.tipo !== 'venta-externa' || e.version !== 1 || !Array.isArray(e.ordenesFert)) return false;
+    if (!e || e.tipo !== 'venta-externa' || e.version !== 2 || !e.resultado) return false;
     if (e.empaqueConfig) {
       empaqueConfigRestaurada.current = e.empaqueConfig;
       setEmpaqueConfig(e.empaqueConfig);
     }
     setGrupos(e.grupos ?? []);
     setRestricciones(e.restricciones ?? []);
-    setOrders(e.ordenes ?? []);
-    setOrdersFert(e.ordenesFert);
-    setTiemposEnsamblado(e.tiemposEnsamblado ?? []);
-    setMantenimientosSAP(e.mantenimientosSAP ?? []);
+    // Sin órdenes SAP de la sesión: lo que se ve sale solo del resultado guardado.
+    setOrders([]);
+    setOrdersFert([]);
+    setTiemposEnsamblado([]);
+    setMantenimientosSAP(e.mantenimientosEmpaque ?? []);
     setSelectedDates(e.selectedDates ?? []);
     if (e.selectedDates?.[0]) setViewDate(parseISO([...e.selectedDates].sort()[0]));
     setSelectedDatesResumen(e.selectedDatesResumen ?? []);
@@ -2358,6 +2380,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     setNecesidadRollos1000(e.necesidadRollos1000 ?? []);
     setNecesidadRollos2000(e.necesidadRollos2000 ?? []);
     setPfdVentaPreview(e.pfdVentaPreview ?? {});
+    setResultadoRestaurado(e.resultado);
     setDatosCargados(true);
     setPlanCargadoDe(origen);
     setActiveTab('resumen');
@@ -2422,8 +2445,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     );
   };
 
-  const summaryData1000 = useMemo(() => calculateSummary(fertC1000Resumen, '1000'), [fertC1000Resumen]);
-  const summaryData2000 = useMemo(() => calculateSummary(fertC2000Resumen, '2000'), [fertC2000Resumen]);
+  type FilaResumenEjecutado = ReturnType<typeof calculateSummary>[number];
+  const summaryData1000 = useMemo(() => (resultadoRestaurado?.summaryData['1000'] as FilaResumenEjecutado[] | undefined) ?? calculateSummary(fertC1000Resumen, '1000'), [fertC1000Resumen, resultadoRestaurado]); // eslint-disable-line react-hooks/exhaustive-deps
+  const summaryData2000 = useMemo(() => (resultadoRestaurado?.summaryData['2000'] as FilaResumenEjecutado[] | undefined) ?? calculateSummary(fertC2000Resumen, '2000'), [fertC2000Resumen, resultadoRestaurado]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Agrupación por Categoría Técnica (la categoría ya embebe la densidad, p.ej. D40ESP)
   const groupByCategoria = (data: typeof summaryData1000) => {
@@ -2802,12 +2826,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       {planCargadoDe && (
         <div
           className="flex items-center gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50/50 px-4 py-2.5 text-left"
-          title="Lo que se ve viene del respaldo guardado junto al reporte (datos SAP de ese momento), no de SAP en vivo. Sincronizar recalcula con los datos actuales."
+          title="Resumen recuperado del respaldo guardado junto al reporte: se muestra el resultado de ese momento, sin consultar SAP ni recalcular. Las acciones que graban (P2/P3/PFD/SAP) quedan bloqueadas hasta Sincronizar."
         >
           <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
             Plan cargado del reporte del <span className="font-black text-emerald-700">{format(parseISO(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
-            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — datos SAP de ese momento; <span className="font-black text-blue-700">Sincronizar</span> los recalcula con SAP.
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — <span className="font-black text-emerald-700">solo consulta</span>, tal cual se guardó; <span className="font-black text-blue-700">Sincronizar</span> trae datos vigentes y habilita generar y enviar.
           </p>
         </div>
       )}

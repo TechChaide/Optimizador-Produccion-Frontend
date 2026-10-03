@@ -920,20 +920,47 @@ const DateFilterPopover: React.FC<{
 // Snapshot de lo que este módulo tiene cargado. Se guarda al sincronizar y se restaura al volver de
 // otro módulo, para no perder el trabajo en curso solo por navegar (ver @/lib/cache-modulos).
 const CACHE_CORTE_ESPUMA = 'tactica-corte-espuma';
-// Respaldo de lo planificado guardado junto al TXT (comprimido, {fecha}.estado.json.gz) para volver a
-// cargarlo desde "Recuperar y revisar". Decisión del usuario 2026-10-02: los DATOS SAP completos del
-// módulo (mismo contenido que el caché de sesión) + configuración de máquinas y fechas evaluadas, para
-// que Capacidad Operativa y el resto de pestañas se recalculen igual que el día que se planificó.
+// Respaldo de lo planificado guardado junto al TXT ({fecha}.estado.json) para volver a mostrar el
+// Resumen (Capacidad Operativa) desde "Recuperar y revisar". Mismo modelo que Laminado (decisión del
+// usuario 2026-10-02): se guarda el RESULTADO ya calculado — las filas de demanda que pinta el tablero
+// (órdenes de Corte mapeadas a horas por máquina, necesidad P2/PFF con sus horas), la configuración
+// de máquinas y las fechas — no los datos SAP crudos (v1 guardaba las 9 consultas enteras, varios MB).
+// Al cargar no se consulta SAP ni se vuelve a procesar: el tablero lee este resultado tal cual
+// (ver resultadoRestaurado). Es solo consulta: P3/PFD/SAP quedan bloqueados hasta Sincronizar.
 // Cambiar su forma exige subir `version`.
-interface EstadoPlanCorteEspuma extends SnapshotCorteEspuma {
+interface ResultadoResumenEspuma {
+  // "Hoy" del día en que se guardó: el tablero separa atrasado / a tiempo contra esta fecha.
+  hoy: string;
+  // Filas ya mapeadas (auditMapper / necesidadCapacidadMapper) que consume renderDashboard y el correo.
+  fertAudit: Record<'1000' | '2000', UnifiedRow[]>;
+  fertAuditAll: Record<'1000' | '2000', UnifiedRow[]>;
+  provAuditAll: Record<'1000' | '2000', UnifiedRow[]>;
+  necesidadCapacidad: Record<'1000' | '2000', UnifiedRow[]>;
+  necesidadCapacidadNivel2: Record<'1000' | '2000', UnifiedRow[]>;
+  clavesProvisionalesTransformadas: Record<'1000' | '2000', string[]>;
+  densidadCarruselesUIO: [string, string[]][];
+}
+interface EstadoPlanCorteEspuma {
   tipo: 'corte-espuma';
-  version: 1;
+  version: 2;
   uioConfig: PlantaConfig;
   gyeConfig: PlantaConfig;
   selectedDatesCapacidad: { UIO: string[]; GYE: string[] };
   selectedDatesProv: string[];
   selectedDatesFert: string[];
   tipoPlanEnsambladoPorCentro: Record<'1000' | '2000', 'P1' | 'PFF' | null>;
+  restriccionesCorte: Restriccion[];
+  diasNoLaborables: string[];
+  diasLaborablesExtra: string[];
+  // Necesidad (chica) para la pestaña Necesidades Planta y los mapas por material.
+  necesidadesPlantaData: Record<string, NecesidadPlantaRow[]>;
+  necesidadPFFData: Record<'1000' | '2000', NecesidadPlantaRow[]>;
+  necesidadPFFNivel2Data: Record<'1000' | '2000', NecesidadPlantaRow[]>;
+  fertsP2Muebles: NecesidadPlantaRow[];
+  fertsPFF: NecesidadPlantaRow[];
+  // Solo los MTTO de Corte y Laminado (ventana de turnos y horas de mantenimiento por máquina).
+  mantenimientosCorte: RawApiRow[];
+  resultado: ResultadoResumenEspuma;
 }
 
 interface SnapshotCorteEspuma {
@@ -1038,6 +1065,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const [datosCargados, setDatosCargados] = useState(false);
   // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
   const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
+  // Resultado del Resumen cargado desde un reporte guardado (ver EstadoPlanCorteEspuma): mientras no
+  // sea null, los cálculos del tablero devuelven esto en vez de procesar datos SAP. Se limpia al sincronizar.
+  const [resultadoRestaurado, setResultadoRestaurado] = useState<ResultadoResumenEspuma | null>(null);
   // "Sincronizar" + "Generar Necesidades · P1/PFF" (antes 2 clics) se combinan en 1 — el usuario lo
   // pidió por ser repetitivo en el uso diario, mismo patrón ya aplicado en Corte y Laminado (ver
   // [[modulos_tacticos_sincronizar_y_generar_combinado]]). "Entregas VE" y "Actualizar P2" NO se
@@ -1367,7 +1397,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       setMarcandoSabadoJornada(prev => ({ ...prev, [planta]: false }));
     }
   }, [addNotification]);
-  const todayStr = format(new Date(), 'yyyy-MM-dd');
+  const todayStr = resultadoRestaurado?.hoy ?? format(new Date(), 'yyyy-MM-dd');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
   // Reporte por correo (Capacidad Operativa) — mismo destinatario para ambas plantas, envío
@@ -1795,8 +1825,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
   const provAuditUIO = useMemo(() => auditMapper(getFilteredData(ordenesProvisionales, '1000', selectedDatesProv, 'future'), '1000'), [auditMapper, getFilteredData, ordenesProvisionales, selectedDatesProv]);
   const provAuditGYE = useMemo(() => auditMapper(getFilteredData(ordenesProvisionales, '2000', selectedDatesProv, 'future'), '2000'), [auditMapper, getFilteredData, ordenesProvisionales, selectedDatesProv]);
-  const fertAuditUIO = useMemo(() => auditMapper(getFilteredData(ordenesFert, '1000', selectedDatesFert, 'past'), '1000'), [auditMapper, getFilteredData, ordenesFert, selectedDatesFert]);
-  const fertAuditGYE = useMemo(() => auditMapper(getFilteredData(ordenesFert, '2000', selectedDatesFert, 'past'), '2000'), [auditMapper, getFilteredData, ordenesFert, selectedDatesFert]);
+  const fertAuditUIO = useMemo(() => resultadoRestaurado?.fertAudit['1000'] ?? auditMapper(getFilteredData(ordenesFert, '1000', selectedDatesFert, 'past'), '1000'), [auditMapper, getFilteredData, ordenesFert, selectedDatesFert, resultadoRestaurado]);
+  const fertAuditGYE = useMemo(() => resultadoRestaurado?.fertAudit['2000'] ?? auditMapper(getFilteredData(ordenesFert, '2000', selectedDatesFert, 'past'), '2000'), [auditMapper, getFilteredData, ordenesFert, selectedDatesFert, resultadoRestaurado]);
 
   // Claves de órdenes Provisionales que YA se transformaron en orden FERT — "las órdenes FERT son las
   // mismas provisionales transformadas" (regla del negocio). Mientras ambas conviven en SAP, sumar sus
@@ -1811,6 +1841,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Se recorre TODO ordenesFert, sin filtro de fecha: si la FERT gemela existe, la provisional ya está
   // transformada aunque esa FERT caiga fuera de la ventana que muestra el tab.
   const clavesProvisionalesTransformadas = useMemo(() => {
+    if (resultadoRestaurado) {
+      const c = resultadoRestaurado.clavesProvisionalesTransformadas;
+      return { '1000': new Set(c['1000']), '2000': new Set(c['2000']) } as Record<string, Set<string>>;
+    }
     const porCentro: Record<string, Set<string>> = { '1000': new Set(), '2000': new Set() };
     ordenesFert.forEach(o => {
       const centro = String(getProp(o, ['CENTRO', 'Centro', 'centro'])).trim();
@@ -1822,7 +1856,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       porCentro[centro].add(`${code}|${fecha}|${cant}`);
     });
     return porCentro;
-  }, [ordenesFert, extractMaterialInfo]);
+  }, [ordenesFert, extractMaterialInfo, resultadoRestaurado]);
 
   // Quita de la carga las provisionales que ya existen como FERT (ver clavesProvisionalesTransformadas).
   const sinProvisionalesTransformadas = useCallback((rows: UnifiedRow[], centroId: '1000' | '2000'): UnifiedRow[] => {
@@ -1900,12 +1934,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // de ESE tab, ajeno a la necesidad puntual del P2. Se arma aquí su propia versión sin ese filtro,
   // recorriendo TODO ordenesProvisionales por centro.
   const provAuditAllUIO = useMemo(
-    () => auditMapper(ordenesProvisionales.filter(o => String(getProp(o, ['Centro', 'CENTRO', 'centro'])).trim() === '1000'), '1000'),
-    [auditMapper, ordenesProvisionales]
+    () => resultadoRestaurado?.provAuditAll['1000'] ?? auditMapper(ordenesProvisionales.filter(o => String(getProp(o, ['Centro', 'CENTRO', 'centro'])).trim() === '1000'), '1000'),
+    [auditMapper, ordenesProvisionales, resultadoRestaurado]
   );
   const provAuditAllGYE = useMemo(
-    () => auditMapper(ordenesProvisionales.filter(o => String(getProp(o, ['Centro', 'CENTRO', 'centro'])).trim() === '2000'), '2000'),
-    [auditMapper, ordenesProvisionales]
+    () => resultadoRestaurado?.provAuditAll['2000'] ?? auditMapper(ordenesProvisionales.filter(o => String(getProp(o, ['Centro', 'CENTRO', 'centro'])).trim() === '2000'), '2000'),
+    [auditMapper, ordenesProvisionales, resultadoRestaurado]
   );
 
   // Respuesta P3: cantidad "ya planificada" por material vía Órdenes Provisionales, en UNIDADES (no
@@ -1982,12 +2016,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // fecha "hoy+3" ni el selectedDatesFert de la UI, que son ajenos a esta necesidad puntual del P2)
   // para no perder órdenes fuera de esa ventana de visualización.
   const fertAuditAllUIO = useMemo(
-    () => auditMapper(ordenesFert.filter(o => String(getProp(o, ['Centro', 'CENTRO', 'centro'])).trim() === '1000'), '1000'),
-    [auditMapper, ordenesFert]
+    () => resultadoRestaurado?.fertAuditAll['1000'] ?? auditMapper(ordenesFert.filter(o => String(getProp(o, ['Centro', 'CENTRO', 'centro'])).trim() === '1000'), '1000'),
+    [auditMapper, ordenesFert, resultadoRestaurado]
   );
   const fertAuditAllGYE = useMemo(
-    () => auditMapper(ordenesFert.filter(o => String(getProp(o, ['Centro', 'CENTRO', 'centro'])).trim() === '2000'), '2000'),
-    [auditMapper, ordenesFert]
+    () => resultadoRestaurado?.fertAuditAll['2000'] ?? auditMapper(ordenesFert.filter(o => String(getProp(o, ['Centro', 'CENTRO', 'centro'])).trim() === '2000'), '2000'),
+    [auditMapper, ordenesFert, resultadoRestaurado]
   );
 
   // Compatibilidad real entre carruseles por densidad (pedido por el usuario, ver caso real
@@ -1999,6 +2033,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Solo Quito: mismo alcance que MACHINE_SAP_CODES_UIO (Guayaquil no tiene su mapeo de máquina
   // confirmado todavía).
   const densidadCarruselesUIO = useMemo(() => {
+    // Plan cargado: el mapa se armó con TODAS las FERT de UIO, que el respaldo no guarda.
+    if (resultadoRestaurado) return new Map(resultadoRestaurado.densidadCarruselesUIO.map(([d, ids]) => [d, new Set(ids)]));
     const map = new Map<string, Set<string>>();
     const machinesCarruselUIO = MACHINES_BY_PLANTA.UIO.filter(m => m.proceso === 'carrusel').map(m => m.id);
     fertAuditAllUIO.forEach(row => {
@@ -2010,7 +2046,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       map.get(row.dens)!.add(machineId);
     });
     return map;
-  }, [fertAuditAllUIO]);
+  }, [fertAuditAllUIO, resultadoRestaurado]);
 
   // Techo de capacidad por carrusel — restricción SAP "Capacidad_Horas_HR-CARxx" del grupo Corte y
   // Laminado (Centro 1000/Quito, ver MACHINE_SAP_NOMBRE_UIO). Dispara las sugerencias de
@@ -2400,8 +2436,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
   // Capacidad física que representaría cortar toda la demanda de "Necesidades Planta" — mismo formato
   // de tabla que FERT/Provisionales (ver renderAuditTable), un bloque por centro.
-  const necesidadCapacidadUIO = useMemo(() => necesidadCapacidadMapper(necesidadesPlantaConsolidada, '1000'), [necesidadCapacidadMapper, necesidadesPlantaConsolidada]);
-  const necesidadCapacidadGYE = useMemo(() => necesidadCapacidadMapper(necesidadesPlantaConsolidada, '2000'), [necesidadCapacidadMapper, necesidadesPlantaConsolidada]);
+  const necesidadCapacidadUIO = useMemo(() => resultadoRestaurado?.necesidadCapacidad['1000'] ?? necesidadCapacidadMapper(necesidadesPlantaConsolidada, '1000'), [necesidadCapacidadMapper, necesidadesPlantaConsolidada, resultadoRestaurado]);
+  const necesidadCapacidadGYE = useMemo(() => resultadoRestaurado?.necesidadCapacidad['2000'] ?? necesidadCapacidadMapper(necesidadesPlantaConsolidada, '2000'), [necesidadCapacidadMapper, necesidadesPlantaConsolidada, resultadoRestaurado]);
 
   // Capacidad Operativa Nivel 2 (red de seguridad, ciclo atrasado un día — ver renderDashboard): SOLO
   // P1/PFF (necesidadPFFNivel2Data, hoy+1 día hábil). Venta Externa-Espumas NO tiene Nivel 2 propio
@@ -2412,8 +2448,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     () => [...necesidadPFFNivel2Data['1000'], ...necesidadPFFNivel2Data['2000']].map(r => ({ ...r, area: 'Ensamblado' })),
     [necesidadPFFNivel2Data]
   );
-  const necesidadCapacidadNivel2UIO = useMemo(() => necesidadCapacidadMapper(necesidadPFFNivel2Consolidada, '1000'), [necesidadCapacidadMapper, necesidadPFFNivel2Consolidada]);
-  const necesidadCapacidadNivel2GYE = useMemo(() => necesidadCapacidadMapper(necesidadPFFNivel2Consolidada, '2000'), [necesidadCapacidadMapper, necesidadPFFNivel2Consolidada]);
+  const necesidadCapacidadNivel2UIO = useMemo(() => resultadoRestaurado?.necesidadCapacidadNivel2['1000'] ?? necesidadCapacidadMapper(necesidadPFFNivel2Consolidada, '1000'), [necesidadCapacidadMapper, necesidadPFFNivel2Consolidada, resultadoRestaurado]);
+  const necesidadCapacidadNivel2GYE = useMemo(() => resultadoRestaurado?.necesidadCapacidadNivel2['2000'] ?? necesidadCapacidadMapper(necesidadPFFNivel2Consolidada, '2000'), [necesidadCapacidadMapper, necesidadPFFNivel2Consolidada, resultadoRestaurado]);
   // Pool de necesidad por material del Nivel 2 — mismo formato de clave que materialNecesidadesPlantaMapPorCentro
   // (String(Number(codigo_material))), para que calcularFaltanteNecesidadPlanta pueda netear contra él.
   const materialNecesidadPFFNivel2MapPorCentro = useMemo(() => {
@@ -3010,35 +3046,60 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // quedaría archivado bajo una fecha que nadie eligió.
   // Respaldo completo del módulo (ver EstadoPlanCorteEspuma): cada planta guarda el suyo junto a su
   // reporte; al cargarlo se restauran las dos plantas tal como estaban al guardar.
-  const capturarEstadoPlan = (): EstadoPlanCorteEspuma => ({
-    tipo: 'corte-espuma',
-    version: 1,
-    ordenesProvisionales, ordenesFert, inventarioSAP, cuboInventarios, tiemposCatalogo, mantenimientosSAP,
-    kpiLooperData, kpiCarruselesData, operadoresCorte, restriccionesCorte,
-    diasNoLaborables: [...diasNoLaborables],
-    diasLaborablesExtra: [...diasLaborablesExtra],
-    necesidadesPlantaData, necesidadPFFData, necesidadPFFNivel2Data, fertsP2Muebles, fertsPFF,
-    uioConfig, gyeConfig,
-    selectedDatesCapacidad: { UIO: [...selectedDatesCapacidad.UIO], GYE: [...selectedDatesCapacidad.GYE] },
-    selectedDatesProv: [...selectedDatesProv],
-    selectedDatesFert: [...selectedDatesFert],
-    tipoPlanEnsambladoPorCentro,
-  });
+  const capturarEstadoPlan = (): EstadoPlanCorteEspuma => {
+    // De las órdenes de cada centro, el tablero solo usa las de los responsables de Corte y, aparte, las
+    // FERT del día hábil anterior a la fecha evaluada (backlog real): se guarda solo eso.
+    const filasDelTablero = (rows: UnifiedRow[], centro: '1000' | '2000', planta: 'UIO' | 'GYE') => {
+      const permitidos = allowedRespPorCentro(centro);
+      const fechaSel = Array.from(selectedDatesCapacidad[planta]).sort()[0];
+      const diaAnterior = fechaSel ? format(restarDiasHabiles(parseFechaLocal(fechaSel), 1), 'yyyy-MM-dd') : '';
+      return rows.filter(r => permitidos.includes(r.responsable) || (!!diaAnterior && r.fecha === diaAnterior));
+    };
+    const permitidas = (rows: UnifiedRow[], centro: '1000' | '2000') => rows.filter(r => allowedRespPorCentro(centro).includes(r.responsable));
+    return {
+      tipo: 'corte-espuma',
+      version: 2,
+      uioConfig, gyeConfig,
+      selectedDatesCapacidad: { UIO: [...selectedDatesCapacidad.UIO], GYE: [...selectedDatesCapacidad.GYE] },
+      selectedDatesProv: [...selectedDatesProv],
+      selectedDatesFert: [...selectedDatesFert],
+      tipoPlanEnsambladoPorCentro,
+      restriccionesCorte,
+      diasNoLaborables: [...diasNoLaborables],
+      diasLaborablesExtra: [...diasLaborablesExtra],
+      necesidadesPlantaData, necesidadPFFData, necesidadPFFNivel2Data, fertsP2Muebles, fertsPFF,
+      mantenimientosCorte: uniqueMantenimientosSAP,
+      resultado: {
+        hoy: todayStr,
+        fertAudit: { '1000': fertAuditUIO, '2000': fertAuditGYE },
+        fertAuditAll: { '1000': filasDelTablero(fertAuditAllUIO, '1000', 'UIO'), '2000': filasDelTablero(fertAuditAllGYE, '2000', 'GYE') },
+        provAuditAll: { '1000': permitidas(provAuditAllUIO, '1000'), '2000': permitidas(provAuditAllGYE, '2000') },
+        necesidadCapacidad: { '1000': necesidadCapacidadUIO, '2000': necesidadCapacidadGYE },
+        necesidadCapacidadNivel2: { '1000': necesidadCapacidadNivel2UIO, '2000': necesidadCapacidadNivel2GYE },
+        clavesProvisionalesTransformadas: {
+          '1000': [...(clavesProvisionalesTransformadas['1000'] ?? [])],
+          '2000': [...(clavesProvisionalesTransformadas['2000'] ?? [])],
+        },
+        densidadCarruselesUIO: Array.from(densidadCarruselesUIO.entries()).map(([d, ids]) => [d, [...ids]] as [string, string[]]),
+      },
+    };
+  };
   const restaurarEstadoPlan = (crudo: unknown, origen: OrigenEstadoPlan): boolean => {
     const e = crudo as Partial<EstadoPlanCorteEspuma> | null;
-    if (!e || e.tipo !== 'corte-espuma' || e.version !== 1 || !Array.isArray(e.ordenesFert) || !e.uioConfig || !e.gyeConfig) return false;
+    if (!e || e.tipo !== 'corte-espuma' || e.version !== 2 || !e.resultado || !e.uioConfig || !e.gyeConfig) return false;
     configRestaurada.current = { UIO: e.uioConfig, GYE: e.gyeConfig };
     setUioConfig(e.uioConfig);
     setGyeConfig(e.gyeConfig);
-    setOrdenesProvisionales(e.ordenesProvisionales ?? []);
-    setOrdenesFert(e.ordenesFert);
-    setInventarioSAP(e.inventarioSAP ?? []);
-    setCuboInventarios(e.cuboInventarios ?? []);
-    setTiemposCatalogo(e.tiemposCatalogo ?? []);
-    setMantenimientosSAP(e.mantenimientosSAP ?? []);
-    setKpiLooperData(e.kpiLooperData ?? []);
-    setKpiCarruselesData(e.kpiCarruselesData ?? []);
-    setOperadoresCorte(e.operadoresCorte ?? []);
+    // Sin datos SAP de la sesión: lo que se ve sale solo del resultado guardado.
+    setOrdenesProvisionales([]);
+    setOrdenesFert([]);
+    setInventarioSAP([]);
+    setCuboInventarios([]);
+    setTiemposCatalogo([]);
+    setKpiLooperData([]);
+    setKpiCarruselesData([]);
+    setOperadoresCorte([]);
+    setMantenimientosSAP(e.mantenimientosCorte ?? []);
     setRestriccionesCorte(e.restriccionesCorte ?? []);
     setDiasNoLaborables(new Set(e.diasNoLaborables ?? []));
     setDiasLaborablesExtra(new Set(e.diasLaborablesExtra ?? []));
@@ -3051,6 +3112,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     setSelectedDatesCapacidad({ UIO: new Set(e.selectedDatesCapacidad?.UIO ?? []), GYE: new Set(e.selectedDatesCapacidad?.GYE ?? []) });
     setSelectedDatesProv(new Set(e.selectedDatesProv ?? []));
     setSelectedDatesFert(new Set(e.selectedDatesFert ?? []));
+    setResultadoRestaurado(e.resultado);
     setDatosCargados(true);
     setPlanCargadoDe(origen);
     setActiveTab('resumen');
@@ -4095,6 +4157,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // para que el usuario elija cuál corregir — mismo criterio de filtro (codigo_grupo + "Espuma" +
   // centro) que desactivarPlanesEspumaSuperados, así solo aparecen planes reales de este módulo.
   const handleOpenEditarPlan = useCallback(async (centro: '1000' | '2000') => {
+    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P3/PFD, editar planes o exportar a SAP con datos vigentes.'); return; }
     setIsLoadingEditPlan(true);
     try {
       const planesRes = await planGrupoService.getAll();
@@ -4115,7 +4178,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     } finally {
       setIsLoadingEditPlan(false);
     }
-  }, [addNotification]);
+  }, [addNotification, resultadoRestaurado]);
 
   // Paso 2: ya elegido el PlanGrupo, reconcilia contra la salida actual y arma la vista editable. La
   // fecha se RECALCULA (no se conserva la que traía el plan) — mismo criterio que al crear un P3
@@ -4265,6 +4328,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // la práctica no pasa porque ambos iteran el mismo necesidadMap) — se maneja igual, esa fila
   // simplemente no se guarda como PFD.
   const handleAbrirRespuestaP3PFD = useCallback((centro: '1000' | '2000') => {
+    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P3/PFD, editar planes o exportar a SAP con datos vigentes.'); return; }
     const p3 = construirPreviewP3(centro);
     if (!p3) {
       addNotification('warning', `No hay materiales de Necesidades Planta para el Centro ${centro}.`);
@@ -4272,11 +4336,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     }
     const pfd = construirPreviewPFD(centro);
     setPlanPreviewP3PFD([{ centro, p3, pfd }]);
-  }, [construirPreviewP3, construirPreviewPFD, addNotification]);
+  }, [construirPreviewP3, construirPreviewPFD, addNotification, resultadoRestaurado]);
 
   // Botón general: arma la vista previa de AMBOS centros en un solo diálogo — un centro sin
   // materiales de Necesidades Planta simplemente no aparece (no bloquea al otro).
   const handleAbrirRespuestaP3PFDTodos = useCallback(() => {
+    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P3/PFD, editar planes o exportar a SAP con datos vigentes.'); return; }
     const previews = (['1000', '2000'] as const)
       .map(centro => {
         const p3 = construirPreviewP3(centro);
@@ -4289,7 +4354,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       return;
     }
     setPlanPreviewP3PFD(previews);
-  }, [construirPreviewP3, construirPreviewPFD, addNotification]);
+  }, [construirPreviewP3, construirPreviewPFD, addNotification, resultadoRestaurado]);
 
   // Paso 2: el usuario confirmó en el diálogo. Guarda un PlanGrupo (grupo 8, compartido con Corte y
   // Laminado — ver CODIGO_GRUPO_LAMINADO) + sus DetalleTactico (uno o más por material vía
@@ -4604,6 +4669,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   }, [provisionalesQueCubrenPorCentro, respuestaSalidaRowsPorCentro]);
 
   const handleExportSap = useCallback(async (centro: '1000' | '2000') => {
+    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P3/PFD, editar planes o exportar a SAP con datos vigentes.'); return; }
     if (!datosCargados) {
       addNotification('warning', 'Sincroniza primero: el envío a SAP cruza el PFD con las órdenes provisionales vigentes.');
       return;
@@ -4645,7 +4711,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     } finally {
       setIsValidandoExportSap(false);
     }
-  }, [fetchUltimoPFDEspuma, fetchVersionesFabricacionEspuma, buildSolicitudProduccionEspuma, addNotification, datosCargados, resolverConversionProvisional]);
+  }, [fetchUltimoPFDEspuma, fetchVersionesFabricacionEspuma, buildSolicitudProduccionEspuma, addNotification, datosCargados, resolverConversionProvisional, resultadoRestaurado]);
 
   const updateExportSapPayload = useCallback((index: number, field: keyof SolicitudProduccionHBPayload, value: string | number) => {
     setExportSapPayloads(prev => {
@@ -4739,6 +4805,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const ejecutarSincronizacion = useCallback(async (noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
     setSyncStep('sincronizando');
     setPlanCargadoDe(null);
+    setResultadoRestaurado(null);
     configRestaurada.current = null;
     const fmt = (d: Date) => format(d, 'dd/MM/yyyy');
     panelProgreso.iniciar('Corte Espuma — Sincronizar y generar', [
@@ -6321,12 +6388,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       {planCargadoDe && (
         <div
           className="flex items-center gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50/50 px-4 py-2.5 text-left"
-          title="Lo que se ve viene del respaldo guardado junto al reporte (datos SAP de ese momento), no de SAP en vivo. Sincronizar recalcula con los datos actuales."
+          title="Resumen recuperado del respaldo guardado junto al reporte: se muestra el resultado de ese momento, sin consultar SAP ni recalcular. Las acciones que graban (P2/P3/PFD/SAP) quedan bloqueadas hasta Sincronizar."
         >
           <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
             Plan cargado del reporte del <span className="font-black text-emerald-700">{format(parseFechaLocal(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
-            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — datos SAP de ese momento; <span className="font-black text-blue-700">Sincronizar</span> los recalcula con SAP.
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — <span className="font-black text-emerald-700">solo consulta</span>, tal cual se guardó; <span className="font-black text-blue-700">Sincronizar</span> trae datos vigentes y habilita generar y enviar.
           </p>
         </div>
       )}
