@@ -87,7 +87,11 @@ interface DataAprobadaRow {
   material: string;
   descripcion: string;
   cantidad: number;
+  // Cantidad confirmada por el consumidor (= cantidad del P2 si respondió este ciclo, 0 si no).
   respuestaCant: number;
+  // Desglose de la respuesta: lo que el P3 manda a fabricar y lo cubierto con stock/provisional.
+  aProducir?: number;
+  cubiertoStock?: number;
   planGrupo: string;
   fechasOk: boolean | null;
 }
@@ -131,7 +135,8 @@ const soloFecha = (v: unknown): string => {
   return fechaLocalPlana(s);
 };
 
-// Solo el plan "P3" es una respuesta real de Corte y Laminado contra el P2 — "PFD" es una
+// Solo el plan "P3" es una respuesta real contra el P2 (desde 2026-10-03 = faltante a fabricar, sin
+// líneas en 0; ver el emparejamiento en fetchDataAprobada) — "PFD" es una
 // variante de salida para otro proceso (deja constancia de qué material quedó sin planificar,
 // forzando a 0 los que no tienen corrida) y no debe contarse como material efectivamente recibido.
 const esPlanP3 = (valor: unknown): boolean => /\bp3\b/i.test(String(valor || ''));
@@ -1910,9 +1915,25 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
         const valorRegex = new RegExp(`plan\\s*t[aá]ctico.*centro.*${combo.centro}.*p2.*${combo.tipo}`, 'i');
         const planPropio = planes.find(pg =>
-          pg.estado === 'A' && pg.codigo_grupo === grupoCentro.codigo_grupo && valorRegex.test(String(pg.valor || ''))
+          pg.estado === 'A' && pg.codigo_grupo === grupoCentro.codigo_grupo && valorRegex.test(String(pg.valor || '')) &&
+          !/diferido/i.test(String(pg.valor || ''))
         );
         if (!planPropio) { resultado[key] = []; continue; }
+
+        // Emparejamiento P2 vs P3 (regla del usuario 2026-10-03): el P3 de Corte Espuma / Laminado
+        // graba SOLO el faltante a fabricar, sin líneas en 0. Un material del P2 sin línea en el P3
+        // está cubierto por stock/provisional — pero solo si el consumidor respondió ESTE ciclo: un P3
+        // activo del mismo centro y canal, creado el día del P2 o después y fechado (recuperación)
+        // antes o el mismo día del PT del P2. Sin ese P3, nada se da por cubierto (pendiente).
+        const fechaCreacionP2 = soloFecha(planPropio.fecha_creacion);
+        const ptP2 = soloFecha(planPropio.fecha_fin_plan) || soloFecha(planPropio.fecha_inicio_plan);
+        const canalP3 = combo.tipo === 'ESPUMAS' ? 'espuma' : 'rollo';
+        const p3DelCiclo = planes.filter(pg => {
+          const valor = String(pg.valor || '');
+          if (pg.estado !== 'A' || !esPlanP3(valor) || !new RegExp(`centro\\s*${combo.centro}`, 'i').test(valor) || !new RegExp(canalP3, 'i').test(valor)) return false;
+          const fechaP3 = soloFecha(pg.fecha_inicio_plan);
+          return soloFecha(pg.fecha_creacion) >= fechaCreacionP2 && fechaP3 >= fechaCreacionP2 && fechaP3 <= ptP2;
+        }).sort((a, b) => b.codigo_plan_grupo - a.codigo_plan_grupo)[0];
 
         const misLineas = detalles.filter(d => d.estado === 'A' && d.codigo_plan_grupo === planPropio.codigo_plan_grupo);
         resultado[key] = misLineas.map(linea => {
@@ -1923,11 +1944,16 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             d.codigo_plan_grupo !== planPropio.codigo_plan_grupo &&
             esPlanP3(planPorCodigo.get(d.codigo_plan_grupo)?.valor)
           );
-          const respuestaCant = respuestas.reduce((s, r) => s + parseQty(r.cantidad_produccion_neta), 0);
+          const cantidad = parseQty(linea.cantidad_produccion_neta);
+          const aProducir = respuestas.reduce((s, r) => s + parseQty(r.cantidad_produccion_neta), 0);
+          const respondido = respuestas.length > 0 || !!p3DelCiclo;
+          // Respondido = Espuma/Laminado lo entrega completo (cubierto con stock/provisional + lo que
+          // fabrica); sin respuesta del ciclo queda en 0 (pendiente).
+          const respuestaCant = respondido ? cantidad : 0;
           const codigosPlanesRespuesta = Array.from(new Set(respuestas.map(r => r.codigo_plan_grupo)));
           const planGrupo = codigosPlanesRespuesta.length > 0
             ? codigosPlanesRespuesta.map(c => String(c).padStart(3, '0')).join(', ')
-            : '—';
+            : p3DelCiclo ? String(p3DelCiclo.codigo_plan_grupo).padStart(3, '0') : '—';
 
           // Contraste de fechas: se compara por LÍNEA (fecha_modificacion de DetalleTactico, que fija
           // el backend al guardar — no lo controla el cliente), no por rango de PlanGrupo. Laminado
@@ -1951,8 +1977,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           return {
             material: String(linea.codigo_material),
             descripcion: descripcionPorMaterial.get(String(linea.codigo_material)) || '—',
-            cantidad: parseQty(linea.cantidad_produccion_neta),
+            cantidad,
             respuestaCant,
+            aProducir,
+            cubiertoStock: respondido ? Math.max(0, cantidad - aProducir) : 0,
             planGrupo,
             fechasOk,
           };
@@ -3626,6 +3654,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                           <th className="px-3 py-3 border-r border-gray-100 text-left">Descripción</th>
                           <th className="px-3 py-3 border-r border-gray-100">Cantidad</th>
                           <th className="px-3 py-3 border-r border-gray-100">Respuesta Cant.</th>
+                          <th className="px-3 py-3 border-r border-gray-100" title="Cubierto con stock / provisional (no viene en el P3)">Stock / Prov.</th>
+                          <th className="px-3 py-3 border-r border-gray-100" title="Faltante que el P3 manda a fabricar">A producir (P3)</th>
                           <th className="px-3 py-3 border-r border-gray-100">Plan Grupo</th>
                           <th className="px-3 py-3 border-r border-gray-100">Fechas</th>
                           <th className="px-3 py-3">Estado</th>
@@ -3633,7 +3663,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                       </thead>
                       <tbody className="divide-y divide-gray-50 text-[10px]">
                         {rows.length === 0 ? (
-                          <tr><td colSpan={7} className="py-10 text-center text-gray-300 font-bold uppercase tracking-widest">Sin plan P2 activo o sin materiales</td></tr>
+                          <tr><td colSpan={9} className="py-10 text-center text-gray-300 font-bold uppercase tracking-widest">Sin plan P2 activo o sin materiales</td></tr>
                         ) : (
                           rows.map((row, i) => {
                             const estado = estadoDataAprobada(row);
@@ -3643,6 +3673,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                                 <td className="px-3 py-2 text-left border-r border-gray-50 text-gray-500 uppercase truncate max-w-[220px]">{row.descripcion}</td>
                                 <td className="px-3 py-2 font-mono font-black text-gray-900 border-r border-gray-50">{row.cantidad.toLocaleString()}</td>
                                 <td className="px-3 py-2 font-mono font-black text-indigo-700 border-r border-gray-50">{row.respuestaCant.toLocaleString()}</td>
+                                <td className="px-3 py-2 font-mono text-emerald-700 border-r border-gray-50">{row.cubiertoStock ? row.cubiertoStock.toLocaleString() : '—'}</td>
+                                <td className="px-3 py-2 font-mono text-orange-700 border-r border-gray-50">{row.aProducir ? row.aProducir.toLocaleString() : '—'}</td>
                                 <td className="px-3 py-2 font-mono text-gray-500 border-r border-gray-50">{row.planGrupo}</td>
                                 <td className="px-3 py-2 border-r border-gray-50">
                                   {row.fechasOk === null ? (

@@ -1283,6 +1283,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       // explícito desde el sync porque el estado recién fijado aún no se refleja en este closure.
       const fechaBase = fechaBaseOverride !== undefined ? fechaBaseOverride : fechaEvaluada;
       const fechaObjetivoP2 = format(nextBusinessDayCal(fechaBase ? parseISO(fechaBase) : new Date(), diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
+      const fechaPTCiclo = format(nextBusinessDayCal(parseISO(fechaObjetivoP2), diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
 
       const planGruposRes = await planGrupoService.getAll();
       const planesActivosCrudo = (planGruposRes.data || []).filter((pg) => {
@@ -1292,8 +1293,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         const esVentaExterna = /venta\s*externa/i.test(grupoPorCodigo.get(pg.codigo_grupo)?.nombre_grupo || '');
         if (esVentaExterna && !/rollo/i.test(valor)) return false;
         if (!esP2ParaModulo(pg, 'LAMINADO')) return false;
-        if (soloFecha(pg.fecha_inicio_plan) !== fechaObjetivoP2) return false;
-        return true;
+        // P2 Venta Rollos es plan de ENTREGA: vale con inicio = recuperación o fin = PT (convención
+        // vieja inicio = fin = PT y nueva inicio = hoy+1 / fin = PT). Forros y Muebles: solo inicio.
+        if (soloFecha(pg.fecha_inicio_plan) === fechaObjetivoP2) return true;
+        return esVentaExterna && soloFecha(pg.fecha_fin_plan) === fechaPTCiclo;
       });
 
       // Solo el plan MÁS RECIENTE por grupo — red de seguridad para el caso (menos común ahora que

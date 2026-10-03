@@ -510,6 +510,8 @@ interface PlanGrupoPreviewEspuma {
   fechaInicio: string;
   fechaFin: string;
   rows: RespuestaP3Row[];
+  // Materiales del P2 cubiertos con stock/provisional: no se graban en el P3 (solo se informan).
+  cubiertos?: number;
 }
 
 // "Editar Plan" (mismo patrón que Corte y Laminado, ver TacticalPlanCorteLaminadoSection): permite
@@ -1249,7 +1251,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // distintas en BD (valor "- P3 -" / "- PFD -", igual que antes — Editar Plan sigue listándolas por
   // separado) — el cambio es solo de secuencia de botones/clics, no del modelo de datos. Array en vez
   // de un solo objeto para poder cubrir 1 centro (botón por centro) o ambos a la vez (botón general).
-  const [planPreviewP3PFD, setPlanPreviewP3PFD] = useState<{ centro: '1000' | '2000'; p3: PlanGrupoPreviewEspuma; pfd: PlanGrupoPreviewEspuma | null }[] | null>(null);
+  const [planPreviewP3PFD, setPlanPreviewP3PFD] = useState<{ centro: '1000' | '2000'; p3: PlanGrupoPreviewEspuma }[] | null>(null);
   const [isSavingPlanP3PFD, setIsSavingPlanP3PFD] = useState(false);
 
   // "Exportar a SAP" (InsertarSolicitudProduccionHB) — mismo patrón que Corte y Laminado
@@ -3165,7 +3167,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (ok) guardados.push(planta);
       }
       panelProgreso.concluir(
-        guardados.length > 0 ? 'P3/PFD y reporte guardados. Exporta a SAP si corresponde y luego revisa y envía el reporte.' : undefined,
+        guardados.length > 0 ? 'P3 y reporte guardados. Exporta a SAP si corresponde y luego revisa y envía el reporte.' : undefined,
         guardados.map(planta => ({
           etiqueta: guardados.length > 1 ? `Ver reporte ${planta === 'UIO' ? 'Quito' : 'Guayaquil'}` : 'Ver reporte y enviar',
           onClick: () => { setActiveTab('resumen'); void reporteFlujo[planta].recuperar(); },
@@ -3513,6 +3515,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // `diasNoLaborables` todavía no se refleja en este closure — se recibe el Set directo para no
       // calcular la fecha objetivo con feriados vacíos (ver handleSincronizarYGenerar).
       const fechaObjetivoP2 = format(nextBusinessDayCal(new Date(), diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
+      // PT del ciclo (hoy+2 hábiles): el P2 de Venta Externa es un plan de ENTREGA y se reconoce por su
+      // PT (fecha_fin_plan). Se acepta también inicio = recuperación: así entran tanto los P2 grabados
+      // con la convención vieja (inicio = fin = PT, ej. #1006/#1008 del 02/10) como los nuevos
+      // (inicio = hoy+1, fin = PT). Muebles (grupo 3) es subproceso: solo inicio = hoy+1.
+      const fechaPTCiclo = format(addBusinessDaysCal(new Date(), DIAS_HABILES_PT_ENSAMBLADO, diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
 
       const planGruposRes = await planGrupoService.getAll();
       const candidatosBase = (planGruposRes.data || []).filter((pg) => {
@@ -3528,7 +3535,18 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // fechaLocalEcuador, NO split('T')[0]: fecha_inicio_plan es UTC — mismo bug de zona horaria
       // que en explotarPFFParaCentro (ver su comentario). Un P2 grabado tarde en el día cruzaba a
       // la fecha calendario siguiente en UTC y dejaba de coincidir con fechaObjetivoP2 (local).
-      const planesActivos = candidatosBase.filter((pg) => fechaLocalPlana(pg.fecha_inicio_plan) === fechaObjetivoP2);
+      const esP2VentaExterna = (pg: PlanGrupo) => /venta\s*externa/i.test(grupoPorCodigo.get(pg.codigo_grupo)?.nombre_grupo || '');
+      const planesActivos = candidatosBase.filter((pg) =>
+        fechaLocalPlana(pg.fecha_inicio_plan) === fechaObjetivoP2
+        || (esP2VentaExterna(pg) && fechaLocalPlana(pg.fecha_fin_plan) === fechaPTCiclo)
+      );
+      // P2 activos que no son de este ciclo (el origen no los apagó): se avisan en consola para poder
+      // distinguir "no hay P2" de "hay P2 pero vencido".
+      const vencidos = candidatosBase.filter((pg) => !planesActivos.includes(pg));
+      if (vencidos.length > 0) {
+        console.warn(`[Necesidades Planta] P2 activos fuera del ciclo (recuperación ${fechaObjetivoP2} / PT ${fechaPTCiclo}):`,
+          vencidos.map((pg) => `#${pg.codigo_plan_grupo} ${pg.valor} (${fechaLocalPlana(pg.fecha_inicio_plan)} → ${fechaLocalPlana(pg.fecha_fin_plan)})`));
+      }
 
 
       const planGrupoCodigos = planesActivos.map((pg) => pg.codigo_plan_grupo);
@@ -4012,12 +4030,19 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     panelProgreso.actualizar('pff', { progreso: { actual: pffProgress.current, total: pffProgress.total } });
   }, [syncStep, pffProgress, panelProgreso.actualizar]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Arma la vista previa de la Respuesta P3 (cobertura) de UN centro — no toca el estado, la decisión
-  // de abrir el diálogo (y con qué centros, y junto con qué PFD) queda en manos de quien llama
-  // (handleAbrirRespuestaP3PFD / handleAbrirRespuestaP3PFDTodos, más abajo).
+  // Arma la vista previa de la Respuesta P3 de UN centro — no toca el estado, la decisión de abrir el
+  // diálogo (y con qué centros) queda en manos de quien llama (handleAbrirRespuestaP3PFD /
+  // handleAbrirRespuestaP3PFDTodos, más abajo).
+  // 2026-10-03 (decisión del usuario): el P3 publica el FALTANTE (lo que hay que fabricar) y ya no se
+  // graba un PFD aparte — P3 y PFD eran redundantes. Exportar a SAP y Venta Externa leen este P3.
   const construirPreviewP3 = useCallback((centro: '1000' | '2000'): PlanGrupoPreviewEspuma | null => {
-    const rows = respuestaSalidaRowsPorCentro(centro);
-    if (rows.length === 0) return null;
+    const todas = respuestaSalidaRowsPorCentro(centro, true);
+    if (todas.length === 0) return null;
+    // Sin líneas en 0 (regla del usuario 2026-10-03): solo viaja lo que hay que fabricar. Lo cubierto
+    // con stock/provisional no se graba; Venta Externa lo da por cubierto al emparejar P2 vs P3. Si todo
+    // queda cubierto se graba igual la cabecera del P3 (sin líneas) para dejar constancia de la respuesta.
+    const rows = todas.filter(r => r.necesidad > 0 && r.cantidadUnidades > 0);
+    const cubiertos = todas.filter(r => r.necesidad > 0 && r.cantidadUnidades <= 0).length;
     // El P3 es la RESPUESTA del día siguiente HÁBIL a la revisión — mismo criterio de negocio que
     // Laminado: su fecha_inicio_plan/fecha_fin_plan se fuerza siempre al próximo día laborable (no
     // simplemente hoy+1 calendario, que caía en sábado/domingo si hoy era viernes/sábado).
@@ -4034,7 +4059,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       valor: `Plan Táctico - Centro ${centro} - P3 - Espuma`,
       fechaInicio: fechaRespuesta,
       fechaFin: fechaRespuesta,
-      rows
+      rows,
+      cubiertos
     };
   }, [respuestaSalidaRowsPorCentro, siguienteDiaHabil]);
 
@@ -4058,7 +4084,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (p.codigo_grupo !== CODIGO_GRUPO_LAMINADO || p.estado !== 'A' || p.codigo_plan_grupo === codigoPlanGrupoNuevo) return false;
         const valor = String(p.valor || '');
         if (!/espuma/i.test(valor) || !centroRegex.test(valor)) return false;
-        if (/pfd/i.test(valor) !== esPFD) return false;
+        // Un P3 nuevo supera P3 y PFD viejos (desde 2026-10-03 ya no se graba PFD: el P3 es el faltante).
+        if (esPFD && !/pfd/i.test(valor)) return false;
         // fechaLocalEcuador: fechaNuevoPlan es una fecha LOCAL (siguienteDiaHabil); comparar contra
         // el recorte crudo de un fecha_inicio_plan (UTC) podía fallar la superación de planes justo
         // en el filo del día.
@@ -4100,8 +4127,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       existentesPorClave.set(`${claveMaterial(d.codigo_material)}|${d.codigo_plan_grupo_padre}|${nivelBomDeLinea(d.linea_produccion) ?? ''}`, d);
     });
 
-    const esPFD = /pfd/i.test(plan.valor);
-    const salidaFresca = respuestaSalidaRowsPorCentro(centro, esPFD);
+    const salidaFresca = respuestaSalidaRowsPorCentro(centro, true); // P3 y PFD = faltante
 
     const clavesUsadas = new Set<string>();
     const rows: EditableDetalleRowEspuma[] = [];
@@ -4158,7 +4184,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
     for (const row of rows) {
       try {
-        if (row.marcadoEliminar) {
+        // Sin líneas en 0 (regla 2026-10-03): una fila editada a 0 se elimina; una nueva en 0 no se graba.
+        const quedaEnCero = Math.round(row.cantidad) <= 0;
+        if (row.marcadoEliminar || quedaEnCero) {
+          if (row.esNuevo) continue;
           await detalleTacticoService.delete(row.codigo_detalle_tactico);
           eliminados++;
           continue;
@@ -4192,7 +4221,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // para que el usuario elija cuál corregir — mismo criterio de filtro (codigo_grupo + "Espuma" +
   // centro) que desactivarPlanesEspumaSuperados, así solo aparecen planes reales de este módulo.
   const handleOpenEditarPlan = useCallback(async (centro: '1000' | '2000') => {
-    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P3/PFD, editar planes o exportar a SAP con datos vigentes.'); return; }
+    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3, editar planes o exportar a SAP con datos vigentes.'); return; }
     setIsLoadingEditPlan(true);
     try {
       const planesRes = await planGrupoService.getAll();
@@ -4252,13 +4281,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const materialesDisponiblesParaAgregarEspuma = useMemo(() => {
     if (!editPlanPreview) return [];
     const yaIncluidos = new Set(editPlanPreview.rows.filter(r => !r.marcadoEliminar).map(r => r.material));
-    const esPFD = /pfd/i.test(editPlanPreview.valor);
-    return respuestaSalidaRowsPorCentro(editPlanPreview.centro, esPFD).filter(r => r.cantidadUnidades > 0 && !yaIncluidos.has(r.material));
+    return respuestaSalidaRowsPorCentro(editPlanPreview.centro, true).filter(r => r.cantidadUnidades > 0 && !yaIncluidos.has(r.material));
   }, [editPlanPreview, respuestaSalidaRowsPorCentro]);
 
   const handleAddMaterialToEditPlanEspuma = (material: string) => {
     if (!editPlanPreview) return;
-    const needRow = respuestaSalidaRowsPorCentro(editPlanPreview.centro, /pfd/i.test(editPlanPreview.valor)).find(r => r.material === material);
+    const needRow = respuestaSalidaRowsPorCentro(editPlanPreview.centro, true).find(r => r.material === material);
     if (!needRow) return;
     const splits = getOrigenesProrrateoEspuma(needRow.material, needRow.cantidadUnidades, editPlanPreview.centro, editPlanPreview.codigo_plan_grupo);
     const nuevasFilas: EditableDetalleRowEspuma[] = splits
@@ -4333,68 +4361,39 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     }
   }, [editPlanPreview, addNotification, fetchNecesidadesPlanta, persistirFilasEditablesEspuma, desactivarPlanesEspumaSuperados]);
 
-  // Variante PFD de construirPreviewP3: mismo universo de materiales y misma fecha de respuesta,
-  // pero con la cascada de respuestaSalidaRowsPorCentro forzando a 0 la fuente "Stock" (esPFD=true) —
-  // es el FALTANTE real que hay que fabricar, no la cobertura. No reemplaza ni modifica el P3: sigue
-  // siendo un PlanGrupo aparte en BD (mismo criterio que el PFD de Corte y Laminado), aunque desde
-  // 2026-09-22 ambos se generan/guardan juntos en un solo paso de UI — ver handleAbrirRespuestaP3PFD/
-  // handleConfirmarRespuestaP3PFD más abajo.
-  const construirPreviewPFD = useCallback((centro: '1000' | '2000'): PlanGrupoPreviewEspuma | null => {
-    const rows = respuestaSalidaRowsPorCentro(centro, true);
-    if (rows.length === 0) return null;
-    const fechaRespuesta = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
-    return {
-      centro,
-      codigo_grupo: CODIGO_GRUPO_LAMINADO,
-      nombreGrupo: 'Corte Espuma',
-      valor: `Plan Táctico - Centro ${centro} - PFD - Espuma`,
-      fechaInicio: fechaRespuesta,
-      fechaFin: fechaRespuesta,
-      rows
-    };
-  }, [respuestaSalidaRowsPorCentro, siguienteDiaHabil]);
-
-  // Paso 1 combinado: arma la vista previa de P3 Y PFD de un centro en un solo diálogo — antes eran
-  // dos botones/diálogos separados (Generar P3, Generar PFD), decisión de negocio 2026-09-22 para
-  // reducir clics: ambos salen de la misma data en vivo (respuestaSalidaRowsPorCentro), no hay razón
-  // de negocio para forzar dos revisiones. Si el centro no tiene materiales, ni P3 ni PFD tienen
-  // sentido — se bloquea con el mismo aviso de antes. pfd puede salir null solo si por alguna razón
-  // el universo de materiales quedó vacío justo entre construir p3 y pfd (misma condición que p3, en
-  // la práctica no pasa porque ambos iteran el mismo necesidadMap) — se maneja igual, esa fila
-  // simplemente no se guarda como PFD.
+  // Paso 1: arma la vista previa del P3 (faltante) de un centro en el diálogo de confirmación. Si el
+  // centro no tiene materiales se bloquea con aviso.
   const handleAbrirRespuestaP3PFD = useCallback((centro: '1000' | '2000') => {
-    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P3/PFD, editar planes o exportar a SAP con datos vigentes.'); return; }
+    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3, editar planes o exportar a SAP con datos vigentes.'); return; }
     const p3 = construirPreviewP3(centro);
     if (!p3) {
       addNotification('warning', `No hay materiales de Necesidades Planta para el Centro ${centro}.`);
       return;
     }
-    const pfd = construirPreviewPFD(centro);
-    setPlanPreviewP3PFD([{ centro, p3, pfd }]);
-  }, [construirPreviewP3, construirPreviewPFD, addNotification, resultadoRestaurado]);
+    setPlanPreviewP3PFD([{ centro, p3 }]);
+  }, [construirPreviewP3, addNotification, resultadoRestaurado]);
 
   // Botón general: arma la vista previa de AMBOS centros en un solo diálogo — un centro sin
   // materiales de Necesidades Planta simplemente no aparece (no bloquea al otro).
   const handleAbrirRespuestaP3PFDTodos = useCallback(() => {
-    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P3/PFD, editar planes o exportar a SAP con datos vigentes.'); return; }
+    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3, editar planes o exportar a SAP con datos vigentes.'); return; }
     const previews = (['1000', '2000'] as const)
       .map(centro => {
         const p3 = construirPreviewP3(centro);
-        if (!p3) return null;
-        return { centro, p3, pfd: construirPreviewPFD(centro) };
+        return p3 ? { centro, p3 } : null;
       })
-      .filter((p): p is { centro: '1000' | '2000'; p3: PlanGrupoPreviewEspuma; pfd: PlanGrupoPreviewEspuma | null } => p !== null);
+      .filter((p): p is { centro: '1000' | '2000'; p3: PlanGrupoPreviewEspuma } => p !== null);
     if (previews.length === 0) {
       addNotification('warning', 'No hay materiales de Necesidades Planta en ningún centro.');
       return;
     }
     setPlanPreviewP3PFD(previews);
-  }, [construirPreviewP3, construirPreviewPFD, addNotification, resultadoRestaurado]);
+  }, [construirPreviewP3, addNotification, resultadoRestaurado]);
 
   // Paso 2: el usuario confirmó en el diálogo. Guarda un PlanGrupo (grupo 8, compartido con Corte y
   // Laminado — ver CODIGO_GRUPO_LAMINADO) + sus DetalleTactico (uno o más por material vía
-  // getOrigenesProrrateoEspuma, incluidos los de cantidad 0 — a diferencia del "Guardar Plan" base de
-  // Laminado, aquí SÍ se conservan para dejar constancia de qué quedó sin Provisional que lo cubra).
+  // getOrigenesProrrateoEspuma). Desde 2026-10-03 NO se graban líneas en 0: el P3 lleva solo el
+  // faltante; lo cubierto con stock/provisional lo deduce Venta Externa al emparejar P2 vs P3.
   // Lógica compartida entre P3 y PFD (antes duplicada en handleConfirmarRespuestaP3/
   // handleConfirmarRespuestaPFD, ahora fusionadas en handleConfirmarRespuestaP3PFD) — el único punto
   // real de diferencia es esPFD, que solo cambia a qué canal (P3 o PFD) desactivarPlanesEspumaSuperados
@@ -4433,6 +4432,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         // medio.
         const splits = getOrigenesProrrateoEspuma(row.material, row.cantidadUnidades, preview.centro, nuevoCodigoPlanGrupo);
         for (const split of splits) {
+          // Sin líneas en 0: un origen cuyo prorrateo redondea a 0 no viaja en el P3.
+          if (Math.round(split.cantidad) <= 0) continue;
           try {
             const detallePayload = {
               codigo_detalle_tactico: 0,
@@ -4479,26 +4480,18 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const nombrePlanta = (c: '1000' | '2000') => (c === '1000' ? 'Quito' : 'Guayaquil');
     setIsSavingPlanP3PFD(true);
     setPlanPreviewP3PFD(null);
-    panelProgreso.iniciar('Corte Espuma — Respuesta P3/PFD y reporte', [
-      ...previews.flatMap(({ centro, pfd }) => [
-        { id: `p3-${centro}`, etiqueta: `Guardando P3 · ${nombrePlanta(centro)}` },
-        ...(pfd ? [{ id: `pfd-${centro}`, etiqueta: `Guardando PFD · ${nombrePlanta(centro)}` }] : []),
-      ]),
+    panelProgreso.iniciar('Corte Espuma — Respuesta P3 y reporte', [
+      ...previews.map(({ centro }) => ({ id: `p3-${centro}`, etiqueta: `Guardando P3 · ${nombrePlanta(centro)}` })),
       { id: 'nec', etiqueta: 'Actualizando necesidades' },
       ...previews.map(({ centro }) => ({ id: `rep-${centro}`, etiqueta: `Guardando reporte · ${nombrePlanta(centro)}` })),
     ]);
     try {
       const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
       const usuario = user?.name || 'admin';
-      for (const { centro, p3, pfd } of previews) {
+      for (const { centro, p3 } of previews) {
         panelProgreso.actualizar(`p3-${centro}`, { estado: 'en_curso' });
         const resP3 = await guardarPlanGrupoEspuma(p3, usuario, false);
         panelProgreso.actualizar(`p3-${centro}`, { estado: resP3.huboError ? 'error' : 'ok', detalle: resP3.mensaje });
-        if (pfd) {
-          panelProgreso.actualizar(`pfd-${centro}`, { estado: 'en_curso' });
-          const resPfd = await guardarPlanGrupoEspuma(pfd, usuario, true);
-          panelProgreso.actualizar(`pfd-${centro}`, { estado: resPfd.huboError ? 'error' : 'ok', detalle: resPfd.mensaje });
-        }
       }
       panelProgreso.actualizar('nec', { estado: 'en_curso' });
       await fetchNecesidadesPlanta();
@@ -4508,7 +4501,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     } catch (e) {
       panelProgreso.actualizar('nec', { estado: 'error', detalle: (e as Error).message });
       previews.forEach(({ centro }) => panelProgreso.actualizar(`rep-${centro}`, { estado: 'omitido' }));
-      panelProgreso.concluir(`Error al guardar la Respuesta P3/PFD: ${(e as Error).message}`);
+      panelProgreso.concluir(`Error al guardar la Respuesta P3: ${(e as Error).message}`);
     } finally {
       setIsSavingPlanP3PFD(false);
     }
@@ -4604,16 +4597,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return resultado;
   }, [fetchVersionConReintentosEspuma, puestoTrabajoPorMaterialEspuma]);
 
-  // Encuentra el PlanGrupo PFD de Espuma más reciente y activo de ese centro — mismo filtro que ya
-  // usa handleOpenEditarPlan (codigo_grupo 8 + "Espuma" + centro), agregando /pfd/i (canal PFD, no
-  // P3) y el mismo desempate por fecha_inicio_plan / codigo_plan_grupo que fetchCodigoDetalleTacticoPorMaterial
-  // usa en Laminado.
+  // Encuentra la Respuesta de Espuma más reciente y activa de ese centro (codigo_grupo 8 + "Espuma" +
+  // centro). Desde 2026-10-03 es el P3 (= faltante, ya no se graba PFD); se aceptan PFD viejos para no
+  // romper el ciclo en curso. Desempate por fecha_inicio_plan y luego codigo_plan_grupo (el más nuevo).
   const fetchUltimoPFDEspuma = useCallback(async (centro: '1000' | '2000'): Promise<{ plan: PlanGrupo; detalles: DetalleTactico[] } | null> => {
     const [planesRes, detallesRes] = await Promise.all([planGrupoService.getAll(), detalleTacticoService.getAll()]);
     const centroRegex = new RegExp(`centro\\s*${centro}`, 'i');
     const planesPFD = (planesRes.data || []).filter(p =>
       p.codigo_grupo === CODIGO_GRUPO_LAMINADO && p.estado === 'A' &&
-      /espuma/i.test(String(p.valor || '')) && centroRegex.test(String(p.valor || '')) && /pfd/i.test(String(p.valor || ''))
+      /espuma/i.test(String(p.valor || '')) && centroRegex.test(String(p.valor || '')) && /\bp3\b|pfd/i.test(String(p.valor || ''))
     );
     if (planesPFD.length === 0) return null;
     const planReciente = planesPFD.reduce<PlanGrupo>((mas, actual) => {
@@ -4715,7 +4707,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   }, [provisionalesQueCubrenPorCentro, respuestaSalidaRowsPorCentro]);
 
   const handleExportSap = useCallback(async (centro: '1000' | '2000') => {
-    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar P3/PFD, editar planes o exportar a SAP con datos vigentes.'); return; }
+    if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3, editar planes o exportar a SAP con datos vigentes.'); return; }
     if (!datosCargados) {
       addNotification('warning', 'Sincroniza primero: el envío a SAP cruza el PFD con las órdenes provisionales vigentes.');
       return;
@@ -4724,7 +4716,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     try {
       const ultimoPFD = await fetchUltimoPFDEspuma(centro);
       if (!ultimoPFD || ultimoPFD.detalles.length === 0) {
-        addNotification('warning', `No hay un PFD guardado para el Centro ${centro}. Generá la Respuesta PFD primero (tab "Respuesta P3", botón "PFD").`);
+        addNotification('warning', `No hay un P3 guardado para el Centro ${centro}. Generá la Respuesta P3 primero (tab "Respuesta P3").`);
         return;
       }
       const { plan, detalles } = ultimoPFD;
@@ -4744,7 +4736,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         }))
         .filter(g => g.conversion.cantidadOrden > 0);
       if (conConversion.length === 0) {
-        addNotification('info', `El PFD #${plan.codigo_plan_grupo} del Centro ${centro} no tiene faltantes ni provisionales por convertir: no hay órdenes que crear en SAP.`);
+        addNotification('info', `El P3 #${plan.codigo_plan_grupo} del Centro ${centro} no tiene faltantes ni provisionales por convertir: no hay órdenes que crear en SAP.`);
         return;
       }
       const grupos = conConversion.map(g => g.lineas);
@@ -6434,7 +6426,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       {planCargadoDe && (
         <div
           className="flex items-center gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50/50 px-4 py-2.5 text-left"
-          title="Resumen recuperado del respaldo guardado junto al reporte: se muestra el resultado de ese momento, sin consultar SAP ni recalcular. Las acciones que graban (P2/P3/PFD/SAP) quedan bloqueadas hasta Sincronizar."
+          title="Resumen recuperado del respaldo guardado junto al reporte: se muestra el resultado de ese momento, sin consultar SAP ni recalcular. Las acciones que graban (P2/P3/SAP) quedan bloqueadas hasta Sincronizar."
         >
           <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
@@ -6654,7 +6646,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                 className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl h-9 px-5 text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2"
                 title="Genera y previsualiza en un solo paso la Respuesta P3 (cobertura) y el PFD (faltante a fabricar) de ambos centros — antes eran dos botones/diálogos separados."
               >
-                <Save className="w-4 h-4" /> Generar Respuestas · P3/PFD (Ambos Centros)
+                <Save className="w-4 h-4" /> Generar Respuesta · P3 (Ambos Centros)
               </Button>
             </div>
             {(['1000', '2000'] as const).map(centro => {
@@ -6687,7 +6679,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                         disabled={isLoadingEditPlan}
                         variant="outline"
                         className="border-indigo-200 text-indigo-700 hover:bg-indigo-50 rounded-xl h-9 px-5 text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
-                        title="Corrige un P3/PFD ya guardado (cantidades, agregar/quitar material) sin esperar al ciclo del día siguiente."
+                        title="Corrige un P3 ya guardado (cantidades, agregar/quitar material) sin esperar al ciclo del día siguiente."
                       >
                         {isLoadingEditPlan ? <Loader2 className="w-4 h-4 animate-spin" /> : <Pencil className="w-4 h-4" />} Editar Plan
                       </Button>
@@ -6697,13 +6689,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                         className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl h-9 px-5 text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2"
                         title="Genera y previsualiza en un solo paso la Respuesta P3 (cobertura) y el PFD (faltante a fabricar) de este centro."
                       >
-                        <Save className="w-4 h-4" /> Generar Respuestas · P3/PFD {nombrePlanta}
+                        <Save className="w-4 h-4" /> Generar Respuesta · P3 {nombrePlanta}
                       </Button>
                       <Button
                         onClick={() => handleExportSap(centro)}
                         disabled={isValidandoExportSap}
                         className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl h-9 px-5 text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2"
-                        title="Envía a SAP (InsertarSolicitudProduccionHB) el PFD ya guardado más reciente de este centro — una orden por cada material/lote ya persistido. Generá la Respuesta PFD primero si todavía no existe."
+                        title="Envía a SAP (InsertarSolicitudProduccionHB) el P3 ya guardado más reciente de este centro — una orden por material. Generá la Respuesta P3 primero si todavía no existe."
                       >
                         {isValidandoExportSap ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} Exportar a SAP · PFD {nombrePlanta}
                       </Button>
@@ -6975,9 +6967,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       <Dialog open={planPreviewP3PFD !== null} onOpenChange={(open) => { if (!open && !isSavingPlanP3PFD) setPlanPreviewP3PFD(null); }}>
         <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Confirmar Respuesta P3/PFD — Corte Espuma</DialogTitle>
+            <DialogTitle>Confirmar Respuesta P3 — Corte Espuma</DialogTitle>
             <DialogDescription>
-              Revisa los datos que se van a grabar antes de continuar — se crean DOS registros por centro: la Respuesta P3 (cobertura: cuánto de la necesidad ya está resuelto) y el PFD (faltante: lo que hay que fabricar). Esta acción crea registros nuevos en producción.
+              Revisa los datos que se van a grabar antes de continuar — se crea UN registro por centro: la Respuesta P3 con el faltante (lo que hay que fabricar = Necesidad P2 − Stock − Provisional). Es el mismo P3 que lee Exportar a SAP y que concilia Venta Externa. Esta acción crea registros nuevos en producción.
             </DialogDescription>
           </DialogHeader>
           {planPreviewP3PFD && (
@@ -6987,13 +6979,19 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                   <h4 className="text-[11px] font-black uppercase tracking-widest text-slate-800 mb-3">Centro {preview.centro}</h4>
 
                   <div className="space-y-3">
-                    <span className="inline-block text-[9px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 rounded-full px-3 py-1">P3 — Cobertura</span>
+                    <span className="inline-block text-[9px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 rounded-full px-3 py-1">P3 — Faltante a fabricar</span>
                     <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
                       <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{preview.p3.valor}</div>
                       <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Respuesta</span>{preview.p3.fechaInicio}</div>
                     </div>
                     <div>
-                      <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales a guardar ({preview.p3.rows.length})</span>
+                      <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">
+                        Materiales a fabricar ({preview.p3.rows.length})
+                        {preview.p3.cubiertos ? <span className="normal-case font-bold text-emerald-700"> · {preview.p3.cubiertos} cubierto(s) con stock/provisional: no se graban</span> : null}
+                      </span>
+                      {preview.p3.rows.length === 0 && (
+                        <p className="text-[11px] text-emerald-700 font-bold px-1 mb-2">Todo el P2 está cubierto: se graba solo la cabecera del P3 (sin líneas) como constancia de respuesta del ciclo.</p>
+                      )}
                       <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
                         <table className="w-full text-[11px] border-collapse">
                           <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
@@ -7002,8 +7000,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                               <th className="px-3 py-2 text-right">Necesidad P2</th>
                               <th className="px-3 py-2 text-right">Stock</th>
                               <th className="px-3 py-2 text-right">Provisional</th>
-                              <th className="px-3 py-2 text-right font-black text-yellow-700">Cubierto (se graba)</th>
-                              <th className="px-3 py-2 text-right">Faltante</th>
+                              <th className="px-3 py-2 text-right">Cubierto</th>
+                              <th className="px-3 py-2 text-right font-black text-orange-700">A producir (se graba)</th>
+                              <th className="px-3 py-2 text-left">Estado</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-50">
@@ -7013,66 +7012,26 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                                 <td className="px-3 py-2 text-right font-mono text-slate-400">{formatNum(row.necesidad, 0)}</td>
                                 <td className="px-3 py-2 text-right font-mono text-amber-700">{formatNum(row.stock, 0)}</td>
                                 <td className="px-3 py-2 text-right font-mono text-sky-700">{formatNum(row.provisional, 0)}</td>
-                                <td className="px-3 py-2 text-right font-mono font-black bg-yellow-50">{formatNum(row.cantidadUnidades, 0)}</td>
-                                <td className={cn("px-3 py-2 text-right font-mono", row.faltante > 0 ? "text-orange-700 font-black" : "text-slate-300")}>{formatNum(row.faltante, 0)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-slate-500">{formatNum(row.cubierto, 0)}</td>
+                                <td className={cn("px-3 py-2 text-right font-mono font-black bg-orange-50/40", row.cantidadUnidades > 0 ? "text-orange-700" : "text-slate-300")}>{formatNum(row.cantidadUnidades, 0)}</td>
+                                <td className="px-3 py-2 text-left">
+                                  <Badge
+                                    className={cn(
+                                      "text-[8px] font-black uppercase",
+                                      row.fuente === 'Producir' ? "bg-orange-50 text-orange-700 border-orange-200"
+                                      : row.fuente === 'Cubierto' ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                      : "bg-slate-50 text-slate-500 border-slate-200"
+                                    )}
+                                  >
+                                    {row.fuente}
+                                  </Badge>
+                                </td>
                               </tr>
                             ))}
                           </tbody>
                         </table>
                       </div>
                     </div>
-                  </div>
-
-                  <div className="space-y-3 mt-5">
-                    <span className="inline-block text-[9px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 rounded-full px-3 py-1">PFD — Faltante a fabricar</span>
-                    {preview.pfd ? (
-                      <>
-                        <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
-                          <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{preview.pfd.valor}</div>
-                          <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Respuesta</span>{preview.pfd.fechaInicio}</div>
-                        </div>
-                        <div>
-                          <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales a guardar ({preview.pfd.rows.length})</span>
-                          <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
-                            <table className="w-full text-[11px] border-collapse">
-                              <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
-                                <tr>
-                                  <th className="px-3 py-2 text-left">Material</th>
-                                  <th className="px-3 py-2 text-right">Necesidad P2</th>
-                                  <th className="px-3 py-2 text-right">Cubierto (Stock + Prov.)</th>
-                                  <th className="px-3 py-2 text-right font-black text-orange-700">A producir (se graba)</th>
-                                  <th className="px-3 py-2 text-left">Estado</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-gray-50">
-                                {preview.pfd.rows.map((row, i) => (
-                                  <tr key={i}>
-                                    <td className="px-3 py-2 text-left font-mono">{row.material}</td>
-                                    <td className="px-3 py-2 text-right font-mono text-slate-400">{formatNum(row.necesidad, 0)}</td>
-                                    <td className="px-3 py-2 text-right font-mono text-slate-500">{formatNum(row.cubierto, 0)}</td>
-                                    <td className={cn("px-3 py-2 text-right font-mono font-black bg-orange-50/40", row.cantidadUnidades > 0 ? "text-orange-700" : "text-slate-300")}>{formatNum(row.cantidadUnidades, 0)}</td>
-                                    <td className="px-3 py-2 text-left">
-                                      <Badge
-                                        className={cn(
-                                          "text-[8px] font-black uppercase",
-                                          row.fuente === 'Producir' ? "bg-orange-50 text-orange-700 border-orange-200"
-                                          : row.fuente === 'Cubierto' ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                          : "bg-slate-50 text-slate-500 border-slate-200"
-                                        )}
-                                      >
-                                        {row.fuente}
-                                      </Badge>
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      </>
-                    ) : (
-                      <p className="text-[11px] text-slate-400 italic px-1">Sin materiales para el PFD de este centro — no se crea Plan Grupo PFD.</p>
-                    )}
                   </div>
                 </div>
               ))}
@@ -7091,9 +7050,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       <Dialog open={exportSapPreview !== null} onOpenChange={(open) => { if (!open && !isEnviandoSap) { setExportSapPreview(null); setExportSapPayloads(null); } }}>
         <DialogContent className="max-w-[96vw] max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Confirmar envío a SAP — PFD Corte Espuma {exportSapPreview ? `(Centro ${exportSapPreview.centro})` : ''}</DialogTitle>
+            <DialogTitle>Confirmar envío a SAP — P3 Corte Espuma {exportSapPreview ? `(Centro ${exportSapPreview.centro})` : ''}</DialogTitle>
             <DialogDescription>
-              Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Sale del PFD #{exportSapPreview?.plan.codigo_plan_grupo} ya guardado: una orden por material (las líneas por nivel N1/N2 u origen se suman). Si el material ya tiene provisional en la ventana, la orden la convierte: provisional + faltante, o la provisional completa si el faltante es 0 y el stock solo no cubre. Esta acción no se puede deshacer desde acá.
+              Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Sale del P3 #{exportSapPreview?.plan.codigo_plan_grupo} ya guardado: una orden por material (las líneas por nivel N1/N2 u origen se suman). Si el material ya tiene provisional en la ventana, la orden la convierte: provisional + faltante, o la provisional completa si el faltante es 0 y el stock solo no cubre. Esta acción no se puede deshacer desde acá.
             </DialogDescription>
           </DialogHeader>
           {exportSapPreview && exportSapPayloads && (
@@ -7117,7 +7076,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                           <td className="px-2 py-1 max-w-[180px]" title={materialDescMap.get(payload.CodigoMaterial) || ''}>
                             <span className="block truncate">{materialDescMap.get(payload.CodigoMaterial) || '—'}</span>
                             {(exportSapPreview.grupos[i]?.length || 0) > 1 && (
-                              <span className="block text-[9px] text-indigo-600 font-bold" title="Líneas del PFD consolidadas en esta orden">
+                              <span className="block text-[9px] text-indigo-600 font-bold" title="Líneas del P3 consolidadas en esta orden">
                                 {exportSapPreview.grupos[i].map(l => `${nivelBomDeLinea(l.linea_produccion) ? `N${nivelBomDeLinea(l.linea_produccion)} ` : `#${l.codigo_plan_grupo_padre} `}${parseQty(l.cantidad_produccion_neta)}`).join(' + ')}
                               </span>
                             )}
