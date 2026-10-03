@@ -60,7 +60,7 @@ import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
 import { cn } from '@/lib/utils';
 import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
-import { nextBusinessDay as nextBusinessDayCal, esDiaNoLaborable, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { nextBusinessDay as nextBusinessDayCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, parseISO, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -896,7 +896,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // semana — el sábado habilitado puntualmente para cubrir excedente de capacidad (ver
   // [[sabado_dia_habil_condicional]]). Se consulta antes que el chequeo de fin de semana.
   const [diasLaborablesExtra, setDiasLaborablesExtra] = useState<DiasNoLaborables>(new Set<string>());
-  const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDayCal(d, diasNoLaborables, diasLaborablesExtra), [diasNoLaborables, diasLaborablesExtra]);
+  // Horizonte de planes (P2/P3, día del plan): sin Jornadas de fin de semana mientras SAP solo genere
+  // órdenes L-V (ver laborablesHorizonte); un sábado Jornada sigue sumando su turno en la ventana.
+  const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDayCal(d, diasNoLaborables, laborablesHorizonte(diasLaborablesExtra)), [diasNoLaborables, diasLaborablesExtra]);
 
   const [selectedDiaShift, setSelectedDiaShift] = useState('EMPTY');
   const [selectedNocheShift, setSelectedNocheShift] = useState('EMPTY');
@@ -1280,7 +1282,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       // Base = fecha evaluada (escogida al sincronizar); sin ella, hoy. fechaBaseOverride llega
       // explícito desde el sync porque el estado recién fijado aún no se refleja en este closure.
       const fechaBase = fechaBaseOverride !== undefined ? fechaBaseOverride : fechaEvaluada;
-      const fechaObjetivoP2 = format(nextBusinessDayCal(fechaBase ? parseISO(fechaBase) : new Date(), diasOverride ?? diasNoLaborables, laborablesExtraOverride ?? diasLaborablesExtra), 'yyyy-MM-dd');
+      const fechaObjetivoP2 = format(nextBusinessDayCal(fechaBase ? parseISO(fechaBase) : new Date(), diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
 
       const planGruposRes = await planGrupoService.getAll();
       const planesActivosCrudo = (planGruposRes.data || []).filter((pg) => {
@@ -1376,7 +1378,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     setPlanCargadoDe(null);
     setSelectedDates(fecha ? new Set([fecha]) : new Set());
     if (fecha) setViewDate(parseISO(fecha));
-    const fechaP2 = format(nextBusinessDayCal(fecha ? parseISO(fecha) : new Date(), noLaborables, laborablesExtra), 'dd/MM/yyyy');
+    const fechaP2 = format(nextBusinessDayCal(fecha ? parseISO(fecha) : new Date(), noLaborables, laborablesHorizonte(laborablesExtra)), 'dd/MM/yyyy');
     panelProgreso.iniciar('Corte Laminado — Sincronizar y generar', [
       { id: 'fecha', etiqueta: fecha ? `Fecha evaluada: ${format(parseISO(fecha), 'EEE dd/MM/yyyy', { locale: es })}` : 'Plan Maestro (todas las fechas)' },
       { id: 'sap', etiqueta: 'Sincronizando datos SAP' },
@@ -1458,7 +1460,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       fechaInicial: filtro.length === 1 ? filtro[0] : format(new Date(), 'yyyy-MM-dd'),
       sinFecha: 'Plan Maestro (todas las fechas)',
       detalle: fecha => {
-        const p2 = format(nextBusinessDayCal(fecha ? parseISO(fecha) : new Date(), noLaborables, laborablesExtra), 'yyyy-MM-dd');
+        const p2 = format(nextBusinessDayCal(fecha ? parseISO(fecha) : new Date(), noLaborables, laborablesHorizonte(laborablesExtra)), 'yyyy-MM-dd');
         const lineas = [
           { etiqueta: 'Órdenes FERT del', valor: fecha ? fmt(fecha) : 'Todas las fechas' },
           { etiqueta: 'P2 (necesidad planta) del', valor: fmt(p2) },

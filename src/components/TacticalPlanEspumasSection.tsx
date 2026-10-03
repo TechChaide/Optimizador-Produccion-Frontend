@@ -28,6 +28,7 @@ import {
   Info,
   Search,
   X,
+  FileText,
 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from '@/components/ui/button';
@@ -56,8 +57,8 @@ import type { Grupo, PlanGrupo, DetalleTactico, Restriccion } from '@/types/inte
 import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
 import type { BodyResponse } from '@/types/body-response';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia } from '@/components/ReportePlanTxtFlujo';
-import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
+import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, laborablesHorizonte, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -919,6 +920,22 @@ const DateFilterPopover: React.FC<{
 // Snapshot de lo que este módulo tiene cargado. Se guarda al sincronizar y se restaura al volver de
 // otro módulo, para no perder el trabajo en curso solo por navegar (ver @/lib/cache-modulos).
 const CACHE_CORTE_ESPUMA = 'tactica-corte-espuma';
+// Respaldo de lo planificado guardado junto al TXT (comprimido, {fecha}.estado.json.gz) para volver a
+// cargarlo desde "Recuperar y revisar". Decisión del usuario 2026-10-02: los DATOS SAP completos del
+// módulo (mismo contenido que el caché de sesión) + configuración de máquinas y fechas evaluadas, para
+// que Capacidad Operativa y el resto de pestañas se recalculen igual que el día que se planificó.
+// Cambiar su forma exige subir `version`.
+interface EstadoPlanCorteEspuma extends SnapshotCorteEspuma {
+  tipo: 'corte-espuma';
+  version: 1;
+  uioConfig: PlantaConfig;
+  gyeConfig: PlantaConfig;
+  selectedDatesCapacidad: { UIO: string[]; GYE: string[] };
+  selectedDatesProv: string[];
+  selectedDatesFert: string[];
+  tipoPlanEnsambladoPorCentro: Record<'1000' | '2000', 'P1' | 'PFF' | null>;
+}
+
 interface SnapshotCorteEspuma {
   ordenesProvisionales: RawApiRow[];
   ordenesFert: RawApiRow[];
@@ -1019,6 +1036,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // La carga es explícita — botón "Sincronizar" (o "Actualizar P2" para solo el P2) — y este flag
   // sirve para mostrar el estado vacío que le dice al usuario que todavía no hay datos.
   const [datosCargados, setDatosCargados] = useState(false);
+  // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
+  const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
   // "Sincronizar" + "Generar Necesidades · P1/PFF" (antes 2 clics) se combinan en 1 — el usuario lo
   // pidió por ser repetitivo en el uso diario, mismo patrón ya aplicado en Corte y Laminado (ver
   // [[modulos_tacticos_sincronizar_y_generar_combinado]]). "Entregas VE" y "Actualizar P2" NO se
@@ -1058,8 +1077,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // semana — el sábado habilitado puntualmente para cubrir excedente de capacidad (mismo criterio
   // que Corte y Laminado, ver [[sabado_dia_habil_condicional]]).
   const [diasLaborablesExtra, setDiasLaborablesExtra] = useState<DiasNoLaborables>(new Set<string>());
-  const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDayCal(d, diasNoLaborables, diasLaborablesExtra), [diasNoLaborables, diasLaborablesExtra]);
-  const sumarDiasHabiles = useCallback((d: Date, n: number) => addBusinessDaysCal(d, n, diasNoLaborables, diasLaborablesExtra), [diasNoLaborables, diasLaborablesExtra]);
+  // Horizonte de planes (P2/P3/PFF): sin Jornadas de fin de semana mientras SAP solo genere órdenes L-V
+  // (ver laborablesHorizonte). restarDiasHabiles (ventana de turnos) sí las cuenta.
+  const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDayCal(d, diasNoLaborables, laborablesHorizonte(diasLaborablesExtra)), [diasNoLaborables, diasLaborablesExtra]);
+  const sumarDiasHabiles = useCallback((d: Date, n: number) => addBusinessDaysCal(d, n, diasNoLaborables, laborablesHorizonte(diasLaborablesExtra)), [diasNoLaborables, diasLaborablesExtra]);
   // Fecha de PAREO de Capacidad Planificada (Nivel 1/2): la producción del PT en fecha X requiere que
   // su componente (lámina) esté firme un día hábil ANTES — restarDiasHabiles(X, 1).
   const restarDiasHabiles = useCallback((d: Date, n: number) => addBusinessDaysCal(d, -n, diasNoLaborables, diasLaborablesExtra), [diasNoLaborables, diasLaborablesExtra]);
@@ -1438,7 +1459,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // cambia (firma), no en cada recarga: un ajuste manual en el dashboard no se pisa al sincronizar,
   // pero si el negocio cambia la restricción, el nuevo valor sí entra.
   const firmaParosAplicada = useRef<Record<'UIO' | 'GYE', string>>({ UIO: '', GYE: '' });
+  // Config de máquinas cargada desde un reporte guardado (ver restaurarEstadoPlan): al restaurar
+  // también cambian las restricciones y esta precarga la pisaría. Si hay una pendiente, se registra
+  // la firma nueva y se vuelve a aplicar la restaurada.
+  const configRestaurada = useRef<{ UIO: PlantaConfig; GYE: PlantaConfig } | null>(null);
   useEffect(() => {
+    const restaurada = configRestaurada.current;
     (['UIO', 'GYE'] as const).forEach(planta => {
       const codigoGrupo = CODIGO_GRUPO_CORTE_POR_CENTRO[planta === 'UIO' ? '1000' : '2000'];
       const paro = porcentajeRestriccion(restriccionesCorte, codigoGrupo, RESTRICCION_CAPACIDAD.parosPlanificados);
@@ -1449,6 +1475,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const firma = JSON.stringify([paro, rendCarrusel, rendCnc, jornada]);
       if (firma === firmaParosAplicada.current[planta]) return;
       firmaParosAplicada.current[planta] = firma;
+      if (restaurada) return;
 
       const claveDia = claveDeHorario(shiftOptions, jornada.dia);
       const claveNoche = jornada.numTurnos >= 2 ? claveDeHorario(nightShiftOptions, jornada.noche) : 'EMPTY';
@@ -1474,6 +1501,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       if (planta === 'UIO') setUioConfig(aplicar);
       else setGyeConfig(aplicar);
     });
+    if (restaurada) {
+      configRestaurada.current = null;
+      setUioConfig(restaurada.UIO);
+      setGyeConfig(restaurada.GYE);
+    }
   }, [restriccionesCorte, jornadaPorPlanta, shiftOptions, nightShiftOptions]);
 
   // Capacidad instalada NOMINAL por día y por proceso (Carrusel/CNC/Vertical), independiente de la
@@ -1855,7 +1887,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const key = String(Number(row.codigo_material));
         const map = porCentro[centro];
         if (!map.has(key)) map.set(key, []);
-        map.get(key)!.push({ fecha: row.fecha_inicio, area });
+        // Venta Externa: sus FERT van fechadas al PT (fecha_fin_plan); fecha_inicio_plan es la recuperación.
+        const fecha = /ventas*externa/i.test(area) && row.fecha_fin && row.fecha_fin !== '—' ? row.fecha_fin : row.fecha_inicio;
+        map.get(key)!.push({ fecha, area });
       });
     });
     return porCentro;
@@ -2974,12 +3008,63 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // a SAP (las FERT nuevas cambiarían la ocupación). Fecha objetivo = la fecha evaluada en Capacidad
   // Operativa (la misma del correo); sin fecha no se puede guardar — el reporte saldría en 0 y
   // quedaría archivado bajo una fecha que nadie eligió.
+  // Respaldo completo del módulo (ver EstadoPlanCorteEspuma): cada planta guarda el suyo junto a su
+  // reporte; al cargarlo se restauran las dos plantas tal como estaban al guardar.
+  const capturarEstadoPlan = (): EstadoPlanCorteEspuma => ({
+    tipo: 'corte-espuma',
+    version: 1,
+    ordenesProvisionales, ordenesFert, inventarioSAP, cuboInventarios, tiemposCatalogo, mantenimientosSAP,
+    kpiLooperData, kpiCarruselesData, operadoresCorte, restriccionesCorte,
+    diasNoLaborables: [...diasNoLaborables],
+    diasLaborablesExtra: [...diasLaborablesExtra],
+    necesidadesPlantaData, necesidadPFFData, necesidadPFFNivel2Data, fertsP2Muebles, fertsPFF,
+    uioConfig, gyeConfig,
+    selectedDatesCapacidad: { UIO: [...selectedDatesCapacidad.UIO], GYE: [...selectedDatesCapacidad.GYE] },
+    selectedDatesProv: [...selectedDatesProv],
+    selectedDatesFert: [...selectedDatesFert],
+    tipoPlanEnsambladoPorCentro,
+  });
+  const restaurarEstadoPlan = (crudo: unknown, origen: OrigenEstadoPlan): boolean => {
+    const e = crudo as Partial<EstadoPlanCorteEspuma> | null;
+    if (!e || e.tipo !== 'corte-espuma' || e.version !== 1 || !Array.isArray(e.ordenesFert) || !e.uioConfig || !e.gyeConfig) return false;
+    configRestaurada.current = { UIO: e.uioConfig, GYE: e.gyeConfig };
+    setUioConfig(e.uioConfig);
+    setGyeConfig(e.gyeConfig);
+    setOrdenesProvisionales(e.ordenesProvisionales ?? []);
+    setOrdenesFert(e.ordenesFert);
+    setInventarioSAP(e.inventarioSAP ?? []);
+    setCuboInventarios(e.cuboInventarios ?? []);
+    setTiemposCatalogo(e.tiemposCatalogo ?? []);
+    setMantenimientosSAP(e.mantenimientosSAP ?? []);
+    setKpiLooperData(e.kpiLooperData ?? []);
+    setKpiCarruselesData(e.kpiCarruselesData ?? []);
+    setOperadoresCorte(e.operadoresCorte ?? []);
+    setRestriccionesCorte(e.restriccionesCorte ?? []);
+    setDiasNoLaborables(new Set(e.diasNoLaborables ?? []));
+    setDiasLaborablesExtra(new Set(e.diasLaborablesExtra ?? []));
+    setNecesidadesPlantaData(e.necesidadesPlantaData ?? {});
+    setNecesidadPFFData(e.necesidadPFFData ?? { '1000': [], '2000': [] });
+    setNecesidadPFFNivel2Data(e.necesidadPFFNivel2Data ?? { '1000': [], '2000': [] });
+    setFertsP2Muebles(e.fertsP2Muebles ?? []);
+    setFertsPFF(e.fertsPFF ?? []);
+    setTipoPlanEnsambladoPorCentro(e.tipoPlanEnsambladoPorCentro ?? { '1000': null, '2000': null });
+    setSelectedDatesCapacidad({ UIO: new Set(e.selectedDatesCapacidad?.UIO ?? []), GYE: new Set(e.selectedDatesCapacidad?.GYE ?? []) });
+    setSelectedDatesProv(new Set(e.selectedDatesProv ?? []));
+    setSelectedDatesFert(new Set(e.selectedDatesFert ?? []));
+    setDatosCargados(true);
+    setPlanCargadoDe(origen);
+    setActiveTab('resumen');
+    return true;
+  };
+
   const reporteFlujoUIO = useReportePlanTxt({
     modulo: 'corte-espuma',
     centro: '1000',
     fechaObjetivo: resumenReportePorPlanta.UIO.fecha || null,
     asunto: asuntoReporteEspuma('UIO'),
     construirHtml: () => construirReporteHtmlEspuma('UIO'),
+    capturarEstado: capturarEstadoPlan,
+    restaurarEstado: restaurarEstadoPlan,
   });
   const reporteFlujoGYE = useReportePlanTxt({
     modulo: 'corte-espuma',
@@ -2987,6 +3072,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     fechaObjetivo: resumenReportePorPlanta.GYE.fecha || null,
     asunto: asuntoReporteEspuma('GYE'),
     construirHtml: () => construirReporteHtmlEspuma('GYE'),
+    capturarEstado: capturarEstadoPlan,
+    restaurarEstado: restaurarEstadoPlan,
   });
   const reporteFlujo = { UIO: reporteFlujoUIO, GYE: reporteFlujoGYE };
 
@@ -3314,7 +3401,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // (nunca desactivado al generar el siguiente ciclo) seguía apareciendo como necesidad vigente
       // indefinidamente, sin importar qué tan vieja fuera su fecha.
       //
-      // EXCEPCIÓN — Venta Externa "Espumas": ya NO se graba a hoy+1 fijo (generarPlanP2Core ahora usa
+      // Venta Externa (Espumas) — 2026-10-02: VE vuelve a grabar fecha_inicio_plan = recuperación
+      // (hoy+1 hábil) y fecha_fin_plan = PT (hoy+2), así que cae en la MISMA regla exacta que el resto.
+      // Se quitó la excepción de abajo (tomaba el activo más reciente sin mirar la fecha). Historial:
+      // HISTORIAL — Venta Externa "Espumas": ya NO se graba a hoy+1 fijo (generarPlanP2Core ahora usa
       // la fecha que el planificador seleccionó en "Ventana de Producción", la "fecha del PT" —
       // mismo criterio que ya usa P1/PFF, ver explotarPFFParaCentro). Exigir aquí el match exacto
       // contra hoy+1 dejaría de encontrarlo. Para ESTA rama se toma el plan ACTIVO más reciente por
@@ -3325,12 +3415,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // diasOverride: al sincronizar, el calendario de feriados se acaba de cargar y el estado
       // `diasNoLaborables` todavía no se refleja en este closure — se recibe el Set directo para no
       // calcular la fecha objetivo con feriados vacíos (ver handleSincronizarYGenerar).
-      const fechaObjetivoP2 = format(nextBusinessDayCal(new Date(), diasOverride ?? diasNoLaborables, laborablesExtraOverride ?? diasLaborablesExtra), 'yyyy-MM-dd');
+      const fechaObjetivoP2 = format(nextBusinessDayCal(new Date(), diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
 
       const planGruposRes = await planGrupoService.getAll();
-      const esEspumaVentaExterna = (pg: PlanGrupo) =>
-        /venta\s*externa/i.test(grupoPorCodigo.get(pg.codigo_grupo)?.nombre_grupo || '') && /espuma/i.test(String(pg.valor || ''));
-
       const candidatosBase = (planGruposRes.data || []).filter((pg) => {
         const valor = String(pg.valor || '').trim();
         if (pg.estado !== 'A' || !gruposCodigos.includes(pg.codigo_grupo)) return false;
@@ -3344,20 +3431,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // fechaLocalEcuador, NO split('T')[0]: fecha_inicio_plan es UTC — mismo bug de zona horaria
       // que en explotarPFFParaCentro (ver su comentario). Un P2 grabado tarde en el día cruzaba a
       // la fecha calendario siguiente en UTC y dejaba de coincidir con fechaObjetivoP2 (local).
-      const conFechaExacta = candidatosBase.filter((pg) => !esEspumaVentaExterna(pg) && fechaLocalPlana(pg.fecha_inicio_plan) === fechaObjetivoP2);
+      const planesActivos = candidatosBase.filter((pg) => fechaLocalPlana(pg.fecha_inicio_plan) === fechaObjetivoP2);
 
-      const masRecienteEspumaVEPorGrupo = new Map<number, PlanGrupo>();
-      candidatosBase.filter(esEspumaVentaExterna).forEach((pg) => {
-        const actual = masRecienteEspumaVEPorGrupo.get(pg.codigo_grupo);
-        if (!actual) { masRecienteEspumaVEPorGrupo.set(pg.codigo_grupo, pg); return; }
-        const fechaNueva = fechaLocalPlana(pg.fecha_inicio_plan);
-        const fechaActual = fechaLocalPlana(actual.fecha_inicio_plan);
-        if (fechaNueva > fechaActual || (fechaNueva === fechaActual && pg.codigo_plan_grupo > actual.codigo_plan_grupo)) {
-          masRecienteEspumaVEPorGrupo.set(pg.codigo_grupo, pg);
-        }
-      });
-
-      const planesActivos = [...conFechaExacta, ...Array.from(masRecienteEspumaVEPorGrupo.values())];
 
       const planGrupoCodigos = planesActivos.map((pg) => pg.codigo_plan_grupo);
       const planPorCodigo = new Map(planesActivos.map((pg) => [pg.codigo_plan_grupo, pg]));
@@ -4663,12 +4738,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // que es quien cierra el panel.
   const ejecutarSincronizacion = useCallback(async (noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
     setSyncStep('sincronizando');
+    setPlanCargadoDe(null);
+    configRestaurada.current = null;
     const fmt = (d: Date) => format(d, 'dd/MM/yyyy');
     panelProgreso.iniciar('Corte Espuma — Sincronizar y generar', [
       { id: 'fecha', etiqueta: `Fecha evaluada: ${format(new Date(), 'EEE dd/MM/yyyy', { locale: es })}` },
       { id: 'sap', etiqueta: 'Sincronizando datos SAP' },
-      { id: 'p2', etiqueta: `Necesidades planta (P2 del ${fmt(nextBusinessDayCal(new Date(), noLaborables, laborablesExtra))})` },
-      { id: 'pff', etiqueta: `Generando necesidades (PFF, PT ${fmt(addBusinessDaysCal(new Date(), DIAS_HABILES_PT_ENSAMBLADO, noLaborables, laborablesExtra))})` },
+      { id: 'p2', etiqueta: `Necesidades planta (P2 del ${fmt(nextBusinessDayCal(new Date(), noLaborables, laborablesHorizonte(laborablesExtra)))})` },
+      { id: 'pff', etiqueta: `Generando necesidades (PFF, PT ${fmt(addBusinessDaysCal(new Date(), DIAS_HABILES_PT_ENSAMBLADO, noLaborables, laborablesHorizonte(laborablesExtra)))})` },
     ]);
     panelProgreso.actualizar('fecha', { estado: 'ok' });
     try {
@@ -4734,8 +4811,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       fechaInicial: format(new Date(), 'yyyy-MM-dd'),
       fija: true,
       detalle: () => [
-        { etiqueta: 'P2 (necesidad planta) del', valor: fmt(nextBusinessDayCal(new Date(), noLaborables, laborablesExtra)) },
-        { etiqueta: 'PFF / P1 Ensamblado, PT del', valor: fmt(addBusinessDaysCal(new Date(), DIAS_HABILES_PT_ENSAMBLADO, noLaborables, laborablesExtra)) },
+        { etiqueta: 'P2 (necesidad planta) del', valor: fmt(nextBusinessDayCal(new Date(), noLaborables, laborablesHorizonte(laborablesExtra))) },
+        { etiqueta: 'PFF / P1 Ensamblado, PT del', valor: fmt(addBusinessDaysCal(new Date(), DIAS_HABILES_PT_ENSAMBLADO, noLaborables, laborablesHorizonte(laborablesExtra))) },
       ],
       onConfirmar: () => { void ejecutarSincronizacion(noLaborables, laborablesExtra); },
     });
@@ -5044,7 +5121,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // eje que ve el usuario (antes lo era, y resultó ilegible para alguien que no construyó el
     // código). Referencia de qué alimenta cada fecha:
     //   Necesidad "a tiempo" (antes Nivel 1): 3 fuentes con su propia fecha real de origen — P1/PFF
-    //     hoy+2 días hábiles (DIAS_HABILES_PT_ENSAMBLADO), P2-Espumas Venta la fecha que seleccionó el planificador, P2-Muebles/
+    //     hoy+2 días hábiles (DIAS_HABILES_PT_ENSAMBLADO), P2-Espumas Venta y P2-Muebles/
     //     Prensado hoy+1 día hábil exacto.
     //   Necesidad "red de seguridad" (antes Nivel 2, ver necesidadPFFNivel2Data): solo P1/PFF, para
     //     un plan que se quedó fechado hoy+1 en vez de hoy+2 (activo pero invisible para la necesidad
@@ -5766,10 +5843,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                       <td className="py-1.5 text-right">
                         <button
                           className="font-sans normal-case text-[9px] font-black uppercase text-amber-700 hover:text-amber-900 underline decoration-dotted"
-                          title="Abre Plan P2 - Venta Externa con la fecha sugerida (mañana) ya preseleccionada en Ventana de Producción. No cambia nada aquí — la decisión final y la regeneración las haces en Venta Externa."
+                          title="Marca SOLO este material como diferido en Plan P2 - Venta Externa: al generar su P2 de Espumas sale del plan de hoy y va a un P2 DIFERIDO (PT un día hábil después), que este módulo recupera mañana. No cambia nada aquí."
                           onClick={() => {
-                            const fechaSugerida = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
-                            router.push(`/dashboard/opciones/tactica-venta-externa?tab=p2&fecha=${fechaSugerida}&material=${r.material}`);
+                            // Diferido por material (2026-10-02): Venta Externa acumula los materiales y los
+                            // graba en su P2 DIFERIDO (ver guardarP2Diferido allá); el resto del P2 no se mueve.
+                            router.push(`/dashboard/opciones/tactica-venta-externa?tab=p2&centro=${planta === 'UIO' ? '1000' : '2000'}&material=${r.material}`);
                           }}
                         >
                           Diferir →
@@ -6240,7 +6318,19 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           "Sincronizar y Generar Necesidades" del encabezado es la única acción de carga general
           (antes había aquí un "Sincronizar ahora" que llamaba a la misma función: dos botones para
           lo mismo). */}
-      {!datosCargados && !isLoading && (
+      {planCargadoDe && (
+        <div
+          className="flex items-center gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50/50 px-4 py-2.5 text-left"
+          title="Lo que se ve viene del respaldo guardado junto al reporte (datos SAP de ese momento), no de SAP en vivo. Sincronizar recalcula con los datos actuales."
+        >
+          <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
+          <p className="text-[11px] font-bold text-slate-600">
+            Plan cargado del reporte del <span className="font-black text-emerald-700">{format(parseFechaLocal(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — datos SAP de ese momento; <span className="font-black text-blue-700">Sincronizar</span> los recalcula con SAP.
+          </p>
+        </div>
+      )}
+      {!datosCargados && !isLoading && !planCargadoDe && (
         <div
           className="flex items-center gap-2.5 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-4 py-2.5 text-left"
           title="Este módulo no consulta SAP al abrirse. Sincronizar y Generar Necesidades trae Provisionales, FERT, Inventario, Tiempos, Mantenimiento y el P2, y calcula la Necesidad P1/PFF automáticamente. Actualizar P2 (Venta Externa) y Entregas VE, dentro de Necesidades Planta, siguen aparte."

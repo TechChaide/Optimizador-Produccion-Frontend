@@ -9,7 +9,7 @@ import {
 } from '@/lib/planes-txt';
 
 // API de planes tácticos en TXT (ver src/lib/planes-txt.ts para la estructura de carpetas).
-//   POST /api/planes-txt   { modulo, centro, fechaObjetivo, contenido, html?, estado? }  -> escribe/sobrescribe
+//   POST /api/planes-txt   { modulo, centro, fechaObjetivo, contenido, html?, estado? | estadoGz? }  -> escribe/sobrescribe
 //   GET  /api/planes-txt?modulo=&centro=&fecha=[&anio=&mes=][&formato=json|meta][&descargar=1]
 //   GET  /api/planes-txt?diagnostico=1   -> qué carpeta usa el servidor y si puede escribir en ella
 //   DELETE /api/planes-txt?modulo=&centro=&fecha=  -> borra solo la foto del correo (tras enviar)
@@ -20,7 +20,9 @@ import {
 // confirma si existe (ruta + fecha de modificación), sin leer el contenido.
 // `estado` es el respaldo del módulo (lo planificado: turnos, corridas, ajustes manuales) para volver
 // a cargarlo en pantalla desde "Recuperar y revisar" — {fecha}.estado.json. A diferencia de la foto
-// del correo, NO se borra al enviar: es el registro de lo que se planificó.
+// del correo, NO se borra al enviar: es el registro de lo que se planificó. `estadoGz` es el mismo
+// respaldo comprimido (gzip en base64, lo arma el navegador) para módulos que guardan sus datos SAP
+// completos (Corte Espuma) — se escribe como {fecha}.estado.json.gz y se devuelve igual, en base64.
 // La ruta en disco se arma SOLO con valores validados contra listas cerradas (módulo, centro) y
 // formatos fijos (fecha, año, mes): el cliente nunca manda segmentos de ruta libres.
 
@@ -58,6 +60,9 @@ const rutaPlan = (p: { anio: string; mes: string; modulo: ModuloPlanTxt; centro:
 
 const rutaHtml = (rutaTxt: string) => rutaTxt.replace(/\.txt$/, '.correo.html');
 const rutaEstado = (rutaTxt: string) => rutaTxt.replace(/\.txt$/, '.estado.json');
+const rutaEstadoGz = (rutaTxt: string) => rutaTxt.replace(/\.txt$/, '.estado.json.gz');
+// El respaldo comprimido puede traer los datos SAP completos del módulo: tope propio, más amplio.
+const MAX_ESTADO_GZ = 30 * 1024 * 1024;
 
 const errorFs =(e: unknown, accion: string) => {
   const err = e as NodeJS.ErrnoException;
@@ -76,7 +81,7 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: 'Cuerpo JSON inválido' }, { status: 400 });
   }
-  const { modulo, centro, fechaObjetivo, contenido, html, estado } = body;
+  const { modulo, centro, fechaObjetivo, contenido, html, estado, estadoGz } = body;
   if (!esModuloPlanTxt(modulo)) return NextResponse.json({ error: 'Módulo inválido' }, { status: 400 });
   if (!esCentroPlanTxt(centro)) return NextResponse.json({ error: 'Centro inválido (1000 o 2000)' }, { status: 400 });
   if (!esFechaPlanTxt(fechaObjetivo)) return NextResponse.json({ error: 'fechaObjetivo inválida (yyyy-MM-dd)' }, { status: 400 });
@@ -85,6 +90,10 @@ export async function POST(req: NextRequest) {
   if (html !== undefined && (typeof html !== 'string' || html.length > MAX_CONTENIDO)) return NextResponse.json({ error: 'html inválido o demasiado grande' }, { status: 400 });
   const estadoJson = estado !== undefined && estado !== null ? JSON.stringify(estado) : null;
   if (estadoJson !== null && (typeof estado !== 'object' || estadoJson.length > MAX_CONTENIDO)) return NextResponse.json({ error: 'estado inválido o demasiado grande' }, { status: 400 });
+  if (estadoGz !== undefined && estadoGz !== null && (typeof estadoGz !== 'string' || estadoGz.length > MAX_ESTADO_GZ || !/^[A-Za-z0-9+/=]+$/.test(estadoGz))) {
+    return NextResponse.json({ error: 'estadoGz inválido o demasiado grande' }, { status: 400 });
+  }
+  const estadoGzBuf = typeof estadoGz === 'string' && estadoGz ? Buffer.from(estadoGz, 'base64') : null;
 
   // Año/mes de la GENERACIÓN en hora Ecuador (no de la fecha objetivo, ver planes-txt.ts).
   const errorRaiz = await verificarRaiz();
@@ -101,7 +110,10 @@ export async function POST(req: NextRequest) {
     if (typeof html === 'string' && html.trim()) await fs.writeFile(rutaHtml(ruta), html, 'utf8');
     else await fs.rm(rutaHtml(ruta), { force: true });
     // Mismo criterio: un respaldo de otro guardado no debe quedar junto a un TXT que no le corresponde.
-    if (estadoJson !== null) await fs.writeFile(rutaEstado(ruta), estadoJson, 'utf8');
+    // Un solo respaldo por plan: el comprimido o el plano, nunca los dos (el viejo se borra).
+    if (estadoGzBuf) await fs.writeFile(rutaEstadoGz(ruta), estadoGzBuf);
+    else await fs.rm(rutaEstadoGz(ruta), { force: true });
+    if (estadoJson !== null && !estadoGzBuf) await fs.writeFile(rutaEstado(ruta), estadoJson, 'utf8');
     else await fs.rm(rutaEstado(ruta), { force: true });
   } catch (e) {
     return errorFs(e, 'guardar');
@@ -225,8 +237,9 @@ export async function GET(req: NextRequest) {
     if (formato === 'json') {
       const html = await fs.readFile(rutaHtml(ruta), 'utf8').catch(() => null);
       // Respaldo ausente o ilegible = null: el reporte se revisa/envía igual, solo no se carga en el módulo.
-      const estado = await fs.readFile(rutaEstado(ruta), 'utf8').then(t => JSON.parse(t) as unknown).catch(() => null);
-      return NextResponse.json({ ruta, modificado, contenido, html, estado });
+      const estadoGz = await fs.readFile(rutaEstadoGz(ruta)).then(b => b.toString('base64')).catch(() => null);
+      const estado = estadoGz ? null : await fs.readFile(rutaEstado(ruta), 'utf8').then(t => JSON.parse(t) as unknown).catch(() => null);
+      return NextResponse.json({ ruta, modificado, contenido, html, estado, estadoGz });
     }
     const headers: Record<string, string> = { 'Content-Type': 'text/plain; charset=utf-8', 'X-Ruta-Plan': encodeURI(ruta) };
     if (q.get('descargar') === '1') headers['Content-Disposition'] = `attachment; filename="${path.basename(ruta)}"`;

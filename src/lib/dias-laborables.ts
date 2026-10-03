@@ -170,6 +170,20 @@ export const addBusinessDays = (
   return d;
 };
 
+/**
+ * Horizonte de los planes (P2 → recuperación hoy+1 y PT hoy+2; P3 hoy+1; PFF PT hoy+2): SAP hoy
+ * genera órdenes solo de lunes a viernes, así que un sábado/domingo marcado "Jornada" NO mueve esas
+ * fechas (vie 02/10 → recuperación lun 05/10, PT mar 06/10), aunque sí suma horas de turno en la
+ * ventana del plan. Decisión del usuario 2026-10-02: cuando SAP habilite órdenes en sábado, poner true.
+ */
+export const SABADO_CUENTA_EN_HORIZONTE = false;
+
+/** `laborablesExtra` para calcular fechas del horizonte: sin las Jornadas de fin de semana (ver arriba). */
+export const laborablesHorizonte = (laborablesExtra: DiasNoLaborables): DiasNoLaborables =>
+  SABADO_CUENTA_EN_HORIZONTE
+    ? laborablesExtra
+    : new Set([...laborablesExtra].filter(f => !esFinDeSemana(new Date(`${f}T12:00:00`))));
+
 /** Resultado de `cargarDiasNoLaborables`: no laborables y, aparte, las excepciones "Jornada". */
 export interface DiasLaborablesConfig {
   /** Feriados nacionales + días que el calendario configurado marcó como no trabajados. */

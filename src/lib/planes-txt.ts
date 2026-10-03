@@ -266,12 +266,37 @@ export interface ResultadoGuardarPlanTxt { ok: true; ruta: string; }
  * la foto HTML del correo (ver route.ts). Devuelve la ruta completa del TXT; lanza Error con el
  * mensaje de la API si falla.
  */
+// Respaldo del módulo grande (ej. Corte Espuma guarda sus datos SAP completos): se comprime con gzip
+// en el navegador (CompressionStream) y viaja en base64; la API lo guarda como {fecha}.estado.json.gz.
+// Los respaldos chicos siguen en JSON plano (legible en la carpeta compartida).
+const UMBRAL_COMPRIMIR_ESTADO = 512 * 1024;
+
+const aBase64 = (bytes: Uint8Array): string => {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+const deBase64 = (b64: string): Uint8Array => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+
+const gzipBase64 = async (texto: string): Promise<string> => {
+  const stream = new Blob([texto]).stream().pipeThrough(new CompressionStream('gzip'));
+  return aBase64(new Uint8Array(await new Response(stream).arrayBuffer()));
+};
+const gunzipBase64 = async (b64: string): Promise<string> => {
+  const bytes = deBase64(b64);
+  const stream = new Blob([bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).text();
+};
+
 export const guardarPlanTxt = async (p: { modulo: ModuloPlanTxt; centro: CentroPlanTxt; fechaObjetivo: string; html: string; asunto?: string; estado?: unknown }): Promise<ResultadoGuardarPlanTxt> => {
   const contenido = armarContenidoPlanTxt({ ...p, cuerpo: htmlReporteATexto(p.html) });
+  const estadoJson = p.estado !== undefined && p.estado !== null ? JSON.stringify(p.estado) : null;
+  const comprimir = !!estadoJson && estadoJson.length > UMBRAL_COMPRIMIR_ESTADO && typeof CompressionStream !== 'undefined';
+  const respaldo = comprimir ? { estadoGz: await gzipBase64(estadoJson!) } : { estado: p.estado ?? null };
   const res = await fetch(urlApiPlanesTxt(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ modulo: p.modulo, centro: p.centro, fechaObjetivo: p.fechaObjetivo, contenido, html: p.html, estado: p.estado ?? null }),
+    body: JSON.stringify({ modulo: p.modulo, centro: p.centro, fechaObjetivo: p.fechaObjetivo, contenido, html: p.html, ...respaldo }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `No se pudo guardar el TXT (HTTP ${res.status})`);
@@ -303,6 +328,15 @@ export const obtenerPlanTxt = async (p: CriteriosPlanTxt): Promise<PlanTxtRecupe
   const res = await fetch(`${urlApiPlanesTxt()}?${qsPlanTxt(p, 'json')}`, { cache: 'no-store' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `No se pudo recuperar el TXT (HTTP ${res.status})`);
+  // Respaldo comprimido: se descomprime acá para que el resto de la app reciba siempre `estado`.
+  if (typeof data?.estadoGz === 'string' && data.estadoGz && typeof DecompressionStream !== 'undefined') {
+    try {
+      data.estado = JSON.parse(await gunzipBase64(data.estadoGz));
+    } catch {
+      data.estado = null; // ilegible: el reporte se revisa/envía igual, solo no se carga en el módulo
+    }
+  }
+  delete data.estadoGz;
   return data as PlanTxtRecuperado;
 };
 
