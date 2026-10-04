@@ -1946,14 +1946,17 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           );
           const cantidad = parseQty(linea.cantidad_produccion_neta);
           const aProducir = respuestas.reduce((s, r) => s + parseQty(r.cantidad_produccion_neta), 0);
-          const respondido = respuestas.length > 0 || !!p3DelCiclo;
-          // Respondido = Espuma/Laminado lo entrega completo (cubierto con stock/provisional + lo que
-          // fabrica); sin respuesta del ciclo queda en 0 (pendiente).
-          const respuestaCant = respondido ? cantidad : 0;
+          // Espumas: el P3 de Corte Espuma graba solo lo que fabrica (faltante + provisional), así que
+          // respondido = la entrega completa (lo que no está en el P3 lo cubren stock/FERT).
+          // Rollos (usuario 2026-10-03): el P3 de Laminado graba stock + corridas — ESA suma es la
+          // respuesta real; sin línea = pendiente (sin corrida ni stock) y menos que el P2 = parcial.
+          const esRollos = combo.tipo === 'ROLLOS';
+          const respondido = esRollos ? respuestas.length > 0 : respuestas.length > 0 || !!p3DelCiclo;
+          const respuestaCant = esRollos ? aProducir : respondido ? cantidad : 0;
           const codigosPlanesRespuesta = Array.from(new Set(respuestas.map(r => r.codigo_plan_grupo)));
           const planGrupo = codigosPlanesRespuesta.length > 0
             ? codigosPlanesRespuesta.map(c => String(c).padStart(3, '0')).join(', ')
-            : p3DelCiclo ? String(p3DelCiclo.codigo_plan_grupo).padStart(3, '0') : '—';
+            : p3DelCiclo && !esRollos ? String(p3DelCiclo.codigo_plan_grupo).padStart(3, '0') : '—';
 
           // Contraste de fechas: se compara por LÍNEA (fecha_modificacion de DetalleTactico, que fija
           // el backend al guardar — no lo controla el cliente), no por rango de PlanGrupo. Laminado
@@ -1980,7 +1983,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             cantidad,
             respuestaCant,
             aProducir,
-            cubiertoStock: respondido ? Math.max(0, cantidad - aProducir) : 0,
+            // Rollos: la línea del P3 ya incluye el stock (no se puede separar), va todo en "A producir".
+            cubiertoStock: respondido && !esRollos ? Math.max(0, cantidad - aProducir) : 0,
             planGrupo,
             fechasOk,
           };

@@ -2010,7 +2010,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         // nuevo de Laminado desactivaba por error los P3/PFD que Corte Espuma generó el mismo día,
         // porque ambos comparten codigo_grupo y esta función no distinguía de quién era cada uno.
         if (!/rollo/i.test(String(p.valor || ''))) return false;
-        if (/pfd/i.test(String(p.valor || '')) !== esPFD) return false;
+        // Un P3 nuevo supera P3 y PFD viejos (desde 2026-10-03 ya no se graba PFD).
+        if (esPFD && !/pfd/i.test(String(p.valor || ''))) return false;
         const inicio = soloFecha(p.fecha_inicio_plan);
         return inicio !== '' && inicio <= fechaNuevoPlan;
       });
@@ -2929,24 +2930,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       rows: p3Rows,
     };
 
-    // Variante "PFD": mismo universo de materiales que P3, pero los materiales sin corrida ("No —
-    // stock", tieneCorrida === false) se fuerzan a cantidad 0 en vez de usar el stock disponible como
-    // fallback. Es un PlanGrupo independiente (valor "...- PFD"), no reemplaza ni modifica el plan
-    // P3; sirve solo para dejar constancia de qué material quedó sin planificar. A diferencia de P3
-    // no se filtran los materiales en 0: todos entran porque el objetivo es persistirlos igual.
-    const pfdRows = respuestaSalidaRows.map(row => row.tieneCorrida ? row : { ...row, cantidadKg: 0, cantidadUn: 0 });
-    const pfd: PlanGrupoPreview | null = pfdRows.length === 0 ? null : {
-      codigo_grupo: CODIGO_GRUPO_LAMINADO,
-      nombreGrupo: 'Corte y Laminado (Centro 1000)',
-      // Mismo sufijo "Rollos" que el P3 — necesario para no confundirse con el PFD de Corte Espuma,
-      // que comparte codigo_grupo=8.
-      valor: 'Plan Táctico - Centro 1000 - PFD - Rollos',
-      fechaInicio: fechaRespuesta,
-      fechaFin: fechaRespuesta,
-      rows: pfdRows,
-    };
-
-    setPlanPreviewP3PFD({ p3, pfd });
+    // Ya no se graba PFD (decisión del usuario 2026-10-03, igual que Corte Espuma): era el mismo P3
+    // con los materiales "solo stock" en 0. El P3 (stock + corridas) es la única respuesta; el P3
+    // nuevo desactiva también los PFD viejos (ver desactivarPlanesLaminadoSuperados).
+    setPlanPreviewP3PFD({ p3, pfd: null });
   }, [respuestaSalidaRows, addNotification, siguienteDiaHabil]);
 
   // Paso 2: el usuario confirmó en el diálogo. Guarda un PlanGrupo (grupo 8 = Corte y Laminado Centro
@@ -3071,36 +3058,40 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     }
   }, [getOrigenesProrrateo, flushFaltanteInternoNotification, desactivarPlanesLaminadoSuperados, puestoTrabajoLineaPorMaterial]);
 
-  // Confirmación del paso combinado: guarda el P3 y (si existe) el PFD en secuencia.
+  // Fase 2 del panel (igual que Corte Espuma): al confirmar, el diálogo se cierra y el panel muestra
+  // Guardando P3 → Actualizando necesidades → Guardando reporte (sin toasts); el reporte lo guarda un
+  // efecto junto a reporteFlujo (reportePorGuardar) y el panel cierra con "Ver reporte y enviar". El
+  // envío sigue manual desde la vista previa.
+  const [reportePorGuardar, setReportePorGuardar] = useState(false);
   const handleConfirmarRespuestaP3PFD = useCallback(async () => {
     if (!planPreviewP3PFD) return;
+    const { p3 } = planPreviewP3PFD;
     setIsSavingPlanP3PFD(true);
+    setPlanPreviewP3PFD(null);
+    panelProgreso.iniciar('Corte y Laminado — Respuesta P3 y reporte', [
+      { id: 'p3', etiqueta: 'Guardando P3 · Rollos' },
+      { id: 'nec', etiqueta: 'Actualizando necesidades' },
+      { id: 'rep', etiqueta: 'Guardando reporte' },
+    ]);
     try {
       const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
       const usuario = user?.name || 'admin';
-
-      const resultados: string[] = [];
-      let huboError = false;
-
-      const resP3 = await guardarPlanGrupoLaminado(planPreviewP3PFD.p3, usuario, false);
-      resultados.push(resP3.mensaje);
-      if (resP3.huboError) huboError = true;
-
-      if (planPreviewP3PFD.pfd) {
-        const resPfd = await guardarPlanGrupoLaminado(planPreviewP3PFD.pfd, usuario, true);
-        resultados.push(resPfd.mensaje);
-        if (resPfd.huboError) huboError = true;
-      }
-
-      addNotification(huboError ? 'warning' : 'success', `Respuesta P3/PFD guardada. ${resultados.join(' | ')}`);
-      fetchNecesidadesPlanta();
-      setPlanPreviewP3PFD(null);
+      panelProgreso.actualizar('p3', { estado: 'en_curso' });
+      const resP3 = await guardarPlanGrupoLaminado(p3, usuario, false);
+      panelProgreso.actualizar('p3', { estado: resP3.huboError ? 'error' : 'ok', detalle: resP3.mensaje });
+      panelProgreso.actualizar('nec', { estado: 'en_curso' });
+      await fetchNecesidadesPlanta();
+      panelProgreso.actualizar('nec', { estado: 'ok' });
+      // El reporte no depende de que el P3 haya salido bien: se guarda igual.
+      setReportePorGuardar(true);
     } catch (e) {
-      addNotification('error', `Error al guardar la Respuesta P3/PFD: ${(e as Error).message}`);
+      panelProgreso.actualizar('nec', { estado: 'error', detalle: (e as Error).message });
+      panelProgreso.actualizar('rep', { estado: 'omitido' });
+      panelProgreso.concluir(`Error al guardar la Respuesta P3: ${(e as Error).message}`);
     } finally {
       setIsSavingPlanP3PFD(false);
     }
-  }, [planPreviewP3PFD, addNotification, fetchNecesidadesPlanta, guardarPlanGrupoLaminado]);
+  }, [planPreviewP3PFD, fetchNecesidadesPlanta, guardarPlanGrupoLaminado, panelProgreso]);
 
   // Paso 1 de edición: busca los PlanGrupo activos de Corte y Laminado directo por codigo_grupo
   // (CODIGO_GRUPO_LAMINADO) en planGrupoService.getAll(), NO a través de "Necesidades Planta"
@@ -4718,6 +4709,24 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     restaurarEstado: restaurarEstadoPlan,
   });
 
+  // Fase 2 del panel: guarda el reporte tras confirmar el P3 (sin preguntar si ya había uno: el P3
+  // recién confirmado lo reemplaza) y deja "Ver reporte y enviar" como siguiente paso.
+  useEffect(() => {
+    if (!reportePorGuardar) return;
+    setReportePorGuardar(false);
+    void (async () => {
+      panelProgreso.actualizar('rep', { estado: 'en_curso' });
+      const ok = await reporteFlujo.guardar({ sinConfirmar: true, silencioso: true });
+      panelProgreso.actualizar('rep', ok
+        ? { estado: 'ok', detalle: `Plan del ${reporteFlujo.config.fechaObjetivo} guardado en la carpeta compartida (todavía no se envió).` }
+        : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
+      panelProgreso.concluir(
+        ok ? 'P3 y reporte guardados. Exporta a SAP si corresponde y luego revisa y envía el reporte.' : undefined,
+        ok ? [{ etiqueta: 'Ver reporte y enviar', onClick: () => { setActiveTab('resumen'); void reporteFlujo.recuperar(); } }] : [],
+      );
+    })();
+  }, [reportePorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!mounted) return <div className="p-4 md:p-6 min-h-screen bg-white" />;
 
   return (
@@ -4862,10 +4871,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               onClick={handleAbrirRespuestaP3PFD}
               disabled={isSavingPlanP3PFD || respuestaSalidaRows.every(r => r.cantidadKg <= 0)}
               className="rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white shadow-lg"
-              title="Genera y previsualiza en un solo paso la Respuesta P3 (plan real) y el PFD (faltante sin planificar) — antes eran dos botones/diálogos separados."
+              title="Genera y previsualiza la Respuesta P3 (stock + corridas). Al confirmar, el panel guarda el P3 y el reporte."
             >
               {isSavingPlanP3PFD ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardList className="w-4 h-4" />}
-              {isSavingPlanP3PFD ? 'Guardando...' : 'Generar Respuestas · P3/PFD - Rollos'}
+              {isSavingPlanP3PFD ? 'Guardando...' : 'Generar Respuesta · P3 - Rollos'}
             </Button>
             <Button
               onClick={handleOpenEditarPlan}
@@ -5206,9 +5215,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <Dialog open={planPreviewP3PFD !== null} onOpenChange={(open) => { if (!open && !isSavingPlanP3PFD) setPlanPreviewP3PFD(null); }}>
             <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
               <DialogHeader>
-                <DialogTitle>Confirmar Respuesta P3/PFD — Corte y Laminado</DialogTitle>
+                <DialogTitle>Confirmar Respuesta P3 — Corte y Laminado</DialogTitle>
                 <DialogDescription>
-                  Revisa los datos que se van a grabar antes de continuar — se crean DOS registros: la Respuesta P3 (plan real) y el PFD (faltante sin planificar, los materiales &quot;No — stock&quot; se guardan en 0). Esta acción crea registros nuevos en producción.
+                  Revisa los datos que se van a grabar antes de continuar — se crea UN registro: la Respuesta P3 (stock + corridas planificadas), que reemplaza al P3/PFD anterior. Al confirmar, el panel guarda el P3 y el reporte. Esta acción crea registros nuevos en producción.
                 </DialogDescription>
               </DialogHeader>
               {planPreviewP3PFD && (
@@ -5246,47 +5255,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                         </table>
                       </div>
                     </div>
-                  </div>
-
-                  <div>
-                    <span className="inline-block text-[9px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 rounded-full px-3 py-1 mb-3">PFD — Faltante sin planificar</span>
-                    {planPreviewP3PFD.pfd ? (
-                      <>
-                        <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
-                          <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{planPreviewP3PFD.pfd.valor}</div>
-                          <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Respuesta</span>{planPreviewP3PFD.pfd.fechaInicio}</div>
-                        </div>
-                        <div className="mt-3">
-                          <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales a guardar ({planPreviewP3PFD.pfd.rows.length})</span>
-                          <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
-                            <table className="w-full text-[11px] border-collapse">
-                              <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
-                                <tr>
-                                  <th className="px-3 py-2 text-left">Material</th>
-                                  <th className="px-3 py-2 text-left">Descripción</th>
-                                  <th className="px-3 py-2 text-center">¿Corrida?</th>
-                                  <th className="px-3 py-2 text-right">Cantidad Un</th>
-                                  <th className="px-3 py-2 text-right">Cantidad Kg</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-gray-50">
-                                {planPreviewP3PFD.pfd.rows.map(row => (
-                                  <tr key={row.material}>
-                                    <td className="px-3 py-2 font-mono">{row.material}</td>
-                                    <td className="px-3 py-2 truncate max-w-[220px]">{row.descripcion}</td>
-                                    <td className="px-3 py-2 text-center">{row.tieneCorrida ? 'Sí — plan' : 'No — stock'}</td>
-                                    <td className="px-3 py-2 text-right font-mono">{Math.round(row.cantidadUn)}</td>
-                                    <td className="px-3 py-2 text-right font-mono">{row.cantidadKg.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      </>
-                    ) : (
-                      <p className="text-[11px] text-slate-400 italic px-1">Sin materiales para el PFD — no se crea Plan Grupo PFD.</p>
-                    )}
                   </div>
                 </div>
               )}
