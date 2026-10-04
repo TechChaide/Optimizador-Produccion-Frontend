@@ -2525,19 +2525,21 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // directamente con guardarPfdVentaCore (ver handleGenerarYGuardarPfdVenta) sin depender de leer
   // pfdVentaPreview del estado justo después de setearlo: dentro de la misma función async, ese
   // closure sigue viendo el valor de ANTES del render, no el que se acaba de guardar.
-  const generarPfdVentaPreview = async (centro: '1000' | '2000'): Promise<PfdVentaPreview | null> => {
+  // onAviso (opcional): el panel de progreso recibe el motivo en vez de un toast (fase 2).
+  const generarPfdVentaPreview = async (centro: '1000' | '2000', onAviso?: (mensaje: string) => void): Promise<PfdVentaPreview | null> => {
+    const avisar = (tipo: 'warning' | 'error', mensaje: string) => (onAviso ? onAviso(mensaje) : addNotification(tipo, mensaje));
     const rows = dataAprobada[`${centro}-ESPUMAS`] || [];
 
     const { planActivo: p2Activo } = await verificarPlanP2Activo(centro, 'ESPUMAS');
     if (!p2Activo) {
-      addNotification('warning', `No hay un P2 activo de Espumas para el Centro ${centro} — genera el P2 primero.`);
+      avisar('warning', `No hay un P2 activo de Espumas para el Centro ${centro} — genera el P2 primero.`);
       return null;
     }
     // FERT del PT (fecha_fin_plan); planes anteriores al 2026-10-02 tenían inicio = fin.
     const fechaP2 = soloFecha(p2Activo.fecha_fin_plan) || soloFecha(p2Activo.fecha_inicio_plan);
     const fertOrigen = filterData(ordenesFert, centro, true, [fechaP2]);
     if (fertOrigen.length === 0) {
-      addNotification('warning', `No hay Órdenes FERT fechadas exacto ${fechaP2} (PT del P2 #${p2Activo.codigo_plan_grupo}) para el Centro ${centro}.`);
+      avisar('warning', `No hay Órdenes FERT fechadas exacto ${fechaP2} (PT del P2 #${p2Activo.codigo_plan_grupo}) para el Centro ${centro}.`);
       return null;
     }
 
@@ -2592,7 +2594,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       setPfdVentaPreview(prev => ({ ...prev, [centro]: preview }));
       return preview;
     } catch (error) {
-      addNotification('error', `Error al generar PFD-VENTA Centro ${centro}: ${(error as Error).message}`);
+      avisar('error', `Error al generar PFD-VENTA Centro ${centro}: ${(error as Error).message}`);
       return null;
     } finally {
       setIsGeneratingPfdVenta(prev => ({ ...prev, [centro]: false }));
@@ -2613,27 +2615,66 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // usando las líneas recién calculadas (lineasOverride), no el estado pfdVentaPreview, que todavía
   // no reflejaría el setState de este mismo ciclo. Un centro sin data aprobada, o cuyo preview salga
   // vacío, se omite con una notificación informativa y el loop sigue con el siguiente centro.
+  // Fase 2 del panel (igual que Corte Espuma / Laminado): cada centro es un paso del panel (sin
+  // toasts) y al final se guarda el reporte de Empaque (efecto reportePorGuardar, junto a
+  // reporteGrupoEmpaque) para cerrar con "Ver reporte y enviar". El envío sigue manual.
+  const [reportePorGuardar, setReportePorGuardar] = useState(false);
   const handleGenerarYGuardarPfdVenta = async () => {
     setIsRunningPfdVentaSecuencia(true);
+    panelProgreso.iniciar('Venta Externa — PFD-VENTA y reporte', [
+      { id: 'pfd-1000', etiqueta: 'PFD-VENTA · Centro 1000' },
+      { id: 'pfd-2000', etiqueta: 'PFD-VENTA · Centro 2000' },
+      { id: 'rep', etiqueta: 'Guardando reporte de Empaque (1000 y 2000)' },
+    ]);
     try {
       for (const centro of ['1000', '2000'] as const) {
+        const id = `pfd-${centro}`;
         if (!centroConDataAprobadaLista(centro)) {
-          addNotification('info', `Centro ${centro}: sin materiales en estado Parcial/Completo en Data Aprobada — se omite.`);
+          panelProgreso.actualizar(id, { estado: 'omitido', detalle: 'Sin materiales en estado Parcial/Completo en Data Aprobada.' });
           continue;
         }
-        const preview = await generarPfdVentaPreview(centro);
-        if (!preview) continue; // generarPfdVentaPreview ya notificó el motivo puntual (sin P2 activo, sin FERT, error)
+        panelProgreso.actualizar(id, { estado: 'en_curso' });
+        let motivo = '';
+        const preview = await generarPfdVentaPreview(centro, m => { motivo = m; });
+        if (!preview) {
+          panelProgreso.actualizar(id, { estado: 'aviso', detalle: motivo || 'No se pudo generar el PFD-VENTA.' });
+          continue;
+        }
         if (preview.lineas.length === 0) {
-          addNotification('warning', `Centro ${centro}: PFD-VENTA generado sin materiales FERT/PT cubiertos — no se guarda ningún plan.`);
+          panelProgreso.actualizar(id, { estado: 'aviso', detalle: 'Sin materiales FERT/PT cubiertos — no se guarda ningún plan.' });
           continue;
         }
         const resultado = await guardarPfdVentaCore(centro, preview.lineas);
-        addNotification(resultado.status === 'ok' ? 'success' : resultado.status === 'sin-datos' ? 'warning' : 'error', resultado.mensaje);
+        panelProgreso.actualizar(id, { estado: resultado.status === 'ok' ? 'ok' : resultado.status === 'sin-datos' ? 'aviso' : 'error', detalle: resultado.mensaje });
       }
+      // El reporte de Empaque no depende de que el PFD-VENTA haya salido: se guarda igual.
+      setReportePorGuardar(true);
+    } catch (e) {
+      panelProgreso.actualizar('rep', { estado: 'omitido' });
+      panelProgreso.concluir(`Error en PFD-VENTA: ${(e as Error).message}`);
     } finally {
       setIsRunningPfdVentaSecuencia(false);
     }
   };
+
+  useEffect(() => {
+    if (!reportePorGuardar) return;
+    setReportePorGuardar(false);
+    void (async () => {
+      panelProgreso.actualizar('rep', { estado: 'en_curso' });
+      // Secuencial: construirHtml refresca el preview FERT/PT de cada centro (ver guardarTodos).
+      const oks: boolean[] = [];
+      for (const f of reporteGrupoEmpaque.flujos) oks.push(await f.guardar({ sinConfirmar: true, silencioso: true }));
+      const ok = oks.some(Boolean);
+      panelProgreso.actualizar('rep', ok
+        ? { estado: oks.every(Boolean) ? 'ok' : 'aviso', detalle: `Reporte del ${fechaObjetivoEmpaque} guardado en la carpeta compartida${oks.every(Boolean) ? '' : ' (un centro falló, reintenta desde "Enviar Reporte")'} — todavía no se envió.` }
+        : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
+      panelProgreso.concluir(
+        ok ? 'PFD-VENTA y reporte guardados. Revisa y envía el reporte de Empaque.' : undefined,
+        ok ? [{ etiqueta: 'Ver reporte y enviar', onClick: () => { setActiveTab('resumen'); void reporteGrupoEmpaque.recuperarTodos(fechaObjetivoEmpaque); } }] : [],
+      );
+    })();
+  }, [reportePorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Totales globales para el dashboard superior
   const globalStats = useMemo(() => {

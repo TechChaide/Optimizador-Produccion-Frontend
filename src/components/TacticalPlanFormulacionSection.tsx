@@ -718,6 +718,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // por ser repetitivo en el uso diario, mismo patrón ya aplicado en Corte Espuma/Venta Externa/
   // Laminado (ver [[modulos_tacticos_sincronizar_y_generar_combinado]]).
   const [autoGenerarPendiente, setAutoGenerarPendiente] = useState(false);
+  const [reportePorGuardar, setReportePorGuardar] = useState(false);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
   // Panel flotante de progreso de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar).
   const panelProgreso = usePanelProgreso();
@@ -1026,13 +1027,19 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     handleProcessResumen()
       .then(
         // Conteo final en r.progreso: el avance solo se publica cada 10 órdenes y el efecto no alcanza el último.
-        r => panelProgreso.actualizar('resumen', { estado: r.estado, detalle: r.mensaje, ...(r.progreso ? { progreso: r.progreso } : {}) }),
-        e => panelProgreso.actualizar('resumen', { estado: 'error', detalle: (e as Error).message })
+        r => {
+          panelProgreso.actualizar('resumen', { estado: r.estado, detalle: r.mensaje, ...(r.progreso ? { progreso: r.progreso } : {}) });
+          // Fase 2 del panel: con necesidades generadas se guarda el reporte (efecto reportePorGuardar).
+          if (r.estado === 'error') { panelProgreso.actualizar('rep', { estado: 'omitido' }); panelProgreso.concluir(); }
+          else setReportePorGuardar(true);
+        },
+        e => {
+          panelProgreso.actualizar('resumen', { estado: 'error', detalle: (e as Error).message });
+          panelProgreso.actualizar('rep', { estado: 'omitido' });
+          panelProgreso.concluir();
+        }
       )
-      .finally(() => {
-        panelProgreso.concluir();
-        setSyncStep('idle');
-      });
+      .finally(() => setSyncStep('idle'));
   }, [autoGenerarPendiente, handleProcessResumen, panelProgreso]);
 
   // Avance de la explosión BOM (órdenes procesadas / total) reflejado en el panel mientras corre.
@@ -1155,6 +1162,26 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
   // Los dos centros son el mismo reporte: un solo Guardar / Revisar / Enviar para ambos.
   const reporteGrupo = useReportePlanTxtGrupo([reporteFlujo1000, reporteFlujo2000]);
 
+  // Fase 2 del panel (igual que los otros 3 módulos): tras generar necesidades, guarda el reporte de
+  // ambos centros (reemplaza el existente) y cierra con "Ver reporte y enviar". El envío sigue manual.
+  useEffect(() => {
+    if (!reportePorGuardar) return;
+    setReportePorGuardar(false);
+    void (async () => {
+      panelProgreso.actualizar('rep', { estado: 'en_curso' });
+      const oks: boolean[] = [];
+      for (const f of reporteGrupo.flujos) oks.push(await f.guardar({ sinConfirmar: true, silencioso: true }));
+      const ok = oks.some(Boolean);
+      panelProgreso.actualizar('rep', ok
+        ? { estado: oks.every(Boolean) ? 'ok' : 'aviso', detalle: `Reporte del ${fechaObjetivoReporte} guardado en la carpeta compartida${oks.every(Boolean) ? '' : ' (un centro falló, reintenta desde "Enviar Reporte")'} — todavía no se envió.` }
+        : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
+      panelProgreso.concluir(
+        ok ? 'Necesidades y reporte guardados. Revisa y envía el reporte.' : undefined,
+        ok ? [{ etiqueta: 'Ver reporte y enviar', onClick: () => { void reporteGrupo.recuperarTodos(fechaObjetivoReporte); } }] : [],
+      );
+    })();
+  }, [reportePorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Consumo trazado (COD_FORMULADO -> intermedio -> componente final), acotado por los
   // responsables de control de producción que corresponden a cada centro — este es el
   // contenido de las pestañas "Provisionales" y "FERT".
@@ -1240,6 +1267,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       { id: 'fecha', etiqueta: !desde ? 'Plan Maestro (todas las fechas)' : desde === hasta ? `Fecha evaluada: ${corta(desde)}` : `Rango evaluado: ${corta(desde)} → ${corta(hasta || desde)}` },
       { id: 'sap', etiqueta: 'Sincronizando datos SAP' },
       { id: 'resumen', etiqueta: 'Generando necesidades' },
+      { id: 'rep', etiqueta: 'Guardando reporte (1000 y 2000)' },
     ]);
     panelProgreso.actualizar('fecha', { estado: 'ok' });
     const TOTAL_CONSULTAS_SAP = 5;
@@ -1338,6 +1366,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       console.error('Error sincronizando datos formulacion');
       panelProgreso.actualizar('sap', { estado: 'error', detalle: (e as Error).message });
       panelProgreso.actualizar('resumen', { estado: 'omitido' });
+      panelProgreso.actualizar('rep', { estado: 'omitido' });
       panelProgreso.concluir(`Error al sincronizar: ${(e as Error).message}`);
       setSyncStep('idle');
     } finally {

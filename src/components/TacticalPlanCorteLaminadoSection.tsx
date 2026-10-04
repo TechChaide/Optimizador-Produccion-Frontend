@@ -60,6 +60,7 @@ import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
 import { cn } from '@/lib/utils';
 import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
+import { pasoPanelDiagnosticoP2, type DiagnosticoP2 } from '@/lib/diagnostico-p2';
 import { nextBusinessDay as nextBusinessDayCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, parseISO, addDays } from 'date-fns';
@@ -1235,8 +1236,11 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // Mismo criterio del tab "Necesidades Planta" de Corte Espuma: filtra los grupos referenciados
   // por la restricción ALMACEN_CONSUMO, ubica sus PlanGrupo activos de "Plan Táctico - Centro <centro> - P2"
   // y trae el DetalleTactico asociado, agrupado por área (nombre de grupo).
+  // Último diagnóstico de recuperación de P2 (ver pasoPanelDiagnosticoP2): lo muestra el panel.
+  const diagnosticoP2Ref = useRef<DiagnosticoP2 | null>(null);
   const fetchNecesidadesPlanta = useCallback(async (diasOverride?: DiasNoLaborables, laborablesExtraOverride?: DiasNoLaborables, fechaBaseOverride?: string | null): Promise<Record<string, NecesidadPlantaRow[]>> => {
     setNecesidadesPlantaLoading(true);
+    diagnosticoP2Ref.current = null;
     try {
       const [restrsRes, gruposRes] = await Promise.all([
         restriccionService.getAll(),
@@ -1286,18 +1290,29 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const fechaPTCiclo = format(nextBusinessDayCal(parseISO(fechaObjetivoP2), diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
 
       const planGruposRes = await planGrupoService.getAll();
-      const planesActivosCrudo = (planGruposRes.data || []).filter((pg) => {
+      const candidatosP2 = (planGruposRes.data || []).filter((pg) => {
         const valor = String(pg.valor || '').trim();
         if (pg.estado !== 'A' || !gruposCodigos.includes(pg.codigo_grupo)) return false;
         if (!/plan\s*t[aá]ctico.*centro.*p2/i.test(valor)) return false;
         const esVentaExterna = /venta\s*externa/i.test(grupoPorCodigo.get(pg.codigo_grupo)?.nombre_grupo || '');
         if (esVentaExterna && !/rollo/i.test(valor)) return false;
-        if (!esP2ParaModulo(pg, 'LAMINADO')) return false;
-        // P2 Venta Rollos es plan de ENTREGA: vale con inicio = recuperación o fin = PT (convención
-        // vieja inicio = fin = PT y nueva inicio = hoy+1 / fin = PT). Forros y Muebles: solo inicio.
+        return esP2ParaModulo(pg, 'LAMINADO');
+      });
+      // P2 Venta Rollos es plan de ENTREGA: vale con inicio = recuperación o fin = PT (convención
+      // vieja inicio = fin = PT y nueva inicio = hoy+1 / fin = PT). Forros y Muebles: solo inicio.
+      const planesActivosCrudo = candidatosP2.filter((pg) => {
         if (soloFecha(pg.fecha_inicio_plan) === fechaObjetivoP2) return true;
+        const esVentaExterna = /venta\s*externa/i.test(grupoPorCodigo.get(pg.codigo_grupo)?.nombre_grupo || '');
         return esVentaExterna && soloFecha(pg.fecha_fin_plan) === fechaPTCiclo;
       });
+      // Diagnóstico para el panel: distinguir "no hay P2" de "hay P2 activo pero con otra fecha".
+      const describirP2 = (pg: PlanGrupo) => `#${pg.codigo_plan_grupo} ${String(pg.valor || '').replace(/^plan\s*t[aá]ctico\s*-\s*/i, '')} (${soloFecha(pg.fecha_inicio_plan)} → ${soloFecha(pg.fecha_fin_plan)})`;
+      diagnosticoP2Ref.current = {
+        recuperacion: fechaObjetivoP2,
+        pt: fechaPTCiclo,
+        usados: planesActivosCrudo.map(describirP2),
+        fuera: candidatosP2.filter(pg => !planesActivosCrudo.includes(pg)).map(describirP2),
+      };
 
       // Solo el plan MÁS RECIENTE por grupo — red de seguridad para el caso (menos común ahora que
       // planesActivosCrudo ya exige fecha de recuperación = hoy) de que el origen genere dos P2 "A"
@@ -1410,7 +1425,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           return snap;
         }),
         fetchNecesidadesPlanta(noLaborables, laborablesExtra, fecha).then(
-          r => { panelProgreso.actualizar('p2', { estado: 'ok' }); return r; },
+          r => { panelProgreso.actualizar('p2', pasoPanelDiagnosticoP2(diagnosticoP2Ref.current)); return r; },
           e => { panelProgreso.actualizar('p2', { estado: 'error', detalle: (e as Error).message }); throw e; }
         ),
       ]);

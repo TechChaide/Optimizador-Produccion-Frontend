@@ -46,6 +46,7 @@ import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
+import { pasoPanelDiagnosticoP2, type DiagnosticoP2 } from '@/lib/diagnostico-p2';
 import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario, intervaloDeHorario, horasSolapadas } from '@/lib/restriccionesCapacidad';
 import { ejecucionPlanHtml, fechaHoraEjecucion } from '@/lib/ventana-plan';
 import { planGrupoService } from '@/services/plangrupo.service';
@@ -3475,8 +3476,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     }
   }, [fetchTiemposCorteYLaminado]);
 
+  // Último diagnóstico de recuperación de P2 (ver pasoPanelDiagnosticoP2): lo muestra el panel.
+  const diagnosticoP2Ref = useRef<DiagnosticoP2 | null>(null);
   const fetchNecesidadesPlanta = useCallback(async (diasOverride?: DiasNoLaborables, laborablesExtraOverride?: DiasNoLaborables) => {
     setNecesidadesPlantaLoading(true);
+    diagnosticoP2Ref.current = null;
     try {
       const [restrsRes, gruposRes] = await Promise.all([
         restriccionService.getAll(),
@@ -3563,6 +3567,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // P2 activos que no son de este ciclo (el origen no los apagó): se avisan en consola para poder
       // distinguir "no hay P2" de "hay P2 pero vencido".
       const vencidos = candidatosBase.filter((pg) => !planesActivos.includes(pg));
+      const describirP2 = (pg: PlanGrupo) => `#${pg.codigo_plan_grupo} ${String(pg.valor || '').replace(/^plan\s*t[aá]ctico\s*-\s*/i, '')} (${fechaLocalPlana(pg.fecha_inicio_plan)} → ${fechaLocalPlana(pg.fecha_fin_plan)})`;
+      diagnosticoP2Ref.current = { recuperacion: fechaObjetivoP2, pt: fechaPTCiclo, usados: planesActivos.map(describirP2), fuera: vencidos.map(describirP2) };
       if (vencidos.length > 0) {
         console.warn(`[Necesidades Planta] P2 activos fuera del ciclo (recuperación ${fechaObjetivoP2} / PT ${fechaPTCiclo}):`,
           vencidos.map((pg) => `#${pg.codigo_plan_grupo} ${pg.valor} (${fechaLocalPlana(pg.fecha_inicio_plan)} → ${fechaLocalPlana(pg.fecha_fin_plan)})`));
@@ -4912,7 +4918,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           return ok;
         }),
         fetchNecesidadesPlanta(noLaborables, laborablesExtra).then(
-          () => panelProgreso.actualizar('p2', { estado: 'ok' }),
+          () => panelProgreso.actualizar('p2', pasoPanelDiagnosticoP2(diagnosticoP2Ref.current)),
           e => { panelProgreso.actualizar('p2', { estado: 'error', detalle: (e as Error).message }); throw e; }
         ),
       ]);
