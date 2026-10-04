@@ -163,58 +163,16 @@ const CODIGO_GRUPO_CORTE_POR_CENTRO: Record<'1000' | '2000', number> = { '1000':
 const NOMBRE_RESTRICCION_RESP = 'RESPCTRLPROD';
 const NOMBRE_RESTRICCION_RESP_VERTICALES = 'RESPCTRLPROD_VERTICALES';
 
-// Determina si la fecha de una orden FERT corresponde a la necesidad P2 de un material, según el
-// criterio de fecha correcto para el ÁREA de origen de ese P2 — verificado contra datos reales, no
-// es el mismo criterio para todas:
-// - Venta Externa: su P2 sí tiene fecha_inicio_plan confiable. Sus Provisionales se generan a hoy+1,
-//   pero al liberarse/convertirse en FERT se traslapan con la fecha del P2 (hoy+2) — tolerancia ±2
-//   alrededor de esa fecha real.
-// - Muebles/Colchones: su fecha_inicio_plan NO siempre es confiable (documentado en la propia
-//   restricción ALMACEN_CONSUMO: "no distingue si el material ya se fabricó o sigue pendiente") —
-//   comprobado con datos reales: P2 de Muebles #73 fechado 2026-08-04, pero sus órdenes FERT reales
-//   caen 2026-07-30/31 (a 4-5 días de esa fecha, ninguna tolerancia razonable las alcanza). Se prueba
-//   primero una ventana FIJA [hoy, hoy+1]; si no alcanza, cae al mismo criterio que cualquier otra
-//   área (ver más abajo) — un P2 de Muebles agendado varios días adelante SÍ puede tener una fecha
-//   real y confiable (caso real: P2 #533 fechado 31-ago con una orden Provisional real exacta a esa
-//   fecha, 3 días después de hoy — la ventana fija sola nunca la hubiera alcanzado).
-// - Cualquier otra área (ej. Prensado): tolerancia ±1 alrededor de la fecha real del P2 (en la
-//   práctica su P2 sí quedó cerca de "hoy").
-//
-// Rango completo de la orden [FECHAINICIO, FECHAFIN] (corregido 2026-08-14): antes solo se
-// comparaba FECHAINICIO ± tolerancia contra la fecha del P2, ignorando FECHAFIN. Caso real que lo
-// destapó: material 30005606, provisional #0144003101 con FECHAINICIO=14-ago/FECHAFIN=18-ago
-// (rango que SÍ incluye el 17-ago, fecha real del P2 #329 de Venta Externa) no coincidía porque
-// 14-ago está a 3 días de 17-ago y la tolerancia de Venta Externa es solo 2 — aunque el rango
-// completo de la orden sí cubre esa fecha. Se comprueba el rango PRIMERO; la tolerancia alrededor
-// de FECHAINICIO se mantiene como respaldo adicional (no se quita nada de lo que ya coincidía).
-const fechaOrdenCoincideConP2 = (fechaOrdenStr: string, fechaOrdenFinStr: string, area: string, fechaP2Str: string, hoyStr: string): boolean => {
-  const tOrden = new Date(fechaOrdenStr).getTime();
-  if (isNaN(tOrden)) return false;
-  if (/muebles|colchones/i.test(area)) {
-    const tHoy = new Date(hoyStr).getTime();
-    if (!isNaN(tHoy) && tOrden >= tHoy && tOrden <= tHoy + 86400000) return true; // [hoy, hoy+1]
-    // La ventana fija [hoy,hoy+1] no alcanzó: cae al mismo criterio que el resto de áreas (rango
-    // completo de la orden + tolerancia ±1 día alrededor de la fecha real del P2), en vez de
-    // descartar directo. Caso real que lo destapó: material 30023211, P2 Muebles #533 fechado 3 días
-    // adelante (31-ago, hoy 28-ago) con una orden Provisional real EXACTA a esa fecha — la ventana
-    // fija nunca puede alcanzar un P2 agendado más allá de mañana. No se quita la ventana [hoy,hoy+1]
-    // (sigue resolviendo el caso histórico que la motivó, P2 #73 con FERT reales 4-5 días ANTES de su
-    // propia fecha) — se agrega como respaldo adicional, no se reemplaza.
-  }
-  const tP2 = new Date(fechaP2Str).getTime();
-  if (isNaN(tP2)) return false;
-  const tOrdenFinParsed = new Date(fechaOrdenFinStr).getTime();
-  const tOrdenFin = isNaN(tOrdenFinParsed) ? tOrden : tOrdenFinParsed;
-  if (tP2 >= tOrden && tP2 <= tOrdenFin) return true;
-  const dias = /venta\s*externa/i.test(area) ? 2 : 1;
-  return Math.abs(tOrden - tP2) <= dias * 86400000;
-};
-
 // Desfase del PT del plan P1/PFF de Ensamblado respecto a hoy, en días hábiles del calendario.
 // Ajustado de 3 a 2 (2026-09-28, confirmado con el usuario): Ensamblado acortó su ventana de
 // planificación — caso real PFF #920 (1000) / #921 (2000), creados el lunes 28-sep con
 // fecha_inicio_plan 30-sep. El Nivel 2 de Capacidad (ciclo atrasado un día) es siempre este valor − 1.
 const DIAS_HABILES_PT_ENSAMBLADO = 2;
+
+// Días hábiles ANTES de la fecha de la necesidad en que SAP entrega la provisional que la responde.
+// 0 = el mismo día (flujo vigente, validado con MD04 2026-10-03). Se están probando en SAP las
+// provisionales a PT−1: si el usuario confirma que funcionan, se pasa a 1.
+const DESFASE_PROVISIONAL_DIAS_HABILES: number = 0;
 
 // Almacenes de stock disponible por centro para la Respuesta P3 (último fallback de la cascada
 // FERT → Provisional → Stock). Antes solo contaba 1006/2006 — verificado con datos reales (caso
@@ -492,8 +450,13 @@ interface RespuestaP3Row {
   fertVigente: number;
   // FERT de hoy hacia atrás: ciclo ya ejecutado. Solo referencia, no cubre el P2 vigente.
   fertAnterior: number;
+  // Parte de la FERT que SÍ cubre: solo Venta Externa con la FERT liberada al PT del P2 (ver
+  // fertQueCubreUnPorMaterialPorCentro).
+  fertCubre: number;
   cubierto: number;
   faltante: number;
+  // Cantidad de la línea del P3 = faltante + provisional en ventana (se convierte al exportar a SAP).
+  aP3: number;
   // Kg SOLO informativo (badge de capacidad/peso) — no participa en ninguna decisión de cobertura o
   // estado. = faltante × pesoUNPorMaterial (estimado geométrico), puede dar 0 para materiales sin
   // geometría parseable aunque su faltante real (en UN) sea mayor que cero.
@@ -510,7 +473,7 @@ interface PlanGrupoPreviewEspuma {
   fechaInicio: string;
   fechaFin: string;
   rows: RespuestaP3Row[];
-  // Materiales del P2 cubiertos con stock/provisional: no se graban en el P3 (solo se informan).
+  // Materiales del P2 cubiertos con stock/FERT: no se graban en el P3 (solo se informan).
   cubiertos?: number;
 }
 
@@ -677,6 +640,16 @@ const SOLICITUD_PRODUCCION_FIELDS_ESPUMA: { key: keyof SolicitudProduccionHBPayl
   { key: 'HoraProceso', label: 'Hora Proceso' },
   { key: 'UsuarioProceso', label: 'Usuario Proceso' },
 ];
+
+// Campos que no pueden viajar vacíos a SAP: si falta alguno, la vista previa marca la celda y no deja
+// enviar (los demás vacíos — fechas/horas fin, pedido, campos que llena SAP — son esperados).
+// PuestoTrabajo puede ir vacío: SAP lo acepta (confirmado por el usuario 2026-10-03).
+const CAMPOS_OBLIGATORIOS_SAP_ESPUMA: (keyof SolicitudProduccionHBPayload)[] = ['CodigoOrdenExterna', 'CodigoMaterial', 'CantidadPlanificada', 'VersionFabricacion'];
+const errorCampoSapEspuma = (payload: SolicitudProduccionHBPayload, campo: keyof SolicitudProduccionHBPayload): string | null => {
+  const valor = payload[campo];
+  if (CAMPOS_OBLIGATORIOS_SAP_ESPUMA.includes(campo) && (valor === '' || valor === null || valor === undefined || (campo === 'CantidadPlanificada' && Number(valor) <= 0))) return 'Obligatorio';
+  return null;
+};
 
 const median = (values: number[]): number => {
   const clean = values.filter(v => v > 0).sort((a, b) => a - b);
@@ -1139,6 +1112,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       hasta: ptStr,
       pt: ptStr,
     };
+  }, [restarDiasHabiles]);
+
+  // Fecha en que SAP debe entregar la provisional que responde a una necesidad (ver
+  // provisionalesQueCubrenPorCentro): hoy el mismo día; con DESFASE_PROVISIONAL_DIAS_HABILES > 0,
+  // esos días hábiles antes.
+  const fechaProvisionalEsperada = useCallback((fechaNecesidad: string): string => {
+    if (DESFASE_PROVISIONAL_DIAS_HABILES === 0 || !fechaNecesidad || fechaNecesidad === '—') return fechaNecesidad;
+    return format(restarDiasHabiles(parseFechaLocal(fechaNecesidad), DESFASE_PROVISIONAL_DIAS_HABILES), 'yyyy-MM-dd');
   }, [restarDiasHabiles]);
 
   // Restricciones crudas del grupo Corte y Laminado de cada centro (se cargan en fetchDataAsync).
@@ -1735,7 +1716,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
       const origen = origenEnRango || origenCandidatos[0];
       const origenAmbiguo = origenCandidatos.length > 0 && !origenEnRango;
-      const llegaDiaPT = !!origenEnRango && origenEnRango.area.startsWith('Ensamblado')
+      // Con DESFASE_PROVISIONAL_DIAS_HABILES = 0 llegar el día del PT es lo normal: sin aviso.
+      const llegaDiaPT = DESFASE_PROVISIONAL_DIAS_HABILES > 0 && !!origenEnRango && origenEnRango.area.startsWith('Ensamblado')
         && fechaOrdenFin === ventanaLaminaEnsamblado(origenEnRango.fecha_inicio)?.pt;
 
       return {
@@ -1926,7 +1908,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const map = porCentro[centro];
         if (!map.has(key)) map.set(key, []);
         // Venta Externa: sus FERT van fechadas al PT (fecha_fin_plan); fecha_inicio_plan es la recuperación.
-        const fecha = /ventas*externa/i.test(area) && row.fecha_fin && row.fecha_fin !== '—' ? row.fecha_fin : row.fecha_inicio;
+        const fecha = /venta\s*externa/i.test(area) && row.fecha_fin && row.fecha_fin !== '—' ? row.fecha_fin : row.fecha_inicio;
         map.get(key)!.push({ fecha, area });
       });
     });
@@ -1975,18 +1957,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (transformadas?.has(`${r.material}|${r.fecha}|${r.cant}`)) return;
         const candidatosP2 = fechasPorMaterial?.get(r.material);
         if (!candidatosP2 || candidatosP2.length === 0) return;
-        // Ensamblado (P1/PFF): la provisional responde al PT si su FECHAFIN cae en
-        // [PT−2 hábiles, PT] (ver ventanaLaminaEnsamblado; el día del PT se acepta con aviso) y cuenta ÍNTEGRA. Antes caía al ±1
-        // alrededor del PT de fechaOrdenCoincideConP2: dejaba fuera la de planchas (PT−2, ej.
-        // 0144951612 del 24-sep para el PT del 28-sep) y aceptaba láminas del mismo día o posteriores
-        // al PT, que ya llegan tarde. Las demás áreas siguen con fechaOrdenCoincideConP2 sin cambios.
-        const coincide = candidatosP2.some(c => {
-          if (c.area.startsWith('Ensamblado')) {
-            const v = ventanaLaminaEnsamblado(c.fecha);
-            return !!v && r.fechaFin >= v.desde && r.fechaFin <= v.hasta;
-          }
-          return fechaOrdenCoincideConP2(r.fecha, r.fechaFin, c.area, c.fecha, todayStr);
-        });
+        // Emparejamiento POR FECHA EXACTA (regla del usuario 2026-10-03, validada con MD04: FERT
+        // 20007201 necesita 360 de 30008909 al 07-oct ↔ OrdPrv 0145201016 del 07-oct por 363 = lote):
+        // la provisional responde a la necesidad si su FECHAFIN (disponibilidad en MD04) es el mismo día
+        // de la necesidad (PT del P1/PFF, PT del P2 de Venta Externa, fecha del P2 en las demás áreas)
+        // menos DESFASE_PROVISIONAL_DIAS_HABILES. Reemplaza la ventana [PT−2, PT] de Ensamblado y la
+        // tolerancia ±1/±2 por área que se usaba antes, que podían sumar la provisional de otro ciclo.
+        const coincide = candidatosP2.some(c => r.fechaFin === fechaProvisionalEsperada(c.fecha));
         if (!coincide) return;
         if (!map.has(r.material)) map.set(r.material, []);
         map.get(r.material)!.push(r);
@@ -1996,7 +1973,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     procesar('1000', provAuditAllUIO);
     procesar('2000', provAuditAllGYE);
     return porCentro;
-  }, [provAuditAllUIO, provAuditAllGYE, fechasP2PorMaterialPorCentro, todayStr, allowedRespPorCentro, clavesProvisionalesTransformadas, ventanaLaminaEnsamblado]);
+  }, [provAuditAllUIO, provAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro, clavesProvisionalesTransformadas, fechaProvisionalEsperada]);
 
   const provisionalUnPorMaterialPorCentro = useMemo(() => {
     const porCentro: Record<string, Map<string, number>> = { '1000': new Map(), '2000': new Map() };
@@ -2105,6 +2082,31 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return { vigente, anterior };
   }, [fertAuditAllUIO, fertAuditAllGYE, todayStr, allowedRespPorCentro]);
 
+  // Excepción a la regla 23/09 (FERT solo informativa), pedida por el usuario 2026-10-03: en Venta
+  // Externa la FERT es la orden de la MISMA plancha que se vende, liberada para el PT de este ciclo
+  // (caso real GYE P2 #1008: 30024818 necesidad 30, FERT 30 al 06-oct salía "Sin cobertura" y
+  // Exportar a SAP la habría duplicado). Cubre solo si su rango [FECHAINICIO, FECHAFIN] contiene el PT
+  // del P2 (fecha_fin_plan) — exacto, sin tolerancia de días, que alcanzaría
+  // la FERT del PT de ayer (ciclo anterior). Las demás áreas siguen con FERT solo informativa.
+  const fertQueCubreUnPorMaterialPorCentro = useMemo(() => {
+    const porCentro: Record<string, Map<string, number>> = { '1000': new Map(), '2000': new Map() };
+    const procesar = (centro: '1000' | '2000', rows: UnifiedRow[]) => {
+      const allowed = allowedRespPorCentro(centro);
+      const fechasPorMaterial = fechasP2PorMaterialPorCentro[centro];
+      rows.forEach(r => {
+        if (!allowed.includes(r.responsable)) return;
+        const candidatos = fechasPorMaterial?.get(r.material);
+        if (!candidatos) return;
+        const cubrePT = candidatos.some(c => /venta\s*externa/i.test(c.area) && r.fecha <= c.fecha && c.fecha <= (r.fechaFin || r.fecha));
+        if (!cubrePT) return;
+        porCentro[centro].set(r.material, (porCentro[centro].get(r.material) || 0) + r.cantUnidadReal);
+      });
+    };
+    procesar('1000', fertAuditAllUIO);
+    procesar('2000', fertAuditAllGYE);
+    return porCentro;
+  }, [fertAuditAllUIO, fertAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro]);
+
   // Respuesta P3: stock disponible por material y centro, en UNIDADES (tal cual viene
   // LIBREUTILIZACION) — último fallback de la cascada (FERT emparejado → Provisional → Stock), solo
   // para materiales del universo P2 de ese centro que no calzaron con ninguna de las dos fuentes
@@ -2203,17 +2205,21 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // vía Stock (inventarioSAP, sin ninguna orden). Verificado con datos reales: Muebles pasó de 0/80 a
   // 80/80 con descripción al sumar esas dos fuentes. Un material sin ninguna orden NI stock en ningún
   // centro queda sin descripción (limitación real, no hay maestro de materiales consultado aquí).
+  // Descripciones vistas en la explosión BOM (P1/PFF, P2 Muebles): un material que solo llega por BOM
+  // y no tiene provisional/FERT/stock no aparece en materialDescMap — caso real 2026-10-03, 30008707 y
+  // 30008716 salían sin descripción en la vista previa de Exportar a SAP.
+  const descripcionesBomRef = useRef(new Map<string, string>());
   const materialDescMap = useMemo(() => {
     const map = new Map<string, string>();
     const trySet = (code: string, desc: string) => {
       if (!code || !desc || desc === '—' || map.has(code)) return;
       map.set(code, desc);
     };
-    [...provAuditUIO, ...provAuditGYE, ...fertAuditUIO, ...fertAuditGYE, ...fertAuditAllUIO, ...fertAuditAllGYE]
+    [...provAuditUIO, ...provAuditGYE, ...provAuditAllUIO, ...provAuditAllGYE, ...fertAuditUIO, ...fertAuditGYE, ...fertAuditAllUIO, ...fertAuditAllGYE]
       .forEach(r => trySet(r.material, r.descripcion));
     inventarioSAP.forEach(inv => { const info = extractMaterialInfo(inv); trySet(info.code, info.desc); });
     return map;
-  }, [provAuditUIO, provAuditGYE, fertAuditUIO, fertAuditGYE, fertAuditAllUIO, fertAuditAllGYE, inventarioSAP, extractMaterialInfo]);
+  }, [provAuditUIO, provAuditGYE, provAuditAllUIO, provAuditAllGYE, fertAuditUIO, fertAuditGYE, fertAuditAllUIO, fertAuditAllGYE, inventarioSAP, extractMaterialInfo]);
 
   // Cruce Pendientes Totales ↔ Órdenes FERT por Cod.Buscar (POSICION+PEDIDO+MATERIAL) — mismo
   // mecanismo que ya usa Programación Táctica Venta Externa: si existe una FERT para esa posición,
@@ -2309,6 +2315,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                 if (!desc.includes('ESPUMA')) return;
                 const laminaCode = cleanCode(row.COMPONENTE);
                 if (!laminaCode) return;
+                if (!descripcionesBomRef.current.has(laminaCode)) descripcionesBomRef.current.set(laminaCode, String(row.DESCRIPCION_COMPONENTE || ''));
                 encontroMatch = true;
 
                 const ordenadas = [...fechas].sort();
@@ -3220,6 +3227,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const provisionalMap = provisionalUnPorMaterialPorCentro[centro];
     const fertMapVigente = fertUnPorMaterialPorCentro.vigente[centro];
     const fertMapAnterior = fertUnPorMaterialPorCentro.anterior[centro];
+    const fertCubreMap = fertQueCubreUnPorMaterialPorCentro[centro];
     const stockMap = stockUnidadesPorMaterialPorCentro[centro];
 
     return Array.from(necesidadMap.keys())
@@ -3229,17 +3237,26 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // las órdenes liberadas se generaron para cubrir el plan ANTERIOR; sumarlas al plan nuevo
       // duplicaba cobertura y le restaba necesidad al ciclo siguiente. Aplica a todas las áreas.
       // Cobertura del plan nuevo = provisionales (ventana de fecha de su área) + stock (por lote puede
-      // cubrir la necesidad anterior y también la siguiente).
+      // cubrir la necesidad anterior y también la siguiente). Excepción: Venta Externa con FERT al PT
+      // de su P2 (fertCubre, ver fertQueCubreUnPorMaterialPorCentro).
       const fertVigente = fertMapVigente.get(material) || 0;
+      const fertCubre = fertCubreMap.get(material) || 0;
       const fertAnterior = fertMapAnterior.get(material) || 0;
       const provisional = provisionalMap.get(material) || 0;
       const stock = stockMap.get(material) || 0;
       const necesidad = necesidadMap.get(material) || 0;
 
-      const disponible = stock + provisional;
+      const disponible = stock + provisional + fertCubre;
       const cubierto = Math.min(necesidad, disponible);
       const faltante = Math.max(0, necesidad - disponible);
-      const cantidadUnidades = esPFD ? faltante : cubierto;
+      // Lo que se graba en el P3 y sale a SAP (regla del usuario 2026-10-03): la provisional en
+      // ventana NO es una orden todavía — viaja en el P3 con su cantidad (el lote que fijó SAP) más el
+      // faltante, y Exportar a SAP la convierte con el codigo_detalle_tactico de esa línea. Stock y FERT
+      // sí son cobertura ya resuelta: no generan línea. Si stock + FERT ya cubren la necesidad, la
+      // provisional no hace falta este ciclo (no se convierte).
+      const requeridoSinProvisional = Math.max(0, necesidad - stock - fertCubre);
+      const aP3 = requeridoSinProvisional > 0 ? Math.max(provisional, requeridoSinProvisional) : 0;
+      const cantidadUnidades = esPFD ? aP3 : cubierto;
       // Kg SOLO informativo (badge de capacidad/peso) — no decide cobertura ni estado. Puede dar 0
       // para materiales sin geometría parseable aunque su faltante real (en UN) sea mayor que cero.
       const pesoUN = pesoUNPorMaterial.get(material) || 0;
@@ -3247,12 +3264,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
       let fuente: FuenteRespuestaP3;
       if (necesidad <= 0) fuente = 'Sin dato';
-      else if (esPFD) fuente = faltante > 0 ? 'Producir' : 'Cubierto';
+      else if (esPFD) fuente = aP3 > 0 ? 'Producir' : 'Cubierto';
       else if (cubierto <= 0) fuente = 'Sin cobertura';
       else {
         const partes = [
           stock > 0 ? 'Stock' : null,
           provisional > 0 ? 'Provisional' : null,
+          fertCubre > 0 ? 'FERT' : null,
         ].filter(Boolean);
         fuente = (partes.length > 1 ? partes.join(' + ') : partes[0]) as FuenteRespuestaP3;
       }
@@ -3271,8 +3289,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         provisional,
         fertVigente,
         fertAnterior,
+        fertCubre,
         cubierto,
         faltante,
+        aP3,
         faltanteKgEstimado,
         origenes,
         fuente
@@ -3281,7 +3301,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // muestra solo los "Sin dato" y da la falsa impresión de que todo devuelve 0 — caso real: 148 de
     // 182 materiales sí tenían respuesta, pero quedaban ocultos tras hacer scroll).
     }).sort((a, b) => Number(b.tienePlan) - Number(a.tienePlan));
-  }, [materialNecesidadesPlantaMapPorCentro, materialOrigenesPlantaMapPorCentro, provisionalUnPorMaterialPorCentro, fertUnPorMaterialPorCentro, stockUnidadesPorMaterialPorCentro, materialDescMap, pesoUNPorMaterial]);
+  }, [materialNecesidadesPlantaMapPorCentro, materialOrigenesPlantaMapPorCentro, provisionalUnPorMaterialPorCentro, fertUnPorMaterialPorCentro, fertQueCubreUnPorMaterialPorCentro, stockUnidadesPorMaterialPorCentro, materialDescMap, pesoUNPorMaterial]);
 
   // Reparte `cantidad` (en UNIDADES) de un material entre sus planes P2 origen, proporcional a la
   // necesidad que cada uno aportó — mismo criterio que getOrigenesProrrateo de Corte y Laminado, pero
@@ -3733,6 +3753,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             if (TIENE_COMPONENTE_ESPUMA(desc)) tieneAlgunEspuma = true;
             const laminaCode = cleanCode(row.COMPONENTE);
             if (!laminaCode) return;
+            if (desc) descripcionesBomRef.current.set(laminaCode, desc);
 
             // Relevancia por RESPONSABLE (criterio autoritativo, el mismo que usa el resto del
             // módulo y que el negocio mantiene en las restricciones), con el patrón de nombres como
@@ -3890,6 +3911,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         explosionCache.get(cacheKey)!.forEach(row => {
           const desc = String(row.DESCRIPCION_COMPONENTE || '');
           const componente = cleanCode(row.COMPONENTE);
+          if (componente && desc) descripcionesBomRef.current.set(componente, desc);
           if (!componente || !esComponenteDeCorte(desc, componente, centro)) return;
           const linea = leerLineaBom(row, fert);
           const consumo = cantidadFert * linea.cantAcumulada;
@@ -4038,8 +4060,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const construirPreviewP3 = useCallback((centro: '1000' | '2000'): PlanGrupoPreviewEspuma | null => {
     const todas = respuestaSalidaRowsPorCentro(centro, true);
     if (todas.length === 0) return null;
-    // Sin líneas en 0 (regla del usuario 2026-10-03): solo viaja lo que hay que fabricar. Lo cubierto
-    // con stock/provisional no se graba; Venta Externa lo da por cubierto al emparejar P2 vs P3. Si todo
+    // Sin líneas en 0 (regla del usuario 2026-10-03): solo viaja lo que hay que fabricar (faltante +
+    // provisional a convertir, ver aP3). Lo cubierto con stock/FERT no se graba; Venta Externa lo da por
+    // cubierto al emparejar P2 vs P3. Si todo
     // queda cubierto se graba igual la cabecera del P3 (sin líneas) para dejar constancia de la respuesta.
     const rows = todas.filter(r => r.necesidad > 0 && r.cantidadUnidades > 0);
     const cubiertos = todas.filter(r => r.necesidad > 0 && r.cantidadUnidades <= 0).length;
@@ -4496,6 +4519,17 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       panelProgreso.actualizar('nec', { estado: 'en_curso' });
       await fetchNecesidadesPlanta();
       panelProgreso.actualizar('nec', { estado: 'ok' });
+      // Sin fecha en "Evaluar Capacidad", el reporte se arma con la fecha del P3 (día de recuperación)
+      // en vez de quedar en aviso (pedido del usuario 2026-10-03); una fecha ya elegida se respeta. Va
+      // en el mismo render que setReportesPorGuardar, así el efecto ya ve el resumen con esa fecha.
+      setSelectedDatesCapacidad(prev => {
+        const next = { ...prev };
+        previews.forEach(({ centro, p3 }) => {
+          const planta = centro === '1000' ? 'UIO' : 'GYE';
+          if (next[planta].size === 0 && p3.fechaInicio) next[planta] = new Set([p3.fechaInicio]);
+        });
+        return next;
+      });
       // El reporte (capacidad + correo) no depende de que el P3 haya salido bien: se guarda igual.
       setReportesPorGuardar(previews.map(x => x.centro));
     } catch (e) {
@@ -4550,6 +4584,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return map;
   }, [tiemposCatalogo]);
 
+  // "Carruseles" (10 caracteres) excede el largo del campo en HANA (8): decisión del usuario
+  // 2026-10-03 — se mantiene el valor del catálogo y TI ajusta el largo del campo.
   const resolvePuestoTrabajoEspuma = useCallback((material: string): string => {
     return puestoTrabajoPorMaterialEspuma.get(material) || '';
   }, [puestoTrabajoPorMaterialEspuma]);
@@ -4676,35 +4712,24 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // dos recuperos bloquea el envío si falta: el payload sale con el campo en '' y se corrige a mano
   // en la tabla editable del diálogo).
   // Conversión de la provisional existente (sin servicio nuevo — el envío a SAP con
-  // InsertarSolicitudProduccionHB ES la conversión; decisión del usuario 2026-09-29). Por material, con
-  // las provisionales que ya cubren su necesidad en la ventana (provisionalesQueCubrenPorCentro, match
-  // material + fecha) y el faltante del PFD persistido (respeta lo editado en "Editar Plan"):
-  //   - faltante > 0 y hay provisional → orden = provisional + faltante (se sube la provisional
-  //     hasta la necesidad: una sola orden por material).
-  //   - faltante = 0 y hay provisional → orden = provisional completa, solo si el stock solo no
-  //     cubre la necesidad (no se reduce la provisional: el lote lo fija SAP y el excedente cubre el
-  //     ciclo siguiente). Si el stock solo ya cubre, no hay orden.
-  //   - sin provisional → orden = faltante (como antes).
-  // Provisional "principal" (referencia en Observaciones) si hay varias: la que llega antes del día
-  // del PT (PT−1), luego la de fecha fin más tardía, luego la de mayor cantidad.
-  const resolverConversionProvisional = useCallback((centro: '1000' | '2000', material: string, faltantePFD: number): ConversionProvisionalEspuma => {
+  // InsertarSolicitudProduccionHB ES la conversión; decisión del usuario 2026-09-29). Desde 2026-10-03
+  // la provisional ya viaja DENTRO de la línea del P3 (aP3 = faltante + provisional, ver
+  // respuestaSalidaRowsPorCentro), así que la orden = la cantidad del P3 tal cual (respeta "Editar
+  // Plan") y CodigoOrdenExterna = su codigo_detalle_tactico. Esto solo DESGLOSA, para la vista previa,
+  // cuánto de esa cantidad es la provisional que se convierte y cuánto es faltante nuevo.
+  // Provisional "principal" (referencia) si hay varias: la que llega antes del día del PT (PT−1),
+  // luego la de fecha fin más tardía, luego la de mayor cantidad.
+  const resolverConversionProvisional = useCallback((centro: '1000' | '2000', material: string, cantidadP3: number): ConversionProvisionalEspuma => {
     const provisionales = provisionalesQueCubrenPorCentro[centro].get(material) || [];
-    const provisionalQty = provisionales.reduce((s, o) => s + o.cantUnidadReal, 0);
+    const provisionalQty = Math.min(cantidadP3, provisionales.reduce((s, o) => s + o.cantUnidadReal, 0));
     const principal = [...provisionales].sort((a, b) =>
       Number(!!a.llegaDiaPT) - Number(!!b.llegaDiaPT) || b.fechaFin.localeCompare(a.fechaFin) || b.cantUnidadReal - a.cantUnidadReal
     )[0]?.orden;
-    if (provisionalQty <= 0) {
-      return { faltantePFD, provisionalQty: 0, cantidadOrden: faltantePFD, motivo: faltantePFD > 0 ? 'solo-faltante' : 'sin-orden' };
-    }
-    if (faltantePFD > 0) {
-      return { faltantePFD, provisionalQty, cantidadOrden: faltantePFD + provisionalQty, principal, motivo: 'provisional+faltante' };
-    }
-    const fila = respuestaSalidaRowsPorCentro(centro, true).find(r => r.material === material);
-    const requeridoSinStock = fila ? Math.max(0, fila.necesidad - fila.stock) : 0;
-    return requeridoSinStock > 0
-      ? { faltantePFD, provisionalQty, cantidadOrden: provisionalQty, principal, motivo: 'provisional-completa' }
-      : { faltantePFD, provisionalQty, cantidadOrden: 0, principal, motivo: 'sin-orden' };
-  }, [provisionalesQueCubrenPorCentro, respuestaSalidaRowsPorCentro]);
+    const faltantePFD = Math.max(0, cantidadP3 - provisionalQty);
+    if (cantidadP3 <= 0) return { faltantePFD: 0, provisionalQty: 0, cantidadOrden: 0, motivo: 'sin-orden' };
+    if (provisionalQty <= 0) return { faltantePFD, provisionalQty: 0, cantidadOrden: cantidadP3, motivo: 'solo-faltante' };
+    return { faltantePFD, provisionalQty, cantidadOrden: cantidadP3, principal, motivo: faltantePFD > 0 ? 'provisional+faltante' : 'provisional-completa' };
+  }, [provisionalesQueCubrenPorCentro]);
 
   const handleExportSap = useCallback(async (centro: '1000' | '2000') => {
     if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3, editar planes o exportar a SAP con datos vigentes.'); return; }
@@ -4758,6 +4783,19 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       next[index] = { ...next[index], [field]: value };
       return next;
     });
+  }, []);
+
+  const descripcionMaterial = useCallback((material: string): string =>
+    materialDescMap.get(material) || descripcionesBomRef.current.get(material) || '', [materialDescMap]);
+
+  const erroresExportSap = useMemo(() => (exportSapPayloads || []).reduce((n, p) =>
+    n + SOLICITUD_PRODUCCION_FIELDS_ESPUMA.filter(f => errorCampoSapEspuma(p, f.key)).length, 0), [exportSapPayloads]);
+
+  // Quitar una orden de la vista previa antes de enviar — mismo patrón que removeExportTxtRow de
+  // Laminado (grupos/conversion van por índice, paralelos a los payloads).
+  const removeExportSapRow = useCallback((index: number) => {
+    setExportSapPreview(prev => prev ? { ...prev, grupos: prev.grupos.filter((_, i) => i !== index), conversion: prev.conversion.filter((_, i) => i !== index) } : prev);
+    setExportSapPayloads(prev => prev ? prev.filter((_, i) => i !== index) : prev);
   }, []);
 
   const handleConfirmarExportSap = useCallback(async () => {
@@ -6710,9 +6748,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                           <th className="px-4 py-3 border-r border-gray-100">Necesidad P2 (UN)</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-amber-50/40 text-amber-700">Stock</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-sky-50/40 text-sky-700">Provisional</th>
-                          <th className="px-4 py-3 border-r border-gray-100 bg-indigo-50/40 text-indigo-700" title="Órdenes FERT programadas de hoy en adelante. Solo informativo: NO cuentan como cobertura, porque se liberaron para cubrir el plan anterior.">FERT vigente (info)</th>
+                          <th className="px-4 py-3 border-r border-gray-100 bg-indigo-50/40 text-indigo-700" title="Órdenes FERT programadas de hoy en adelante. Informativo: no cuentan como cobertura (se liberaron para el plan anterior), salvo Venta Externa con la FERT liberada al PT de su P2 — ahí se indica cuánto cubre.">FERT vigente</th>
                           <th className="px-4 py-3 border-r border-gray-100 font-black bg-yellow-50/50 text-yellow-700">Cubierto (UN)</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-orange-50/40 text-orange-700">Faltante (UN)</th>
+                          <th className="px-4 py-3 border-r border-gray-100 font-black bg-orange-50/60 text-orange-800" title="Lo que se graba en el P3 y sale a SAP: faltante + provisional del material (la provisional se convierte en orden).">Respuesta P3 (UN)</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-slate-50/40 text-slate-500" title="Órdenes FERT programadas de hoy hacia atrás: pertenecen a un ciclo de P2 ya ejecutado. NO cubren este P2; se muestran como referencia y alimentan la carga en curso de Capacidad Operativa.">FERT ciclo anterior</th>
                           <th className="px-4 py-3 border-r border-gray-100">Fuente</th>
                           <th className="px-4 py-3 border-r border-gray-100">Estado</th>
@@ -6721,7 +6760,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                       </thead>
                       <tbody className="divide-y divide-gray-50 font-bold text-slate-700">
                         {rows.length === 0 ? (
-                          <tr><td colSpan={12} className="py-16 text-slate-300 uppercase font-black tracking-widest italic opacity-50 text-center">Sin materiales de Necesidades Planta para este centro</td></tr>
+                          <tr><td colSpan={13} className="py-16 text-slate-300 uppercase font-black tracking-widest italic opacity-50 text-center">Sin materiales de Necesidades Planta para este centro</td></tr>
                         ) : rows.map((row, idx) => (
                           <tr key={idx} className="hover:bg-gray-50/50 transition-colors font-mono text-[10px]">
                             <td className="px-4 py-3 border-r border-slate-50 text-left text-indigo-600 font-black">{row.material}</td>
@@ -6729,9 +6768,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                             <td className="px-4 py-3 border-r border-slate-50 text-slate-500">{formatNum(row.necesidad, 0)}</td>
                             <td className="px-4 py-3 border-r border-slate-50 text-amber-700 bg-amber-50/20">{formatNum(row.stock, 0)}</td>
                             <td className="px-4 py-3 border-r border-slate-50 text-sky-700 bg-sky-50/20">{formatNum(row.provisional, 0)}</td>
-                            <td className="px-4 py-3 border-r border-slate-50 text-indigo-700 bg-indigo-50/20">{formatNum(row.fertVigente, 0)}</td>
+                            <td className="px-4 py-3 border-r border-slate-50 text-indigo-700 bg-indigo-50/20">
+                              {formatNum(row.fertVigente, 0)}
+                              {row.fertCubre > 0 && <div className="text-[8px] font-black uppercase text-indigo-500" title="FERT liberada al PT del P2 de Venta Externa: cuenta como cobertura">cubre {formatNum(row.fertCubre, 0)}</div>}
+                            </td>
                             <td className="px-4 py-3 border-r border-slate-50 text-slate-900 font-black bg-yellow-50">{formatNum(row.cubierto, 0)}</td>
                             <td className={cn("px-4 py-3 border-r border-slate-50 font-black bg-orange-50/20", row.faltante > 0 ? "text-orange-700" : "text-slate-300")}>{formatNum(row.faltante, 0)}</td>
+                            <td className={cn("px-4 py-3 border-r border-slate-50 font-black bg-orange-50/40", row.aP3 > 0 ? "text-orange-800" : "text-slate-300")}>{formatNum(row.aP3, 0)}</td>
                             <td className="px-4 py-3 border-r border-slate-50 text-slate-500 bg-slate-50/20">{row.fertAnterior > 0 ? formatNum(row.fertAnterior, 0) : '—'}</td>
                             <td className="px-4 py-3 border-r border-slate-50">
                               <Badge
@@ -6969,7 +7012,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           <DialogHeader>
             <DialogTitle>Confirmar Respuesta P3 — Corte Espuma</DialogTitle>
             <DialogDescription>
-              Revisa los datos que se van a grabar antes de continuar — se crea UN registro por centro: la Respuesta P3 con el faltante (lo que hay que fabricar = Necesidad P2 − Stock − Provisional). Es el mismo P3 que lee Exportar a SAP y que concilia Venta Externa. Esta acción crea registros nuevos en producción.
+              Revisa los datos que se van a grabar antes de continuar — se crea UN registro por centro: la Respuesta P3 con lo que se fabrica: faltante (Necesidad P2 − Stock − Provisional − FERT de VE al PT) + la provisional del material, que se convierte en orden al exportar a SAP. Lo cubierto con stock o FERT no se graba. Es el mismo P3 que lee Exportar a SAP y que concilia Venta Externa. Esta acción crea registros nuevos en producción.
             </DialogDescription>
           </DialogHeader>
           {planPreviewP3PFD && (
@@ -6987,7 +7030,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                     <div>
                       <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">
                         Materiales a fabricar ({preview.p3.rows.length})
-                        {preview.p3.cubiertos ? <span className="normal-case font-bold text-emerald-700"> · {preview.p3.cubiertos} cubierto(s) con stock/provisional: no se graban</span> : null}
+                        {preview.p3.cubiertos ? <span className="normal-case font-bold text-emerald-700"> · {preview.p3.cubiertos} cubierto(s) con stock/FERT: no se graban</span> : null}
                       </span>
                       {preview.p3.rows.length === 0 && (
                         <p className="text-[11px] text-emerald-700 font-bold px-1 mb-2">Todo el P2 está cubierto: se graba solo la cabecera del P3 (sin líneas) como constancia de respuesta del ciclo.</p>
@@ -7001,7 +7044,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                               <th className="px-3 py-2 text-right">Stock</th>
                               <th className="px-3 py-2 text-right">Provisional</th>
                               <th className="px-3 py-2 text-right">Cubierto</th>
-                              <th className="px-3 py-2 text-right font-black text-orange-700">A producir (se graba)</th>
+                              <th className="px-3 py-2 text-right font-black text-orange-700" title="Faltante + provisional del material (se convierte al exportar a SAP)">Respuesta P3 (se graba)</th>
                               <th className="px-3 py-2 text-left">Estado</th>
                             </tr>
                           </thead>
@@ -7052,7 +7095,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           <DialogHeader>
             <DialogTitle>Confirmar envío a SAP — P3 Corte Espuma {exportSapPreview ? `(Centro ${exportSapPreview.centro})` : ''}</DialogTitle>
             <DialogDescription>
-              Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Sale del P3 #{exportSapPreview?.plan.codigo_plan_grupo} ya guardado: una orden por material (las líneas por nivel N1/N2 u origen se suman). Si el material ya tiene provisional en la ventana, la orden la convierte: provisional + faltante, o la provisional completa si el faltante es 0 y el stock solo no cubre. Esta acción no se puede deshacer desde acá.
+              Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Sale del P3 #{exportSapPreview?.plan.codigo_plan_grupo} ya guardado: Cod. Orden Externa = codigo_detalle_tactico de la línea del material y Cant. Planificada = su cantidad. Esta acción no se puede deshacer desde acá.
             </DialogDescription>
           </DialogHeader>
           {exportSapPreview && exportSapPayloads && (
@@ -7063,8 +7106,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                   <table className="text-[11px] border-collapse">
                     <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0 z-10">
                       <tr>
+                        <th className="px-2 py-2 w-8" aria-label="Quitar" />
                         <th className="px-2 py-2 text-left whitespace-nowrap">Descripción</th>
-                        <th className="px-2 py-2 text-left whitespace-nowrap" title="Órdenes provisionales de SAP de este material dentro de la ventana del plan (las mismas que ya cuentan como cobertura). Base para vincular/ajustar la provisional en vez de crear una orden nueva.">Provisional existente</th>
                         {SOLICITUD_PRODUCCION_FIELDS_ESPUMA.map(f => (
                           <th key={f.key} className="px-2 py-2 text-left whitespace-nowrap">{f.label}</th>
                         ))}
@@ -7073,51 +7116,50 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                     <tbody className="divide-y divide-gray-50">
                       {exportSapPayloads.map((payload, i) => (
                         <tr key={`${exportSapPreview.grupos[i]?.[0]?.codigo_detalle_tactico}-${i}`}>
-                          <td className="px-2 py-1 max-w-[180px]" title={materialDescMap.get(payload.CodigoMaterial) || ''}>
-                            <span className="block truncate">{materialDescMap.get(payload.CodigoMaterial) || '—'}</span>
-                            {(exportSapPreview.grupos[i]?.length || 0) > 1 && (
-                              <span className="block text-[9px] text-indigo-600 font-bold" title="Líneas del P3 consolidadas en esta orden">
-                                {exportSapPreview.grupos[i].map(l => `${nivelBomDeLinea(l.linea_produccion) ? `N${nivelBomDeLinea(l.linea_produccion)} ` : `#${l.codigo_plan_grupo_padre} `}${parseQty(l.cantidad_produccion_neta)}`).join(' + ')}
-                              </span>
-                            )}
+                          <td className="px-1 py-1 text-center">
+                            <button
+                              type="button"
+                              onClick={() => removeExportSapRow(i)}
+                              disabled={isEnviandoSap}
+                              title="Quitar esta orden del envío a SAP"
+                              aria-label={`Quitar ${payload.CodigoMaterial} del envío`}
+                              className="inline-flex items-center justify-center w-6 h-6 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:pointer-events-none"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
                           </td>
-                          <td className="px-2 py-1 whitespace-nowrap text-[9px] font-mono">
-                            {(provisionalesQueCubrenPorCentro[exportSapPreview.centro].get(payload.CodigoMaterial) || []).map(o => (
-                              <span key={o.orden} className={cn("block", o.llegaDiaPT && "text-orange-600")} title={o.llegaDiaPT ? 'Llega el día del PT' : undefined}>
-                                {o.orden} · {o.fechaFin} · {o.cantUnidadReal}
-                              </span>
-                            ))}
-                            {!provisionalesQueCubrenPorCentro[exportSapPreview.centro].get(payload.CodigoMaterial)?.length && <span className="text-slate-300">—</span>}
-                            {exportSapPreview.conversion[i] && exportSapPreview.conversion[i].provisionalQty > 0 && (
-                              <span className="block text-[8px] font-sans font-black uppercase text-emerald-700 mt-0.5">
-                                {exportSapPreview.conversion[i].motivo === 'provisional+faltante'
-                                  ? `Convierte ${exportSapPreview.conversion[i].provisionalQty} + faltante ${exportSapPreview.conversion[i].faltantePFD}`
-                                  : `Convierte provisional completa (${exportSapPreview.conversion[i].provisionalQty})`}
-                              </span>
-                            )}
-                          </td>
-                          {SOLICITUD_PRODUCCION_FIELDS_ESPUMA.map(f => (
-                            <td key={f.key} className="px-1 py-1">
-                              <Input
-                                type={f.type === 'number' ? 'number' : 'text'}
-                                value={payload[f.key] ?? ''}
-                                onChange={(e) => updateExportSapPayload(i, f.key, f.type === 'number' ? (Number(e.target.value) || 0) : e.target.value)}
-                                disabled={isEnviandoSap}
-                                className={cn("h-7 text-[10px] font-mono px-1.5", f.key === 'Observaciones' ? 'w-48' : 'w-24')}
-                              />
-                            </td>
-                          ))}
+                          <td className="px-2 py-1 truncate max-w-[180px]" title={descripcionMaterial(payload.CodigoMaterial)}>{descripcionMaterial(payload.CodigoMaterial) || '—'}</td>
+                          {SOLICITUD_PRODUCCION_FIELDS_ESPUMA.map(f => {
+                            const error = errorCampoSapEspuma(payload, f.key);
+                            return (
+                              <td key={f.key} className="px-1 py-1">
+                                <Input
+                                  type={f.type === 'number' ? 'number' : 'text'}
+                                  value={payload[f.key] ?? ''}
+                                  onChange={(e) => updateExportSapPayload(i, f.key, f.type === 'number' ? (Number(e.target.value) || 0) : e.target.value)}
+                                  disabled={isEnviandoSap}
+                                  title={error || undefined}
+                                  className={cn("h-7 text-[10px] font-mono px-1.5", f.key === 'Observaciones' ? 'w-48' : 'w-24', error && "border-red-400 bg-red-50")}
+                                />
+                              </td>
+                            );
+                          })}
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+                {erroresExportSap > 0 && (
+                  <p className="mt-2 text-[11px] font-bold text-red-600">
+                    {erroresExportSap} campo(s) en rojo: completa los obligatorios (Cod. Orden Externa, Material, Cantidad, Versión) o quita la fila con ✕ antes de enviar.
+                  </p>
+                )}
               </div>
             </div>
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => { setExportSapPreview(null); setExportSapPayloads(null); }} disabled={isEnviandoSap}>Cancelar</Button>
-            <Button onClick={handleConfirmarExportSap} disabled={isEnviandoSap} className="bg-emerald-600 hover:bg-emerald-700 text-white">
+            <Button onClick={handleConfirmarExportSap} disabled={isEnviandoSap || erroresExportSap > 0 || !exportSapPayloads || exportSapPayloads.length === 0} className="bg-emerald-600 hover:bg-emerald-700 text-white">
               {isEnviandoSap ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Send className="w-4 h-4 mr-2" />} {isEnviandoSap ? 'Enviando…' : 'Confirmar y Enviar a SAP'}
             </Button>
           </DialogFooter>
