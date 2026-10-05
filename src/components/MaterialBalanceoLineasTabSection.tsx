@@ -113,17 +113,7 @@ export const MaterialBalanceoLineasTabSection: React.FC = () => {
   const fetchTechnicalData = async () => {
     setIsLoadingTech(true);
     try {
-      let allTiempos: any[] = [];
-      let page = 1;
-      let hasMore = true;
-      const pageSize = 5000;
-
-      while (hasMore && page <= 10) {
-        const response = await serviciosService.getTiemposEnsamblado(page, pageSize);
-        const raw = Array.isArray(response?.data) ? response.data : [];
-        allTiempos = [...allTiempos, ...raw];
-        if (raw.length < pageSize) hasMore = false; else page++;
-      }
+      const allTiempos = await serviciosService.getTiemposEnsambladoCompleto();
       setTechnicalData(allTiempos);
     } catch (error) {
       console.error('Error loading technical data:', error);

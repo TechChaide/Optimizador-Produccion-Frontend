@@ -190,21 +190,39 @@ export const TacticalPlanMueblesSection: React.FC = () => {
 
             const codigoGrupo = grupoMuebles.codigo_grupo;
 
-            try {
-                const response = await serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(centro, codigoGrupo);
-                if (response && response.data) {
-                    const dataArray = Array.isArray(response.data) ? response.data : [response.data];
-                    setTiemposMueblesData(dataArray);
-                }
-            } catch (error) {
-                console.error('Error al cargar tiempos de Muebles:', error);
-            } finally {
-                setIsTiemposLoading(false);
+            // Fuente 1: tiempos filtrados por grupo (PR2). Ese filtro depende de la clasificación de
+            // puestos en SAP y deja fuera materiales de Muebles que sí tienen tiempo (p. ej. puesto
+            // "Armado"), así que se complementa con el maestro completo de TiemposEnsamblado (todas sus
+            // páginas), filtrado al centro, solo para los materiales que PR2 no trae con tiempo > 0.
+            // Las filas de PR2 van primero: tienen prioridad en el cruce por material (primera con tiempo).
+            const [porGrupo, maestro] = await Promise.allSettled([
+                serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(centro, codigoGrupo),
+                serviciosService.getTiemposEnsambladoCompleto(),
+            ]);
+
+            const toArray = (data: unknown): any[] => (data == null ? [] : Array.isArray(data) ? data : [data]);
+            const materialDe = (item: any) => String(item.CodMaterial ?? item.MATERIAL ?? item.Material ?? '').trim().slice(-8);
+            const tiempoDe = (item: any) => Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
+
+            const filasGrupo = porGrupo.status === 'fulfilled' ? toArray(porGrupo.value?.data) : [];
+            if (porGrupo.status === 'rejected') console.error('Error al cargar tiempos de Muebles por grupo:', porGrupo.reason);
+
+            const conTiempo = new Set(filasGrupo.filter(it => tiempoDe(it) > 0).map(materialDe));
+            const filasMaestro = maestro.status === 'fulfilled'
+                ? maestro.value.filter(it => String(it.Centro ?? '').trim() === centro && tiempoDe(it) > 0 && !conTiempo.has(materialDe(it)))
+                : [];
+            if (maestro.status === 'rejected') console.error('Error al cargar el maestro completo de TiemposEnsamblado:', maestro.reason);
+
+            if (porGrupo.status === 'rejected' && maestro.status === 'rejected') {
+                addNotification('error', 'No se pudieron cargar los tiempos de fabricación de Muebles.');
+            } else {
+                setTiemposMueblesData([...filasGrupo, ...filasMaestro]);
             }
+            setIsTiemposLoading(false);
         };
 
         fetchTiemposData();
-    }, [gruposMuebles, mounted]);
+    }, [gruposMuebles, mounted, addNotification]);
 
   if (!mounted) {
     return (

@@ -2028,32 +2028,19 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
 
             // Cargar Tiempos de Ensamblado (global, sin discriminar Previsional/Fert)
             updateLoadStage('tiempos', { status: 'loading' });
-            const tiemposExplore = await serviciosService.getTiemposEnsamblado(1, 1);
-            const totalTiempos = tiemposExplore.totalRegistros || 0;
-            updateLoadStage('tiempos', { total: totalTiempos });
-            if (totalTiempos > 0) {
-              const BATCH_TIEMPOS = 20000;
-              const pagesTiempos = Math.ceil(totalTiempos / BATCH_TIEMPOS);
-              const tMap = new Map<string, number>();
-              let processedTiempos = 0;
-              for (let i = 1; i <= pagesTiempos; i++) {
-                const res = await serviciosService.getTiemposEnsamblado(i, BATCH_TIEMPOS);
-                if (res.data) {
-                  const items = Array.isArray(res.data) ? res.data : [res.data];
-                  items.forEach((item: any) => {
-                    const material = normalizeMaterialCode(item.CodMaterial ?? item.MATERIAL ?? item.Material ?? '');
-                    const tiempo = Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
-                    if (material && tiempo > 0 && !tMap.has(material)) {
-                      tMap.set(material, tiempo);
-                    }
-                  });
-                  processedTiempos += items.length;
-                  updateLoadStage('tiempos', { current: processedTiempos });
-                }
+            const tiemposRows = await serviciosService.getTiemposEnsambladoCompleto(
+              (loaded, total) => updateLoadStage('tiempos', { total, current: loaded }),
+            );
+            const tMap = new Map<string, number>();
+            tiemposRows.forEach((item: any) => {
+              const material = normalizeMaterialCode(item.CodMaterial ?? item.MATERIAL ?? item.Material ?? '');
+              const tiempo = Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
+              if (material && tiempo > 0 && !tMap.has(material)) {
+                tMap.set(material, tiempo);
               }
-              setGlobalTiemposMap(tMap);
-            }
-            updateLoadStage('tiempos', { status: 'done', current: totalTiempos });
+            });
+            if (tiemposRows.length > 0) setGlobalTiemposMap(tMap);
+            updateLoadStage('tiempos', { status: 'done', current: tiemposRows.length });
 
             // Cargar Órdenes Fert
             updateLoadStage('fert', { status: 'loading' });

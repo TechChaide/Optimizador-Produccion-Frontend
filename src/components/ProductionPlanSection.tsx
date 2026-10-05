@@ -1129,10 +1129,10 @@ const PlanTacticalDetailsTable: React.FC<{ plan: PlanGrupo; grupo: Grupo }> = ({
     setIsLoadingTiemposFallback(true);
     const materialesNecesarios = new Set(matchedOrdenes.map(o => normalizeMaterialCode(o.MATERIAL)));
 
-    serviciosService.getTiemposEnsamblado(1, 30000)
-      .then(response => {
+    serviciosService.getTiemposEnsambladoCompleto()
+      .then(rows => {
         if (!isMountedRef.current) return;
-        const relevantes = ((response.data || []) as TiempoEnsamblePorGrupo[])
+        const relevantes = (rows as TiempoEnsamblePorGrupo[])
           .filter(t => String(t.Centro) === String(centro) && materialesNecesarios.has(normalizeMaterialCode(t.CodMaterial)));
         if (relevantes.length > 0) setTiempos(prev => [...prev, ...relevantes]);
       })

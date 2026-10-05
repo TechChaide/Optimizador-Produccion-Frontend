@@ -2,6 +2,7 @@ import type { BodyResponse } from "@/types/body-response";
 import type { SolicitudProduccionHB } from "@/types/interfaces";
 import { environment } from "@/environments/environments.prod";
 import { fetchWithAuth } from "@/lib/http-client";
+import { fetchAllPages } from "@/lib/paginacion";
 
 const API_URL = `${environment.apiURL}/api/servicios`;
 
@@ -76,6 +77,10 @@ export const serviciosService = {
       throw new Error(errorBody.message || "Failed to fetch Tiempos Ensamblado");
     }
     return response.json();
+  },
+  // Maestro completo de TiemposEnsamblado (todas las páginas, ver fetchAllPages)
+  async getTiemposEnsambladoCompleto(onProgress?: (loaded: number, total: number) => void): Promise<any[]> {
+    return fetchAllPages<any>((page, rows) => this.getTiemposEnsamblado(page, rows), { onProgress });
   },
 
   async getDiccionarioDeDatos(): Promise<BodyResponse<any>> {

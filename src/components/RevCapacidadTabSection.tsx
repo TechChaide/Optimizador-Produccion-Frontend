@@ -157,15 +157,7 @@ export const RevCapacidadTabSection: React.FC = () => {
       setAvailableCenters(centers);
       if (centers.length > 0 && !selectedCenter) setSelectedCenter(centers[0]);
 
-      let allTiempos: any[] = [];
-      let page = 1;
-      let hasMore = true;
-      while (hasMore && page <= 5) {
-        const response = await serviciosService.getTiemposEnsamblado(page, 5000);
-        const raw = Array.isArray(response?.data) ? response.data : [];
-        allTiempos = [...allTiempos, ...raw];
-        if (raw.length < 5000) hasMore = false; else page++;
-      }
+      const allTiempos = await serviciosService.getTiemposEnsambladoCompleto();
       setTechnicalData(allTiempos);
       setFertOrders(Array.isArray(fertRes?.data) ? fertRes.data : []);
       setProvisionalOrders(Array.isArray(prevRes?.data) ? prevRes.data : []);

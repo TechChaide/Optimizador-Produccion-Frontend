@@ -287,24 +287,7 @@ export const TiemposEnsambladoTabSection: React.FC<TiemposEnsambladoTabSectionPr
         // no repite la descarga si ya hay datos cargados).
         sharedTiempos.ensureLoaded();
       } else if (localAllData.length === 0) {
-        let allTiempos: TiempoEnsamblado[] = [];
-        let page = 1;
-        let hasMore = true;
-        const pageSize = 10000;
-
-        while (hasMore) {
-          const response = await serviciosService.getTiemposEnsamblado(page, pageSize);
-          const rawData = Array.isArray(response?.data) ? response.data : [];
-          allTiempos = [...allTiempos, ...rawData];
-
-          const total = response.totalRegistros || response.totalRecords || 0;
-          if (allTiempos.length >= total || rawData.length < pageSize || total === 0) {
-            hasMore = false;
-          } else {
-            page++;
-          }
-          if (page > 50) break;
-        }
+        const allTiempos = (await serviciosService.getTiemposEnsambladoCompleto()) as TiempoEnsamblado[];
         const dedupedTiempos = dedupeTiemposRows(allTiempos) as TiempoEnsamblado[];
         setLocalAllData(dedupedTiempos);
         inspector.captureVariable('tiempos_raw_count', dedupedTiempos.length);
