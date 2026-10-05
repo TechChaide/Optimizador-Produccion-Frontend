@@ -3568,7 +3568,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // distinguir "no hay P2" de "hay P2 pero vencido".
       const vencidos = candidatosBase.filter((pg) => !planesActivos.includes(pg));
       const describirP2 = (pg: PlanGrupo) => `#${pg.codigo_plan_grupo} ${String(pg.valor || '').replace(/^plan\s*t[aá]ctico\s*-\s*/i, '')} (${fechaLocalPlana(pg.fecha_inicio_plan)} → ${fechaLocalPlana(pg.fecha_fin_plan)})`;
-      diagnosticoP2Ref.current = { recuperacion: fechaObjetivoP2, pt: fechaPTCiclo, usados: planesActivos.map(describirP2), fuera: vencidos.map(describirP2) };
+      diagnosticoP2Ref.current = { recuperacion: fechaObjetivoP2, pt: fechaPTCiclo, usados: planesActivos.map(describirP2), fuera: vencidos.map(pg => ({ texto: describirP2(pg), fin: fechaLocalPlana(pg.fecha_fin_plan) })) };
       if (vencidos.length > 0) {
         console.warn(`[Necesidades Planta] P2 activos fuera del ciclo (recuperación ${fechaObjetivoP2} / PT ${fechaPTCiclo}):`,
           vencidos.map((pg) => `#${pg.codigo_plan_grupo} ${pg.valor} (${fechaLocalPlana(pg.fecha_inicio_plan)} → ${fechaLocalPlana(pg.fecha_fin_plan)})`));

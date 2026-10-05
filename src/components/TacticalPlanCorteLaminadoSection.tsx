@@ -71,7 +71,163 @@ import { es } from 'date-fns/locale';
 // GET /api/grupo. Es el único PlanGrupo/DetalleTactico que este módulo crea y edita.
 const CODIGO_GRUPO_LAMINADO = 8;
 const BLOCK_SIZE = 40;
-const SETUP_TIME_PER_RUN = 95; // 95 min por corrida física: traslado/ingreso de bloques + pegado (adhesivo) + limpieza (ajustado desde 55 min, validado con el negocio incluyendo el tiempo de traslado)
+// Tiempo por corrida física (min), tabla del negocio 2026-10-05: TiempoPreparacion 1.200166 h (ingreso
+// de bloques + pegado + limpieza) + TiempoSTDTrasCalleLooper 0.470333 h (traslado) = 1.670499 h ≈ 100.2
+// min. Se aplica una vez por corrida (antes 95 min fijos).
+const TIEMPO_PREPARACION_CORRIDA_H = 1.200166;
+const TIEMPO_TRASLADO_CALLE_LOOPER_H = 0.470333;
+const SETUP_TIME_PER_RUN = (TIEMPO_PREPARACION_CORRIDA_H + TIEMPO_TRASLADO_CALLE_LOOPER_H) * 60;
+// Cambio de referencia (espesor) dentro de una corrida: 5–8 min de ajuste, se usa el promedio
+// (usuario 2026-10-05). Ver minutosSetupBloque.
+const MIN_CAMBIO_REFERENCIA = 6.5;
+// +5% solo sobre el tiempo de rollos (looperTRolloMin × UN): ajuste de velocidad y de estándares
+// previsto por el usuario 2026-10-05. No toca la preparación ni reemplaza el Rendimiento del Looper.
+const FACTOR_TIEMPO_ROLLO = 1.05;
+
+// Empareja líneas del Plan de Salida con las órdenes FERT que SAP creó a partir de ellas: Laminado
+// (Centro 1000, responsables 014/031), misma fecha de inicio y material; si un material tiene varias
+// líneas (corrida 1/2 y 2/2) gana la cantidad más cercana (KG o UN según la unidad de la orden) y cada
+// orden se usa una sola vez. null = SAP todavía no la creó. Lo usan el correo (completarOrdenesSap) y
+// la tabla de pantalla.
+const emparejarOrdenesSap = (
+  lineas: { material: string; un: number; kg: number; fecha: string }[],
+  ordenesFert: RawApiRow[],
+): (string | null)[] => {
+  const libres = ordenesFert.flatMap(o => {
+    if (getProp(o, ['CENTRO', 'Centro', 'centro']).trim() === '2000') return [];
+    const responsable = getProp(o, ['RESPCTRLPROD', 'RESP_CONTROL_PROD', 'RESPCONTROLPROD', 'RespControlProd', 'RESPONSABLE']).trim();
+    if (!RESP_PRODUCCION_DIARIA.includes(responsable)) return [];
+    const orden = getProp(o, ['ORDEN', 'ORDEN_PROCESO', 'ORDEN_FERT']).trim();
+    if (!orden) return [];
+    const fechaRaw = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']).trim();
+    return [{
+      orden,
+      fecha: fechaRaw.includes('T') ? fechaRaw.split('T')[0] : fechaRaw,
+      material: String(Number(getProp(o, ['MATERIAL', 'CodMaterial']))),
+      cantidad: safeNum(getProp(o, ['CANTPROGRAMADA', 'CANTIDAD', 'CANTPENDIENTE'])),
+      enUn: getProp(o, ['UNIDAD', 'Unidad', 'UNIDAD_MEDIDA']).trim().toUpperCase() !== 'KG',
+      usada: false,
+    }];
+  });
+  return lineas.map(l => {
+    const material = String(Number(l.material));
+    let mejor: (typeof libres)[number] | undefined;
+    let dif = Infinity;
+    for (const o of libres) {
+      if (o.usada || o.material !== material || o.fecha !== l.fecha) continue;
+      const d = Math.abs(o.cantidad - (o.enUn ? l.un : l.kg));
+      if (d < dif) { dif = d; mejor = o; }
+    }
+    if (!mejor) return null;
+    mejor.usada = true;
+    return mejor.orden;
+  });
+};
+
+// Material de un bloque a repartir en corridas. deficit = necesidad − stock (deficitRealUN): lo que
+// planta necesita YA; sin él, todo el plan se trata como no urgente.
+interface ItemCorrida { material: string; planUn: number; deficit?: number }
+
+// Empaqueta los materiales de un bloque en sus N corridas (bins de BLOCK_SIZE un.) en dos fases:
+// 1) Cobertura (pedido del usuario 2026-10-05): las primeras corridas cubren el DÉFICIT de TODOS los
+//    materiales a la vez; si no cabe, se reparte proporcional al déficit (mayor residuo, mínimo 1 por
+//    material). Antes era Best-Fit-Decreasing puro: el material grande llenaba la 1/2 y el otro
+//    espesor recién salía en la 2/2, al final del plan, dejando a planta desabastecida (ej. D22 BL-219:
+//    214X1.2 40 en la 1/2 y 214X1.0 28 recién en la 2/2).
+// 2) Resto del plan (sobre el déficit): Best-Fit, prefiriendo una corrida que ya tenga ese material
+//    para no sumar cambios de espesor; solo se fracciona si no cabe entero en ninguna.
+const distributeItemsIntoRuns = (items: ItemCorrida[], totalRuns: number, blockSize: number) => {
+  const bins = Array.from({ length: totalRuns }, () => ({
+    remaining: blockSize,
+    allocations: [] as { material: string; planUn: number }[]
+  }));
+  const agregar = (bin: typeof bins[number], material: string, qty: number) => {
+    if (qty <= 0) return;
+    const ex = bin.allocations.find(x => x.material === material);
+    if (ex) ex.planUn += qty; else bin.allocations.push({ material, planUn: qty });
+    bin.remaining -= qty;
+  };
+
+  const vivos = items
+    .filter(it => it.planUn > 0)
+    .map(it => {
+      const plan = Math.round(it.planUn);
+      return { material: it.material, plan, urgente: Math.min(plan, Math.max(0, Math.round(it.deficit ?? 0))) };
+    })
+    .sort((a, b) => b.plan - a.plan);
+
+  // Fase 1 — cobertura del déficit.
+  for (const bin of bins) {
+    const pend = vivos.filter(v => v.urgente > 0);
+    const total = pend.reduce((s, v) => s + v.urgente, 0);
+    if (total === 0 || bin.remaining <= 0) break;
+    const cupo = bin.remaining;
+    const cuotas = pend.map(v => {
+      const exacta = total <= cupo ? v.urgente : (v.urgente * cupo) / total;
+      return { v, q: Math.max(1, Math.floor(exacta)), r: exacta - Math.floor(exacta) };
+    });
+    let suma = cuotas.reduce((s, c) => s + c.q, 0);
+    // El mínimo de 1 pudo pasarse del cupo: se descuenta de las cuotas más grandes.
+    while (suma > cupo) {
+      const mayor = cuotas.reduce((m, c) => (c.q > m.q ? c : m), cuotas[0]);
+      if (mayor.q <= 1) break;
+      mayor.q--; suma--;
+    }
+    // Cupo sobrante por el redondeo hacia abajo: al de mayor residuo que todavía tenga déficit.
+    const porResiduo = [...cuotas].sort((a, b) => b.r - a.r);
+    while (suma < cupo && porResiduo.some(c => c.q < c.v.urgente)) {
+      for (const c of porResiduo) {
+        if (suma >= cupo) break;
+        if (c.q < c.v.urgente) { c.q++; suma++; }
+      }
+    }
+    cuotas.forEach(c => {
+      const q = Math.min(c.q, c.v.urgente, bin.remaining);
+      agregar(bin, c.v.material, q);
+      c.v.urgente -= q;
+      c.v.plan -= q;
+    });
+  }
+
+  // Fase 2 — resto del plan.
+  vivos.forEach(v => {
+    let qtyLeft = v.plan;
+    while (qtyLeft > 0) {
+      const conMaterial = bins.find(b => b.remaining >= qtyLeft && b.allocations.some(x => x.material === v.material));
+      let destino = conMaterial;
+      if (!destino) {
+        bins.forEach(b => {
+          if (b.remaining >= qtyLeft && (!destino || b.remaining < destino.remaining)) destino = b;
+        });
+      }
+      if (destino) {
+        agregar(destino, v.material, qtyLeft);
+        qtyLeft = 0;
+      } else {
+        // No cabe entero en ninguna corrida: se fracciona en la de más espacio libre.
+        const mayor = bins.reduce((m, b) => (b.remaining > m.remaining ? b : m), bins[0]);
+        const take = Math.min(qtyLeft, mayor?.remaining ?? 0);
+        if (take <= 0) break;
+        agregar(mayor, v.material, take);
+        qtyLeft -= take;
+      }
+    }
+  });
+
+  return bins;
+};
+
+// Minutos de preparación de un bloque: SETUP_TIME_PER_RUN por corrida + un cambio de referencia
+// (espesor) por cada material adicional DENTRO de cada corrida, según el mismo empaquetado del Plan
+// de Salida (ej. D15 AM AF 2/2 con 4 materiales = 3 cambios; una corrida de un solo material = 0).
+// El cambio entre bloques (otra densidad/apertura) ya va dentro de SETUP_TIME_PER_RUN.
+const minutosSetupBloque = (items: ItemCorrida[], corridas: number): number => {
+  if (corridas <= 0) return 0;
+  const cambios = distributeItemsIntoRuns(items, corridas, BLOCK_SIZE)
+    .reduce((s, bin) => s + Math.max(0, new Set(bin.allocations.map(x => x.material)).size - 1), 0);
+  return SETUP_TIME_PER_RUN * corridas + MIN_CAMBIO_REFERENCIA * cambios;
+};
+
 // Proceso "lámina convoluted": 1 lámina base pasada por el proceso alterno (otra máquina) devuelve
 // 2 láminas CONV de menor espesor del mismo recorrido. La necesidad/plan de la variante CONV se
 // deriva multiplicando por este factor la de su lámina base, en vez de calcularse por participación propia.
@@ -1311,7 +1467,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         recuperacion: fechaObjetivoP2,
         pt: fechaPTCiclo,
         usados: planesActivosCrudo.map(describirP2),
-        fuera: candidatosP2.filter(pg => !planesActivosCrudo.includes(pg)).map(describirP2),
+        fuera: candidatosP2.filter(pg => !planesActivosCrudo.includes(pg)).map(pg => ({ texto: describirP2(pg), fin: soloFecha(pg.fecha_fin_plan) })),
       };
 
       // Solo el plan MÁS RECIENTE por grupo — red de seguridad para el caso (menos común ahora que
@@ -2531,17 +2687,18 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         row.planKg = planUn * row.peso;
       });
 
-      // El tiempo de preparación (45 min por corrida física: ingreso de bloques + colocar adhesivo,
+      // El tiempo de preparación (SETUP_TIME_PER_RUN por corrida física: preparación + traslado,
       // medido en prueba en vivo) se reparte entre los materiales del bloque según su participación
       // REAL en unidades planificadas (PLAN(UN)/total del bloque), no según porcentajeNecesidad (que
       // es en Kg y queda congelado/desalineado si hubo overrides manuales). Así el total de setup del
       // bloque (45 × corridas) sigue cerrando exacto, y queda correcto tras cualquier redistribución manual.
       const totalPlanUnGroup = standardItems.reduce((s, r) => s + r.planUn, 0);
       const corridasBloque = totalPlanUnGroup > 0 ? Math.ceil(totalPlanUnGroup / BLOCK_SIZE) : 0;
+      const setupBloque = minutosSetupBloque(standardItems.map(r => ({ material: r.material, planUn: r.planUn, deficit: deficitRealUN(r) })), corridasBloque);
       standardItems.forEach(row => {
         const shareUn = totalPlanUnGroup > 0 ? (row.planUn / totalPlanUnGroup) : 0;
-        const setupContribution = (corridasBloque > 0) ? (SETUP_TIME_PER_RUN * corridasBloque * shareUn) : 0;
-        row.tProceso = ((row.looperTRolloMin || 0) * row.planUn + setupContribution) / 60;
+        const setupContribution = setupBloque * shareUn;
+        row.tProceso = ((row.looperTRolloMin || 0) * row.planUn * FACTOR_TIEMPO_ROLLO + setupContribution) / 60;
       });
 
       // Las variantes CONV no corren corrida propia: su necesidad/plan se deriva de la lámina base
@@ -2555,7 +2712,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
         row.planUn = planUn;
         row.planKg = planUn * row.peso;
-        row.tProceso = ((row.looperTRolloMin || 0) * planUn) / 60;
+        row.tProceso = ((row.looperTRolloMin || 0) * planUn * FACTOR_TIEMPO_ROLLO) / 60;
       });
     });
 
@@ -2613,7 +2770,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // que no ocupan cupo de corrida propio.
   const recomputeRowForPlanUn = (row: UnifiedNeedRow, planUn: number, setupContribution: number = 0): UnifiedNeedRow => {
     const planKg = planUn * row.peso;
-    const tProceso = ((row.looperTRolloMin || 0) * planUn + setupContribution) / 60;
+    const tProceso = ((row.looperTRolloMin || 0) * planUn * FACTOR_TIEMPO_ROLLO + setupContribution) / 60;
     return { ...row, planUn, planKg, tProceso };
   };
 
@@ -2667,7 +2824,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
   // PLAN (UN) por material es editable libremente e independiente de los demás materiales del bloque
   // (no reparte ninguna "bolsa" fija ni tiene tope contra el total automático): permite corregir a mano
-  // incluso un bloque que el cálculo automático dejó en 0 corridas. El total de setup (128 min/corrida)
+  // incluso un bloque que el cálculo automático dejó en 0 corridas. El total de setup (SETUP_TIME_PER_RUN por corrida)
   // sí se recalcula para TODO el bloque tras la edición, según la participación en unidades vigente
   // (planUn/total del bloque), para que siga cerrando exacto. El número de corridas del bloque
   // (Subtotal/corridas) se ajusta a este único material vía el control de "Corridas" del bloque.
@@ -2704,9 +2861,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const standardGroup = prev.filter(r => inGroup(r) && !isConvDescripcion(r.descripcion));
       const newGroupTotal = standardGroup.reduce((s, r) => s + (r.material === material ? newValue : r.planUn), 0);
       const corridasBloque = newGroupTotal > 0 ? Math.ceil(newGroupTotal / BLOCK_SIZE) : 0;
-      const setupFor = (planUn: number) => (corridasBloque > 0 && newGroupTotal > 0)
-        ? SETUP_TIME_PER_RUN * corridasBloque * (planUn / newGroupTotal)
-        : 0;
+      const setupBloque = minutosSetupBloque(standardGroup.map(r => ({ material: r.material, planUn: r.material === material ? newValue : r.planUn, deficit: deficitRealUN(r) })), corridasBloque);
+      const setupFor = (planUn: number) => (newGroupTotal > 0 ? setupBloque * (planUn / newGroupTotal) : 0);
 
       return prev.map(row => {
         if (!inGroup(row)) return row;
@@ -2776,9 +2932,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const actualOthersTotal = others.reduce((s, r) => s + (distribution.get(r.material) ?? 0), 0);
       const newGroupTotal = editedValue + actualOthersTotal;
       const corridasBloque = newGroupTotal > 0 ? Math.ceil(newGroupTotal / BLOCK_SIZE) : 0;
-      const setupFor = (planUn: number) => (corridasBloque > 0 && newGroupTotal > 0)
-        ? SETUP_TIME_PER_RUN * corridasBloque * (planUn / newGroupTotal)
-        : 0;
+      const setupBloque = minutosSetupBloque(standardGroup.map(r => ({ material: r.material, planUn: r.material === material ? editedValue : (distribution.get(r.material) ?? 0), deficit: deficitRealUN(r) })), corridasBloque);
+      const setupFor = (planUn: number) => (newGroupTotal > 0 ? setupBloque * (planUn / newGroupTotal) : 0);
 
       return prev.map(row => {
         if (!inGroup(row)) return row;
@@ -2861,9 +3016,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
       const actualTotal = standardGroup.reduce((s, r) => s + (distribution.get(r.material) ?? 0), 0);
       const corridasBloque = actualTotal > 0 ? Math.ceil(actualTotal / BLOCK_SIZE) : 0;
-      const setupFor = (planUn: number) => (corridasBloque > 0 && actualTotal > 0)
-        ? SETUP_TIME_PER_RUN * corridasBloque * (planUn / actualTotal)
-        : 0;
+      const setupBloque = minutosSetupBloque(standardGroup.map(r => ({ material: r.material, planUn: distribution.get(r.material) ?? 0, deficit: deficitRealUN(r) })), corridasBloque);
+      const setupFor = (planUn: number) => (actualTotal > 0 ? setupBloque * (planUn / actualTotal) : 0);
 
       return prev.map(row => {
         if (!inGroup(row)) return row;
@@ -3508,43 +3662,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     [mttoPreventivoTasks]
   );
 
-  // Corrida pendiente: órdenes propias de Laminado (responsables 014/031, Centro 1000) con fecha
-  // ANTERIOR a la fecha evaluada que todavía tienen cantidad pendiente — siguen ocupando el Looper
-  // al arrancar la ventana. Horas = unidades × TiempoRolloMin del KPI Looper (KG → UN con PesoUN).
-  // SAP sugiere; el planificador ajusta (ej. si en planta ya avanzó) — decisión del usuario 2026-10-02.
-  const corridaPendienteSAP = useMemo(() => {
-    if (!ventanaPlan) return { horas: 0, ordenes: [] as { material: string; fecha: string; un: number; horas: number }[] };
-    const ordenes = ordenesFert.flatMap(o => {
-      if (getProp(o, ['CENTRO', 'Centro', 'centro']).trim() === '2000') return [];
-      const responsable = getProp(o, ['RESPCTRLPROD', 'RESP_CONTROL_PROD', 'RESPCONTROLPROD', 'RespControlProd', 'RESPONSABLE']).trim();
-      if (!RESP_PRODUCCION_DIARIA.includes(responsable)) return [];
-      const fechaRaw = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']).trim();
-      const fecha = fechaRaw.includes('T') ? fechaRaw.split('T')[0] : fechaRaw;
-      if (!fecha || fecha >= ventanaPlan.baseStr) return [];
-      const pendiente = safeNum(getProp(o, ['CANTPENDIENTE']));
-      if (pendiente <= 0) return [];
-      const material = String(Number(getProp(o, ['MATERIAL', 'CodMaterial'])));
-      const looper = kpiLooperData.find(k => cleanCode(k.Material) === material);
-      const minRollo = looper ? safeNum(looper.TiempoRolloMin) : 0;
-      const pesoUN = looper ? safeNum(looper.PesoUN) : 0;
-      const unidad = getProp(o, ['UNIDAD', 'Unidad', 'UNIDAD_MEDIDA']).trim().toUpperCase();
-      const un = unidad === 'KG' ? (pesoUN > 0 ? pendiente / pesoUN : 0) : pendiente;
-      return [{ material, fecha, un, horas: (un * minRollo) / 60 }];
-    });
-    return { horas: ordenes.reduce((s, o) => s + o.horas, 0), ordenes };
-  }, [ventanaPlan, ordenesFert, kpiLooperData]);
-  // null = usar lo que sugiere SAP; un número = ajuste manual del planificador. Se reinicia al
-  // cambiar la fecha evaluada (otra ventana, otra sugerencia).
-  const [corridaPendienteManual, setCorridaPendienteManual] = useState<number | null>(null);
-  // Al cargar un plan guardado (ver restaurarEstadoPlan) la fecha cambia en el mismo paso: el valor
-  // restaurado espera acá para no ser borrado por el reinicio de abajo.
-  const corridaPendienteRestaurada = useRef<number | null>(null);
-  useEffect(() => {
-    setCorridaPendienteManual(corridaPendienteRestaurada.current);
-    corridaPendienteRestaurada.current = null;
-  }, [ventanaPlan?.baseStr]);
-  const corridaPendienteHoras = ventanaPlan ? (corridaPendienteManual ?? corridaPendienteSAP.horas) : 0;
-
   // Paros Planificados y Rendimiento del Looper — salen de las restricciones "Paros _Planificados" y
   // "Rendimiento_Looper" del grupo Corte y Laminado (ver restriccionesCapacidad.ts) y quedan editables
   // en Gestión de Tiempos. Sin restricción: 13% de paros (el 0.87 que estaba fijo) y 100% rendimiento.
@@ -3563,6 +3680,73 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     if (rend !== null) setRendimientoLooperPct(rend);
   }, [restriccionesArray]);
   const factorEfectivoLooper = (1 - paroLooperPct / 100) * (rendimientoLooperPct / 100);
+
+  // Corrida pendiente: órdenes propias de Laminado (responsables 014/031, Centro 1000) con fecha
+  // HASTA la fecha evaluada (plan anterior) que todavía tienen cantidad pendiente. Regla del usuario
+  // 2026-10-05: esas órdenes se procesan en el turno que termina al iniciar el turno Noche de la
+  // ventana (ej. Día lun 05/10 07:00 → 19:00); solo lo que EXCEDE las horas que le quedan a ese turno
+  // (desde ahora, con paros y rendimiento) pasa a ocupar la ventana. Si el turno alcanza, es 0.
+  // Horas = unidades × TiempoRolloMin del KPI Looper (KG → UN con PesoUN).
+  // SAP sugiere; el planificador ajusta (ej. si en planta ya avanzó) — decisión del usuario 2026-10-02.
+  const corridaPendienteSAP = useMemo(() => {
+    const vacio = { horas: 0, horasOrdenes: 0, disponibleTurno: 0, mttoTurno: 0, turnoAnterior: null as { ini: Date; fin: Date } | null, ordenes: [] as { material: string; fecha: string; un: number; horas: number }[] };
+    if (!ventanaPlan) return vacio;
+    const ordenes = ordenesFert.flatMap(o => {
+      if (getProp(o, ['CENTRO', 'Centro', 'centro']).trim() === '2000') return [];
+      const responsable = getProp(o, ['RESPCTRLPROD', 'RESP_CONTROL_PROD', 'RESPCONTROLPROD', 'RespControlProd', 'RESPONSABLE']).trim();
+      if (!RESP_PRODUCCION_DIARIA.includes(responsable)) return [];
+      const fechaRaw = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']).trim();
+      const fecha = fechaRaw.includes('T') ? fechaRaw.split('T')[0] : fechaRaw;
+      if (!fecha || fecha > ventanaPlan.baseStr) return [];
+      const pendiente = safeNum(getProp(o, ['CANTPENDIENTE']));
+      if (pendiente <= 0) return [];
+      const material = String(Number(getProp(o, ['MATERIAL', 'CodMaterial'])));
+      const looper = kpiLooperData.find(k => cleanCode(k.Material) === material);
+      const minRollo = looper ? safeNum(looper.TiempoRolloMin) : 0;
+      const pesoUN = looper ? safeNum(looper.PesoUN) : 0;
+      const unidad = getProp(o, ['UNIDAD', 'Unidad', 'UNIDAD_MEDIDA']).trim().toUpperCase();
+      const un = unidad === 'KG' ? (pesoUN > 0 ? pendiente / pesoUN : 0) : pendiente;
+      return [{ material, fecha, un, horas: (un * minRollo) / 60 }];
+    });
+    const horasOrdenes = ordenes.reduce((s, o) => s + o.horas, 0);
+    // Turno anterior = turno Día de la fecha evaluada, recortado al inicio de la ventana. Lo que le
+    // queda se cuenta desde AHORA (CANTPENDIENTE es lo pendiente al sincronizar).
+    const diaLbl = diaShiftOptions.find(o => o.v === selectedDiaShift)?.l;
+    const iv = diaLbl && selectedDiaShift !== 'EMPTY' ? intervaloDeHorario(parseISO(ventanaPlan.baseStr), diaLbl) : null;
+    const turnoAnterior = iv && ventanaPlan.inicio
+      ? { ini: iv.ini, fin: new Date(Math.min(iv.fin.getTime(), ventanaPlan.inicio.getTime())) }
+      : null;
+    // El MTTO del Looper que cae en ese turno (ej. lun 05/10 en la mañana) es del plan anterior: se
+    // descuenta acá solo la parte que aún no pasó, y no toca la ventana nueva (empieza 19:00).
+    const ahora = new Date();
+    const desde = turnoAnterior ? new Date(Math.max(ahora.getTime(), turnoAnterior.ini.getTime())) : null;
+    const mttoTurno = turnoAnterior && desde
+      ? mantenimientosSAP
+        .filter(m => String(getProp(m, ['MAQUINA'])).toUpperCase().includes('LOOPER'))
+        .reduce((s, m) => {
+          const ini = new Date(getProp(m, ['FECHA_OT_PRG_INI']).trim());
+          const fin = new Date(getProp(m, ['FECHA_OT_PRG_FIN']).trim());
+          if (!isValid(ini) || !isValid(fin) || fin <= ini) return s;
+          return s + horasSolapadas(ini, fin, desde, turnoAnterior.fin);
+        }, 0)
+      : 0;
+    const disponibleTurno = turnoAnterior && desde
+      ? Math.max(0, horasSolapadas(desde, turnoAnterior.fin, turnoAnterior.ini, turnoAnterior.fin) * factorEfectivoLooper - mttoTurno)
+      : 0;
+    return { horas: Math.max(0, horasOrdenes - disponibleTurno), horasOrdenes, disponibleTurno, mttoTurno, turnoAnterior, ordenes };
+  }, [ventanaPlan, ordenesFert, kpiLooperData, diaShiftOptions, selectedDiaShift, factorEfectivoLooper, mantenimientosSAP]);
+  // null = usar lo que sugiere SAP; un número = ajuste manual del planificador. Se reinicia al
+  // cambiar la fecha evaluada (otra ventana, otra sugerencia).
+  const [corridaPendienteManual, setCorridaPendienteManual] = useState<number | null>(null);
+  // Al cargar un plan guardado (ver restaurarEstadoPlan) la fecha cambia en el mismo paso: el valor
+  // restaurado espera acá para no ser borrado por el reinicio de abajo.
+  const corridaPendienteRestaurada = useRef<number | null>(null);
+  useEffect(() => {
+    setCorridaPendienteManual(corridaPendienteRestaurada.current);
+    corridaPendienteRestaurada.current = null;
+  }, [ventanaPlan?.baseStr]);
+  const corridaPendienteHoras = ventanaPlan ? (corridaPendienteManual ?? corridaPendienteSAP.horas) : 0;
+
 
   // Disponibilidad neta calculada de forma independiente por turno (cada turno descuenta su propio
   // % de paros y el rendimiento del Looper) para poder evaluar la disponibilidad real de cada turno
@@ -3594,6 +3778,62 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return (totalsUnified.tProceso / tDisponible) * 100;
   }, [tDisponible, totalsUnified.tProceso]);
 
+  // Destino de cada línea del Plan de Salida (pedido del usuario 2026-10-05), con la misma prioridad
+  // del reparto del bloque (TIER 1/2 en handleProcessResumen): el plan del material cubre primero el
+  // déficit de consumo interno (Forros + Muebles) y después el de Venta Externa (P2 Venta Rollos). Se
+  // recorre en el orden de las corridas, así que la primera corrida del material atiende lo interno.
+  // El sobrante (redondeo del bloque) va al destino que tenga el material (interno si tiene).
+  const destinosPlanSalida = (): string[] => {
+    const restante = new Map<string, { interno: number; ve: number }>();
+    unifiedNeeds.forEach(r => {
+      if (restante.has(r.material)) return;
+      const plan = Math.max(0, Math.round(r.planUn));
+      let interno = Math.min(plan, deficitForrosMueblesUN(r));
+      let ve = Math.min(deficitVentaExternaUN(r), plan - interno);
+      const sobrante = plan - interno - ve;
+      const tieneInterno = r.totalNroRollos - r.necVentaExternaUn > 0.001;
+      if (sobrante > 0) {
+        if (tieneInterno || ve === 0) interno += sobrante; else ve += sobrante;
+      }
+      restante.set(r.material, { interno, ve });
+    });
+    return outputPlanRows.map(row => {
+      const r = restante.get(row.material);
+      let un = Math.round(row.planUn);
+      if (!r) return 'Consumo interno';
+      const interno = Math.min(un, r.interno);
+      r.interno -= interno; un -= interno;
+      const ve = Math.min(un, r.ve);
+      r.ve -= ve; un -= ve;
+      const internoTotal = interno + un; // lo que excede lo calculado (ajuste manual) se trata como interno
+      if (ve > 0 && internoTotal > 0) return `Interno ${internoTotal} · VE ${ve}`;
+      return ve > 0 ? 'Venta Externa' : 'Consumo interno';
+    });
+  };
+
+  // Celda "Orden SAP" del correo: al guardar todavía no existe (SAP la crea después del envío), así
+  // que queda una marca que completarOrdenesSap reemplaza al revisar el reporte. Los comentarios HTML
+  // no se ven en el correo ni pasan al TXT.
+  const marcaOrdenSap = (row: CorridaOutputRow) =>
+    `<!--OF:${row.material}|${Math.round(row.planUn)}|${row.planKg.toFixed(1)}-->pendiente SAP<!--/OF-->`;
+
+  // Al revisar el reporte guardado: busca en SAP las órdenes FERT de Laminado (Centro 1000,
+  // responsables 014/031) con la fecha del plan y llena cada marca por material. Si un material tiene
+  // varias líneas (corrida 1/2 y 2/2), se empareja por la cantidad más cercana (KG o UN según la
+  // unidad de la orden) y cada orden se usa una sola vez. Lo no encontrado sigue "pendiente SAP".
+  const completarOrdenesSap = async (html: string, fechaPlan: string): Promise<string> => {
+    if (!html.includes('<!--OF:')) return html;
+    const res = await serviciosService.getOrdenesFert(1, 20000);
+    const marca = /<!--OF:([^|]*)\|([^|]*)\|([^>]*?)-->[\s\S]*?<!--\/OF-->/g;
+    const lineas = Array.from(html.matchAll(marca)).map(m => ({ material: m[1], un: Number(m[2]), kg: Number(m[3]), fecha: fechaPlan }));
+    const ordenes = emparejarOrdenesSap(lineas, (res.data || []) as RawApiRow[]);
+    let i = 0;
+    return html.replace(marca, (todo, mat: string, un: string, kg: string) => {
+      const orden = ordenes[i++];
+      return orden ? `<!--OF:${mat}|${un}|${kg}-->${orden}<!--/OF-->` : todo;
+    });
+  };
+
   // Cuerpo del correo "Enviar Reporte" (Gestión de Tiempos) — HTML tabla, estilos inline (sin <style>,
   // sin fuentes externas: los clientes de correo los ignoran o los rompen). Formato ya evaluado con el
   // usuario vía vista previa antes de conectar el envío real. Mismos umbrales/colores que ya usa este
@@ -3615,9 +3855,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     const ventanaHtml = ventanaPlan?.inicio && ventanaPlan.fin
       ? `<div style="margin:0 0 12px;">${ejecucionPlanHtml(ventanaPlan.inicio, ventanaPlan.fin)}</div>`
       : '';
+    const inicioPrimerTurno = ventanaPlan?.turnos[0];
+    const pendienteDetalle = inicioPrimerTurno
+      ? `plan anterior que excede el turno y pasa al turno ${inicioPrimerTurno.turno} del ${format(inicioPrimerTurno.ini, 'EEE dd/MM HH:mm', { locale: es })}`
+      : 'plan anterior que pasa al siguiente turno';
     const pendienteHtml = corridaPendienteHoras > 0 ? `
         <tr style="background:#fff7ed;">
-          <td colspan="6" style="padding:10px 12px;font-size:12px;font-weight:700;color:#c2410c;">Corrida pendiente (en proceso al iniciar la ventana)</td>
+          <td colspan="6" style="padding:10px 12px;font-size:12px;font-weight:700;color:#c2410c;">Corrida pendiente (${pendienteDetalle})</td>
           <td align="right" style="padding:10px 12px;font-size:12px;font-weight:700;color:#c2410c;font-variant-numeric:tabular-nums;">${corridaPendienteHoras.toFixed(2)} h</td>
         </tr>` : '';
     // Gestión de tiempos: mismo esquema que el detalle por máquina de Corte Espuma — horas brutas,
@@ -3636,9 +3880,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     const fechaEjecucion = outputPlanRows[0]?.fecha
       ? format(parseISO(outputPlanRows[0].fecha), "EEEE d 'de' MMMM", { locale: es })
       : '—';
+    const destinos = destinosPantalla;
     const planSalidaFilas = outputPlanRows.map((row, i) => {
       const esPrimeraDeCorrida = i === 0 || outputPlanRows[i - 1].corridaId !== row.corridaId;
       const bg = i % 2 === 0 ? '#ffffff' : '#fafafa';
+      const destino = destinos[i];
+      const destinoColor = destino.startsWith('Venta') ? '#7c3aed' : destino.startsWith('Consumo') ? '#047857' : '#b45309';
       return `
         <tr style="background:${bg};">
           <td style="padding:7px 10px;font-size:10px;color:${esPrimeraDeCorrida ? '#9ca3af' : '#d1d5db'};border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${esPrimeraDeCorrida ? format(parseISO(row.fecha), 'dd/MM') : '&nbsp;'}</td>
@@ -3647,6 +3894,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <td align="right" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${Math.round(row.planUn)}</td>
           <td align="right" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${formatNum(row.planKg, 1)}</td>
           <td align="center" style="padding:7px 10px;font-size:10px;font-weight:700;color:#b45309;border-bottom:1px solid #f3f4f6;">${row.isConvNested ? '—' : row.prioridad}</td>
+          <td style="padding:7px 10px;font-size:10px;color:#374151;font-family:ui-monospace,Consolas,monospace;border-bottom:1px solid #f3f4f6;white-space:nowrap;">${marcaOrdenSap(row)}</td>
+          <td style="padding:7px 10px;font-size:10px;font-weight:600;color:${destinoColor};border-bottom:1px solid #f3f4f6;white-space:nowrap;">${destino}</td>
         </tr>`;
     }).join('');
     const planSalidaHtml = outputPlanRows.length === 0 ? '' : `
@@ -3666,6 +3915,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">UN</td>
           <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Kg</td>
           <td align="center" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Prior.</td>
+          <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Orden SAP</td>
+          <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Destino</td>
         </tr>${planSalidaFilas}
       </table>
     </td>
@@ -3788,51 +4039,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const ASUNTO_REPORTE = 'Reporte de producción — Corte y Laminado [Looper]-[Quito]';
 
 
-  // Empaqueta los materiales de un grupo dentro de sus N corridas (bins de 40 un.) usando
-  // Best-Fit-Decreasing: cada material entra ENTERO en la corrida donde mejor quepa, y solo
-  // se fracciona entre varias corridas si su necesidad por sí sola supera el tamaño de un bloque.
-  // Esto unifica las necesidades menores en un único ciclo en vez de repartirlas parejo entre todas las corridas.
-  const distributeItemsIntoRuns = (items: UnifiedNeedRow[], totalRuns: number, blockSize: number) => {
-    const bins = Array.from({ length: totalRuns }, () => ({
-      remaining: blockSize,
-      allocations: [] as { material: string; planUn: number }[]
-    }));
-
-    const sorted = [...items].filter(it => it.planUn > 0).sort((a, b) => b.planUn - a.planUn);
-
-    sorted.forEach(item => {
-      let qtyLeft = Math.round(item.planUn);
-
-      while (qtyLeft > 0) {
-        // Best-fit: el bin con menor espacio libre que aún alcance a cubrir qtyLeft completo
-        let bestBinIdx = -1;
-        let bestRemaining = Infinity;
-        bins.forEach((bin, idx) => {
-          if (bin.remaining >= qtyLeft && bin.remaining < bestRemaining) {
-            bestBinIdx = idx;
-            bestRemaining = bin.remaining;
-          }
-        });
-
-        if (bestBinIdx >= 0) {
-          bins[bestBinIdx].allocations.push({ material: item.material, planUn: qtyLeft });
-          bins[bestBinIdx].remaining -= qtyLeft;
-          qtyLeft = 0;
-        } else {
-          // No cabe entero en ninguna corrida: solo aquí se fracciona, en el bin con más espacio disponible
-          let maxBinIdx = 0;
-          bins.forEach((bin, idx) => { if (bin.remaining > bins[maxBinIdx].remaining) maxBinIdx = idx; });
-          const take = Math.min(qtyLeft, bins[maxBinIdx].remaining);
-          if (take <= 0) break;
-          bins[maxBinIdx].allocations.push({ material: item.material, planUn: take });
-          bins[maxBinIdx].remaining -= take;
-          qtyLeft -= take;
-        }
-      }
-    });
-
-    return bins;
-  };
 
   // Plan de Salida: prioriza corridas por impacto en la necesidad (déficit de stock primero,
   // luego % de déficit, luego mayor consumo total) y reparte las corridas de cada grupo en
@@ -3864,7 +4070,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     scored.forEach(gw => {
       const key = `${gw.group.apertura}|${gw.group.densidad}`;
       const runnableItems = gw.group.items.filter(it => !isConvDescripcion(it.descripcion));
-      groupBins.set(key, distributeItemsIntoRuns(runnableItems, gw.totalRuns, BLOCK_SIZE));
+      groupBins.set(key, distributeItemsIntoRuns(runnableItems.map(it => ({ material: it.material, planUn: it.planUn, deficit: deficitRealUN(it) })), gw.totalRuns, BLOCK_SIZE));
     });
 
     const corridaSequence: { group: typeof scored[0]['group']; runIndex: number; totalRuns: number }[] = [];
@@ -3941,7 +4147,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
     // Reloj acumulado de producción por fecha: cada fila NO-CONV arranca donde terminó la anterior de
     // su misma fecha (primera del día a las 07:00) y su duración es looperTRolloMin × planUn de ESA
-    // fila puntual (sin sumar el setup de 45min del bloque, que ya está prorrateado aparte en tProceso
+    // fila puntual (sin sumar el setup del bloque, que ya está prorrateado aparte en tProceso
     // de Resumen Necesidades — acá se pidió el tiempo de producción puro). Las filas CONV no consumen
     // reloj propio: se producen en paralelo en otra máquina a partir de su lámina base, así que
     // heredan el horario de la fila base bajo la que aparecen anidadas (ver isConvNested arriba).
@@ -3979,6 +4185,15 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
     return rows;
   }, [groupedNeeds, corridaFechas, siguienteDiaHabil]);
+
+  // Mismas columnas en la tabla de pantalla del Plan de Salida: la orden sale de las FERT ya cargadas
+  // al sincronizar (aparece al volver a sincronizar después de que SAP la cree).
+  const ordenesSapPantalla = useMemo(
+    () => emparejarOrdenesSap(outputPlanRows.map(r => ({ material: r.material, un: Math.round(r.planUn), kg: Number(r.planKg.toFixed(1)), fecha: r.fecha })), ordenesFert),
+    [outputPlanRows, ordenesFert]
+  );
+  const destinosPantalla = destinosPlanSalida();
+
 
   useEffect(() => { outputPlanRowsRef.current = outputPlanRows; }, [outputPlanRows]);
 
@@ -4458,10 +4673,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                     <PopoverContent className="w-[320px] p-4 bg-white border border-gray-100 rounded-2xl shadow-xl text-slate-800" align="start">
                       <p className="text-[9px] font-black uppercase text-orange-700 tracking-widest mb-1">Corrida pendiente — Looper</p>
                       <p className="text-[8px] text-slate-400 font-bold uppercase mb-3">
-                        Órdenes 014/031 anteriores al {format(parseISO(ventanaPlan.baseStr), 'dd/MM')} con cantidad pendiente en SAP: siguen ocupando el Looper al iniciar la ventana
+                        Órdenes 014/031 hasta el {format(parseISO(ventanaPlan.baseStr), 'dd/MM')} (plan anterior) con cantidad pendiente en SAP. Solo cuenta lo que no alcanza a terminar el turno que cierra{corridaPendienteSAP.turnoAnterior ? ` a las ${format(corridaPendienteSAP.turnoAnterior.fin, 'HH:mm')}` : ''}: ese exceso ocupa el turno siguiente
                       </p>
                       {corridaPendienteSAP.ordenes.length === 0 ? (
-                        <p className="text-[10px] text-slate-400 italic mb-3">SAP no reporta órdenes pendientes anteriores.</p>
+                        <p className="text-[10px] text-slate-400 italic mb-3">SAP no reporta órdenes pendientes del plan anterior.</p>
                       ) : (
                         <div className="space-y-1.5 max-h-40 overflow-y-auto mb-3">
                           {corridaPendienteSAP.ordenes.map((o, i) => (
@@ -4472,8 +4687,16 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                               <span className="font-black text-orange-700 whitespace-nowrap">{o.horas.toFixed(2)}h</span>
                             </div>
                           ))}
-                          <div className="flex justify-between pt-1 text-[9px] font-black">
-                            <span className="uppercase">Sugerido SAP</span>
+                          <div className="flex justify-between pt-1 text-[9px] font-bold text-slate-500">
+                            <span className="uppercase">Tiempo en corridas</span>
+                            <span>{corridaPendienteSAP.horasOrdenes.toFixed(2)}h</span>
+                          </div>
+                          <div className="flex justify-between text-[9px] font-bold text-slate-500">
+                            <span className="uppercase">Disponible del turno{corridaPendienteSAP.turnoAnterior ? ` (hasta ${format(corridaPendienteSAP.turnoAnterior.fin, 'HH:mm')})` : ''}{corridaPendienteSAP.mttoTurno > 0 ? ` · −${corridaPendienteSAP.mttoTurno.toFixed(2)}h MTTO` : ''}</span>
+                            <span>−{corridaPendienteSAP.disponibleTurno.toFixed(2)}h</span>
+                          </div>
+                          <div className="flex justify-between text-[9px] font-black">
+                            <span className="uppercase">Pasa al siguiente turno</span>
                             <span className="text-orange-700">{corridaPendienteSAP.horas.toFixed(2)}h</span>
                           </div>
                         </div>
@@ -4720,6 +4943,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     fechaObjetivo: outputPlanRows[0]?.fecha || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd'),
     asunto: ASUNTO_REPORTE,
     construirHtml: () => construirReporteHtml(),
+    completarHtml: completarOrdenesSap,
     capturarEstado: capturarEstadoPlan,
     restaurarEstado: restaurarEstadoPlan,
   });
@@ -4751,7 +4975,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <div className="p-2 bg-red-600/10 rounded-xl shadow-inner"><Scissors className="w-6 h-6 text-red-600" /></div>
           <div>
             <h2 className="text-xl font-black text-gray-800 uppercase tracking-tighter">Programación Táctica Laminado</h2>
-            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Setup: {SETUP_TIME_PER_RUN}min | Auditoría Multialmacén SAP</p>
+            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Setup: {SETUP_TIME_PER_RUN.toFixed(1)} min por corrida + {MIN_CAMBIO_REFERENCIA} min por cambio de espesor · rollos +{Math.round((FACTOR_TIEMPO_ROLLO - 1) * 100)}% | Auditoría Multialmacén SAP</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -5614,12 +5838,14 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                     <th className="px-6 py-4 border-r border-gray-100 text-left min-w-[220px]">Descripción</th>
                     <th className="px-4 py-4 border-r border-gray-100">Plan (Un)</th>
                     <th className="px-4 py-4 border-r border-gray-100">Plan (Kg)</th>
-                    <th className="px-4 py-4 bg-red-50 text-red-700">Prioridad</th>
+                    <th className="px-4 py-4 bg-red-50 text-red-700 border-r border-gray-100">Prioridad</th>
+                    <th className="px-4 py-4 border-r border-gray-100">Orden SAP</th>
+                    <th className="px-4 py-4 text-left">Destino</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50 font-bold text-slate-700">
                   {outputPlanRows.length === 0 ? (
-                    <tr><td colSpan={7} className="py-24 text-slate-300 font-black uppercase tracking-widest italic text-center">No hay corridas calculadas para los criterios actuales</td></tr>
+                    <tr><td colSpan={9} className="py-24 text-slate-300 font-black uppercase tracking-widest italic text-center">No hay corridas calculadas para los criterios actuales</td></tr>
                   ) : (
                     outputPlanRows.map((row, i) => {
                       const isFirstOfCorrida = i === 0 || outputPlanRows[i - 1].corridaId !== row.corridaId;
@@ -5648,7 +5874,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                           </td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono text-red-900 bg-[#fee2e2]/30">{Math.round(row.planUn).toLocaleString()}</td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono text-red-900 bg-[#fee2e2]/30">{formatNum(row.planKg, 1)}</td>
-                          <td className="px-4 py-3 bg-amber-50 text-amber-700 font-black">{row.isConvNested ? '—' : row.prioridad}</td>
+                          <td className="px-4 py-3 bg-amber-50 text-amber-700 font-black border-r border-gray-100">{row.isConvNested ? '—' : row.prioridad}</td>
+                          <td className="px-4 py-3 border-r border-gray-100 font-mono text-[10px] whitespace-nowrap">
+                            {ordenesSapPantalla[i] ?? <span className="text-slate-300 font-sans italic">pendiente SAP</span>}
+                          </td>
+                          <td className={cn("px-4 py-3 text-left text-[10px] whitespace-nowrap", destinosPantalla[i]?.startsWith('Venta') ? 'text-violet-700' : destinosPantalla[i]?.startsWith('Consumo') ? 'text-emerald-700' : 'text-amber-700')}>
+                            {destinosPantalla[i]}
+                          </td>
                         </tr>
                       );
                     })

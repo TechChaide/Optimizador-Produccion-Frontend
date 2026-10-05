@@ -49,6 +49,10 @@ export interface ConfigReportePlanTxt {
   asunto: string;
   /** Arma el HTML del correo con los datos ACTUALES del módulo (solo se llama al guardar). */
   construirHtml: () => string | Promise<string>;
+  /** Opcional: al revisar el reporte, completa en la foto guardada datos que recién existen después
+   *  de guardar (ej. Laminado: número de orden SAP). Si cambia algo, la foto se vuelve a guardar para
+   *  que el archivo quede igual a lo que se envía. Si falla, se revisa la foto tal cual. */
+  completarHtml?: (html: string, fechaObjetivo: string) => Promise<string>;
   /** Texto corto para notificaciones/diálogo cuando hay varios flujos en el mismo módulo (ej. "Centro 1000"). */
   etiqueta?: string;
   /** Respaldo de lo planificado (turnos, corridas, ajustes) que se guarda junto al TXT como {fecha}.estado.json. */
@@ -164,7 +168,18 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
     if (!fecha) return false;
     setRecuperando(true);
     try {
-      const plan = await obtenerPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: fecha });
+      let plan = await obtenerPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: fecha });
+      if (cfg.completarHtml && plan.html) {
+        try {
+          const html = await cfg.completarHtml(plan.html, fecha);
+          if (html !== plan.html) {
+            const res = await guardarPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: fecha, html, asunto: cfg.asunto, estado: plan.estado ?? undefined });
+            plan = { ...plan, html, ruta: res.ruta, contenido: (await obtenerPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: fecha })).contenido };
+          }
+        } catch (error) {
+          addNotification('warning', `${prefijo}no se pudieron completar los datos de SAP en el reporte: ${(error as Error).message}`);
+        }
+      }
       setVista(plan);
       setFechaVista(fecha);
       if (fecha === cfg.fechaObjetivo) {
