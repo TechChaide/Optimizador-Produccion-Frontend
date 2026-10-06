@@ -4587,7 +4587,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                 <PopoverTrigger asChild>
                   <button
                     type="button"
-                    title="Envía por correo un resumen de Rollos, Gestión de Tiempos, Tiempo Operativo y Disponibilidad Total"
+                    title="Envía por correo un resumen de Rollos, Gestión de Tiempos, Tiempo Operativo y Tiempo Disponible"
                     className="flex items-center gap-1 text-[7px] font-black uppercase tracking-wider text-indigo-700 border border-indigo-200 bg-white rounded px-2 py-1 hover:bg-indigo-50 transition-colors"
                   >
                     <Mail className="w-2.5 h-2.5" /> Enviar Reporte
@@ -4866,7 +4866,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             <span className="text-2xl font-black text-emerald-600 leading-none tabular-nums">{totalsUnified.tProceso.toFixed(2)}</span>
           </div>
           <div className="col-span-2 p-4 border-r border-gray-100 flex flex-col items-center justify-center">
-            <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter mb-1">DISPONIBILIDAD TOTAL (H)</p>
+            <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter mb-1">TIEMPO DISPONIBLE (H)</p>
             <span className="text-2xl font-black text-amber-600 leading-none tabular-nums">{tDisponible.toFixed(2)}</span>
             <p className="text-[7px] font-bold text-slate-400 uppercase tracking-tighter mt-1">Día {diaDisponibleOEE.toFixed(2)}h + Noche {nocheDisponibleOEE.toFixed(2)}h{sabadoDisponibleOEE > 0 ? ` + Sábado ${sabadoDisponibleOEE.toFixed(2)}h` : ''} (-{paroLooperPct}% paros · {rendimientoLooperPct}% rend. c/u) -{mttoPreventivoHoras.toFixed(2)}h MTTO{corridaPendienteHoras > 0 ? ` -${corridaPendienteHoras.toFixed(2)}h pendiente` : ''}</p>
           </div>
