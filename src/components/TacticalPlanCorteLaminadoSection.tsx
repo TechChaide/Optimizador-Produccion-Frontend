@@ -121,7 +121,9 @@ const emparejarOrdenesSap = (
 
 // Material de un bloque a repartir en corridas. deficit = necesidad − stock (deficitRealUN): lo que
 // planta necesita YA; sin él, todo el plan se trata como no urgente.
-interface ItemCorrida { material: string; planUn: number; deficit?: number }
+// ve = UN del plan que van a Venta Externa (repartoDestinoUN): van JUNTAS en una corrida (fase 1b);
+// el resto (planUn − ve) es consumo interno y sigue el reparto normal. Con ve, deficit es solo el interno.
+interface ItemCorrida { material: string; planUn: number; deficit?: number; ve?: number }
 
 // Empaqueta los materiales de un bloque en sus N corridas (bins de BLOCK_SIZE un.) en dos fases:
 // 1) Cobertura (pedido del usuario 2026-10-05): las primeras corridas cubren el DÉFICIT de TODOS los
@@ -134,24 +136,33 @@ interface ItemCorrida { material: string; planUn: number; deficit?: number }
 const distributeItemsIntoRuns = (items: ItemCorrida[], totalRuns: number, blockSize: number) => {
   const bins = Array.from({ length: totalRuns }, () => ({
     remaining: blockSize,
-    allocations: [] as { material: string; planUn: number }[]
+    // veUn: cuántas de esas UN son la parte de Venta Externa (para el Destino de la fila).
+    allocations: [] as { material: string; planUn: number; veUn: number }[]
   }));
-  const agregar = (bin: typeof bins[number], material: string, qty: number) => {
+  const agregar = (bin: typeof bins[number], material: string, qty: number, esVenta = false) => {
     if (qty <= 0) return;
-    const ex = bin.allocations.find(x => x.material === material);
-    if (ex) ex.planUn += qty; else bin.allocations.push({ material, planUn: qty });
+    let ex = bin.allocations.find(x => x.material === material);
+    if (!ex) { ex = { material, planUn: 0, veUn: 0 }; bin.allocations.push(ex); }
+    ex.planUn += qty;
+    if (esVenta) ex.veUn += qty;
     bin.remaining -= qty;
   };
 
+  // Cada material se separa en su parte interna (reparto normal) y su parte de venta (una corrida).
   const vivos = items
     .filter(it => it.planUn > 0)
-    .map(it => {
+    .flatMap(it => {
       const plan = Math.round(it.planUn);
-      return { material: it.material, plan, urgente: Math.min(plan, Math.max(0, Math.round(it.deficit ?? 0))) };
+      const ve = Math.min(plan, Math.max(0, Math.round(it.ve ?? 0)));
+      const interno = plan - ve;
+      return [
+        { material: it.material, plan: interno, esVenta: false, urgente: Math.min(interno, Math.max(0, Math.round(it.deficit ?? 0))) },
+        { material: it.material, plan: ve, esVenta: true, urgente: 0 },
+      ].filter(v => v.plan > 0);
     })
     .sort((a, b) => b.plan - a.plan);
 
-  // Fase 1 — cobertura del déficit.
+  // Fase 1 — cobertura del déficit interno (la parte de venta va en la 1b).
   for (const bin of bins) {
     const pend = vivos.filter(v => v.urgente > 0);
     const total = pend.reduce((s, v) => s + v.urgente, 0);
@@ -184,7 +195,20 @@ const distributeItemsIntoRuns = (items: ItemCorrida[], totalRuns: number, blockS
     });
   }
 
-  // Fase 2 — resto del plan.
+  // Fase 1b — parte de Venta Externa (usuario 2026-10-06): toda junta en UNA corrida, la primera donde
+  // quepa tras cubrir el déficit interno, para no partirla (ej. 30012660: 1 UN en la 1/2 y 5 en la 2/2;
+  // 30007712: VE 1 en una corrida y VE 10 en otra). Si no cabe entera en ninguna, se fracciona en la
+  // menor cantidad de corridas posible.
+  vivos.filter(v => v.esVenta && v.plan > 0).forEach(v => {
+    const destino = bins.find(b => b.remaining >= v.plan);
+    if (destino) { agregar(destino, v.material, v.plan, true); v.plan = 0; return; }
+    [...bins].sort((a, b) => b.remaining - a.remaining).forEach(b => {
+      const take = Math.min(v.plan, b.remaining);
+      if (take > 0) { agregar(b, v.material, take, true); v.plan -= take; }
+    });
+  });
+
+  // Fase 2 — resto del plan interno.
   vivos.forEach(v => {
     let qtyLeft = v.plan;
     while (qtyLeft > 0) {
@@ -308,6 +332,26 @@ const deficitForrosMueblesUN = (r: Pick<UnifiedNeedRow, 'totalNroRollos' | 'tota
   return Math.max(0, deficitRealUN(r) - deficitVentaExternaUN(r));
 };
 
+// Reparto del PLAN de un material entre consumo interno y Venta Externa para el Destino y las
+// corridas (usuario 2026-10-06): el stock cubre PRIMERO a Forros/Muebles y el resto a VE (antes todo el
+// stock se le restaba a VE: D25 CONV mostraba "VE 11" con ~20 pedidos). El sobrante del plan va a
+// interno si el material tiene necesidad interna. deficitInterno = lo que planta interna necesita YA.
+// No cambia corridas ni cantidades (TIER 1/2/3 siguen con deficitForrosMueblesUN/deficitVentaExternaUN).
+const repartoDestinoUN = (r: Pick<UnifiedNeedRow, 'planUn' | 'totalNroRollos' | 'totalStockUN' | 'necVentaExternaUn'>) => {
+  const enteroUN = (raw: number) => (raw > 0.001 ? Math.ceil(raw - 0.001) : 0);
+  const plan = Math.max(0, Math.round(r.planUn));
+  const necInterna = Math.max(0, r.totalNroRollos - r.necVentaExternaUn);
+  const stockParaVE = Math.max(0, r.totalStockUN - necInterna);
+  const deficitInterno = enteroUN(necInterna - r.totalStockUN);
+  let interno = Math.min(plan, deficitInterno);
+  let ve = Math.min(enteroUN(r.necVentaExternaUn - stockParaVE), plan - interno);
+  const sobrante = plan - interno - ve;
+  if (sobrante > 0) {
+    if (necInterna > 0.001 || ve === 0) interno += sobrante; else ve += sobrante;
+  }
+  return { interno, ve, deficitInterno };
+};
+
 // Fila cruda proveniente de endpoints SAP/servicios internos: los nombres de columna varían de
 // mayúsculas/minúsculas y de endpoint a endpoint, por eso se accede siempre vía getProp/cleanCode/safeNum.
 type RawApiRow = Record<string, unknown>;
@@ -349,6 +393,8 @@ interface CorridaOutputRow {
   planKg: number;
   prioridad: number;
   isConvNested: boolean;
+  // UN de esta fila que van a Venta Externa (del reparto de corridas); undefined en filas CONV.
+  veUn?: number;
   // Minutos por rollo del material (mismo dato que looperTRolloMin en Resumen Necesidades) — se usa
   // para calcular la duración real de esta fila (looperTRolloMin × planUn) al armar el reloj
   // acumulado de horaInicioProgramada/horaFinProgramada (ver el segundo paso dentro de outputPlanRows
@@ -3769,26 +3815,21 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // recorre en el orden de las corridas, así que la primera corrida del material atiende lo interno.
   // El sobrante (redondeo del bloque) va al destino que tenga el material (interno si tiene).
   const destinosPlanSalida = (): string[] => {
+    // Reparto interno/VE por material (repartoDestinoUN: stock primero a Forros/Muebles). Las filas de
+    // corrida ya traen su parte de venta (veUn, la que el reparto de corridas dejó junta en una sola
+    // corrida); las CONV (sin veUn) se etiquetan consumiendo ese reparto en orden: interno, luego VE.
     const restante = new Map<string, { interno: number; ve: number }>();
-    // Para el Destino el stock cubre PRIMERO a Forros/Muebles y el resto a VE (usuario 2026-10-06:
-    // D25 CONV mostraba "VE 11" con ~20 pedidos porque todo el stock se le restaba a VE). Solo es la
-    // etiqueta de pantalla/correo: corridas, cantidades, P3 y SAP siguen con deficit*UN de siempre.
-    const enteroUN = (raw: number) => (raw > 0.001 ? Math.ceil(raw - 0.001) : 0);
     unifiedNeeds.forEach(r => {
-      if (restante.has(r.material)) return;
-      const plan = Math.max(0, Math.round(r.planUn));
-      const necInterna = Math.max(0, r.totalNroRollos - r.necVentaExternaUn);
-      const stockParaVE = Math.max(0, r.totalStockUN - necInterna);
-      let interno = Math.min(plan, enteroUN(necInterna - r.totalStockUN));
-      let ve = Math.min(enteroUN(r.necVentaExternaUn - stockParaVE), plan - interno);
-      const sobrante = plan - interno - ve;
-      const tieneInterno = r.totalNroRollos - r.necVentaExternaUn > 0.001;
-      if (sobrante > 0) {
-        if (tieneInterno || ve === 0) interno += sobrante; else ve += sobrante;
-      }
-      restante.set(r.material, { interno, ve });
+      if (!restante.has(r.material)) restante.set(r.material, repartoDestinoUN(r));
     });
+    const etiqueta = (interno: number, ve: number) =>
+      ve > 0 && interno > 0 ? `Interno ${interno} · VE ${ve}` : ve > 0 ? 'Venta Externa' : 'Consumo interno';
     return outputPlanRows.map(row => {
+      if (row.veUn !== undefined) {
+        const un = Math.round(row.planUn);
+        const ve = Math.min(un, row.veUn);
+        return etiqueta(un - ve, ve);
+      }
       const r = restante.get(row.material);
       let un = Math.round(row.planUn);
       if (!r) return 'Consumo interno';
@@ -3796,9 +3837,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       r.interno -= interno; un -= interno;
       const ve = Math.min(un, r.ve);
       r.ve -= ve; un -= ve;
-      const internoTotal = interno + un; // lo que excede lo calculado (ajuste manual) se trata como interno
-      if (ve > 0 && internoTotal > 0) return `Interno ${internoTotal} · VE ${ve}`;
-      return ve > 0 ? 'Venta Externa' : 'Consumo interno';
+      return etiqueta(interno + un, ve); // lo que excede lo calculado (ajuste manual) se trata como interno
     });
   };
 
@@ -4061,7 +4100,11 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     scored.forEach(gw => {
       const key = `${gw.group.apertura}|${gw.group.densidad}`;
       const runnableItems = gw.group.items.filter(it => !isConvDescripcion(it.descripcion));
-      groupBins.set(key, distributeItemsIntoRuns(runnableItems.map(it => ({ material: it.material, planUn: it.planUn, deficit: deficitRealUN(it) })), gw.totalRuns, BLOCK_SIZE));
+      groupBins.set(key, distributeItemsIntoRuns(runnableItems.map(it => {
+        if ((it.necVentaExternaUn || 0) <= 0) return { material: it.material, planUn: it.planUn, deficit: deficitRealUN(it) };
+        const reparto = repartoDestinoUN(it);
+        return { material: it.material, planUn: it.planUn, deficit: reparto.deficitInterno, ve: reparto.ve };
+      }), gw.totalRuns, BLOCK_SIZE));
     });
 
     const corridaSequence: { group: typeof scored[0]['group']; runIndex: number; totalRuns: number }[] = [];
@@ -4102,6 +4145,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           planKg: alloc.planUn * item.peso,
           prioridad,
           isConvNested: false,
+          veUn: alloc.veUn,
           looperTRolloMin: item.looperTRolloMin,
           fechaInicioProgramada: fecha,
           horaInicioProgramada: '',
