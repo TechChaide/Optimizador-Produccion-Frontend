@@ -4033,7 +4033,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <td width="33.33%" style="padding-left:6px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#111827;border-radius:10px;">
               <tr><td style="padding:14px 14px;">
-                <p style="margin:0;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#9ca3af;">Disponibilidad total</p>
+                <p style="margin:0;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#9ca3af;">Tiempo disponible</p>
                 <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#ffffff;font-variant-numeric:tabular-nums;">${tDisponible.toFixed(2)} h</p>
               </td></tr>
             </table>

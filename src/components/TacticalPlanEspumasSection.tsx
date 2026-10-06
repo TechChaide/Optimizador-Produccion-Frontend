@@ -2951,6 +2951,27 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const listaDetalleHtml = (lista: typeof r.detallePorMaquina) => lista.map((m, idx) => `
       <div style="${idx < lista.length - 1 ? 'margin-bottom:12px;' : ''}">${detalleMaquinaHtml(m)}</div>`).join('');
 
+    // Resumen final por proceso (pedido del usuario 2026-10-06, mismo formato que el correo de
+    // Laminado): Ocupación real | Tiempo operativo | Disponibilidad. Carruseles con el criterio "A":
+    // su disponibilidad incluye el remanente de CNC, igual que el tablero del módulo.
+    const tarjetaHtml = (titulo: string, valor: string, fondo: string, colorTitulo: string, nota = '') => `
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${fondo};border-radius:10px;">
+              <tr><td style="padding:12px 12px;">
+                <p style="margin:0;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${colorTitulo};">${titulo}</p>
+                <p style="margin:4px 0 0;font-size:20px;font-weight:700;color:#ffffff;font-variant-numeric:tabular-nums;">${valor}</p>${nota ? `
+                <p style="margin:2px 0 0;font-size:9px;color:#9ca3af;">${nota}</p>` : ''}
+              </td></tr>
+            </table>`;
+    const resumenProcesoHtml = (proceso: string, pct: number, operativo: number, disponible: number, notaDisponible: string) => `
+      <p style="margin:0 0 6px;font-size:11px;font-weight:800;color:#111827;text-transform:uppercase;">${proceso}</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px;">
+        <tr>
+          <td width="33.33%" valign="top" style="padding-right:6px;">${tarjetaHtml('Ocupación real', `${pct.toFixed(1)}%`, pct > 100 ? '#7f1d1d' : '#065f46', '#fecaca')}</td>
+          <td width="33.34%" valign="top" style="padding:0 6px;">${tarjetaHtml('Tiempo operativo', `${operativo.toFixed(2)} h`, '#111827', '#9ca3af')}</td>
+          <td width="33.33%" valign="top" style="padding-left:6px;">${tarjetaHtml('Tiempo disponible', `${disponible.toFixed(2)} h`, '#111827', '#9ca3af', notaDisponible)}</td>
+        </tr>
+      </table>`;
+
     const carruselesMaquinas = r.detallePorMaquina.filter(m => m.proceso === 'carrusel');
     const carruselesDetalleHtml = listaDetalleHtml(carruselesMaquinas);
 
@@ -3006,18 +3027,24 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           <td align="right" style="padding:8px 12px;font-size:11px;font-weight:700;color:#1d4ed8;border-bottom:1px solid #dbeafe;">Verticales</td>
         </tr>
         <tr>
-          <td style="padding:7px 12px;font-size:11px;font-weight:700;color:#1e3a8a;border-bottom:1px solid #eff6ff;">Tiempo Máquina (H)</td>
+          <td style="padding:7px 12px;font-size:11px;font-weight:700;color:#1e3a8a;border-bottom:1px solid #eff6ff;">Tiempo disponible (H)</td>
           <td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${r.carruseles.capacidad.toFixed(2)}</td>
           ${tieneCnc ? `<td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${cncCedeRemanente ? `${r.cnc.ocupacion.toFixed(2)} <span style="font-size:9px;color:#6b7280;">(usado)</span>` : r.cnc.capacidad.toFixed(2)}</td>` : ''}
           <td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${r.verticales.capacidad.toFixed(2)}</td>
         </tr>
         <tr style="background:#fafafa;">
+          <td style="padding:7px 12px;font-size:11px;font-weight:700;color:#1e3a8a;border-bottom:1px solid #eff6ff;">Tiempo operativo (H)</td>
+          <td align="right" style="padding:7px 12px;font-size:11px;font-weight:700;color:#111827;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${r.carruseles.ocupacion.toFixed(2)}</td>
+          ${tieneCnc ? `<td align="right" style="padding:7px 12px;font-size:11px;font-weight:700;color:#111827;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${r.cnc.ocupacion.toFixed(2)}</td>` : ''}
+          <td align="right" style="padding:7px 12px;font-size:11px;font-weight:700;color:#111827;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${r.verticales.ocupacion.toFixed(2)}</td>
+        </tr>
+        <tr>
           <td style="padding:7px 12px;font-size:11px;font-weight:700;color:#1e3a8a;border-bottom:1px solid #eff6ff;">Cantidad (und)</td>
           <td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${formatNum(r.carruseles.cantidad, 0)}</td>
           ${tieneCnc ? `<td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${formatNum(r.cnc.cantidad, 0)}</td>` : ''}
           <td align="right" style="padding:7px 12px;font-size:11px;color:#374151;border-bottom:1px solid #eff6ff;font-variant-numeric:tabular-nums;">${formatNum(r.verticales.cantidad, 0)}</td>
         </tr>
-        <tr>
+        <tr style="background:#fafafa;">
           <td style="padding:7px 12px;font-size:11px;font-weight:700;color:#1e3a8a;">Peso (Kg)</td>
           <td align="right" style="padding:7px 12px;font-size:11px;color:#374151;font-variant-numeric:tabular-nums;">${formatNum(r.carruseles.peso, 0)}</td>
           ${tieneCnc ? `<td align="right" style="padding:7px 12px;font-size:11px;color:#374151;font-variant-numeric:tabular-nums;">${formatNum(r.cnc.peso, 0)}</td>` : ''}
@@ -3032,6 +3059,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       </table>
       ${r.cncRemanente > 0.05 ? `<p style="margin:8px 0 0;font-size:10px;color:#b45309;">Capacidad de Carruseles incluye +${r.cncRemanente.toFixed(1)}h remanente de CNC (capacidad libre de CNC ese día, que un carrusel puede aprovechar). Por eso la columna CNC muestra solo su tiempo utilizado, para no contar esas horas dos veces; el detalle por máquina CNC arriba conserva su tiempo máquina completo.</p>` : ''}
       ${!r.fecha ? '<p style="margin:8px 0 0;font-size:10px;color:#b45309;">Sin fecha seleccionada en Capacidad Operativa — la ocupación mostrada es 0. Selecciona una fecha antes de enviar.</p>' : ''}
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:16px 28px 6px;">
+      <p style="margin:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Resumen de ocupación</p>
+      ${resumenProcesoHtml('Carruseles', pctCarruseles, r.carruseles.ocupacion, r.carruseles.capacidad, cncCedeRemanente ? `incluye ${r.cncRemanente.toFixed(1)} h libres de CNC` : '')}
+      ${resumenProcesoHtml('Verticales', pctVerticales, r.verticales.ocupacion, r.verticales.capacidad, '')}
     </td>
   </tr>
   <tr>
