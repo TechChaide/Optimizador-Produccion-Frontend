@@ -169,6 +169,8 @@ const NOMBRE_RESTRICCION_RESP_VERTICALES = 'RESPCTRLPROD_VERTICALES';
 // planificación — caso real PFF #920 (1000) / #921 (2000), creados el lunes 28-sep con
 // fecha_inicio_plan 30-sep. El Nivel 2 de Capacidad (ciclo atrasado un día) es siempre este valor − 1.
 const DIAS_HABILES_PT_ENSAMBLADO = 2;
+// Consultas de BOM en paralelo por lote en el cálculo PFF (antes una por una, ver obtenerBomPFF).
+const LOTE_BOM_PFF = 8;
 
 // Días hábiles ANTES de la fecha de la necesidad en que SAP entrega la provisional que la responde.
 // 0 = el mismo día (flujo vigente, validado con MD04 2026-10-03). Se están probando en SAP las
@@ -205,7 +207,7 @@ type ProcesoCorte = 'carrusel' | 'vertical' | 'cnc';
 // (ver MACHINE_SAP_CODES_UIO) para la fecha elegida en "Evaluar Capacidad" — 'sin-fecha' y
 // 'sin-mapeo' son estados informativos, no ceros: evitan que "no hay dato" se lea como "máquina libre".
 type OcupacionMaquinaInfo =
-  | { estado: 'ok'; horas: number; capNeta: number; tiempoMaquinaBruto: number; pct: number | null }
+  | { estado: 'ok'; horas: number; capNeta: number; tiempoMaquinaBruto: number; pct: number | null; pendienteAnterior?: { dia: string; pendiente: number; restante: number; pasa: number } }
   | { estado: 'sin-mapeo' }
   | { estado: 'sin-fecha' };
 // Código real de puesto de trabajo SAP para la Cortadora CNC (HR-CTCNC) — verificado con el maestro
@@ -913,6 +915,8 @@ interface ResultadoResumenEspuma {
   necesidadCapacidadNivel2: Record<'1000' | '2000', UnifiedRow[]>;
   clavesProvisionalesTransformadas: Record<'1000' | '2000', string[]>;
   densidadCarruselesUIO: [string, string[]][];
+  // Hora de la sincronización que produjo este resultado (opcional: reportes previos no la tienen).
+  momentoSync?: string;
 }
 interface EstadoPlanCorteEspuma {
   tipo: 'corte-espuma';
@@ -937,6 +941,9 @@ interface EstadoPlanCorteEspuma {
   resultado: ResultadoResumenEspuma;
 }
 
+// Resumen del pendiente FERT del día hábil anterior que pasa al plan (ver ajustePendienteTurnoAnterior).
+interface PendienteTurnoAnterior { dia: string; pendiente: number; restante: number; pasa: number }
+
 interface SnapshotCorteEspuma {
   ordenesProvisionales: RawApiRow[];
   ordenesFert: RawApiRow[];
@@ -959,6 +966,9 @@ interface SnapshotCorteEspuma {
   necesidadPFFNivel2Data: Record<'1000' | '2000', NecesidadPlantaRow[]>;
   fertsP2Muebles?: NecesidadPlantaRow[];
   fertsPFF?: NecesidadPlantaRow[];
+  // Hora de la sincronización (ISO): el pendiente del día anterior se compara con lo que le quedaba
+  // al turno A ESA HORA (ver ajustePendienteTurnoAnterior).
+  momentoSync?: string;
 }
 
 // Una línea del BOM de un FERT del P2 Muebles que llega a un componente de corte (ver
@@ -1004,14 +1014,20 @@ const ES_CODIGO_FERT = (codigo: string | number): boolean => /^2\d{7}$/.test(Str
 // FERT (MATERIAL_PADRE = el FERT) con otro NIVEL y una CANTIDAD_ACUMULADA distinta de la unitaria
 // (unitaria=2/acumulada=0.02). En una relación directa acumulada = unitaria siempre.
 // nivelBom: 1 si cuelga directo del FERT, 2 si llega a través de un semielaborado.
+// Profundidad máxima donde hay láminas de corte (usuario 2026-10-06): hasta el nivel 3 de la explosión
+// (láminas que vienen del proceso de prensado); el resto están en nivel 2. Lo que aparezca más abajo
+// no es consumo de corte del FERT y no se suma. El endpoint devuelve el árbol completo (no acepta
+// nivel máximo), así que se filtra aquí. fueraDeNivel permite contar lo descartado.
+const NIVEL_MAX_BOM_LAMINA = 3;
 const leerLineaBom = (row: Record<string, unknown>, fertConsultado: string) => {
   const nivel = Number(row.NIVEL || 0);
   const cantUnitaria = Number(row.CANTIDAD_UNITARIA || 0);
   const cantAcumulada = Number(row.CANTIDAD_ACUMULADA || cantUnitaria || 0);
   const materialPadre = cleanCode(row.MATERIAL_PADRE);
   const directa = materialPadre === cleanCode(fertConsultado);
-  const valida = !(directa && Math.abs(cantAcumulada - cantUnitaria) >= 0.0001);
-  return { nivel, cantUnitaria, cantAcumulada, materialPadre, nivelBom: (directa ? 1 : 2) as 1 | 2, valida };
+  const fueraDeNivel = nivel > NIVEL_MAX_BOM_LAMINA;
+  const valida = !fueraDeNivel && !(directa && Math.abs(cantAcumulada - cantUnitaria) >= 0.0001);
+  return { nivel, cantUnitaria, cantAcumulada, materialPadre, nivelBom: (directa ? 1 : 2) as 1 | 2, valida, fueraDeNivel };
 };
 
 // Nivel BOM de una línea de Respuesta P3/PFD (decisión del usuario 2026-09-29): DetalleTactico no
@@ -1042,6 +1058,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Resultado del Resumen cargado desde un reporte guardado (ver EstadoPlanCorteEspuma): mientras no
   // sea null, los cálculos del tablero devuelven esto en vez de procesar datos SAP. Se limpia al sincronizar.
   const [resultadoRestaurado, setResultadoRestaurado] = useState<ResultadoResumenEspuma | null>(null);
+  // Hora de la última sincronización (ISO); con plan cargado de un reporte manda la del reporte.
+  const [momentoSync, setMomentoSync] = useState<string | null>(null);
+  const momentoEvaluacion = resultadoRestaurado ? (resultadoRestaurado.momentoSync ?? null) : momentoSync;
   // "Sincronizar" + "Generar Necesidades · P1/PFF" (antes 2 clics) se combinan en 1 — el usuario lo
   // pidió por ser repetitivo en el uso diario, mismo patrón ya aplicado en Corte y Laminado (ver
   // [[modulos_tacticos_sincronizar_y_generar_combinado]]). "Entregas VE" y "Actualizar P2" NO se
@@ -2705,6 +2724,60 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     }, 0);
   }, [uniqueMantenimientosSAP, turnosVentanaMaquina]);
 
+  // Pendiente del día hábil anterior = solo el EXCESO del turno (regla de Laminado, usuario 2026-10-06).
+  // Las FERT del día anterior con cantidad pendiente se están cortando en el turno Día de ese día: a la
+  // hora de la sincronización (momentoEvaluacion) cada máquina aún tiene horas de ese turno. Por máquina:
+  // pasa = máx(0, horas pendientes − horas restantes × (1 − paro Día) × rendimiento − MTTO en ese resto).
+  // Cada fila se escala por la fracción que pasa en su(s) máquina(s); sin máquina mapeada, sin turno Día
+  // o sin hora de sincronización (reporte viejo) pasa completa, como antes. Solo FERT: el pendiente por
+  // plan sin orden se sigue sumando completo (sin orden no se puede cortar todavía).
+  const ajustePendienteTurnoAnterior = useCallback(<T extends { row: UnifiedRow }>(
+    planta: 'UIO' | 'GYE', diaHabilAnterior: string, filas: T[]
+  ): { filas: T[]; porMaquina: Map<string, { pendiente: number; restante: number; pasa: number }> } => {
+    const porMaquina = new Map<string, { pendiente: number; restante: number; pasa: number }>();
+    const ahora = momentoEvaluacion ? new Date(momentoEvaluacion) : null;
+    if (!ahora || !isValid(ahora) || filas.length === 0) return { filas, porMaquina };
+    const config = planta === 'UIO' ? uioConfig : gyeConfig;
+    const asignaciones = filas.map(x => asignacionMaquinaOrden(planta, normalizarCodigoMaquina(x.row.maquina), x.row.material));
+    filas.forEach((x, i) => asignaciones[i].forEach(a => {
+      const p = porMaquina.get(a.id) ?? { pendiente: 0, restante: 0, pasa: 0 };
+      p.pendiente += x.row.tTotal * a.fraccion;
+      porMaquina.set(a.id, p);
+    }));
+    const dia = parseFechaLocal(diaHabilAnterior);
+    porMaquina.forEach((p, id) => {
+      const c = config.shifts[id];
+      const label = c && c.activa !== false && c.day !== 'EMPTY' ? shiftOptions.find(o => o.v === c.day)?.l : null;
+      const iv = label && isValid(dia) ? intervaloDeHorario(dia, label) : null;
+      if (iv) {
+        const desde = ahora > iv.ini ? ahora : iv.ini;
+        const proceso = MACHINES_BY_PLANTA[planta].find(m => m.id === id)?.proceso ?? 'carrusel';
+        const rendimiento = proceso === 'vertical' ? 1 : proceso === 'cnc' ? config.performanceCNC / 100 : config.performance / 100;
+        const target = id.trim().toUpperCase();
+        const mtto = uniqueMantenimientosSAP.reduce((s, m) => {
+          const link = resolveMachineLink(getProp(m, ['ID_MAQUINA', 'MAQUINA']), getProp(m, ['Centro', 'CENTRO']), getProp(m, ['PLANTA']));
+          if (!link || link.id !== target || link.planta !== planta) return s;
+          const ini = new Date(getProp(m, ['FECHA_OT_PRG_INI']));
+          const fin = new Date(getProp(m, ['FECHA_OT_PRG_FIN']));
+          return isValid(ini) && isValid(fin) && fin > ini ? s + horasSolapadas(ini, fin, desde, iv.fin) : s;
+        }, 0);
+        p.restante = Math.max(0, horasSolapadas(desde, iv.fin, iv.ini, iv.fin) * (1 - (c?.paro1 ?? 0) / 100) * rendimiento - mtto);
+      }
+      p.pasa = Math.max(0, p.pendiente - p.restante);
+    });
+    const ajustadas = filas.map((x, i) => {
+      const asig = asignaciones[i];
+      if (asig.length === 0) return x;
+      const factor = asig.reduce((s, a) => {
+        const p = porMaquina.get(a.id)!;
+        return s + a.fraccion * (p.pendiente > 0 ? p.pasa / p.pendiente : 1);
+      }, 0) + Math.max(0, 1 - asig.reduce((s, a) => s + a.fraccion, 0));
+      if (factor >= 0.9999) return x;
+      return { ...x, row: { ...x.row, tTotal: x.row.tTotal * factor, cantUnidadReal: x.row.cantUnidadReal * factor, peso: x.row.peso * factor } };
+    });
+    return { filas: ajustadas, porMaquina };
+  }, [momentoEvaluacion, uioConfig, gyeConfig, shiftOptions, uniqueMantenimientosSAP]);
+
   // Ventana del plan de la PLANTA para mostrarla (inicio más temprano / fin más tardío de sus
   // máquinas en servicio) — solo con UNA fecha evaluada.
   const ventanaPlanPorPlanta = useMemo(() => {
@@ -2754,6 +2827,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // siempre cierra el remanente aunque la orden ya esté resuelta en la práctica) — sumar eso sin
       // tope disparó la Ocupación Total a 200%. El backlog es "lo de ayer que no se hizo", no un
       // acumulado histórico completo.
+      // Pendiente FERT del día anterior y cuánto pasa al plan (ver ajustePendienteTurnoAnterior).
+      let pendienteTurnoAnterior = null as PendienteTurnoAnterior | null;
       const calcularBacklogAntesDe = (fechaLimite: string) => {
         const fechasConNecesidad = Array.from(new Set(
           [...necesidadCapacidad, ...necesidadCapacidadNivel2].map(r => r.fecha)
@@ -2765,8 +2840,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const backlogFertReal = fertSinVentana
           .filter(r => r.centro === centroId && r.fecha === diaHabilAnterior && r.cant > 0 && !yaCapturado.has(`${r.orden}|${r.material}`))
           .map(row => ({ row, estado: 'FERT' as const, fecha: row.fecha }));
+        const ajuste = ajustePendienteTurnoAnterior(planta, diaHabilAnterior, backlogFertReal);
+        if (ajuste.porMaquina.size > 0) {
+          const tot = Array.from(ajuste.porMaquina.values()).reduce((s, p) => ({ pendiente: s.pendiente + p.pendiente, restante: s.restante + Math.min(p.restante, p.pendiente), pasa: s.pasa + p.pasa }), { pendiente: 0, restante: 0, pasa: 0 });
+          pendienteTurnoAnterior = { dia: diaHabilAnterior, ...tot };
+        }
 
-        return [...backlogNecesidad, ...backlogFertReal];
+        return [...backlogNecesidad, ...ajuste.filas];
       };
 
       const fechasSel = Array.from(selectedDatesCapacidad[planta]).sort();
@@ -2887,6 +2967,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         rendimientoCNCPct: config.performanceCNC,
         detallePorMaquina,
         cncRemanente,
+        pendienteTurnoAnterior: pendienteTurnoAnterior as PendienteTurnoAnterior | null,
         carruseles: { capacidad: Math.max(0, capacidadPorProceso.carrusel - mttoPorProceso('carrusel')) + cncRemanente, ocupacion: ocupadoPorProceso('carrusel'), cantidad: cantidadPorProceso('carrusel'), peso: pesoPorProceso('carrusel'), tiempoMaquina: tiempoMaquinaPorProceso.carrusel },
         verticales: { capacidad: Math.max(0, capacidadPorProceso.vertical - mttoPorProceso('vertical')), ocupacion: ocupadoPorProceso('vertical'), cantidad: cantidadPorProceso('vertical'), peso: pesoPorProceso('vertical'), tiempoMaquina: tiempoMaquinaPorProceso.vertical },
         cnc: { capacidad: Math.max(0, capacidadPorProceso.cnc - mttoPorProceso('cnc')), ocupacion: ocupadoPorProceso('cnc'), cantidad: cantidadPorProceso('cnc'), peso: pesoPorProceso('cnc'), tiempoMaquina: tiempoMaquinaPorProceso.cnc },
@@ -2898,7 +2979,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     fertAuditAllUIO, fertAuditAllGYE, provAuditAllUIO, provAuditAllGYE, sinProvisionalesTransformadas,
     filasCentroEnFecha, calcularFaltanteNecesidadPlanta, necesidadPorMaterialCombinadoPorCentro,
     selectedDatesCapacidad, uioConfig, gyeConfig, shiftOptions, nightShiftOptions, responsablesPorCentro,
-    restarDiasHabiles, getMttoTimeParaFecha, sabadoCuentaEnPlanta, diasVentanaPlan,
+    restarDiasHabiles, getMttoTimeParaFecha, sabadoCuentaEnPlanta, diasVentanaPlan, ajustePendienteTurnoAnterior,
   ]);
 
   // Cuerpo del correo — mismo formato ya aprobado en Artifact (Día/Noche/Mtto simple, Carruseles y
@@ -2911,6 +2992,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const nombrePlanta = planta === 'UIO' ? 'Quito' : 'Guayaquil';
     const ventana = ventanaPlanPorPlanta[planta];
     const ventanaHtml = ventana ? ejecucionPlanHtml(ventana.inicio, ventana.fin) : '';
+    // Pendiente del día hábil anterior (órdenes FERT): cuánto alcanzaba el turno en curso y cuánto pasó al plan
+    // (ya incluido en el tiempo operativo de cada proceso, ver ajustePendienteTurnoAnterior).
+    const pend = r.pendienteTurnoAnterior;
+    const pendienteHtml = pend && pend.pendiente > 0.05
+      ? `<p style="margin:4px 0 0;font-size:11px;color:#b45309;">Pendiente del ${format(parseFechaLocal(pend.dia), "EEE dd/MM", { locale: es })}: ${pend.pendiente.toFixed(1)} h − ${pend.restante.toFixed(1)} h que alcanza el turno en curso = <strong>${pend.pasa.toFixed(1)} h pasan a este plan</strong> (incluidas en el tiempo operativo).</p>`
+      : '';
     // Fecha de LIBERACIÓN del plan (el día en que se genera y guarda el reporte), no la del plan:
     // pedido del usuario 2026-10-02 — la fecha del plan ya se lee en la ejecución (inicio → fin).
     const fechaLabel = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
@@ -3066,6 +3153,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       <p style="margin:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Resumen de ocupación</p>
       ${resumenProcesoHtml('Carruseles', pctCarruseles, r.carruseles.ocupacion, r.carruseles.capacidad, cncCedeRemanente ? `incluye ${r.cncRemanente.toFixed(1)} h libres de CNC` : '')}
       ${resumenProcesoHtml('Verticales', pctVerticales, r.verticales.ocupacion, r.verticales.capacidad, '')}
+      ${pendienteHtml}
     </td>
   </tr>
   <tr>
@@ -3127,6 +3215,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           '2000': [...(clavesProvisionalesTransformadas['2000'] ?? [])],
         },
         densidadCarruselesUIO: Array.from(densidadCarruselesUIO.entries()).map(([d, ids]) => [d, [...ids]] as [string, string[]]),
+        momentoSync: momentoEvaluacion ?? undefined,
       },
     };
   };
@@ -3482,7 +3571,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // Snapshot para no perder lo cargado al cambiar de módulo (ver CACHE_CORTE_ESPUMA). El P2 y el
       // PFF se agregan por su cuenta desde fetchNecesidadesPlanta / calcularNecesidadPFF.
       const previo = leerDeCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA);
+      const ahoraSync = new Date().toISOString();
+      setMomentoSync(ahoraSync);
       guardarEnCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA, {
+        momentoSync: ahoraSync,
         ordenesProvisionales: provsRes.data?.data || provsRes.data || [],
         ordenesFert: fertsRes.data?.data || fertsRes.data || [],
         inventarioSAP: invRes.data || [],
@@ -3699,6 +3791,24 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // explosión de BOM. `explotarPFFParaCentro` (más abajo) es un wrapper de una línea que sigue
   // calculando hoy+3 y delega aquí — mismo nombre, misma firma, mismo comportamiento para
   // calcularNecesidadPFF, sin ningún cambio para el flujo P1/PFF existente.
+  // Caché de BOM del cálculo PFF por centro|material (la promesa, así dos pedidos simultáneos comparten
+  // la consulta). El Nivel 2 de Capacidad explota los mismos FERT con otra fecha: ya no vuelve a
+  // consultar SAP. Se vacía al iniciar cada calcularNecesidadPFF para traer BOM vigentes.
+  const bomPFFCacheRef = useRef(new Map<string, Promise<unknown[]>>());
+  const obtenerBomPFF = useCallback((centro: string, materialCode: string): Promise<unknown[]> => {
+    const clave = `${centro}|${materialCode}`;
+    let p = bomPFFCacheRef.current.get(clave);
+    if (!p) {
+      p = serviciosService.getMaestroMaterialesExplosion(centro, materialCode.padStart(18, '0'), 1, 500)
+        .then(response => {
+          const raw = response?.data?.data || response?.data || [];
+          return Array.isArray(raw) ? raw : [];
+        });
+      bomPFFCacheRef.current.set(clave, p);
+    }
+    return p;
+  }, []);
+
   const explotarPFFParaCentroConFecha = useCallback(async (
     codigoGrupoEnsamblado: number,
     centro: '1000' | '2000',
@@ -3706,7 +3816,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     detallesTodos: DetalleTactico[],
     fechaObjetivoPFF: string,
     onStep: () => void
-  ): Promise<{ filas: NecesidadPlantaRow[]; sinMatch: string[]; conError: string[]; tipoPlan: 'P1' | 'PFF' | null; ferts: NecesidadPlantaRow[] }> => {
+  ): Promise<{ filas: NecesidadPlantaRow[]; sinMatch: string[]; conError: string[]; tipoPlan: 'P1' | 'PFF' | null; ferts: NecesidadPlantaRow[]; descartadasNivel?: number }> => {
     // Además del estado, se exige que fecha_inicio_plan coincida EXACTO con `fechaObjetivoPFF`: esa
     // es la fecha de producción del Producto Terminado (PT) real del PFF/P1 — confirmado por el
     // usuario, corrige un valor (hoy+2) que se había fijado en una sesión anterior sin ese respaldo
@@ -3767,12 +3877,20 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const resultadoPorPlan = new Map<number, Map<string, { n1: number; n2: number }>>();
     const sinMatch: string[] = [];
     const conError: string[] = [];
+    // Líneas de lámina por debajo de NIVEL_MAX_BOM_LAMINA que no se sumaron (se informan en el panel).
+    let descartadasNivel = 0;
 
-    for (const materialCode of qtyPorMaterialYPlan.keys()) {
+    // BOM de todos los materiales en lotes paralelos (usuario 2026-10-06: 558 materiales uno por uno,
+    // ~5 s cada consulta, tardaba más de 40 min). El avance del panel cuenta cada BOM recibido; la suma
+    // de abajo sigue en el mismo orden, leyendo de la caché (bomPFFCacheRef).
+    const materialesPFF = Array.from(qtyPorMaterialYPlan.keys());
+    for (let i = 0; i < materialesPFF.length; i += LOTE_BOM_PFF) {
+      await Promise.allSettled(materialesPFF.slice(i, i + LOTE_BOM_PFF).map(m => obtenerBomPFF(centro, m).finally(onStep)));
+    }
+
+    for (const materialCode of materialesPFF) {
       try {
-        const fullCode = materialCode.padStart(18, '0');
-        const response = await serviciosService.getMaestroMaterialesExplosion(centro, fullCode, 1, 500);
-        const rawData = response?.data?.data || response?.data || [];
+        const rawData = await obtenerBomPFF(centro, materialCode);
         let encontroMatch = false;
         // Ver TIENE_COMPONENTE_ESPUMA: si NINGÚN componente del árbol menciona espuma en absoluto,
         // este material simplemente no la necesita (ej. una BASE cuyo único componente es un FORRO) —
@@ -3818,8 +3936,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             // pero incompleto: no cubría "TACO PRENSADO" con 029/039.
             if (!esComponenteDeCorte(desc, laminaCode, centro)) return;
 
-            encontroMatch = true;
             const linea = leerLineaBom(row, materialCode);
+            if (linea.fueraDeNivel) { descartadasNivel++; return; }
+            encontroMatch = true;
             if (!linea.valida) return;
             const acum = porComponente.get(laminaCode) || { n1: 0, n2: 0 };
             if (linea.nivelBom === 1) acum.n1 += linea.cantAcumulada; else acum.n2 += linea.cantAcumulada;
@@ -3842,8 +3961,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       } catch (e) {
         console.warn(`[Necesidad PFF] Error explotando BOM para material ${materialCode} (centro ${centro}):`, (e as Error).message);
         conError.push(materialCode);
-      } finally {
-        onStep();
       }
     }
 
@@ -3886,8 +4003,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
     }));
 
-    return { filas, sinMatch, conError, tipoPlan, ferts };
-  }, [esComponenteDeCorte]);
+    return { filas, sinMatch, conError, tipoPlan, ferts, descartadasNivel };
+  }, [esComponenteDeCorte, obtenerBomPFF]);
 
   // Wrapper de siempre: hoy+DIAS_HABILES_PT_ENSAMBLADO días hábiles (antes +3), delega en explotarPFFParaCentroConFecha. Mismo
   // nombre/firma/comportamiento de antes — no cambia nada para calcularNecesidadPFF.
@@ -3998,6 +4115,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const calcularNecesidadPFF = useCallback(async (): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string; progreso?: { actual: number; total: number } }> => {
     setIsCalculandoPFF(true);
     setPffDiagnostico({ sinMatch: [], conError: [] });
+    bomPFFCacheRef.current.clear();
     try {
       const [planesRes, detallesRes] = await Promise.all([
         planGrupoService.getAll(),
@@ -4057,8 +4175,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         sinMatch.length > 0 ? `${sinMatch.length} material(es) sin lámina cortada en su BOM` : null,
         conError.length > 0 ? `${conError.length} material(es) con error al consultar el BOM` : null,
       ].filter(Boolean).join(' · ');
+      // Informativo (no es aviso): láminas bajo el nivel 3 del BOM que no se sumaron.
+      const descartadas = (resultado1000.descartadasNivel || 0) + (resultado2000.descartadasNivel || 0);
+      const notaNivel = descartadas > 0 ? ` ${descartadas} línea(s) de lámina bajo el nivel ${NIVEL_MAX_BOM_LAMINA} del BOM no se sumaron.` : '';
       const etiquetaTipo = (t: 'P1' | 'PFF' | null) => t ? ` (${t})` : '';
-      const mensajePFF = `${resultado1000.filas.length} línea(s) Quito${etiquetaTipo(resultado1000.tipoPlan)}, ${resultado2000.filas.length} línea(s) Guayaquil${etiquetaTipo(resultado2000.tipoPlan)}.${incidencias ? ' ' + incidencias : ''}`;
+      const mensajePFF = `${resultado1000.filas.length} línea(s) Quito${etiquetaTipo(resultado1000.tipoPlan)}, ${resultado2000.filas.length} línea(s) Guayaquil${etiquetaTipo(resultado2000.tipoPlan)}.${incidencias ? ' ' + incidencias : ''}${notaNivel}`;
       return { estado: conError.length > 0 || sinMatch.length > 0 ? 'aviso' : 'ok', mensaje: mensajePFF, progreso: { actual: current, total } };
     } catch (e) {
       return { estado: 'error', mensaje: (e as Error).message };
@@ -4903,6 +5024,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       setFertsPFF(snap.fertsPFF || []);
       setNecesidadPFFData(snap.necesidadPFFData);
       setNecesidadPFFNivel2Data(snap.necesidadPFFNivel2Data || { '1000': [], '2000': [] });
+      setMomentoSync(snap.momentoSync ?? null);
       setDatosCargados(true);
     }
   }, []);
@@ -5116,7 +5238,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
               </div>
             ) : (
               <>
-                <div className="flex items-center justify-between gap-2" title="Suma real de tTotal de las órdenes cuya Hoja de Ruta/Puesto de Trabajo coincide con esta máquina (ver MACHINE_SAP_CODES_UIO), para la fecha elegida en 'Evaluar Capacidad'.">
+                <div className="flex items-center justify-between gap-2" title={`Suma real de tTotal de las órdenes cuya Hoja de Ruta/Puesto de Trabajo coincide con esta máquina, para la fecha elegida en 'Evaluar Capacidad'.${ocupacion.pendienteAnterior && ocupacion.pendienteAnterior.pendiente > 0.05 ? `
+Incluye el pendiente del ${format(parseFechaLocal(ocupacion.pendienteAnterior.dia), 'EEE dd/MM', { locale: es })}: ${ocupacion.pendienteAnterior.pendiente.toFixed(1)} h − turno restante ${Math.min(ocupacion.pendienteAnterior.restante, ocupacion.pendienteAnterior.pendiente).toFixed(1)} h = pasa ${ocupacion.pendienteAnterior.pasa.toFixed(1)} h (turno medido desde la sincronización, con paros, rendimiento y MTTO).` : ''}`}>
                   <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wide">Tiempo Proceso</span>
                   <span className="text-[10px] font-black text-slate-700">{ocupacion.horas.toFixed(1)}h</span>
                 </div>
@@ -5611,10 +5734,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const backlogFertReal = fertSinVentana
         .filter(r => r.centro === centroId && r.fecha === diaHabilAnterior && r.cant > 0 && !yaCapturado.has(`${r.orden}|${r.material}`))
         .map(row => ({ row, estado: 'FERT' as const, fecha: row.fecha }));
+      // Solo el exceso del turno Día del día anterior pasa al plan (ver ajustePendienteTurnoAnterior).
+      const ajuste = ajustePendienteTurnoAnterior(planta, diaHabilAnterior, backlogFertReal);
+      ajuste.porMaquina.forEach((v, id) => pendienteAnteriorPorMaquina.set(id, { dia: diaHabilAnterior, ...v }));
 
-      return [...backlogNecesidad, ...backlogFertReal];
+      return [...backlogNecesidad, ...ajuste.filas];
     };
 
+    const pendienteAnteriorPorMaquina = new Map<string, { dia: string; pendiente: number; restante: number; pasa: number }>();
     const fechasSel = Array.from(selectedDatesCapacidad[planta]).sort();
     const backlogSeleccion = fechasSel.length > 0 ? calcularBacklogAntesDe(fechasSel[0]) : [];
     const filasSeleccion = [...backlogSeleccion, ...fechasSel.flatMap(f => resolverFecha(f).map(x => ({ ...x, fecha: f })))];
@@ -5638,7 +5765,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // rendimiento y paros descontados). Distinto criterio a propósito: acá se quiere ver qué tanto
       // del tiempo de reloj programado (crudo) se está usando de verdad.
       const pct = tiempoMaquinaBruto > 0 ? (horas / tiempoMaquinaBruto) * 100 : null;
-      return { estado: 'ok', horas, capNeta, tiempoMaquinaBruto, pct };
+      return { estado: 'ok', horas, capNeta, tiempoMaquinaBruto, pct, pendienteAnterior: pendienteAnteriorPorMaquina.get(id) };
     };
 
     // Sugerencias de redistribución entre carruseles (pedido por el usuario, ver
