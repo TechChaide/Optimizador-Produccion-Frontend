@@ -349,6 +349,25 @@ export const consultarPlanTxt = async (p: CriteriosPlanTxt): Promise<{ ruta: str
   return data as { ruta: string; modificado: string };
 };
 
+/**
+ * Último plan guardado entre varias fechas objetivo candidatas (la más reciente que exista), con su
+ * respaldo. Lo usan los módulos al abrirse sin datos de la sesión (ej. tras recargar la página) para
+ * mostrar el plan vigente hasta que se sincronice uno nuevo. null si no hay ninguno o la carpeta no
+ * responde: es una carga de cortesía, nunca bloquea el módulo.
+ */
+export const buscarUltimoPlanTxt = async (p: { modulo: ModuloPlanTxt; centro: CentroPlanTxt; fechas: string[] }): Promise<(PlanTxtRecuperado & { fechaObjetivo: string }) | null> => {
+  const fechas = [...new Set(p.fechas)].sort().reverse();
+  const metas = await Promise.all(fechas.map(f => consultarPlanTxt({ modulo: p.modulo, centro: p.centro, fechaObjetivo: f }).catch(() => null)));
+  const fecha = fechas.find((_, i) => metas[i]);
+  if (!fecha) return null;
+  try {
+    const plan = await obtenerPlanTxt({ modulo: p.modulo, centro: p.centro, fechaObjetivo: fecha });
+    return { ...plan, fechaObjetivo: fecha };
+  } catch {
+    return null;
+  }
+};
+
 /** Borra la foto HTML del correo (nunca el TXT). Se usa tras un envío exitoso; lanza Error si falla. */
 export const eliminarFotoCorreoPlanTxt = async (p: CriteriosPlanTxt): Promise<void> => {
   const res = await fetch(`${urlApiPlanesTxt()}?${qsPlanTxt(p, 'json')}`, { method: 'DELETE' });

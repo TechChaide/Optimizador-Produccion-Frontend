@@ -63,6 +63,7 @@ import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { pasoPanelDiagnosticoP2, type DiagnosticoP2 } from '@/lib/diagnostico-p2';
 import { nextBusinessDay as nextBusinessDayCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
+import { buscarUltimoPlanTxt } from '@/lib/planes-txt';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, parseISO, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
 
@@ -77,12 +78,6 @@ const BLOCK_SIZE = 40;
 const TIEMPO_PREPARACION_CORRIDA_H = 1.200166;
 const TIEMPO_TRASLADO_CALLE_LOOPER_H = 0.470333;
 const SETUP_TIME_PER_RUN = (TIEMPO_PREPARACION_CORRIDA_H + TIEMPO_TRASLADO_CALLE_LOOPER_H) * 60;
-// Cambio de referencia (espesor) dentro de una corrida: 5–8 min de ajuste, se usa el promedio
-// (usuario 2026-10-05). Ver minutosSetupBloque.
-const MIN_CAMBIO_REFERENCIA = 6.5;
-// +5% solo sobre el tiempo de rollos (looperTRolloMin × UN): ajuste de velocidad y de estándares
-// previsto por el usuario 2026-10-05. No toca la preparación ni reemplaza el Rendimiento del Looper.
-const FACTOR_TIEMPO_ROLLO = 1.05;
 
 // Empareja líneas del Plan de Salida con las órdenes FERT que SAP creó a partir de ellas: Laminado
 // (Centro 1000, responsables 014/031), misma fecha de inicio y material; si un material tiene varias
@@ -215,17 +210,6 @@ const distributeItemsIntoRuns = (items: ItemCorrida[], totalRuns: number, blockS
   });
 
   return bins;
-};
-
-// Minutos de preparación de un bloque: SETUP_TIME_PER_RUN por corrida + un cambio de referencia
-// (espesor) por cada material adicional DENTRO de cada corrida, según el mismo empaquetado del Plan
-// de Salida (ej. D15 AM AF 2/2 con 4 materiales = 3 cambios; una corrida de un solo material = 0).
-// El cambio entre bloques (otra densidad/apertura) ya va dentro de SETUP_TIME_PER_RUN.
-const minutosSetupBloque = (items: ItemCorrida[], corridas: number): number => {
-  if (corridas <= 0) return 0;
-  const cambios = distributeItemsIntoRuns(items, corridas, BLOCK_SIZE)
-    .reduce((s, bin) => s + Math.max(0, new Set(bin.allocations.map(x => x.material)).size - 1), 0);
-  return SETUP_TIME_PER_RUN * corridas + MIN_CAMBIO_REFERENCIA * cambios;
 };
 
 // Proceso "lámina convoluted": 1 lámina base pasada por el proceso alterno (otra máquina) devuelve
@@ -2694,11 +2678,11 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       // bloque (45 × corridas) sigue cerrando exacto, y queda correcto tras cualquier redistribución manual.
       const totalPlanUnGroup = standardItems.reduce((s, r) => s + r.planUn, 0);
       const corridasBloque = totalPlanUnGroup > 0 ? Math.ceil(totalPlanUnGroup / BLOCK_SIZE) : 0;
-      const setupBloque = minutosSetupBloque(standardItems.map(r => ({ material: r.material, planUn: r.planUn, deficit: deficitRealUN(r) })), corridasBloque);
+      const setupBloque = SETUP_TIME_PER_RUN * corridasBloque;
       standardItems.forEach(row => {
         const shareUn = totalPlanUnGroup > 0 ? (row.planUn / totalPlanUnGroup) : 0;
         const setupContribution = setupBloque * shareUn;
-        row.tProceso = ((row.looperTRolloMin || 0) * row.planUn * FACTOR_TIEMPO_ROLLO + setupContribution) / 60;
+        row.tProceso = ((row.looperTRolloMin || 0) * row.planUn + setupContribution) / 60;
       });
 
       // Las variantes CONV no corren corrida propia: su necesidad/plan se deriva de la lámina base
@@ -2712,7 +2696,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
         row.planUn = planUn;
         row.planKg = planUn * row.peso;
-        row.tProceso = ((row.looperTRolloMin || 0) * planUn * FACTOR_TIEMPO_ROLLO) / 60;
+        row.tProceso = ((row.looperTRolloMin || 0) * planUn) / 60;
       });
     });
 
@@ -2770,7 +2754,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // que no ocupan cupo de corrida propio.
   const recomputeRowForPlanUn = (row: UnifiedNeedRow, planUn: number, setupContribution: number = 0): UnifiedNeedRow => {
     const planKg = planUn * row.peso;
-    const tProceso = ((row.looperTRolloMin || 0) * planUn * FACTOR_TIEMPO_ROLLO + setupContribution) / 60;
+    const tProceso = ((row.looperTRolloMin || 0) * planUn + setupContribution) / 60;
     return { ...row, planUn, planKg, tProceso };
   };
 
@@ -2861,7 +2845,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const standardGroup = prev.filter(r => inGroup(r) && !isConvDescripcion(r.descripcion));
       const newGroupTotal = standardGroup.reduce((s, r) => s + (r.material === material ? newValue : r.planUn), 0);
       const corridasBloque = newGroupTotal > 0 ? Math.ceil(newGroupTotal / BLOCK_SIZE) : 0;
-      const setupBloque = minutosSetupBloque(standardGroup.map(r => ({ material: r.material, planUn: r.material === material ? newValue : r.planUn, deficit: deficitRealUN(r) })), corridasBloque);
+      const setupBloque = SETUP_TIME_PER_RUN * corridasBloque;
       const setupFor = (planUn: number) => (newGroupTotal > 0 ? setupBloque * (planUn / newGroupTotal) : 0);
 
       return prev.map(row => {
@@ -2932,7 +2916,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const actualOthersTotal = others.reduce((s, r) => s + (distribution.get(r.material) ?? 0), 0);
       const newGroupTotal = editedValue + actualOthersTotal;
       const corridasBloque = newGroupTotal > 0 ? Math.ceil(newGroupTotal / BLOCK_SIZE) : 0;
-      const setupBloque = minutosSetupBloque(standardGroup.map(r => ({ material: r.material, planUn: r.material === material ? editedValue : (distribution.get(r.material) ?? 0), deficit: deficitRealUN(r) })), corridasBloque);
+      const setupBloque = SETUP_TIME_PER_RUN * corridasBloque;
       const setupFor = (planUn: number) => (newGroupTotal > 0 ? setupBloque * (planUn / newGroupTotal) : 0);
 
       return prev.map(row => {
@@ -3016,7 +3000,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
       const actualTotal = standardGroup.reduce((s, r) => s + (distribution.get(r.material) ?? 0), 0);
       const corridasBloque = actualTotal > 0 ? Math.ceil(actualTotal / BLOCK_SIZE) : 0;
-      const setupBloque = minutosSetupBloque(standardGroup.map(r => ({ material: r.material, planUn: distribution.get(r.material) ?? 0, deficit: deficitRealUN(r) })), corridasBloque);
+      const setupBloque = SETUP_TIME_PER_RUN * corridasBloque;
       const setupFor = (planUn: number) => (actualTotal > 0 ? setupBloque * (planUn / actualTotal) : 0);
 
       return prev.map(row => {
@@ -3073,6 +3057,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // planificada, sin corrida = stock disponible (P3) o forzado a 0 (PFD, ver más abajo). Si no hay
   // NADA con cantidad real (plan o stock), se bloquea el paso completo — un PFD todo en 0 no aporta.
   const handleAbrirRespuestaP3PFD = useCallback(() => {
+    if (planCargadoDe && !datosCargados) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3 o enviar a SAP con datos vigentes.'); return; }
     const p3Rows = respuestaSalidaRows.filter(row => row.cantidadKg > 0);
     if (p3Rows.length === 0) {
       addNotification('warning', 'No hay materiales con cantidad (plan o stock) para guardar.');
@@ -3103,7 +3088,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // con los materiales "solo stock" en 0. El P3 (stock + corridas) es la única respuesta; el P3
     // nuevo desactiva también los PFD viejos (ver desactivarPlanesLaminadoSuperados).
     setPlanPreviewP3PFD({ p3, pfd: null });
-  }, [respuestaSalidaRows, addNotification, siguienteDiaHabil]);
+  }, [respuestaSalidaRows, addNotification, siguienteDiaHabil, planCargadoDe, datosCargados]);
 
   // Paso 2: el usuario confirmó en el diálogo. Guarda un PlanGrupo (grupo 8 = Corte y Laminado Centro
   // 1000) + sus DetalleTactico — lógica compartida entre P3 y PFD (antes duplicada en
@@ -3785,11 +3770,17 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // El sobrante (redondeo del bloque) va al destino que tenga el material (interno si tiene).
   const destinosPlanSalida = (): string[] => {
     const restante = new Map<string, { interno: number; ve: number }>();
+    // Para el Destino el stock cubre PRIMERO a Forros/Muebles y el resto a VE (usuario 2026-10-06:
+    // D25 CONV mostraba "VE 11" con ~20 pedidos porque todo el stock se le restaba a VE). Solo es la
+    // etiqueta de pantalla/correo: corridas, cantidades, P3 y SAP siguen con deficit*UN de siempre.
+    const enteroUN = (raw: number) => (raw > 0.001 ? Math.ceil(raw - 0.001) : 0);
     unifiedNeeds.forEach(r => {
       if (restante.has(r.material)) return;
       const plan = Math.max(0, Math.round(r.planUn));
-      let interno = Math.min(plan, deficitForrosMueblesUN(r));
-      let ve = Math.min(deficitVentaExternaUN(r), plan - interno);
+      const necInterna = Math.max(0, r.totalNroRollos - r.necVentaExternaUn);
+      const stockParaVE = Math.max(0, r.totalStockUN - necInterna);
+      let interno = Math.min(plan, enteroUN(necInterna - r.totalStockUN));
+      let ve = Math.min(enteroUN(r.necVentaExternaUn - stockParaVE), plan - interno);
       const sobrante = plan - interno - ve;
       const tieneInterno = r.totalNroRollos - r.necVentaExternaUn > 0.001;
       if (sobrante > 0) {
@@ -4405,6 +4396,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   }, [resolvePuestoTrabajo]);
 
   const handleExportTxt = useCallback(async () => {
+    if (planCargadoDe && !datosCargados) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3 o enviar a SAP con datos vigentes.'); return; }
     const rows = outputPlanRows;
     if (rows.length === 0) {
       addNotification('warning', 'No hay datos para exportar.');
@@ -4441,7 +4433,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     } finally {
       setIsValidandoExportTxt(false);
     }
-  }, [outputPlanRows, addNotification, validarAprobacionVentaExterna, fetchVersionesFabricacionLaminado, fetchCodigoDetalleTacticoPorMaterial, buildSolicitudProduccion]);
+  }, [outputPlanRows, addNotification, validarAprobacionVentaExterna, fetchVersionesFabricacionLaminado, fetchCodigoDetalleTacticoPorMaterial, buildSolicitudProduccion, planCargadoDe, datosCargados]);
 
   // Edita un campo de una fila ya congelada en exportTxtPayloads (vista previa de envío a SAP) — ver
   // el diálogo "Confirmar envío a SAP" más abajo, donde cada celda de la tabla es un Input sobre esto.
@@ -4948,6 +4940,26 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     restaurarEstado: restaurarEstadoPlan,
   });
 
+  // Plan vigente al abrir sin datos de la sesión (pedido del usuario 2026-10-06: "tenerlo activo hasta
+  // que exista un nuevo plan"). Navegar entre módulos ya lo conserva la caché en memoria; esto cubre
+  // recargar la página (F5) o abrir otro día: se carga, en modo consulta, el último reporte guardado
+  // (fecha objetivo más reciente entre hoy−5 y hoy+3) hasta que se pulse Sincronizar. Sin SAP.
+  const autoCargaIntentada = useRef(false);
+  useEffect(() => {
+    if (!rehidratado || autoCargaIntentada.current) return;
+    autoCargaIntentada.current = true;
+    if (datosCargados || leerDeCache<SnapshotCorteLaminado>(CACHE_CORTE_LAMINADO)) return;
+    const hoy = new Date();
+    const fechas = Array.from({ length: 9 }, (_, i) => format(addDays(hoy, 3 - i), 'yyyy-MM-dd'));
+    // Sin cleanup a propósito: con la guarda del ref, el doble montaje de Strict Mode cancelaría la
+    // única carga. Si mientras tanto se sincronizó (hay caché), no se pisa lo nuevo con el respaldo.
+    void buscarUltimoPlanTxt({ modulo: 'laminado', centro: '1000', fechas }).then(plan => {
+      if (!plan?.estado || leerDeCache<SnapshotCorteLaminado>(CACHE_CORTE_LAMINADO)) return;
+      restaurarEstadoPlan(plan.estado, { fechaObjetivo: plan.fechaObjetivo, guardadoEn: plan.modificado });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- una sola vez al montar, tras rehidratar
+  }, [rehidratado]);
+
   // Fase 2 del panel: guarda el reporte tras confirmar el P3 (sin preguntar si ya había uno: el P3
   // recién confirmado lo reemplaza) y deja "Ver reporte y enviar" como siguiente paso.
   useEffect(() => {
@@ -4975,7 +4987,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <div className="p-2 bg-red-600/10 rounded-xl shadow-inner"><Scissors className="w-6 h-6 text-red-600" /></div>
           <div>
             <h2 className="text-xl font-black text-gray-800 uppercase tracking-tighter">Programación Táctica Laminado</h2>
-            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Setup: {SETUP_TIME_PER_RUN.toFixed(1)} min por corrida + {MIN_CAMBIO_REFERENCIA} min por cambio de espesor · rollos +{Math.round((FACTOR_TIEMPO_ROLLO - 1) * 100)}% | Auditoría Multialmacén SAP</p>
+            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Setup: {SETUP_TIME_PER_RUN.toFixed(1)} min por corrida | Auditoría Multialmacén SAP</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
