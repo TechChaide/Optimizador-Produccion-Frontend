@@ -942,7 +942,9 @@ interface EstadoPlanCorteEspuma {
 }
 
 // Resumen del pendiente FERT del día hábil anterior que pasa al plan (ver ajustePendienteTurnoAnterior).
-interface PendienteTurnoAnterior { dia: string; pendiente: number; restante: number; pasa: number }
+interface PendienteTurnoAnterior { dia: string; pendiente: number; restante: number; pasa: number; anteriores: { dia: string; horas: number }[] }
+// Días hábiles hacia atrás cuyo pendiente FERT pasa al plan (usuario 2026-10-06): más viejo = no procesado (incumplimiento).
+const DIAS_PENDIENTE_MAX = 3;
 
 interface SnapshotCorteEspuma {
   ordenesProvisionales: RawApiRow[];
@@ -2778,6 +2780,38 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return { filas: ajustadas, porMaquina };
   }, [momentoEvaluacion, uioConfig, gyeConfig, shiftOptions, uniqueMantenimientosSAP]);
 
+  // Pendiente FERT que pasa al plan de `fechaLimite` (usuario 2026-10-06): lo que no alcanza un turno
+  // se suma al siguiente plan, hasta DIAS_PENDIENTE_MAX días hábiles atrás (más viejo = no procesado,
+  // incumplimiento: no suma). El día hábil anterior se descuenta con el turno en curso
+  // (ajustePendienteTurnoAnterior); los previos suman completos. Las FERT se toman por fecha FIN, igual
+  // que el plan (una orden 06→07 ya cuenta en el plan del 07). Lo usan el tablero y el correo.
+  type ItemCarga = { row: UnifiedRow; estado: 'FERT' | 'Ya firme' | 'Faltante'; fecha: string };
+  const armarPendienteAnterior = useCallback((
+    planta: 'UIO' | 'GYE', centroId: '1000' | '2000', fechaLimite: string, backlogNecesidad: ItemCarga[], fertSinVentana: UnifiedRow[]
+  ): { filas: ItemCarga[]; pendientes: ItemCarga[]; resumen: PendienteTurnoAnterior | null; porMaquina: Map<string, { pendiente: number; restante: number; pasa: number }> } => {
+    const base = parseFechaLocal(fechaLimite);
+    const dias = Array.from({ length: DIAS_PENDIENTE_MAX }, (_, i) => format(restarDiasHabiles(base, i + 1), 'yyyy-MM-dd'));
+    const diaAnterior = dias[0];
+    const yaCapturado = new Set(backlogNecesidad.map(x => `${x.row.orden}|${x.row.material}`));
+    const fertReal: ItemCarga[] = fertSinVentana
+      .filter(r => r.centro === centroId && r.cant > 0 && dias.includes(r.fechaFin) && !yaCapturado.has(`${r.orden}|${r.material}`))
+      .map(row => ({ row, estado: 'FERT' as const, fecha: row.fecha }));
+    // FERT del día anterior que llegaron por un plan aún activo: mismo descuento del turno.
+    const esFertDiaAnterior = (x: ItemCarga) => x.estado === 'FERT' && x.fecha === diaAnterior;
+    const delDiaAnterior = [...backlogNecesidad.filter(esFertDiaAnterior), ...fertReal.filter(x => x.row.fechaFin === diaAnterior)];
+    const previos = fertReal.filter(x => x.row.fechaFin !== diaAnterior);
+    const ajuste = ajustePendienteTurnoAnterior(planta, diaAnterior, delDiaAnterior);
+    const horasDe = (lista: ItemCarga[]) => lista.reduce((sum, x) => sum + x.row.tTotal, 0);
+    const tot = ajuste.porMaquina.size > 0
+      ? Array.from(ajuste.porMaquina.values()).reduce((a, v) => ({ pendiente: a.pendiente + v.pendiente, restante: a.restante + Math.min(v.restante, v.pendiente), pasa: a.pasa + v.pasa }), { pendiente: 0, restante: 0, pasa: 0 })
+      : { pendiente: horasDe(delDiaAnterior), restante: 0, pasa: horasDe(delDiaAnterior) };
+    const anteriores = dias.slice(1).reverse()
+      .map(dia => ({ dia, horas: horasDe(previos.filter(x => x.row.fechaFin === dia)) }))
+      .filter(d => d.horas > 0.05);
+    const resumen = tot.pendiente > 0.05 || anteriores.length > 0 ? { dia: diaAnterior, ...tot, anteriores } : null;
+    return { filas: [...backlogNecesidad.filter(x => !esFertDiaAnterior(x)), ...ajuste.filas, ...previos], pendientes: [...ajuste.filas, ...previos], resumen, porMaquina: ajuste.porMaquina };
+  }, [restarDiasHabiles, ajustePendienteTurnoAnterior]);
+
   // Ventana del plan de la PLANTA para mostrarla (inicio más temprano / fin más tardío de sus
   // máquinas en servicio) — solo con UNA fecha evaluada.
   const ventanaPlanPorPlanta = useMemo(() => {
@@ -2829,24 +2863,17 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // acumulado histórico completo.
       // Pendiente FERT del día anterior y cuánto pasa al plan (ver ajustePendienteTurnoAnterior).
       let pendienteTurnoAnterior = null as PendienteTurnoAnterior | null;
+      let filasPendientes: ItemCarga[] = [];
       const calcularBacklogAntesDe = (fechaLimite: string) => {
         const fechasConNecesidad = Array.from(new Set(
           [...necesidadCapacidad, ...necesidadCapacidadNivel2].map(r => r.fecha)
         )).filter(f => f < fechaLimite);
         const backlogNecesidad = fechasConNecesidad.flatMap(f => resolverFecha(f).map(x => ({ ...x, fecha: f })));
 
-        const diaHabilAnterior = format(restarDiasHabiles(parseFechaLocal(fechaLimite), 1), 'yyyy-MM-dd');
-        const yaCapturado = new Set(backlogNecesidad.map(x => `${x.row.orden}|${x.row.material}`));
-        const backlogFertReal = fertSinVentana
-          .filter(r => r.centro === centroId && r.fecha === diaHabilAnterior && r.cant > 0 && !yaCapturado.has(`${r.orden}|${r.material}`))
-          .map(row => ({ row, estado: 'FERT' as const, fecha: row.fecha }));
-        const ajuste = ajustePendienteTurnoAnterior(planta, diaHabilAnterior, backlogFertReal);
-        if (ajuste.porMaquina.size > 0) {
-          const tot = Array.from(ajuste.porMaquina.values()).reduce((s, p) => ({ pendiente: s.pendiente + p.pendiente, restante: s.restante + Math.min(p.restante, p.pendiente), pasa: s.pasa + p.pasa }), { pendiente: 0, restante: 0, pasa: 0 });
-          pendienteTurnoAnterior = { dia: diaHabilAnterior, ...tot };
-        }
-
-        return [...backlogNecesidad, ...ajuste.filas];
+        const pend = armarPendienteAnterior(planta, centroId, fechaLimite, backlogNecesidad, fertSinVentana);
+        pendienteTurnoAnterior = pend.resumen;
+        filasPendientes = pend.pendientes;
+        return pend.filas;
       };
 
       const fechasSel = Array.from(selectedDatesCapacidad[planta]).sort();
@@ -2892,9 +2919,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // CNC se separa por MÁQUINA real (esFilaCNC, código SAP HR-CTCNC), no por responsable — sus
       // responsables (044, 038) ya estaban dentro de CARRUSEL_RESP, así que Carruseles debe excluir
       // explícitamente las filas de CNC para no contarlas dos veces.
-      const filasProceso = (proceso: ProcesoCorte) => proceso === 'cnc'
-        ? filasSeleccion.filter(x => esFilaCNC(x.row.maquina))
-        : filasSeleccion.filter(x => (proceso === 'carrusel' ? CARRUSEL_RESP : VERTICAL_RESP).includes(x.row.responsable) && !esFilaCNC(x.row.maquina));
+      const delProceso = <T extends { row: UnifiedRow }>(lista: T[], proceso: ProcesoCorte) => proceso === 'cnc'
+        ? lista.filter(x => esFilaCNC(x.row.maquina))
+        : lista.filter(x => (proceso === 'carrusel' ? CARRUSEL_RESP : VERTICAL_RESP).includes(x.row.responsable) && !esFilaCNC(x.row.maquina));
+      const filasProceso = (proceso: ProcesoCorte) => delProceso(filasSeleccion, proceso);
+      // Materiales pendientes de días anteriores que pasan al plan, por proceso (ya incluidos en ocupación).
+      const pendientePorProceso = (proceso: ProcesoCorte) => delProceso(filasPendientes, proceso).reduce((s, x) => s + x.row.tTotal, 0);
       const ocupadoPorProceso = (proceso: ProcesoCorte) => filasProceso(proceso).reduce((s, x) => s + x.row.tTotal, 0);
       // Cantidad (UN) y Peso (Kg) reales — mismas filas que ya se usan para el tiempo (confirmado por
       // el usuario), no un cálculo aparte.
@@ -2968,6 +2998,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         detallePorMaquina,
         cncRemanente,
         pendienteTurnoAnterior: pendienteTurnoAnterior as PendienteTurnoAnterior | null,
+        pendientePorProceso: { carrusel: pendientePorProceso('carrusel'), cnc: pendientePorProceso('cnc'), vertical: pendientePorProceso('vertical') },
         carruseles: { capacidad: Math.max(0, capacidadPorProceso.carrusel - mttoPorProceso('carrusel')) + cncRemanente, ocupacion: ocupadoPorProceso('carrusel'), cantidad: cantidadPorProceso('carrusel'), peso: pesoPorProceso('carrusel'), tiempoMaquina: tiempoMaquinaPorProceso.carrusel },
         verticales: { capacidad: Math.max(0, capacidadPorProceso.vertical - mttoPorProceso('vertical')), ocupacion: ocupadoPorProceso('vertical'), cantidad: cantidadPorProceso('vertical'), peso: pesoPorProceso('vertical'), tiempoMaquina: tiempoMaquinaPorProceso.vertical },
         cnc: { capacidad: Math.max(0, capacidadPorProceso.cnc - mttoPorProceso('cnc')), ocupacion: ocupadoPorProceso('cnc'), cantidad: cantidadPorProceso('cnc'), peso: pesoPorProceso('cnc'), tiempoMaquina: tiempoMaquinaPorProceso.cnc },
@@ -2979,7 +3010,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     fertAuditAllUIO, fertAuditAllGYE, provAuditAllUIO, provAuditAllGYE, sinProvisionalesTransformadas,
     filasCentroEnFecha, calcularFaltanteNecesidadPlanta, necesidadPorMaterialCombinadoPorCentro,
     selectedDatesCapacidad, uioConfig, gyeConfig, shiftOptions, nightShiftOptions, responsablesPorCentro,
-    restarDiasHabiles, getMttoTimeParaFecha, sabadoCuentaEnPlanta, diasVentanaPlan, ajustePendienteTurnoAnterior,
+    getMttoTimeParaFecha, sabadoCuentaEnPlanta, diasVentanaPlan, armarPendienteAnterior,
   ]);
 
   // Cuerpo del correo — mismo formato ya aprobado en Artifact (Día/Noche/Mtto simple, Carruseles y
@@ -2992,11 +3023,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const nombrePlanta = planta === 'UIO' ? 'Quito' : 'Guayaquil';
     const ventana = ventanaPlanPorPlanta[planta];
     const ventanaHtml = ventana ? ejecucionPlanHtml(ventana.inicio, ventana.fin) : '';
-    // Pendiente del día hábil anterior (órdenes FERT): cuánto alcanzaba el turno en curso y cuánto pasó al plan
-    // (ya incluido en el tiempo operativo de cada proceso, ver ajustePendienteTurnoAnterior).
-    const pend = r.pendienteTurnoAnterior;
-    const pendienteHtml = pend && pend.pendiente > 0.05
-      ? `<p style="margin:4px 0 0;font-size:11px;color:#b45309;">Pendiente del ${format(parseFechaLocal(pend.dia), "EEE dd/MM", { locale: es })}: ${pend.pendiente.toFixed(1)} h − ${pend.restante.toFixed(1)} h que alcanza el turno en curso = <strong>${pend.pasa.toFixed(1)} h pasan a este plan</strong> (incluidas en el tiempo operativo).</p>`
+    // Materiales pendientes de procesar de días anteriores, por proceso (usuario 2026-10-06): una línea
+    // corta bajo cada bloque del resumen. Carruseles incluye lo de CNC, igual que su tiempo disponible.
+    const pendienteLinea = (horas: number) => horas > 0.05
+      ? `<p style="margin:-6px 0 12px;font-size:11px;color:#6b7280;">Materiales pendientes de procesar: <strong style="color:#111827;">${horas.toFixed(1)} h</strong> (incluidas en el tiempo operativo)</p>`
       : '';
     // Fecha de LIBERACIÓN del plan (el día en que se genera y guarda el reporte), no la del plan:
     // pedido del usuario 2026-10-02 — la fecha del plan ya se lee en la ejecución (inicio → fin).
@@ -3152,8 +3182,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     <td style="padding:16px 28px 6px;">
       <p style="margin:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Resumen de ocupación</p>
       ${resumenProcesoHtml('Carruseles', pctCarruseles, r.carruseles.ocupacion, r.carruseles.capacidad, cncCedeRemanente ? `incluye ${r.cncRemanente.toFixed(1)} h libres de CNC` : '')}
+      ${pendienteLinea(r.pendientePorProceso.carrusel + r.pendientePorProceso.cnc)}
       ${resumenProcesoHtml('Verticales', pctVerticales, r.verticales.ocupacion, r.verticales.capacidad, '')}
-      ${pendienteHtml}
+      ${pendienteLinea(r.pendientePorProceso.vertical)}
     </td>
   </tr>
   <tr>
@@ -5729,16 +5760,9 @@ Incluye el pendiente del ${format(parseFechaLocal(ocupacion.pendienteAnterior.di
       )).filter(f => f < fechaLimite);
       const backlogNecesidad = fechasConNecesidad.flatMap(f => resolverFecha(f).map(x => ({ ...x, fecha: f })));
 
-      const diaHabilAnterior = format(restarDiasHabiles(parseFechaLocal(fechaLimite), 1), 'yyyy-MM-dd');
-      const yaCapturado = new Set(backlogNecesidad.map(x => `${x.row.orden}|${x.row.material}`));
-      const backlogFertReal = fertSinVentana
-        .filter(r => r.centro === centroId && r.fecha === diaHabilAnterior && r.cant > 0 && !yaCapturado.has(`${r.orden}|${r.material}`))
-        .map(row => ({ row, estado: 'FERT' as const, fecha: row.fecha }));
-      // Solo el exceso del turno Día del día anterior pasa al plan (ver ajustePendienteTurnoAnterior).
-      const ajuste = ajustePendienteTurnoAnterior(planta, diaHabilAnterior, backlogFertReal);
-      ajuste.porMaquina.forEach((v, id) => pendienteAnteriorPorMaquina.set(id, { dia: diaHabilAnterior, ...v }));
-
-      return [...backlogNecesidad, ...ajuste.filas];
+      const pend = armarPendienteAnterior(planta, centroId, fechaLimite, backlogNecesidad, fertSinVentana);
+      pend.porMaquina.forEach((v, id) => pendienteAnteriorPorMaquina.set(id, { dia: pend.resumen?.dia ?? '', ...v }));
+      return pend.filas;
     };
 
     const pendienteAnteriorPorMaquina = new Map<string, { dia: string; pendiente: number; restante: number; pasa: number }>();
