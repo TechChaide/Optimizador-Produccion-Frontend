@@ -3712,26 +3712,35 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       TIEMPO: getProp(m, ['TIEMPO']), Duracion_Minutos: getProp(m, ['Duracion_Minutos']),
       horas: ventanaPlan ? (horasMttoEnTurnos(m, ventanaPlan.turnos)?.horas ?? 0) : '—',
     })));
+    // El MTTO se busca por el DÍA DEL PLAN (siguiente día hábil de la fecha evaluada: evaluada jue
+    // 08/10 → plan lun 12/10), no por la fecha en que se generan las necesidades — regla del usuario
+    // 2026-10-08. Una OT de sábado/domingo se corre al lunes, como la pestaña Mantenimiento.
+    const diaProgramado = (m: RawApiRow) => {
+      const dia = fechaLocalEcuador(getProp(m, ['FECHA_PRO']) || getProp(m, ['FECHA_OT_PRG_INI']));
+      if (!dia) return '';
+      const wd = getDay(parseISO(dia));
+      return wd === 6 || wd === 0 ? format(addDays(parseISO(dia), wd === 6 ? 2 : 1), 'yyyy-MM-dd') : dia;
+    };
     if (ventanaPlan) {
+      const diaPlanStr = format(ventanaPlan.diaPlan, 'yyyy-MM-dd');
       return mantenimientosLooper.flatMap(m => {
         const r = horasMttoEnTurnos(m, ventanaPlan.turnos);
-        return r ? [{ maquina: getProp(m, ['MAQUINA']), fecha: format(r.inicio, r.porDia ? 'yyyy-MM-dd' : 'yyyy-MM-dd HH:mm'), horas: r.horas }] : [];
+        if (r) return [{ maquina: getProp(m, ['MAQUINA']), fecha: format(r.inicio, r.porDia ? 'yyyy-MM-dd' : 'yyyy-MM-dd HH:mm'), horas: r.horas }];
+        // Sin turno que la cubra (ej. Turno Día vacío): igual cuenta si es del día del plan.
+        const horas = duracionMttoH(m);
+        return diaProgramado(m) === diaPlanStr && horas > 0 ? [{ maquina: getProp(m, ['MAQUINA']), fecha: diaPlanStr, horas }] : [];
       });
     }
+    const diasPlan = new Set(Array.from(selectedDates).map(d => format(siguienteDiaHabil(parseISO(d)), 'yyyy-MM-dd')));
     return mantenimientosLooper
-      .filter(m => {
-        if (selectedDates.size === 0) return true;
-        // fechaLocalEcuador, no split('T')[0]: FECHA_OT_PRG_INI es UTC real, selectedDates son
-        // fechas locales del calendario — mismo bug de zona horaria que en Corte Espuma.
-        return selectedDates.has(fechaLocalEcuador(getProp(m, ['FECHA_PRO']) || getProp(m, ['FECHA_OT_PRG_INI'])));
-      })
+      .filter(m => selectedDates.size === 0 || diasPlan.has(diaProgramado(m)))
       .map(m => ({
         maquina: getProp(m, ['MAQUINA']),
-        fecha: fechaLocalEcuador(getProp(m, ['FECHA_PRO']) || getProp(m, ['FECHA_OT_PRG_INI'])),
+        fecha: diaProgramado(m),
         horas: duracionMttoH(m),
       }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mantenimientosLooper, mantenimientosSAP, maquinasMttoLooper, selectedDates, ventanaPlan]);
+  }, [mantenimientosLooper, mantenimientosSAP, maquinasMttoLooper, selectedDates, ventanaPlan, siguienteDiaHabil]);
 
   const mttoPreventivoHoras = useMemo(
     () => mttoPreventivoTasks.reduce((sum, t) => sum + t.horas, 0),
