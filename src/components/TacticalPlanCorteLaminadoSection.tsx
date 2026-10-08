@@ -3704,15 +3704,15 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // Con ventana del plan, cuenta solo el MTTO de sus turnos (ver horasMttoEnTurnos); sin ventana,
   // el filtro por fecha de siempre.
   const mttoPreventivoTasks = useMemo(() => {
+    // Diagnóstico temporal (MTTO en 0, 2026-10-08): qué filas del Looper llegan y cuánto aporta cada una.
+    console.info(`[MTTO Laminado] ${mantenimientosSAP.length} filas SAP, ${mantenimientosLooper.length} del Looper (IDs restricción: ${maquinasMttoLooper.join(', ') || '—'}) · fechas evaluadas: ${Array.from(selectedDates).join(', ') || 'ninguna'} · ventana: ${ventanaPlan ? ventanaPlan.turnos.map(t => `${t.turno} ${format(t.ini, 'dd/MM HH:mm')}-${format(t.fin, 'HH:mm')}`).join(' | ') : 'SIN VENTANA (varias fechas o Ver Todo)'}`);
+    console.table(mantenimientosLooper.map(m => ({
+      ID: getProp(m, ['ID_MAQUINA']), MAQUINA: getProp(m, ['MAQUINA']), FECHA_PRO: getProp(m, ['FECHA_PRO']),
+      INI: getProp(m, ['FECHA_OT_PRG_INI']), FIN: getProp(m, ['FECHA_OT_PRG_FIN']),
+      TIEMPO: getProp(m, ['TIEMPO']), Duracion_Minutos: getProp(m, ['Duracion_Minutos']),
+      horas: ventanaPlan ? (horasMttoEnTurnos(m, ventanaPlan.turnos)?.horas ?? 0) : '—',
+    })));
     if (ventanaPlan) {
-      // Diagnóstico temporal (MTTO en 0, 2026-10-08): qué filas del Looper llegan y cuánto aporta cada una.
-      console.info(`[MTTO Laminado] ${mantenimientosSAP.length} filas SAP, ${mantenimientosLooper.length} del Looper (IDs restricción: ${maquinasMttoLooper.join(', ') || '—'})`);
-      console.table(mantenimientosLooper.map(m => ({
-        ID: getProp(m, ['ID_MAQUINA']), MAQUINA: getProp(m, ['MAQUINA']), FECHA_PRO: getProp(m, ['FECHA_PRO']),
-        INI: getProp(m, ['FECHA_OT_PRG_INI']), FIN: getProp(m, ['FECHA_OT_PRG_FIN']),
-        TIEMPO: getProp(m, ['TIEMPO']), Duracion_Minutos: getProp(m, ['Duracion_Minutos']),
-        horas: horasMttoEnTurnos(m, ventanaPlan.turnos)?.horas ?? 0,
-      })));
       return mantenimientosLooper.flatMap(m => {
         const r = horasMttoEnTurnos(m, ventanaPlan.turnos);
         return r ? [{ maquina: getProp(m, ['MAQUINA']), fecha: format(r.inicio, r.porDia ? 'yyyy-MM-dd' : 'yyyy-MM-dd HH:mm'), horas: r.horas }] : [];
