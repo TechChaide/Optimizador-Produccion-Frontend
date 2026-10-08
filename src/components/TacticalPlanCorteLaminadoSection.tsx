@@ -3648,49 +3648,90 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     };
   }, [selectedDates, siguienteDiaHabil, diaShiftOptions, nocheShiftOptions, selectedDiaShift, selectedNocheShift, selectedSabadoShift]);
 
-  // Operación Adicional: agrupa las tareas de MTTO preventivo de la Laminadora Looper Fecken
-  // y el Transportador de ingreso a Looper (ambas contienen "LOOPER" en la maestra SAP).
-  // Con ventana del plan, cuenta solo las horas de MTTO que caen DENTRO de sus turnos (ej. el lunes
-  // en la mañana sí, un sábado sin turno no); sin ventana, el filtro por fecha de siempre.
+  // Máquinas SAP del Looper: restricción MANTENIMIENTO (ID_MAQUINA separados por "&"), mismo criterio
+  // que Empaque en Venta Externa. La restricción es compartida con Corte Espuma
+  // ("CR04&CR03&CR01&CNC01&LO00"): de ahí solo se toman los IDs del Looper (prefijo "LO"). Sin
+  // restricción se mantiene el criterio anterior: la descripción MAQUINA contiene "LOOPER".
+  const maquinasMttoLooper = useMemo(() => Array.from(new Set(restriccionesArray
+    .filter(r => r.estado === 'A' && String(r.nombre_restriccion || '').trim().toUpperCase() === 'MANTENIMIENTO')
+    .flatMap(r => String(r.valor_restriccion || '').split(/[&,;]/).map(v => v.trim().toUpperCase()))
+    .filter(id => id.startsWith('LO')))), [restriccionesArray]);
+
+  // MTTO del Looper: cada fila es una tarea (una OT trae varias, ej. 109271 ×5 con 30 min c/u) y el
+  // MTTO es UN total con todas — confirmado por el usuario 2026-10-08, no se deduplica.
+  // Vale el ID de la restricción O la descripción con "LOOPER" (un "LO00" escrito con cero en vez de
+  // O en un lado no debe dejar el MTTO en 0).
+  const mantenimientosLooper = useMemo(() => mantenimientosSAP.filter(m =>
+    maquinasMttoLooper.includes(getProp(m, ['ID_MAQUINA']).toUpperCase())
+    || getProp(m, ['MAQUINA']).toUpperCase().includes('LOOPER')), [mantenimientosSAP, maquinasMttoLooper]);
+
+  // Duración de una OT en horas: Duracion_Minutos o TIEMPO (minutos, SISMAC); si no vienen,
+  // T_MTTO_PLANIFICADO (horas) o la diferencia Inicio/Fin.
+  const duracionMttoH = (m: RawApiRow): number => {
+    const min = safeNum(getProp(m, ['Duracion_Minutos'])) || safeNum(getProp(m, ['TIEMPO']));
+    if (min > 0) return min / 60;
+    const legacyH = safeNum(getProp(m, ['T_MTTO_PLANIFICADO', 't_mtto_planificado']));
+    if (legacyH > 0) return legacyH;
+    const ini = new Date(getProp(m, ['FECHA_OT_PRG_INI']));
+    const fin = new Date(getProp(m, ['FECHA_OT_PRG_FIN']));
+    return isValid(ini) && isValid(fin) && fin > ini ? (fin.getTime() - ini.getTime()) / 3600000 : 0;
+  };
+
+  // Horas de una OT dentro de unos turnos. SISMAC programa por DÍA (FECHA_PRO a las 0:00, con TIEMPO
+  // en minutos): esa hora no cae en ningún turno y antes la OT quedaba en 0 h (caso lun 12/10, LO00).
+  // Una OT a las 0:00 cuenta entera en el turno Día/Sábado de ese día (sábado o domingo sin turno →
+  // lunes, como la pestaña Mantenimiento); una OT con hora real cuenta solo lo que solapa los turnos.
+  const horasMttoEnTurnos = (m: RawApiRow, turnos: { turno: string; ini: Date; fin: Date }[]): { horas: number; inicio: Date; porDia: boolean } | null => {
+    const dur = duracionMttoH(m);
+    const iniStr = getProp(m, ['FECHA_OT_PRG_INI']) || getProp(m, ['FECHA_PRO']);
+    const ini = new Date(iniStr);
+    const fin = new Date(getProp(m, ['FECHA_OT_PRG_FIN']));
+    if (isValid(ini) && isValid(fin) && fin > ini && format(ini, 'HH:mm') !== '00:00') {
+      const enTurnos = turnos.reduce((s, t) => s + horasSolapadas(ini, fin, t.ini, t.fin), 0);
+      if (enTurnos > 0) return { horas: dur > 0 ? Math.min(dur, enTurnos) : enTurnos, inicio: ini, porDia: false };
+    }
+    // Sin solape con hora real (o la hora viene corrida por zona horaria): manda el DÍA programado.
+    const dia = fechaLocalEcuador(getProp(m, ['FECHA_PRO']) || iniStr);
+    if (!dia || dur <= 0) return null;
+    const turnoDe = (d: string) => turnos.find(t => t.turno !== 'Noche' && format(t.ini, 'yyyy-MM-dd') === d);
+    let turno = turnoDe(dia);
+    const wd = getDay(parseISO(dia));
+    if (!turno && (wd === 6 || wd === 0)) turno = turnoDe(format(addDays(parseISO(dia), wd === 6 ? 2 : 1), 'yyyy-MM-dd'));
+    return turno ? { horas: dur, inicio: turno.ini, porDia: true } : null;
+  };
+
+  // Operación Adicional: tareas de MTTO preventivo del Looper (ver mantenimientosLooper).
+  // Con ventana del plan, cuenta solo el MTTO de sus turnos (ver horasMttoEnTurnos); sin ventana,
+  // el filtro por fecha de siempre.
   const mttoPreventivoTasks = useMemo(() => {
-    const looper = mantenimientosSAP.filter(m => String(getProp(m, ['MAQUINA'])).toUpperCase().includes('LOOPER'));
     if (ventanaPlan) {
-      return looper.flatMap(m => {
-        const iniStr = getProp(m, ['FECHA_OT_PRG_INI']).trim();
-        const ini = new Date(iniStr);
-        const fin = new Date(getProp(m, ['FECHA_OT_PRG_FIN']).trim());
-        if (!isValid(ini) || !isValid(fin) || fin <= ini) return [];
-        const enVentana = ventanaPlan.turnos.reduce((s, t) => s + horasSolapadas(ini, fin, t.ini, t.fin), 0);
-        if (enVentana <= 0) return [];
-        const planificadas = safeNum(getProp(m, ['T_MTTO_PLANIFICADO', 't_mtto_planificado']));
-        return [{
-          maquina: getProp(m, ['MAQUINA']),
-          fecha: `${fechaLocalEcuador(iniStr)} ${format(ini, 'HH:mm')}`,
-          horas: planificadas > 0 ? Math.min(planificadas, enVentana) : enVentana,
-        }];
+      // Diagnóstico temporal (MTTO en 0, 2026-10-08): qué filas del Looper llegan y cuánto aporta cada una.
+      console.info(`[MTTO Laminado] ${mantenimientosSAP.length} filas SAP, ${mantenimientosLooper.length} del Looper (IDs restricción: ${maquinasMttoLooper.join(', ') || '—'})`);
+      console.table(mantenimientosLooper.map(m => ({
+        ID: getProp(m, ['ID_MAQUINA']), MAQUINA: getProp(m, ['MAQUINA']), FECHA_PRO: getProp(m, ['FECHA_PRO']),
+        INI: getProp(m, ['FECHA_OT_PRG_INI']), FIN: getProp(m, ['FECHA_OT_PRG_FIN']),
+        TIEMPO: getProp(m, ['TIEMPO']), Duracion_Minutos: getProp(m, ['Duracion_Minutos']),
+        horas: horasMttoEnTurnos(m, ventanaPlan.turnos)?.horas ?? 0,
+      })));
+      return mantenimientosLooper.flatMap(m => {
+        const r = horasMttoEnTurnos(m, ventanaPlan.turnos);
+        return r ? [{ maquina: getProp(m, ['MAQUINA']), fecha: format(r.inicio, r.porDia ? 'yyyy-MM-dd' : 'yyyy-MM-dd HH:mm'), horas: r.horas }] : [];
       });
     }
-    return looper
+    return mantenimientosLooper
       .filter(m => {
         if (selectedDates.size === 0) return true;
         // fechaLocalEcuador, no split('T')[0]: FECHA_OT_PRG_INI es UTC real, selectedDates son
         // fechas locales del calendario — mismo bug de zona horaria que en Corte Espuma.
-        return selectedDates.has(fechaLocalEcuador(getProp(m, ['FECHA_OT_PRG_INI'])));
+        return selectedDates.has(fechaLocalEcuador(getProp(m, ['FECHA_PRO']) || getProp(m, ['FECHA_OT_PRG_INI'])));
       })
-      .map(m => {
-        const iniStr = getProp(m, ['FECHA_OT_PRG_INI']).trim();
-        const finStr = getProp(m, ['FECHA_OT_PRG_FIN']).trim();
-        const ini = new Date(iniStr);
-        const fin = new Date(finStr);
-        const horas = safeNum(getProp(m, ['T_MTTO_PLANIFICADO', 't_mtto_planificado']))
-          || (isValid(ini) && isValid(fin) ? (fin.getTime() - ini.getTime()) / 3600000 : 0);
-        return {
-          maquina: getProp(m, ['MAQUINA']),
-          fecha: fechaLocalEcuador(iniStr),
-          horas
-        };
-      });
-  }, [mantenimientosSAP, selectedDates, ventanaPlan]);
+      .map(m => ({
+        maquina: getProp(m, ['MAQUINA']),
+        fecha: fechaLocalEcuador(getProp(m, ['FECHA_PRO']) || getProp(m, ['FECHA_OT_PRG_INI'])),
+        horas: duracionMttoH(m),
+      }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mantenimientosLooper, mantenimientosSAP, maquinasMttoLooper, selectedDates, ventanaPlan]);
 
   const mttoPreventivoHoras = useMemo(
     () => mttoPreventivoTasks.reduce((sum, t) => sum + t.horas, 0),
@@ -3755,21 +3796,24 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // descuenta acá solo la parte que aún no pasó, y no toca la ventana nueva (empieza 19:00).
     const ahora = new Date();
     const desde = turnoAnterior ? new Date(Math.max(ahora.getTime(), turnoAnterior.ini.getTime())) : null;
-    const mttoTurno = turnoAnterior && desde
-      ? mantenimientosSAP
-        .filter(m => String(getProp(m, ['MAQUINA'])).toUpperCase().includes('LOOPER'))
-        .reduce((s, m) => {
-          const ini = new Date(getProp(m, ['FECHA_OT_PRG_INI']).trim());
-          const fin = new Date(getProp(m, ['FECHA_OT_PRG_FIN']).trim());
-          if (!isValid(ini) || !isValid(fin) || fin <= ini) return s;
-          return s + horasSolapadas(ini, fin, desde, turnoAnterior.fin);
+    // Una OT programada por día (0:00) cuenta en proporción a lo que le queda al turno.
+    const totalTurno = turnoAnterior ? horasSolapadas(turnoAnterior.ini, turnoAnterior.fin, turnoAnterior.ini, turnoAnterior.fin) : 0;
+    const mttoTurno = turnoAnterior && desde && totalTurno > 0
+      ? mantenimientosLooper.reduce((s, m) => {
+          const r = horasMttoEnTurnos(m, [{ turno: 'Día', ini: turnoAnterior.ini, fin: turnoAnterior.fin }]);
+          if (!r) return s;
+          if (r.porDia) return s + r.horas * (horasSolapadas(desde, turnoAnterior.fin, turnoAnterior.ini, turnoAnterior.fin) / totalTurno);
+          const ini = new Date(getProp(m, ['FECHA_OT_PRG_INI']));
+          const fin = new Date(getProp(m, ['FECHA_OT_PRG_FIN']));
+          return s + Math.min(r.horas, horasSolapadas(ini, fin, desde, turnoAnterior.fin));
         }, 0)
       : 0;
     const disponibleTurno = turnoAnterior && desde
       ? Math.max(0, horasSolapadas(desde, turnoAnterior.fin, turnoAnterior.ini, turnoAnterior.fin) * factorEfectivoLooper - mttoTurno)
       : 0;
     return { horas: Math.max(0, horasOrdenes - disponibleTurno), horasOrdenes, disponibleTurno, mttoTurno, turnoAnterior, ordenes };
-  }, [ventanaPlan, ordenesFert, kpiLooperData, diaShiftOptions, selectedDiaShift, factorEfectivoLooper, mantenimientosSAP]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ventanaPlan, ordenesFert, kpiLooperData, diaShiftOptions, selectedDiaShift, factorEfectivoLooper, mantenimientosLooper]);
   // null = usar lo que sugiere SAP; un número = ajuste manual del planificador. Se reinicia al
   // cambiar la fecha evaluada (otra ventana, otra sugerencia).
   const [corridaPendienteManual, setCorridaPendienteManual] = useState<number | null>(null);
@@ -4956,7 +5000,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       corridaFechas,
       necesidadesPlantaData,
       // Solo el MTTO del Looper (lo único que usa este cálculo), no toda la maestra de SAP.
-      mantenimientosLooper: mantenimientosSAP.filter(m => String(getProp(m, ['MAQUINA'])).toUpperCase().includes('LOOPER')),
+      mantenimientosLooper,
     };
   };
 
