@@ -43,6 +43,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
+import { VistaPreviaEnvioSap, versionesFabricacionCacheadas } from '@/components/VistaPreviaEnvioSap';
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
@@ -121,13 +122,21 @@ const ES_FORRO = (desc: string): boolean => /FORRO/i.test(String(desc || ''));
 // no coincidió con ES_LAMINA_CORTADA (ahí sí puede haber un gap real de nomenclatura).
 const TIENE_COMPONENTE_ESPUMA = (desc: string): boolean => /ESPUMA/i.test(String(desc || ''));
 const CAROUSEL_DIAMETER_CM = 320;
-// Tiempo real de un ciclo de descarga física del carrusel, cronometrado en campo por el usuario
-// (2026-08-31): Centro 1000 (Quito) 2.7 min, Centro 2000 (Guayaquil) 4.48 min — reemplaza el modelo
-// simulado con marcadores de posición (ver [[corte_espuma_modelo_carga_descarga_simulado]]; el peso
-// máximo de levantamiento ya no se usa: cada sub-bloque corresponde a 1 ciclo real medido, sin
-// desglose por peso). Solo cubre DESCARGA — el tiempo de CARGA sigue sin dato real, se deja el "4
-// ciclos por la cúpula" existente sin tocar.
-const TIEMPO_DESCARGA_CICLO_MIN: Record<string, number> = { '1000': 2.7, '2000': 4.48 };
+// Tiempos de carga y descarga de UN sub-bloque, en SEGUNDOS (mismo criterio que el KPI de carruseles:
+// el dato de planta se guarda en segundos y se convierte a horas al calcular, / 3600).
+// Descarga — cronometrada por el usuario 2026-08-31: Quito 2.7 min = 162 s, Guayaquil 4.48 min = 268.8 s
+// (reemplazó el modelo simulado con marcadores, ver [[corte_espuma_modelo_carga_descarga_simulado]]).
+const TIEMPO_DESCARGA_CICLO_SEG: Record<string, number> = { '1000': 162, '2000': 268.8 };
+// Carga — cronometrada por el usuario 2026-10-07 en Quito (bloques D19 de 198, 4 sub-bloques: 1.42 /
+// 1.45 / 1.38 / 1.46 min → promedio 1.43 min = 85.8 s). Aparte de los 4 ciclos de corte por carga
+// (despeje de la cúpula). Sin dato (Guayaquil todavía) la carga no suma.
+const TIEMPO_CARGA_CICLO_SEG: Record<string, number> = { '1000': 85.8 };
+// Corte VERTICAL — estimado de planta del usuario 2026-10-07 (en evaluación, ajustar al medir): carga y
+// descarga (buscar, colocar, descargar) 3.5 min por lote de láminas (1 orden = 1 lote); esquinas 8.5 min
+// por lote de 1 230 piezas. El corte (T. Indiv del KPI × unidades) se suma aparte.
+const VERTICAL_MIN_POR_LOTE_LAMINAS = 3.5;
+const VERTICAL_MIN_POR_LOTE_ESQUINAS = 8.5;
+const VERTICAL_ESQUINAS_POR_LOTE = 1230;
  // El 13% de pérdidas estándar (OEE) YA se aplica como "Paro T1/T2" de cada turno, que por defecto
 // vale 13 y es editable por máquina. Existía además esta constante EFFICIENCY_FACTOR = 0.87 que lo
 // volvía a descontar: la capacidad salía ~13% más baja de lo real. Verificado contra el cálculo del
@@ -345,7 +354,7 @@ interface UnifiedRow {
   tIndiv: number;
   tTotal: number;
   // Componente de tTotal correspondiente solo a descarga física (subBloques × ciclo real medido por
-  // centro / 60) — ver TIEMPO_DESCARGA_CICLO_MIN y calcularMetricasCapacidad.
+  // centro en segundos / 3600) — ver TIEMPO_DESCARGA_CICLO_SEG y calcularMetricasCapacidad.
   tiempoDescargaH: number;
   subBloques: number;
   nroCargas: number;  
@@ -648,6 +657,8 @@ const SOLICITUD_PRODUCCION_FIELDS_ESPUMA: { key: keyof SolicitudProduccionHBPayl
 // enviar (los demás vacíos — fechas/horas fin, pedido, campos que llena SAP — son esperados).
 // PuestoTrabajo puede ir vacío: SAP lo acepta (confirmado por el usuario 2026-10-03).
 const CAMPOS_OBLIGATORIOS_SAP_ESPUMA: (keyof SolicitudProduccionHBPayload)[] = ['CodigoOrdenExterna', 'CodigoMaterial', 'CantidadPlanificada', 'VersionFabricacion'];
+const avisoErroresSapEspuma = (n: number) =>
+  `${n} campo(s) en rojo: completa los obligatorios (Cod. Orden Externa, Material, Cantidad, Versión) o quita la fila con ✕ antes de enviar.`;
 const errorCampoSapEspuma = (payload: SolicitudProduccionHBPayload, campo: keyof SolicitudProduccionHBPayload): string | null => {
   const valor = payload[campo];
   if (CAMPOS_OBLIGATORIOS_SAP_ESPUMA.includes(campo) && (valor === '' || valor === null || valor === undefined || (campo === 'CantidadPlanificada' && Number(valor) <= 0))) return 'Obligatorio';
@@ -752,19 +763,35 @@ interface MetricasCapacidad {
 // Mismas reglas de negocio documentadas ahí: densidad >=28 usa 85 de altura de bloque, <28 usa 103;
 // capGiro se calcula como cuerdas de un polígono inscrito, no como división lineal de la circunferencia.
 const calcularMetricasCapacidad = (
-  info: { ancho: number; largo: number; esp: number },
+  info: { ancho: number; largo: number; esp: number; desc?: string },
   densVal: number,
   qty: number,
   tIndivReal: number,
   conocidos: MaterialGeomConocido[],
-  centro: string
+  centro: string,
+  // Corte VERTICAL (responsables RespCtrlProd_Verticales): no es carrusel — sin sub-bloques, descarga
+  // por sub-bloque ni ciclos de cúpula. Su tiempo es carga/descarga por lote (VERTICAL_MIN_*) + T. Indiv × cantidad (pedido del usuario
+  // 2026-10-07: 30000160 LAMINA ESQUINA 12X31X5 sumaba 11.66 h de "descarga" de carrusel en verticales).
+  esVertical: boolean = false
 ): MetricasCapacidad => {
+  // Modelo de carrusel (usuario 2026-10-07), en sub-bloques ENTEROS por material/espesor/densidad:
+  //  1) Unidades aprovechables por sub-bloque = ⌊altura útil / espesor⌋ (del piso a lo alto del bloque
+  //     útil, después de quitar la cúpula).
+  //  2) Sub-bloques = ⌈cantidad / unidades por sub-bloque⌉ — antes era (espesor × cantidad) / altura útil
+  //     fraccionario: 0.7 sub-bloques no existen, se carga y descarga uno entero.
+  //  3) Cada sub-bloque paga 1 carga y 1 descarga cronometradas (TIEMPO_CARGA/DESCARGA_CICLO_SEG, en segundos).
+  //  4) Cargas (giros) = ⌈sub-bloques / capacidad por giro⌉; cada carga paga 4 ciclos de corte para
+  //     despejar el desperdicio de la cúpula y dejar el bloque útil.
+  //  5) Corte = T. Indiv (KPI) × unidades + 4 × T. Indiv × cargas.
+  //  6) Und/Batch = lo que realmente va en la carga: unidades por sub-bloque × min(sub-bloques, capacidad
+  //     por giro) — "carrusel lleno" solo cuando hay sub-bloques para llenarlo.
   const usefulHeight = densVal >= 28 ? 85 : 103;
   const hTotal = info.esp * qty;
-  const subB = usefulHeight > 0 ? hTotal / usefulHeight : 0;
-  // Descarga real: 1 ciclo cronometrado por sub-bloque (ver TIEMPO_DESCARGA_CICLO_MIN) — subB YA es
-  // (cantidad×espesor)/alturaÚtil, la misma fórmula que dio el usuario como ejemplo.
-  const tiempoDescargaH = (subB * (TIEMPO_DESCARGA_CICLO_MIN[centro] || 0)) / 60;
+  const unidadesPorSubBloque = info.esp > 0 ? Math.max(1, Math.floor(usefulHeight / info.esp)) : 0;
+  const subB = unidadesPorSubBloque > 0 && qty > 0 ? Math.ceil(qty / unidadesPorSubBloque - 1e-9) : 0;
+  const tiempoDescargaH = (subB * (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0)) / 3600;
+  // Sin medición de carga en el centro (Guayaquil todavía), la carga no suma tiempo propio.
+  const tiempoCargaH = (subB * (TIEMPO_CARGA_CICLO_SEG[centro] || 0)) / 3600;
 
   const gap = 10;
   const radioCarrusel = CAROUSEL_DIAMETER_CM / 2;
@@ -772,12 +799,11 @@ const calcularMetricasCapacidad = (
   const capGiro = cuerdaReq > 0 && cuerdaReq < 2 * radioCarrusel
     ? Math.floor(Math.PI / Math.asin(cuerdaReq / (2 * radioCarrusel)))
     : (cuerdaReq > 0 ? 1 : 0);
-  const slicesPerBlock = info.esp > 0 ? Math.floor(usefulHeight / info.esp) : 0;
 
-  const undBatch = slicesPerBlock * capGiro;
+  const undBatch = unidadesPorSubBloque * Math.min(subB, capGiro);
   const nLoads = capGiro > 0 ? Math.ceil(subB / capGiro) : 0;
-  // REGLA: sumarle 4 ciclos por la cúpula al número de la cantidad para el cálculo
-  const totalCycles = qty + (nLoads * 4);
+  // REGLA: 4 ciclos de corte por carga para despejar la cúpula.
+  const totalCycles = qty + nLoads * 4;
 
   // Sin ancho/largo/esp/densidad válidos no hay con qué comparar family (3a/3b) ni qué escalar — el
   // único candidato sería el fallback ciego 3c (mediana global, sin relación con este material), que
@@ -802,6 +828,29 @@ const calcularMetricasCapacidad = (
     }
   }
 
+  if (esVertical) {
+    // Estimado de planta (usuario 2026-10-07, en evaluación): carga/descarga por LOTE + el corte
+    // (T. Indiv del KPI × unidades). Láminas de cualquier espesor/densidad: 3.5 min por lote — una
+    // orden es un lote, sea de 1 unidad o de varias (promedian ~300 UN). Esquinas: 8.5 min por cada
+    // lote de 1 230 piezas.
+    const esEsquina = /ESQUINA/i.test(info.desc || '');
+    const lotes = qty <= 0 ? 0 : esEsquina ? Math.ceil(qty / VERTICAL_ESQUINAS_POR_LOTE - 1e-9) : 1;
+    const minutos = lotes * (esEsquina ? VERTICAL_MIN_POR_LOTE_ESQUINAS : VERTICAL_MIN_POR_LOTE_LAMINAS) + tIndiv * qty;
+    return {
+      hTotal,
+      subBloques: 0,
+      capGiro: 0,
+      undBatch: 0,
+      nroCargas: 0,
+      tIndiv,
+      tIndivEstimado,
+      tIndivEstimadoNivel,
+      tTotal: minutos / 60,
+      tiempoDescargaH: 0,
+      sinGeometria: tIndiv === 0 && !hasValidGeometria,
+    };
+  }
+
   return {
     hTotal,
     subBloques: subB,
@@ -811,7 +860,7 @@ const calcularMetricasCapacidad = (
     tIndiv,
     tIndivEstimado,
     tIndivEstimadoNivel,
-    tTotal: (tIndiv * totalCycles) / 60 + tiempoDescargaH,
+    tTotal: (tIndiv * totalCycles) / 60 + tiempoCargaH + tiempoDescargaH,
     tiempoDescargaH,
     sinGeometria: tIndiv === 0 && !hasValidGeometria,
   };
@@ -1263,12 +1312,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // PERSISTIDO más reciente de ese centro (ver fetchUltimoPFDEspuma/handleExportSap): cada
   // DetalleTactico guardado del PFD (ya separado por lote/actividad de origen vía
   // getOrigenesProrrateoEspuma) se convierte en una línea del payload. exportSapPreview guarda el
-  // PlanGrupo + las filas DetalleTactico crudas (para poder mostrar descripción/origen en la tabla);
-  // exportSapPayloads es el payload editable 1:1, mismo índice.
-  // grupos[i] = las líneas del PFD que se consolidaron en exportSapPayloads[i] (una orden por material);
-  // conversion[i] = de qué se compone su cantidad (faltante del PFD + provisional convertida).
-  const [exportSapPreview, setExportSapPreview] = useState<{ plan: PlanGrupo; centro: '1000' | '2000'; grupos: DetalleTactico[][]; conversion: ConversionProvisionalEspuma[] } | null>(null);
-  const [exportSapPayloads, setExportSapPayloads] = useState<SolicitudProduccionHBPayload[] | null>(null);
+  // PlanGrupo/centro del encabezado; exportSapFilas, las filas iniciales (una orden por material) que
+  // VistaPreviaEnvioSap edita por dentro — se envía tal cual lo que quedó en la tabla.
+  const [exportSapPreview, setExportSapPreview] = useState<{ plan: PlanGrupo; centro: '1000' | '2000' } | null>(null);
+  const [exportSapFilas, setExportSapFilas] = useState<{ key: string; descripcion: string; payload: SolicitudProduccionHBPayload }[] | null>(null);
   const [isValidandoExportSap, setIsValidandoExportSap] = useState(false);
   const [isEnviandoSap, setIsEnviandoSap] = useState(false);
 
@@ -1684,7 +1731,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // REGLA: Responsables de operación alterna (039, 036, 044)
       const isAlterna = esRespVertical(centroId, resp);
 
-      const metrics = calcularMetricasCapacidad(info, densVal, qty, tIndivReal, conocidos, centroId);
+      const metrics = calcularMetricasCapacidad(info, densVal, qty, tIndivReal, conocidos, centroId, isAlterna);
       const { hTotal, subBloques: subB, undBatch, nroCargas: nLoads, tIndiv, tIndivEstimado, tIndivEstimadoNivel, tTotal, tiempoDescargaH, sinGeometria } = metrics;
 
       const looperMatch = kpiLooperData.find(k => cleanCode(k.Material) === info.code);
@@ -2410,15 +2457,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return prepared.map(({ r, info, tIndivReal }) => {
       const qty = parseQty(r.cantidad_produccion_neta);
       const densVal = safeNum(info.dens);
-      const { hTotal, subBloques, undBatch, nroCargas, tIndiv, tIndivEstimado, tIndivEstimadoNivel, tTotal, tiempoDescargaH, sinGeometria } =
-        calcularMetricasCapacidad(info, densVal, qty, tIndivReal, conocidos, centroId);
-
-      const looperMatch = kpiLooperData.find(k => cleanCode(k.Material) === info.code);
-      const pesoUN = looperMatch ? safeNum(looperMatch.PesoUN) : (info.ancho * info.largo * info.esp * densVal) / 1000000;
-
       const respCP = materialRespCPPorCentro[centroId]?.get(info.code) || '';
       // Misma regla que Provisionales/FERT (ver auditMapper): responsables 039/036/044 son operación alterna.
       const isAlterna = esRespVertical(centroId, respCP);
+      const { hTotal, subBloques, undBatch, nroCargas, tIndiv, tIndivEstimado, tIndivEstimadoNivel, tTotal, tiempoDescargaH, sinGeometria } =
+        calcularMetricasCapacidad(info, densVal, qty, tIndivReal, conocidos, centroId, isAlterna);
+
+      const looperMatch = kpiLooperData.find(k => cleanCode(k.Material) === info.code);
+      const pesoUN = looperMatch ? safeNum(looperMatch.PesoUN) : (info.ancho * info.largo * info.esp * densVal) / 1000000;
 
       // Atraso/próxima entrega solo aplica a Venta Externa (ver pendientesLaminaPorCentro, resultado
       // de calcularEntregasVentaExterna): Colchones/Muebles/Prensado no tienen pedido de venta
@@ -2726,8 +2772,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     }, 0);
   }, [uniqueMantenimientosSAP, turnosVentanaMaquina]);
 
-  // Pendiente del día hábil anterior = solo el EXCESO del turno (regla de Laminado, usuario 2026-10-06).
-  // Las FERT del día anterior con cantidad pendiente se están cortando en el turno Día de ese día: a la
+  // Pendiente FERT = solo el EXCESO del turno (regla de Laminado, usuario 2026-10-06; desde 2026-10-07 con
+  // todo el pendiente, no solo el del día anterior). Esas FERT se están cortando en el turno Día del día hábil anterior: a la
   // hora de la sincronización (momentoEvaluacion) cada máquina aún tiene horas de ese turno. Por máquina:
   // pasa = máx(0, horas pendientes − horas restantes × (1 − paro Día) × rendimiento − MTTO en ese resto).
   // Cada fila se escala por la fracción que pasa en su(s) máquina(s); sin máquina mapeada, sin turno Día
@@ -2782,8 +2828,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
   // Pendiente FERT que pasa al plan de `fechaLimite` (usuario 2026-10-06): lo que no alcanza un turno
   // se suma al siguiente plan, hasta DIAS_PENDIENTE_MAX días hábiles atrás (más viejo = no procesado,
-  // incumplimiento: no suma). El día hábil anterior se descuenta con el turno en curso
-  // (ajustePendienteTurnoAnterior); los previos suman completos. Las FERT se toman por fecha FIN, igual
+  // incumplimiento: no suma). Todo ese pendiente se concilia contra el turno en curso
+  // (ajustePendienteTurnoAnterior) y solo pasa el exceso, como Laminado. Las FERT se toman por fecha FIN, igual
   // que el plan (una orden 06→07 ya cuenta en el plan del 07). Lo usan el tablero y el correo.
   type ItemCarga = { row: UnifiedRow; estado: 'FERT' | 'Ya firme' | 'Faltante'; fecha: string };
   const armarPendienteAnterior = useCallback((
@@ -2796,21 +2842,80 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const fertReal: ItemCarga[] = fertSinVentana
       .filter(r => r.centro === centroId && r.cant > 0 && dias.includes(r.fechaFin) && !yaCapturado.has(`${r.orden}|${r.material}`))
       .map(row => ({ row, estado: 'FERT' as const, fecha: row.fecha }));
-    // FERT del día anterior que llegaron por un plan aún activo: mismo descuento del turno.
-    const esFertDiaAnterior = (x: ItemCarga) => x.estado === 'FERT' && x.fecha === diaAnterior;
-    const delDiaAnterior = [...backlogNecesidad.filter(esFertDiaAnterior), ...fertReal.filter(x => x.row.fechaFin === diaAnterior)];
-    const previos = fertReal.filter(x => x.row.fechaFin !== diaAnterior);
-    const ajuste = ajustePendienteTurnoAnterior(planta, diaAnterior, delDiaAnterior);
+    // Regla de Laminado (usuario 2026-10-07): TODO el pendiente FERT (día anterior, los previos dentro
+    // de los 3 días y las FERT de planes aún activos) se está procesando en el turno en curso. Por
+    // máquina se concilia contra las horas que le quedan a ese turno desde la sincronización (ej. corte
+    // 11:00, turno hasta 19:00 → 8 h con paros/rendimiento/MTTO); solo la diferencia que no alcanza
+    // pasa al plan. Antes solo el día anterior se descontaba y los previos sumaban completos.
+    const esFertBacklog = (x: ItemCarga) => x.estado === 'FERT';
+    const enTurno = [...backlogNecesidad.filter(esFertBacklog), ...fertReal];
+    const ajuste = ajustePendienteTurnoAnterior(planta, diaAnterior, enTurno);
     const horasDe = (lista: ItemCarga[]) => lista.reduce((sum, x) => sum + x.row.tTotal, 0);
     const tot = ajuste.porMaquina.size > 0
       ? Array.from(ajuste.porMaquina.values()).reduce((a, v) => ({ pendiente: a.pendiente + v.pendiente, restante: a.restante + Math.min(v.restante, v.pendiente), pasa: a.pasa + v.pasa }), { pendiente: 0, restante: 0, pasa: 0 })
-      : { pendiente: horasDe(delDiaAnterior), restante: 0, pasa: horasDe(delDiaAnterior) };
+      : { pendiente: horasDe(enTurno), restante: 0, pasa: horasDe(enTurno) };
+    // Desglose informativo del pendiente (antes del descuento) por los días previos al anterior.
     const anteriores = dias.slice(1).reverse()
-      .map(dia => ({ dia, horas: horasDe(previos.filter(x => x.row.fechaFin === dia)) }))
+      .map(dia => ({ dia, horas: horasDe(enTurno.filter(x => (x.row.fechaFin || x.fecha) === dia)) }))
       .filter(d => d.horas > 0.05);
-    const resumen = tot.pendiente > 0.05 || anteriores.length > 0 ? { dia: diaAnterior, ...tot, anteriores } : null;
-    return { filas: [...backlogNecesidad.filter(x => !esFertDiaAnterior(x)), ...ajuste.filas, ...previos], pendientes: [...ajuste.filas, ...previos], resumen, porMaquina: ajuste.porMaquina };
+    const resumen = tot.pendiente > 0.05 ? { dia: diaAnterior, ...tot, anteriores } : null;
+    return { filas: [...backlogNecesidad.filter(x => !esFertBacklog(x)), ...ajuste.filas], pendientes: ajuste.filas, resumen, porMaquina: ajuste.porMaquina };
   }, [restarDiasHabiles, ajustePendienteTurnoAnterior]);
+
+  // Auditoría (solo lectura, pedido del usuario 2026-10-07): cada FERT con cantidad pendiente hasta la
+  // fecha evaluada y CUÁNTO de ella entra a la ocupación, con el motivo — para conciliar contra SAP
+  // (COHV) sin exportar. Replica las reglas de resumenReportePorPlanta/armarPendienteAnterior, no las
+  // cambia: plan del día completo; día hábil anterior solo el exceso del turno; los 2 previos completos;
+  // fechas con plan de necesidad aún activo completas; más viejo, fuera. Incluye también órdenes de
+  // hojas de ruta de corte con responsable fuera de la restricción, para detectar un responsable faltante.
+  type EstadoAuditoriaPendiente = 'Plan del día' | 'Día anterior (exceso del turno)' | 'Pendiente previo' | 'Plan aún activo' | 'Más de 3 días hábiles' | 'Responsable no permitido';
+  const [auditoriaPendientePlanta, setAuditoriaPendientePlanta] = useState<'UIO' | 'GYE' | null>(null);
+  const auditoriaPendiente = useMemo(() => {
+    const planta = auditoriaPendientePlanta;
+    if (!planta) return null;
+    const centroId: '1000' | '2000' = planta === 'UIO' ? '1000' : '2000';
+    const fecha = Array.from(selectedDatesCapacidad[planta]).sort()[0];
+    if (!fecha) return { planta, fecha: '', filas: [] as never[] };
+    const fertSinVentana = planta === 'UIO' ? fertAuditAllUIO : fertAuditAllGYE;
+    const necesidad = planta === 'UIO' ? [...necesidadCapacidadUIO, ...necesidadCapacidadNivel2UIO] : [...necesidadCapacidadGYE, ...necesidadCapacidadNivel2GYE];
+    const fechasConNecesidad = new Set(necesidad.map(r => r.fecha).filter(f => f < fecha));
+    const { permitidos, verticales, carruseles } = responsablesPorCentro[centroId];
+    const base = parseFechaLocal(fecha);
+    const dias = Array.from({ length: DIAS_PENDIENTE_MAX }, (_, i) => format(restarDiasHabiles(base, i + 1), 'yyyy-MM-dd'));
+    const esHojaDeCorte = (maquina: string) => /HR[-_ ]?(CAR|V0|TACO|CTCNC)/i.test(maquina);
+
+    const candidatas = fertSinVentana.filter(r =>
+      r.centro === centroId && r.cant > 0 && r.fechaFin && r.fechaFin <= fecha &&
+      !/PRENSAD/i.test(r.descripcion) && !ES_FORRO(r.descripcion) && !/APROVECHAMIENTO/i.test(r.descripcion) &&
+      (permitidos.includes(r.responsable) || esHojaDeCorte(r.maquina))
+    );
+    // Factor del descuento del turno en curso, por fila: todo el pendiente previo al plan (3 días y
+    // planes aún activos) se concilia junto contra el turno, igual que armarPendienteAnterior.
+    const enTurno = candidatas.filter(r => permitidos.includes(r.responsable) && r.fechaFin < fecha && (dias.includes(r.fechaFin) || fechasConNecesidad.has(r.fechaFin))).map(row => ({ row }));
+    const ajuste = ajustePendienteTurnoAnterior(planta, dias[0], enTurno);
+    const factorTurno = new Map<UnifiedRow, number>();
+    enTurno.forEach((x, i) => factorTurno.set(x.row, x.row.tTotal > 0 ? ajuste.filas[i].row.tTotal / x.row.tTotal : (x.row.cantUnidadReal > 0 ? ajuste.filas[i].row.cantUnidadReal / x.row.cantUnidadReal : 1)));
+
+    const filas = candidatas.map(r => {
+      const proceso = esFilaCNC(r.maquina) ? 'CNC' : carruseles.includes(r.responsable) ? 'Carrusel' : verticales.includes(r.responsable) ? 'Vertical' : '—';
+      let estado: EstadoAuditoriaPendiente;
+      let factor: number;
+      if (!permitidos.includes(r.responsable)) { estado = 'Responsable no permitido'; factor = 0; }
+      else if (r.fechaFin === fecha) { estado = 'Plan del día'; factor = 1; }
+      else if (r.fechaFin === dias[0]) { estado = 'Día anterior (exceso del turno)'; factor = factorTurno.get(r) ?? 1; }
+      else if (dias.includes(r.fechaFin)) { estado = 'Pendiente previo'; factor = factorTurno.get(r) ?? 1; }
+      else if (fechasConNecesidad.has(r.fechaFin)) { estado = 'Plan aún activo'; factor = factorTurno.get(r) ?? 1; }
+      else { estado = 'Más de 3 días hábiles'; factor = 0; }
+      return {
+        orden: r.orden, material: r.material, descripcion: r.descripcion, maquina: r.maquina || '—',
+        responsable: r.responsable, fechaFin: r.fechaFin, proceso, estado,
+        pendienteUn: r.cantUnidadReal, cuentaUn: r.cantUnidadReal * factor,
+        pendienteH: r.tTotal, cuentaH: r.tTotal * factor,
+        sinTiempo: r.tTotal <= 0,
+      };
+    }).sort((a, b) => a.fechaFin.localeCompare(b.fechaFin) || a.proceso.localeCompare(b.proceso) || a.material.localeCompare(b.material));
+    return { planta, fecha, filas };
+  }, [auditoriaPendientePlanta, selectedDatesCapacidad, fertAuditAllUIO, fertAuditAllGYE, necesidadCapacidadUIO, necesidadCapacidadNivel2UIO, necesidadCapacidadGYE, necesidadCapacidadNivel2GYE, responsablesPorCentro, restarDiasHabiles, ajustePendienteTurnoAnterior]);
 
   // Ventana del plan de la PLANTA para mostrarla (inicio más temprano / fin más tardío de sus
   // máquinas en servicio) — solo con UNA fecha evaluada.
@@ -4798,30 +4903,25 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return [];
   }, []);
 
-  // Mismo patrón que fetchVersionesFabricacionLaminado: lotes pequeños en paralelo (no todo de una
-  // vez, no uno por uno), con desambiguación por PuestoTrabajo cuando el material trae más de una
+  // Mismo patrón que fetchVersionesFabricacionLaminado: caché compartida + hasta 10 consultas a la vez
+  // (versionesFabricacionCacheadas), precargada en segundo plano con el P3 en memoria (ver el useEffect
+  // junto a handleExportSap); desambiguación por PuestoTrabajo cuando el material trae más de una
   // Hoja de Ruta.
   const fetchVersionesFabricacionEspuma = useCallback(async (centro: string, materiales: string[]): Promise<Map<string, { version: string; ambiguo: boolean }>> => {
     const resultado = new Map<string, { version: string; ambiguo: boolean }>();
-    const CHUNK_SIZE = 5;
-    for (let i = 0; i < materiales.length; i += CHUNK_SIZE) {
-      const lote = materiales.slice(i, i + CHUNK_SIZE);
-      const respuestas = await Promise.allSettled(lote.map(m => fetchVersionConReintentosEspuma(centro, m)));
-      respuestas.forEach((r, idx) => {
-        const material = lote[idx];
-        const filas = r.status === 'fulfilled' ? r.value : [];
-        if (filas.length === 0) return;
-        if (filas.length === 1) {
-          const version = getProp(filas[0], ['VERSION']);
-          if (version) resultado.set(material, { version, ambiguo: false });
-          return;
-        }
-        const puesto = puestoTrabajoPorMaterialEspuma.get(material)?.toUpperCase().trim() || '';
-        const match = filas.find(f => getProp(f, ['GRUPOHOJARUTA']).toUpperCase().replace(/^HR-/, '') === puesto.replace(/^HR-/, ''));
-        const version = getProp(match || filas[0], ['VERSION']);
-        if (version) resultado.set(material, { version, ambiguo: !match });
-      });
-    }
+    const porMaterial = await versionesFabricacionCacheadas(centro, materiales, fetchVersionConReintentosEspuma);
+    porMaterial.forEach((filas, material) => {
+      if (filas.length === 0) return;
+      if (filas.length === 1) {
+        const version = getProp(filas[0], ['VERSION']);
+        if (version) resultado.set(material, { version, ambiguo: false });
+        return;
+      }
+      const puesto = puestoTrabajoPorMaterialEspuma.get(material)?.toUpperCase().trim() || '';
+      const match = filas.find(f => getProp(f, ['GRUPOHOJARUTA']).toUpperCase().replace(/^HR-/, '') === puesto.replace(/^HR-/, ''));
+      const version = getProp(match || filas[0], ['VERSION']);
+      if (version) resultado.set(material, { version, ambiguo: !match });
+    });
     return resultado;
   }, [fetchVersionConReintentosEspuma, puestoTrabajoPorMaterialEspuma]);
 
@@ -4876,7 +4976,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       CodigoOrdenExterna: String(d.codigo_detalle_tactico),
       ClaseOrden: 'ZCSQ',
       Centro: centro,
-      CodigoMaterial: material,
+      // Formato interno SAP (MATNR, 18 caracteres con ceros a la izquierda), el mismo que usa
+      // MaestroMaterialesExplosionPaginado (ej. "000000000030004186"). Solo códigos numéricos.
+      CodigoMaterial: /^\d+$/.test(material) ? material.padStart(18, '0') : material,
       CantidadPlanificada: cantidad,
       VersionFabricacion: versiones.get(material)?.version || '',
       PuestoTrabajo: resolvePuestoTrabajoEspuma(material),
@@ -4886,7 +4988,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       HoraInicioProgramada: '070000',
       PedidoComercial: '',
       PosicionPedido: '',
-      EstadoRegistro: '1',
+      EstadoRegistro: '1', // CHAR(01) en ZPPT_ORDER_INT: texto, no número (HANA rechaza el 1 numérico)
       // Mismo texto fijo que ya cargaba sin problemas en SAP/HANA — el detalle de consolidación
       // (N1/N2, provisional convertida) se muestra en la vista previa, no se manda aquí, para no
       // arriesgar el largo del campo en el endpoint.
@@ -4923,6 +5025,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return { faltantePFD, provisionalQty, cantidadOrden: cantidadP3, principal, motivo: faltantePFD > 0 ? 'provisional+faltante' : 'provisional-completa' };
   }, [provisionalesQueCubrenPorCentro]);
 
+  const descripcionMaterial = useCallback((material: string): string =>
+    materialDescMap.get(material) || descripcionesBomRef.current.get(material) || '', [materialDescMap]);
+
   const handleExportSap = useCallback(async (centro: '1000' | '2000') => {
     if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3, editar planes o exportar a SAP con datos vigentes.'); return; }
     if (!datosCargados) {
@@ -4956,43 +5061,42 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         addNotification('info', `El P3 #${plan.codigo_plan_grupo} del Centro ${centro} no tiene faltantes ni provisionales por convertir: no hay órdenes que crear en SAP.`);
         return;
       }
-      const grupos = conConversion.map(g => g.lineas);
-      const conversion = conConversion.map(g => g.conversion);
-      const versiones = await fetchVersionesFabricacionEspuma(centro, grupos.map(g => cleanCode(g[0].codigo_material)));
-      setExportSapPreview({ plan, centro, grupos, conversion });
-      setExportSapPayloads(conConversion.map(g => buildSolicitudProduccionEspuma(g.lineas, centro, fechaInicioPlan, versiones, g.conversion)));
+      const versiones = await fetchVersionesFabricacionEspuma(centro, conConversion.map(g => cleanCode(g.lineas[0].codigo_material)));
+      setExportSapPreview({ plan, centro });
+      setExportSapFilas(conConversion.map((g, i) => {
+        const payload = buildSolicitudProduccionEspuma(g.lineas, centro, fechaInicioPlan, versiones, g.conversion);
+        return { key: `${g.lineas[0]?.codigo_detalle_tactico}-${i}`, descripcion: descripcionMaterial(cleanCode(payload.CodigoMaterial)), payload };
+      }));
     } catch (e) {
       addNotification('error', `No se pudo completar la validación previa al envío: ${(e as Error).message}. Envío cancelado por seguridad.`);
     } finally {
       setIsValidandoExportSap(false);
     }
-  }, [fetchUltimoPFDEspuma, fetchVersionesFabricacionEspuma, buildSolicitudProduccionEspuma, addNotification, datosCargados, resolverConversionProvisional, resultadoRestaurado]);
+  }, [fetchUltimoPFDEspuma, fetchVersionesFabricacionEspuma, buildSolicitudProduccionEspuma, addNotification, datosCargados, resolverConversionProvisional, resultadoRestaurado, descripcionMaterial]);
 
-  const updateExportSapPayload = useCallback((index: number, field: keyof SolicitudProduccionHBPayload, value: string | number) => {
-    setExportSapPayloads(prev => {
-      if (!prev) return prev;
-      const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
-      return next;
-    });
-  }, []);
+  // Precarga en segundo plano la Versión de Fabricación de los materiales del P3 en memoria (queda en
+  // caché), para que "Enviar a SAP" solo espere el P3 guardado. Con pausa: los datos llegan por partes.
+  const materialesP3PorCentro = useMemo(() => {
+    if (!datosCargados || resultadoRestaurado) return '';
+    return (['1000', '2000'] as const).map(c =>
+      `${c}:${respuestaSalidaRowsPorCentro(c).filter(r => r.cantidadUnidades > 0).map(r => r.material).sort().join(',')}`
+    ).join(';');
+  }, [datosCargados, resultadoRestaurado, respuestaSalidaRowsPorCentro]);
+  useEffect(() => {
+    if (!materialesP3PorCentro) return;
+    const t = setTimeout(() => {
+      materialesP3PorCentro.split(';').forEach(par => {
+        const [centro, lista] = par.split(':');
+        if (lista) fetchVersionesFabricacionEspuma(centro, lista.split(',')).catch(() => {});
+      });
+    }, 3000);
+    return () => clearTimeout(t);
+  }, [materialesP3PorCentro, fetchVersionesFabricacionEspuma]);
 
-  const descripcionMaterial = useCallback((material: string): string =>
-    materialDescMap.get(material) || descripcionesBomRef.current.get(material) || '', [materialDescMap]);
-
-  const erroresExportSap = useMemo(() => (exportSapPayloads || []).reduce((n, p) =>
-    n + SOLICITUD_PRODUCCION_FIELDS_ESPUMA.filter(f => errorCampoSapEspuma(p, f.key)).length, 0), [exportSapPayloads]);
-
-  // Quitar una orden de la vista previa antes de enviar — mismo patrón que removeExportTxtRow de
-  // Laminado (grupos/conversion van por índice, paralelos a los payloads).
-  const removeExportSapRow = useCallback((index: number) => {
-    setExportSapPreview(prev => prev ? { ...prev, grupos: prev.grupos.filter((_, i) => i !== index), conversion: prev.conversion.filter((_, i) => i !== index) } : prev);
-    setExportSapPayloads(prev => prev ? prev.filter((_, i) => i !== index) : prev);
-  }, []);
-
-  const handleConfirmarExportSap = useCallback(async () => {
-    const payloads = exportSapPayloads;
-    if (!payloads || payloads.length === 0) return;
+  // Las ediciones y la X (quitar una orden de este envío) viven dentro de VistaPreviaEnvioSap; acá
+  // llega exactamente lo que quedó en la tabla.
+  const handleConfirmarExportSap = useCallback(async (payloads: SolicitudProduccionHBPayload[]) => {
+    if (payloads.length === 0) return;
     setIsEnviandoSap(true);
     try {
       const resultados: { material: string; ok: boolean; mensaje: string }[] = [];
@@ -5016,11 +5120,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         addNotification('warning', `${ok.length} orden(es) ok, ${fallidos.length} con error: ${fallidos.map(f => `${f.material} (${f.mensaje})`).join(' | ')}`);
       }
       setExportSapPreview(null);
-      setExportSapPayloads(null);
+      setExportSapFilas(null);
     } finally {
       setIsEnviandoSap(false);
     }
-  }, [exportSapPayloads, addNotification]);
+  }, [addNotification]);
+  const cerrarExportSap = useCallback(() => { setExportSapPreview(null); setExportSapFilas(null); }, []);
 
   useEffect(() => {
     setMounted(true);
@@ -5270,7 +5375,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             ) : (
               <>
                 <div className="flex items-center justify-between gap-2" title={`Suma real de tTotal de las órdenes cuya Hoja de Ruta/Puesto de Trabajo coincide con esta máquina, para la fecha elegida en 'Evaluar Capacidad'.${ocupacion.pendienteAnterior && ocupacion.pendienteAnterior.pendiente > 0.05 ? `
-Incluye el pendiente del ${format(parseFechaLocal(ocupacion.pendienteAnterior.dia), 'EEE dd/MM', { locale: es })}: ${ocupacion.pendienteAnterior.pendiente.toFixed(1)} h − turno restante ${Math.min(ocupacion.pendienteAnterior.restante, ocupacion.pendienteAnterior.pendiente).toFixed(1)} h = pasa ${ocupacion.pendienteAnterior.pasa.toFixed(1)} h (turno medido desde la sincronización, con paros, rendimiento y MTTO).` : ''}`}>
+Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteAnterior.dia), 'EEE dd/MM', { locale: es })}: ${ocupacion.pendienteAnterior.pendiente.toFixed(1)} h − turno restante ${Math.min(ocupacion.pendienteAnterior.restante, ocupacion.pendienteAnterior.pendiente).toFixed(1)} h = pasa ${ocupacion.pendienteAnterior.pasa.toFixed(1)} h (turno medido desde la sincronización, con paros, rendimiento y MTTO).` : ''}`}>
                   <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wide">Tiempo Proceso</span>
                   <span className="text-[10px] font-black text-slate-700">{ocupacion.horas.toFixed(1)}h</span>
                 </div>
@@ -5914,6 +6019,15 @@ Incluye el pendiente del ${format(parseFechaLocal(ocupacion.pendienteAnterior.di
               <p className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Gestión de Tiempos</p>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAuditoriaPendientePlanta(planta)}
+                disabled={fechasSel.length === 0}
+                title={fechasSel.length === 0 ? "Elige una fecha en 'Evaluar Capacidad'." : 'Órdenes FERT pendientes hasta la fecha evaluada: cuánto entra a la ocupación y por qué (solo lectura, para conciliar con SAP).'}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+              >
+                <Search className="w-3.5 h-3.5" /> Auditar pendiente FERT
+              </button>
               <Popover>
                 <PopoverTrigger asChild>
                   <button
@@ -6524,7 +6638,7 @@ Incluye el pendiente del ${format(parseFechaLocal(ocupacion.pendienteAnterior.di
                           </td>
                           <td className="px-3 py-2 border-r border-slate-50 bg-amber-50 text-amber-700 font-black">{row.nroCargas}</td>
                           <td className="px-3 py-2 border-r border-slate-50 font-black">{Math.round(row.undBatch)}</td>
-                          <td className="px-3 py-2 border-r border-slate-50 font-black text-indigo-900">{row.subBloques.toFixed(3)}</td>
+                          <td className="px-3 py-2 border-r border-slate-50 font-black text-indigo-900">{Number.isInteger(row.subBloques) ? row.subBloques : row.subBloques.toFixed(3)}</td>
                           <td className="px-3 py-2 border-r border-slate-50 font-black text-slate-500 bg-gray-50">
                              {row.isAlterna ? <Badge variant="outline" className="bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200 text-[7px] px-1 font-black">VERTICAL</Badge> : '—'}
                           </td>
@@ -7281,78 +7395,117 @@ Incluye el pendiente del ${format(parseFechaLocal(ocupacion.pendienteAnterior.di
         </DialogContent>
       </Dialog>
 
-      <Dialog open={exportSapPreview !== null} onOpenChange={(open) => { if (!open && !isEnviandoSap) { setExportSapPreview(null); setExportSapPayloads(null); } }}>
-        <DialogContent className="max-w-[96vw] max-h-[85vh] overflow-y-auto">
+      <VistaPreviaEnvioSap
+        abierto={exportSapFilas !== null}
+        titulo={`Confirmar envío a SAP — P3 Corte Espuma ${exportSapPreview ? `(Centro ${exportSapPreview.centro})` : ''}`}
+        descripcion={`Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Sale del P3 #${exportSapPreview?.plan.codigo_plan_grupo ?? ''} ya guardado: Cod. Orden Externa = codigo_detalle_tactico de la línea del material y Cant. Planificada = su cantidad. Esta acción no se puede deshacer desde acá.`}
+        filasIniciales={exportSapFilas}
+        campos={SOLICITUD_PRODUCCION_FIELDS_ESPUMA}
+        errorCampo={errorCampoSapEspuma}
+        avisoErrores={avisoErroresSapEspuma}
+        enviando={isEnviandoSap}
+        onCancelar={cerrarExportSap}
+        onConfirmar={handleConfirmarExportSap}
+      />
+
+      <Dialog open={auditoriaPendiente !== null} onOpenChange={(open) => { if (!open) setAuditoriaPendientePlanta(null); }}>
+        <DialogContent className="max-w-6xl max-h-[88vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Confirmar envío a SAP — P3 Corte Espuma {exportSapPreview ? `(Centro ${exportSapPreview.centro})` : ''}</DialogTitle>
+            <DialogTitle>Auditoría de pendiente FERT — {auditoriaPendiente?.planta === 'GYE' ? 'Guayaquil' : 'Quito'}{auditoriaPendiente?.fecha ? ` · plan del ${format(parseFechaLocal(auditoriaPendiente.fecha), 'EEE dd/MM/yyyy', { locale: es })}` : ''}</DialogTitle>
             <DialogDescription>
-              Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Sale del P3 #{exportSapPreview?.plan.codigo_plan_grupo} ya guardado: Cod. Orden Externa = codigo_detalle_tactico de la línea del material y Cant. Planificada = su cantidad. Esta acción no se puede deshacer desde acá.
+              Órdenes FERT con cantidad pendiente (teórica − entregada) y fecha fin hasta la fecha evaluada. &quot;Cuenta&quot; es lo que entra hoy a la ocupación con la regla vigente; la diferencia contra &quot;Pendiente SAP&quot; es lo que queda fuera. Solo lectura: no cambia el cálculo.
             </DialogDescription>
           </DialogHeader>
-          {exportSapPreview && exportSapPayloads && (
-            <div className="space-y-4 text-left text-sm">
-              <div>
-                <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Órdenes a crear ({exportSapPayloads.length})</span>
-                <div className="border border-slate-100 rounded-xl overflow-auto max-h-[400px]">
-                  <table className="text-[11px] border-collapse">
-                    <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0 z-10">
+          {auditoriaPendiente && auditoriaPendiente.filas.length === 0 && (
+            <p className="text-xs text-slate-500">{auditoriaPendiente.fecha ? 'Sin órdenes FERT pendientes hasta esa fecha (¿ya sincronizaste?).' : "Elige una fecha en 'Evaluar Capacidad'."}</p>
+          )}
+          {auditoriaPendiente && auditoriaPendiente.filas.length > 0 && (() => {
+            const filas = auditoriaPendiente.filas;
+            const procesos = ['Carrusel', 'CNC', 'Vertical', '—'].filter(p => filas.some(f => f.proceso === p));
+            const estados = Array.from(new Set(filas.map(f => f.estado)));
+            const suma = (lista: typeof filas, k: 'pendienteUn' | 'cuentaUn' | 'pendienteH' | 'cuentaH') => lista.reduce((s, f) => s + f[k], 0);
+            const n0 = (v: number) => formatNum(v, 0);
+            return (
+              <div className="space-y-4">
+                <div className="border border-slate-100 rounded-xl overflow-x-auto">
+                  <table className="w-full text-[11px] border-collapse">
+                    <thead className="bg-gray-50 text-gray-500 uppercase font-bold text-[9px]">
                       <tr>
-                        <th className="px-2 py-2 w-8" aria-label="Quitar" />
-                        <th className="px-2 py-2 text-left whitespace-nowrap">Descripción</th>
-                        {SOLICITUD_PRODUCCION_FIELDS_ESPUMA.map(f => (
-                          <th key={f.key} className="px-2 py-2 text-left whitespace-nowrap">{f.label}</th>
-                        ))}
+                        <th className="px-3 py-2 text-left">Motivo</th>
+                        {procesos.map(p => <th key={p} className="px-3 py-2 text-right" colSpan={2}>{p === '—' ? 'Sin proceso' : p} (UN pend. / cuenta)</th>)}
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-gray-50">
-                      {exportSapPayloads.map((payload, i) => (
-                        <tr key={`${exportSapPreview.grupos[i]?.[0]?.codigo_detalle_tactico}-${i}`}>
-                          <td className="px-1 py-1 text-center">
-                            <button
-                              type="button"
-                              onClick={() => removeExportSapRow(i)}
-                              disabled={isEnviandoSap}
-                              title="Quitar esta orden del envío a SAP"
-                              aria-label={`Quitar ${payload.CodigoMaterial} del envío`}
-                              className="inline-flex items-center justify-center w-6 h-6 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:pointer-events-none"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          </td>
-                          <td className="px-2 py-1 truncate max-w-[180px]" title={descripcionMaterial(payload.CodigoMaterial)}>{descripcionMaterial(payload.CodigoMaterial) || '—'}</td>
-                          {SOLICITUD_PRODUCCION_FIELDS_ESPUMA.map(f => {
-                            const error = errorCampoSapEspuma(payload, f.key);
+                    <tbody className="divide-y divide-gray-50 font-bold text-slate-700">
+                      {estados.map(e => (
+                        <tr key={e}>
+                          <td className="px-3 py-1.5 text-left">{e}</td>
+                          {procesos.map(p => {
+                            const l = filas.filter(f => f.estado === e && f.proceso === p);
                             return (
-                              <td key={f.key} className="px-1 py-1">
-                                <Input
-                                  type={f.type === 'number' ? 'number' : 'text'}
-                                  value={payload[f.key] ?? ''}
-                                  onChange={(e) => updateExportSapPayload(i, f.key, f.type === 'number' ? (Number(e.target.value) || 0) : e.target.value)}
-                                  disabled={isEnviandoSap}
-                                  title={error || undefined}
-                                  className={cn("h-7 text-[10px] font-mono px-1.5", f.key === 'Observaciones' ? 'w-48' : 'w-24', error && "border-red-400 bg-red-50")}
-                                />
-                              </td>
+                              <React.Fragment key={p}>
+                                <td className="px-3 py-1.5 text-right tabular-nums text-slate-500">{l.length ? n0(suma(l, 'pendienteUn')) : '—'}</td>
+                                <td className={cn("px-3 py-1.5 text-right tabular-nums", l.length && suma(l, 'cuentaUn') < suma(l, 'pendienteUn') - 0.5 ? "text-red-600" : "text-emerald-700")}>{l.length ? n0(suma(l, 'cuentaUn')) : '—'}</td>
+                              </React.Fragment>
                             );
                           })}
+                        </tr>
+                      ))}
+                      <tr className="bg-slate-50 font-black">
+                        <td className="px-3 py-1.5 text-left">Total</td>
+                        {procesos.map(p => {
+                          const l = filas.filter(f => f.proceso === p);
+                          return (
+                            <React.Fragment key={p}>
+                              <td className="px-3 py-1.5 text-right tabular-nums">{n0(suma(l, 'pendienteUn'))}</td>
+                              <td className="px-3 py-1.5 text-right tabular-nums text-indigo-700" title={`${suma(l, 'cuentaH').toFixed(2)} h de ${suma(l, 'pendienteH').toFixed(2)} h pendientes`}>{n0(suma(l, 'cuentaUn'))} · {suma(l, 'cuentaH').toFixed(1)}h</td>
+                            </React.Fragment>
+                          );
+                        })}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="border border-slate-100 rounded-xl overflow-auto max-h-[45vh]">
+                  <table className="w-full text-[10px] border-collapse">
+                    <thead className="bg-gray-50 text-gray-500 uppercase font-bold text-[9px] sticky top-0">
+                      <tr>
+                        <th className="px-2 py-2 text-left">Fecha fin</th>
+                        <th className="px-2 py-2 text-left">Orden</th>
+                        <th className="px-2 py-2 text-left">Material</th>
+                        <th className="px-2 py-2 text-left">Descripción</th>
+                        <th className="px-2 py-2 text-left">Hoja ruta</th>
+                        <th className="px-2 py-2 text-left">Resp</th>
+                        <th className="px-2 py-2 text-left">Proceso</th>
+                        <th className="px-2 py-2 text-right">Pend. SAP (UN)</th>
+                        <th className="px-2 py-2 text-right">Cuenta (UN)</th>
+                        <th className="px-2 py-2 text-right">Cuenta (h)</th>
+                        <th className="px-2 py-2 text-left">Motivo</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50 font-mono">
+                      {filas.map((f, i) => (
+                        <tr key={i} className={cn(f.cuentaUn < f.pendienteUn - 0.5 ? "bg-red-50/40" : "")}>
+                          <td className="px-2 py-1">{f.fechaFin}</td>
+                          <td className="px-2 py-1">{f.orden}</td>
+                          <td className="px-2 py-1 text-indigo-600 font-black">{f.material}</td>
+                          <td className="px-2 py-1 truncate max-w-[220px]" title={f.descripcion}>{f.descripcion}</td>
+                          <td className="px-2 py-1">{f.maquina}</td>
+                          <td className="px-2 py-1">{f.responsable}</td>
+                          <td className="px-2 py-1">{f.proceso}</td>
+                          <td className="px-2 py-1 text-right">{n0(f.pendienteUn)}</td>
+                          <td className="px-2 py-1 text-right font-black">{n0(f.cuentaUn)}</td>
+                          <td className={cn("px-2 py-1 text-right", f.sinTiempo ? "text-red-600 font-black" : "")}>{f.sinTiempo ? 'SIN TIEMPO' : f.cuentaH.toFixed(2)}</td>
+                          <td className="px-2 py-1 font-sans font-bold">{f.estado}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                {erroresExportSap > 0 && (
-                  <p className="mt-2 text-[11px] font-bold text-red-600">
-                    {erroresExportSap} campo(s) en rojo: completa los obligatorios (Cod. Orden Externa, Material, Cantidad, Versión) o quita la fila con ✕ antes de enviar.
-                  </p>
-                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setExportSapPreview(null); setExportSapPayloads(null); }} disabled={isEnviandoSap}>Cancelar</Button>
-            <Button onClick={handleConfirmarExportSap} disabled={isEnviandoSap || erroresExportSap > 0 || !exportSapPayloads || exportSapPayloads.length === 0} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-              {isEnviandoSap ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Send className="w-4 h-4 mr-2" />} {isEnviandoSap ? 'Enviando…' : 'Confirmar y Enviar a SAP'}
-            </Button>
+            <Button variant="outline" onClick={() => setAuditoriaPendientePlanta(null)}>Cerrar</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -478,6 +478,8 @@ export interface SolicitudProduccionHB {
   HoraInicioProgramada?: string;
   PedidoComercial?: string;
   PosicionPedido?: string;
+  // ESTATUS_REG_ORD es CHAR(01) en ZPPT_ORDER_INT: siempre texto ("1" al cargar). Probado 2026-10-07:
+  // enviado como número, HANA rechaza la solicitud.
   EstadoRegistro?: string;
   Observaciones?: string;
   // FECHA_CARGA/HORA_CARGA (doc oficial de la interfaz SAP ZPPT_ORDER_INT): fecha y hora en que el

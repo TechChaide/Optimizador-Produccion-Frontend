@@ -26,8 +26,7 @@ import {
   Trash2,
   CheckCircle2,
   Mail,
-  Send,
-  X
+  Send
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -53,6 +52,7 @@ import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones
 import { ejecucionPlanHtml, fechaHoraEjecucion } from '@/lib/ventana-plan';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
+import { VistaPreviaEnvioSap, versionesFabricacionCacheadas } from '@/components/VistaPreviaEnvioSap';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
@@ -255,6 +255,9 @@ const EXCLUDED_LAMINA_MATERIALS = new Set(['30026039']);
 // "014" — su columna mostraba "—" pese a tener producción real ese día, y esa producción tampoco se
 // sumaba al stock disponible (totalStockKg/UN en handleProcessResumen).
 const RESP_PRODUCCION_DIARIA = ['014', '031'];
+// Solo "014" corre en el Looper: "031" (CONV) es otra máquina y no ocupa su tiempo — mismo criterio que
+// el T. Proceso del plan, que tampoco suma las filas CONV.
+const RESP_LOOPER = '014';
 
 const isConvDescripcion = (desc: string): boolean => {
   const u = desc.toUpperCase();
@@ -632,6 +635,12 @@ const soloFecha = (v: unknown): string => {
 // TacticalPlanVentaExternaSection) para su propia validación "Data Aprobada".
 const esPlanP3 = (valor: unknown): boolean => /\bp3\b/i.test(String(valor || ''));
 
+// Plan Grupo + Detalle Táctico completos, una sola descarga para todo el armado del envío a SAP.
+const descargarPlanesYDetalles = async (): Promise<{ planes: PlanGrupo[]; detalles: DetalleTactico[] }> => {
+  const [planesRes, detallesRes] = await Promise.all([planGrupoService.getAll(), detalleTacticoService.getAll()]);
+  return { planes: planesRes.data || [], detalles: detallesRes.data || [] };
+};
+
 // Los días hábiles viven en @/lib/dias-laborables y contemplan feriados / días no trabajados del
 // calendario configurado (Configuraciones → Calendario Área). Dentro del componente se usa el wrapper
 // siguienteDiaHabil, que ya lleva ese calendario cargado. Antes esto era un salto fijo (viernes +3,
@@ -956,13 +965,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const [unifiedNeeds, setUnifiedNeeds] = useState<UnifiedNeedRow[]>([]);
   const [isProcessingResumen, setIsProcessingResumen] = useState(false);
   const [isValidandoExportTxt, setIsValidandoExportTxt] = useState(false);
-  const [exportTxtPreview, setExportTxtPreview] = useState<CorridaOutputRow[] | null>(null);
-  // Payload real (uno por fila de exportTxtPreview, mismo índice) que se muestra y edita en la tabla
-  // del diálogo "Confirmar envío a SAP" — respeta siempre la forma completa de SolicitudProduccionHBPayload
-  // (todos sus campos, aunque queden en '') y es lo que se envía tal cual a insertarSolicitudProduccionHB,
-  // sin recalcular nada, para que lo que el usuario ve y edita sea exactamente lo que sale. Ver
-  // buildSolicitudProduccion (arma el valor inicial) y updateExportTxtPayload (edición por celda).
-  const [exportTxtPayloads, setExportTxtPayloads] = useState<SolicitudProduccionHBPayload[] | null>(null);
+  // Filas iniciales del diálogo "Confirmar envío a SAP" (payload real por fila, forma completa de
+  // SolicitudProduccionHBPayload aunque queden campos en ''). Se arman una vez en handleExportTxt; las
+  // ediciones y la X viven dentro de VistaPreviaEnvioSap y se envía tal cual lo que quedó ahí.
+  const [exportTxtFilas, setExportTxtFilas] = useState<{ key: string; descripcion: string; payload: SolicitudProduccionHBPayload }[] | null>(null);
   // Materiales de Venta Externa que bloquean "Exportar TXT" por no tener Respuesta P3 aprobada (ver
   // validarAprobacionVentaExterna) — antes esto solo lanzaba una notificación de error y dejaba al
   // usuario sin saber a dónde ir a resolverlo. Ahora se muestra en un diálogo con acceso directo al
@@ -1325,32 +1331,26 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return [];
   }, []);
 
-  // Igual patrón que Forros (fetchVersionesPorMaterial): en lotes pequeños en paralelo, no todo de
-  // una sola vez (satura la conexión) ni uno por uno (demasiado lento para un plan con muchos
-  // materiales).
+  // Caché compartida + hasta 10 consultas a la vez (versionesFabricacionCacheadas); el plan de salida
+  // la precarga en segundo plano (ver el useEffect junto a handleExportTxt), así "Enviar a SAP" no
+  // espera este endpoint por-material.
   const fetchVersionesFabricacionLaminado = useCallback(async (materiales: string[]): Promise<Map<string, { version: string; ambiguo: boolean }>> => {
     const resultado = new Map<string, { version: string; ambiguo: boolean }>();
-    const CHUNK_SIZE = 5;
-    for (let i = 0; i < materiales.length; i += CHUNK_SIZE) {
-      const lote = materiales.slice(i, i + CHUNK_SIZE);
-      const respuestas = await Promise.allSettled(lote.map(m => fetchVersionConReintentos(m)));
-      respuestas.forEach((r, idx) => {
-        const material = lote[idx];
-        const filas = r.status === 'fulfilled' ? r.value : [];
-        if (filas.length === 0) return;
-        if (filas.length === 1) {
-          const version = getProp(filas[0], ['VERSION']);
-          if (version) resultado.set(material, { version, ambiguo: false });
-          return;
-        }
-        // Más de una Hoja de Ruta: intenta cruzar GRUPOHOJARUTA contra el PuestoTrabajo ya resuelto
-        // para este material (sin tabla de equivalencias — compara directo, sin el prefijo "HR-").
-        const puesto = puestoTrabajoPorMaterial.get(material)?.toUpperCase().trim() || '';
-        const match = filas.find(f => getProp(f, ['GRUPOHOJARUTA']).toUpperCase().replace(/^HR-/, '') === puesto.replace(/^HR-/, ''));
-        const version = getProp(match || filas[0], ['VERSION']);
-        if (version) resultado.set(material, { version, ambiguo: !match });
-      });
-    }
+    const porMaterial = await versionesFabricacionCacheadas('1000', materiales, (_c, m) => fetchVersionConReintentos(m));
+    porMaterial.forEach((filas, material) => {
+      if (filas.length === 0) return;
+      if (filas.length === 1) {
+        const version = getProp(filas[0], ['VERSION']);
+        if (version) resultado.set(material, { version, ambiguo: false });
+        return;
+      }
+      // Más de una Hoja de Ruta: intenta cruzar GRUPOHOJARUTA contra el PuestoTrabajo ya resuelto
+      // para este material (sin tabla de equivalencias — compara directo, sin el prefijo "HR-").
+      const puesto = puestoTrabajoPorMaterial.get(material)?.toUpperCase().trim() || '';
+      const match = filas.find(f => getProp(f, ['GRUPOHOJARUTA']).toUpperCase().replace(/^HR-/, '') === puesto.replace(/^HR-/, ''));
+      const version = getProp(match || filas[0], ['VERSION']);
+      if (version) resultado.set(material, { version, ambiguo: !match });
+    });
     return resultado;
   }, [fetchVersionConReintentos, puestoTrabajoPorMaterial]);
 
@@ -3712,7 +3712,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   }, [restriccionesArray]);
   const factorEfectivoLooper = (1 - paroLooperPct / 100) * (rendimientoLooperPct / 100);
 
-  // Corrida pendiente: órdenes propias de Laminado (responsables 014/031, Centro 1000) con fecha
+  // Corrida pendiente: órdenes del Looper (responsable 014, Centro 1000; las 031/CONV son otra máquina) con fecha
   // HASTA la fecha evaluada (plan anterior) que todavía tienen cantidad pendiente. Regla del usuario
   // 2026-10-05: esas órdenes se procesan en el turno que termina al iniciar el turno Noche de la
   // ventana (ej. Día lun 05/10 07:00 → 19:00); solo lo que EXCEDE las horas que le quedan a ese turno
@@ -3725,7 +3725,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     const ordenes = ordenesFert.flatMap(o => {
       if (getProp(o, ['CENTRO', 'Centro', 'centro']).trim() === '2000') return [];
       const responsable = getProp(o, ['RESPCTRLPROD', 'RESP_CONTROL_PROD', 'RESPCONTROLPROD', 'RespControlProd', 'RESPONSABLE']).trim();
-      if (!RESP_PRODUCCION_DIARIA.includes(responsable)) return [];
+      if (responsable !== RESP_LOOPER) return [];
       const fechaRaw = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']).trim();
       const fecha = fechaRaw.includes('T') ? fechaRaw.split('T')[0] : fechaRaw;
       if (!fecha || fecha > ventanaPlan.baseStr) return [];
@@ -4244,16 +4244,16 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // verificada del lado de Laminado, automáticamente, sin necesitar un clic manual de "aprobar": no
   // hay ningún campo "aprobado" persistido — se recalcula en vivo contra la API cada vez, igual que el
   // resto del módulo. Materiales sin origen Venta Externa (Forros/Muebles/Prensado) no se validan acá.
-  const validarAprobacionVentaExterna = useCallback(async (materiales: string[]): Promise<string[]> => {
+  // `datos` (opcional): planes/detalles ya descargados — handleExportTxt los baja UNA vez y los comparte
+  // con fetchCodigoDetalleTacticoPorMaterial (detalle_tactico completo son decenas de miles de filas).
+  const validarAprobacionVentaExterna = useCallback(async (materiales: string[], datos?: { planes: PlanGrupo[]; detalles: DetalleTactico[] }): Promise<string[]> => {
     const materialesVE = materiales.filter(m => {
       const origenes = materialOrigenesPlantaMap.get(String(Number(m)));
       return !!origenes && Array.from(origenes.keys()).some(c => planGruposVentaExternaSet.has(c));
     });
     if (materialesVE.length === 0) return [];
 
-    const [planesRes, detallesRes] = await Promise.all([planGrupoService.getAll(), detalleTacticoService.getAll()]);
-    const planes = planesRes.data || [];
-    const detalles = detallesRes.data || [];
+    const { planes, detalles } = datos ?? await descargarPlanesYDetalles();
     const planPorCodigo = new Map(planes.map(pg => [pg.codigo_plan_grupo, pg]));
 
     return materialesVE.filter(m => {
@@ -4313,8 +4313,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // (tab "Resumen Necesidades"); la corrida que arma outputPlanRows es una simulación en memoria que
   // no trae codigo_detalle_tactico propio. Si un material no aparece en esa Respuesta P3 (todavía no
   // se generó, o cambió desde entonces), el campo queda en '' y se corrige a mano en la vista previa.
-  const fetchCodigoDetalleTacticoPorMaterial = useCallback(async (): Promise<Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>> => {
-    const [planesRes, detallesRes] = await Promise.all([planGrupoService.getAll(), detalleTacticoService.getAll()]);
+  const fetchCodigoDetalleTacticoPorMaterial = useCallback(async (datos?: { planes: PlanGrupo[]; detalles: DetalleTactico[] }): Promise<Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>> => {
+    const { planes, detalles } = datos ?? await descargarPlanesYDetalles();
+    const planesRes = { data: planes };
+    const detallesRes = { data: detalles };
     // codigo_grupo=8 es compartido con la Respuesta P3/PFD de Corte Espuma (mismo grupo SAP, ver
     // handleAbrirRespuestaP3PFD) -- sin el filtro "Rollos" acá, un P3 de Espuma más reciente que el de
     // Laminado ganaba el desempate de abajo y el map salía armado con los DetalleTactico de Espuma,
@@ -4411,7 +4413,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const buildSolicitudProduccion = useCallback((
     r: CorridaOutputRow,
     versiones: Map<string, { version: string; ambiguo: boolean }>,
-    codigoDetalleTacticoPorMaterial: Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>
+    codigoDetalleTacticoPorMaterial: Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>,
+    puestos?: Map<string, string>
   ): SolicitudProduccionHBPayload => {
     const codigoDetalleTactico = consumirCodigoDetalleTactico(codigoDetalleTacticoPorMaterial, r.material, r.planKg);
     return {
@@ -4419,17 +4422,19 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       CodigoOrdenExterna: codigoDetalleTactico ? String(codigoDetalleTactico) : '',
       ClaseOrden: 'ZCSQ',
       Centro: '1000',
-      CodigoMaterial: r.material,
+      // Formato interno SAP (MATNR, 18 caracteres con ceros a la izquierda), el mismo que usa
+      // MaestroMaterialesExplosionPaginado (ej. "000000000030004186"). Solo códigos numéricos.
+      CodigoMaterial: /^\d+$/.test(r.material) ? r.material.padStart(18, '0') : r.material,
       CantidadPlanificada: r.planKg,
       VersionFabricacion: versiones.get(r.material)?.version || '',
-      PuestoTrabajo: r.isConvNested ? '' : resolvePuestoTrabajo(r.material),
+      PuestoTrabajo: r.isConvNested ? '' : (puestos ? puestos.get(r.material) || '' : resolvePuestoTrabajo(r.material)),
       FechaFinProgramada: r.fechaFinProgramada.replace(/-/g, ''),
       HoraFinProgramada: r.horaFinProgramada,
       FechaInicioProgramada: r.fechaInicioProgramada.replace(/-/g, ''),
       HoraInicioProgramada: r.horaInicioProgramada,
       PedidoComercial: '',
       PosicionPedido: '',
-      EstadoRegistro: '1',
+      EstadoRegistro: '1', // CHAR(01) en ZPPT_ORDER_INT: texto, no número (HANA rechaza el 1 numérico)
       Observaciones: 'Generado automático — Plan Táctico Corte y Laminado',
       EstadoCarga: '',
       NumeroOrdenSap: '',
@@ -4440,7 +4445,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   }, [resolvePuestoTrabajo]);
 
   const handleExportTxt = useCallback(async () => {
-    if (planCargadoDe && !datosCargados) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3 o enviar a SAP con datos vigentes.'); return; }
+    // Un plan cargado de un reporte guardado SÍ se puede enviar (pedido del usuario 2026-10-07: generó
+    // el P3, no alcanzó a enviar y luego recuperó el plan): las corridas/fechas vienen del reporte y
+    // versión, codigo_detalle_tactico y aprobación VE se consultan en vivo. Lo único que el reporte no
+    // trae es la hoja de ruta (PuestoTrabajo): si no está en memoria se pide acá.
     const rows = outputPlanRows;
     if (rows.length === 0) {
       addNotification('warning', 'No hay datos para exportar.');
@@ -4450,58 +4458,65 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     setIsValidandoExportTxt(true);
     try {
       const materiales = Array.from(new Set(rows.map(r => r.material)));
-      const noAprobados = await validarAprobacionVentaExterna(materiales);
+      // Todo en paralelo (pedido del usuario 2026-10-07, la vista previa tardaba): Plan Grupo + Detalle
+      // Táctico se bajan UNA vez y sirven para la validación VE y para codigo_detalle_tactico (antes se
+      // bajaban dos veces, la primera sola antes de lo demás); la versión de fabricación sale de la
+      // caché que ya se precargó con el plan de salida. Ninguno de los dos recuperos bloquea el envío
+      // si falta: el payload sale con el campo en '' y se completa a mano en la vista previa.
+      const datosP3 = descargarPlanesYDetalles();
+      const [noAprobados, versiones, codigoDetalleTacticoPorMaterial, puestos] = await Promise.all([
+        datosP3.then(d => validarAprobacionVentaExterna(materiales, d)),
+        fetchVersionesFabricacionLaminado(materiales),
+        datosP3.then(d => fetchCodigoDetalleTacticoPorMaterial(d)),
+        puestoTrabajoPorMaterial.size > 0
+          ? Promise.resolve(undefined)
+          : serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo('1000', CODIGO_GRUPO_LAMINADO)
+            .then(res => {
+              const tiemposRows: RawApiRow[] = res?.data?.data || res?.data || [];
+              setTiemposEnsambladoData(tiemposRows);
+              const map = new Map<string, string>();
+              tiemposRows.forEach(t => {
+                const code = cleanCode(getProp(t, ['CodMaterial', 'MATERIAL', 'Material']));
+                const puesto = getProp(t, ['PuestoTrabajo']);
+                if (code && puesto && !map.has(code)) map.set(code, puesto);
+              });
+              return map;
+            })
+            .catch(() => new Map<string, string>()),
+      ]);
       if (noAprobados.length > 0) {
         setExportTxtBloqueado(noAprobados);
         return;
       }
-      // VersionFabricacion se consulta recién acá (no en initData) porque es un endpoint por-material
-      // (ver fetchVersionesFabricacionLaminado) — pedirla para todo el maestro de una sola vez sería
-      // desperdicio; solo hace falta para los materiales que realmente van a exportarse. Igual con
-      // codigo_detalle_tactico (fetchCodigoDetalleTacticoPorMaterial). Ninguno de los dos bloquea el
-      // envío si falta: el payload sale con el campo en '' y se completa a mano en la única pantalla
-      // de edición, la vista previa "Confirmar envío a SAP" — ya no hay un diálogo intermedio
-      // duplicando esa acción.
-      const [versiones, codigoDetalleTacticoPorMaterial] = await Promise.all([
-        fetchVersionesFabricacionLaminado(materiales),
-        fetchCodigoDetalleTacticoPorMaterial(),
-      ]);
-      // Vista previa antes de enviar a SAP: el payload de cada fila se congela en exportTxtPayloads en
-      // este momento (fechas/valores resueltos vigentes a la validación) y desde acá en adelante es lo
-      // que se edita y lo que se envía — si el usuario deja el diálogo abierto y alguien edita una
-      // fecha de corrida detrás, lo que se envía sigue correspondiendo a lo que se mostró acá.
-      setExportTxtPreview(rows);
-      setExportTxtPayloads(rows.map(r => buildSolicitudProduccion(r, versiones, codigoDetalleTacticoPorMaterial)));
+      // Vista previa antes de enviar a SAP: el payload de cada fila se congela acá (fechas/valores
+      // vigentes a la validación) y desde acá en adelante es lo que se edita (dentro de
+      // VistaPreviaEnvioSap) y lo que se envía.
+      setExportTxtFilas(rows.map((r, i) => ({
+        key: `${r.corridaId}-${r.material}-${i}`,
+        descripcion: r.descripcion,
+        payload: buildSolicitudProduccion(r, versiones, codigoDetalleTacticoPorMaterial, puestos),
+      })));
     } catch (e) {
       addNotification('error', `No se pudo completar la validación previa al envío: ${(e as Error).message}. Envío cancelado por seguridad.`);
     } finally {
       setIsValidandoExportTxt(false);
     }
-  }, [outputPlanRows, addNotification, validarAprobacionVentaExterna, fetchVersionesFabricacionLaminado, fetchCodigoDetalleTacticoPorMaterial, buildSolicitudProduccion, planCargadoDe, datosCargados]);
+  }, [outputPlanRows, addNotification, validarAprobacionVentaExterna, fetchVersionesFabricacionLaminado, fetchCodigoDetalleTacticoPorMaterial, buildSolicitudProduccion, puestoTrabajoPorMaterial]);
 
-  // Edita un campo de una fila ya congelada en exportTxtPayloads (vista previa de envío a SAP) — ver
-  // el diálogo "Confirmar envío a SAP" más abajo, donde cada celda de la tabla es un Input sobre esto.
-  const updateExportTxtPayload = useCallback((index: number, field: keyof SolicitudProduccionHBPayload, value: string | number) => {
-    setExportTxtPayloads(prev => {
-      if (!prev) return prev;
-      const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
-      return next;
-    });
-  }, []);
+  // Precarga en segundo plano la Versión de Fabricación de los materiales del plan de salida (queda en
+  // caché), para que "Enviar a SAP" no tenga que esperarla. Con pausa: el plan se recalcula varias
+  // veces seguidas mientras se arma.
+  const materialesPlanSalida = useMemo(() => Array.from(new Set(outputPlanRows.map(r => r.material))).sort().join(','), [outputPlanRows]);
+  useEffect(() => {
+    if (!materialesPlanSalida) return;
+    const t = setTimeout(() => { fetchVersionesFabricacionLaminado(materialesPlanSalida.split(',')).catch(() => {}); }, 1500);
+    return () => clearTimeout(t);
+  }, [materialesPlanSalida, fetchVersionesFabricacionLaminado]);
 
-  // Quita una fila de la vista previa de envío a SAP (botón X) cuando esa orden no hace falta enviarla.
-  // Solo afecta a este envío: el plan de salida (outputPlanRows) no se toca, y al volver a "Enviar a
-  // SAP" la fila reaparece. Se borra en exportTxtPreview Y exportTxtPayloads a la vez porque van
-  // alineados por índice.
-  const removeExportTxtRow = useCallback((index: number) => {
-    setExportTxtPreview(prev => prev ? prev.filter((_, i) => i !== index) : prev);
-    setExportTxtPayloads(prev => prev ? prev.filter((_, i) => i !== index) : prev);
-  }, []);
-
-  const handleConfirmarExportTxt = useCallback(async () => {
-    const payloads = exportTxtPayloads;
-    if (!payloads || payloads.length === 0) return;
+  // Las ediciones y la X (quitar una orden de este envío; el plan de salida no se toca) viven dentro de
+  // VistaPreviaEnvioSap; acá llega exactamente lo que quedó en la tabla.
+  const handleConfirmarExportTxt = useCallback(async (payloads: SolicitudProduccionHBPayload[]) => {
+    if (payloads.length === 0) return;
     setIsEnviandoSap(true);
     try {
       const resultados: { material: string; ok: boolean; mensaje: string }[] = [];
@@ -4525,12 +4540,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       } else {
         addNotification('warning', `${ok.length} orden(es) ok, ${fallidos.length} con error: ${fallidos.map(f => `${f.material} (${f.mensaje})`).join(' | ')}`);
       }
-      setExportTxtPreview(null);
-      setExportTxtPayloads(null);
+      setExportTxtFilas(null);
     } finally {
       setIsEnviandoSap(false);
     }
-  }, [exportTxtPayloads, addNotification]);
+  }, [addNotification]);
+  const cerrarExportTxt = useCallback(() => setExportTxtFilas(null), []);
 
   const renderTopConsolidation = () => {
     const isSaturated = totalsUnified.totalRuns > 6;
@@ -4709,7 +4724,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                     <PopoverContent className="w-[320px] p-4 bg-white border border-gray-100 rounded-2xl shadow-xl text-slate-800" align="start">
                       <p className="text-[9px] font-black uppercase text-orange-700 tracking-widest mb-1">Corrida pendiente — Looper</p>
                       <p className="text-[8px] text-slate-400 font-bold uppercase mb-3">
-                        Órdenes 014/031 hasta el {format(parseISO(ventanaPlan.baseStr), 'dd/MM')} (plan anterior) con cantidad pendiente en SAP. Solo cuenta lo que no alcanza a terminar el turno que cierra{corridaPendienteSAP.turnoAnterior ? ` a las ${format(corridaPendienteSAP.turnoAnterior.fin, 'HH:mm')}` : ''}: ese exceso ocupa el turno siguiente
+                        Órdenes 014 (Looper) hasta el {format(parseISO(ventanaPlan.baseStr), 'dd/MM')} (plan anterior) con cantidad pendiente en SAP. Solo cuenta lo que no alcanza a terminar el turno que cierra{corridaPendienteSAP.turnoAnterior ? ` a las ${format(corridaPendienteSAP.turnoAnterior.fin, 'HH:mm')}` : ''}: ese exceso ocupa el turno siguiente
                       </p>
                       {corridaPendienteSAP.ordenes.length === 0 ? (
                         <p className="text-[10px] text-slate-400 italic mb-3">SAP no reporta órdenes pendientes del plan anterior.</p>
@@ -5108,7 +5123,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
             Plan cargado del reporte del <span className="font-black text-emerald-700">{format(parseISO(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
-            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — solo lectura de lo planificado; <span className="font-black text-blue-700">Sincronizar</span> lo recalcula con SAP.
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — se puede revisar y <span className="font-black text-blue-700">Enviar a SAP</span> tal cual; <span className="font-black text-blue-700">Sincronizar</span> lo recalcula con SAP.
           </p>
         </div>
       )}
@@ -6054,72 +6069,16 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
       {/* Fuera de los <TabsContent>, a propósito: Radix desmonta el contenido de un tab inactivo por
           defecto — si el usuario cambia de tab con el diálogo abierto, este debe seguir existiendo. */}
-      <Dialog open={exportTxtPreview !== null} onOpenChange={(open) => { if (!open) { setExportTxtPreview(null); setExportTxtPayloads(null); } }}>
-        <DialogContent className="max-w-[96vw] max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Confirmar envío a SAP — Plan de Salida Laminado</DialogTitle>
-            <DialogDescription>
-              Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Esta acción no se puede deshacer desde acá.
-            </DialogDescription>
-          </DialogHeader>
-          {exportTxtPreview && exportTxtPayloads && (
-            <div className="space-y-4 text-left text-sm">
-              <div>
-                <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Órdenes a crear ({exportTxtPayloads.length})</span>
-                <div className="border border-slate-100 rounded-xl overflow-auto max-h-[400px]">
-                  <table className="text-[11px] border-collapse">
-                    <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0 z-10">
-                      <tr>
-                        <th className="px-2 py-2 w-8" aria-label="Quitar" />
-                        <th className="px-2 py-2 text-left whitespace-nowrap">Descripción</th>
-                        {SOLICITUD_PRODUCCION_FIELDS.map(f => (
-                          <th key={f.key} className="px-2 py-2 text-left whitespace-nowrap">{f.label}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-50">
-                      {exportTxtPayloads.map((payload, i) => (
-                        <tr key={`${exportTxtPreview[i]?.corridaId}-${exportTxtPreview[i]?.material}-${i}`}>
-                          <td className="px-1 py-1 text-center">
-                            <button
-                              type="button"
-                              onClick={() => removeExportTxtRow(i)}
-                              disabled={isEnviandoSap}
-                              title="Quitar esta orden del envío a SAP"
-                              aria-label={`Quitar ${payload.CodigoMaterial} del envío`}
-                              className="inline-flex items-center justify-center w-6 h-6 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:pointer-events-none"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          </td>
-                          <td className="px-2 py-1 truncate max-w-[180px]" title={exportTxtPreview[i]?.descripcion}>{exportTxtPreview[i]?.descripcion}</td>
-                          {SOLICITUD_PRODUCCION_FIELDS.map(f => (
-                            <td key={f.key} className="px-1 py-1">
-                              <Input
-                                type={f.type === 'number' ? 'number' : 'text'}
-                                value={payload[f.key] ?? ''}
-                                onChange={(e) => updateExportTxtPayload(i, f.key, f.type === 'number' ? (Number(e.target.value) || 0) : e.target.value)}
-                                disabled={isEnviandoSap}
-                                className={cn("h-7 text-[10px] font-mono px-1.5", f.key === 'Observaciones' ? 'w-48' : 'w-24')}
-                              />
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setExportTxtPreview(null); setExportTxtPayloads(null); }} disabled={isEnviandoSap}>Cancelar</Button>
-            <Button onClick={handleConfirmarExportTxt} disabled={isEnviandoSap || !exportTxtPayloads || exportTxtPayloads.length === 0} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-              {isEnviandoSap ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Send className="w-4 h-4 mr-2" />} {isEnviandoSap ? 'Enviando…' : 'Confirmar y Enviar a SAP'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <VistaPreviaEnvioSap
+        abierto={exportTxtFilas !== null}
+        titulo="Confirmar envío a SAP — Plan de Salida Laminado"
+        descripcion="Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Esta acción no se puede deshacer desde acá."
+        filasIniciales={exportTxtFilas}
+        campos={SOLICITUD_PRODUCCION_FIELDS}
+        enviando={isEnviandoSap}
+        onCancelar={cerrarExportTxt}
+        onConfirmar={handleConfirmarExportTxt}
+      />
 
       <Dialog open={exportTxtBloqueado !== null} onOpenChange={(open) => { if (!open) setExportTxtBloqueado(null); }}>
         <DialogContent className="max-w-xl">
