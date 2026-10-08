@@ -43,7 +43,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
-import { VistaPreviaEnvioSap, versionesFabricacionCacheadas } from '@/components/VistaPreviaEnvioSap';
+import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
@@ -1315,6 +1315,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // PlanGrupo/centro del encabezado; exportSapFilas, las filas iniciales (una orden por material) que
   // VistaPreviaEnvioSap edita por dentro — se envía tal cual lo que quedó en la tabla.
   const [exportSapPreview, setExportSapPreview] = useState<{ plan: PlanGrupo; centro: '1000' | '2000' } | null>(null);
+  const [exportSapTiempos, setExportSapTiempos] = useState("");
   const [exportSapFilas, setExportSapFilas] = useState<{ key: string; descripcion: string; payload: SolicitudProduccionHBPayload }[] | null>(null);
   const [isValidandoExportSap, setIsValidandoExportSap] = useState(false);
   const [isEnviandoSap, setIsEnviandoSap] = useState(false);
@@ -4928,8 +4929,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Encuentra la Respuesta de Espuma más reciente y activa de ese centro (codigo_grupo 8 + "Espuma" +
   // centro). Desde 2026-10-03 es el P3 (= faltante, ya no se graba PFD); se aceptan PFD viejos para no
   // romper el ciclo en curso. Desempate por fecha_inicio_plan y luego codigo_plan_grupo (el más nuevo).
-  const fetchUltimoPFDEspuma = useCallback(async (centro: '1000' | '2000'): Promise<{ plan: PlanGrupo; detalles: DetalleTactico[] } | null> => {
-    const [planesRes, detallesRes] = await Promise.all([planGrupoService.getAll(), detalleTacticoService.getAll()]);
+  const fetchUltimoPFDEspuma = useCallback(async (centro: '1000' | '2000', log: string[] = []): Promise<{ plan: PlanGrupo; detalles: DetalleTactico[] } | null> => {
+    const [planesRes, detallesRes] = await Promise.all([
+      medirPaso(log, "Plan Grupo", planGrupoService.getAll()),
+      medirPaso(log, "Detalle Táctico", detalleTacticoService.getAll()),
+    ]);
     const centroRegex = new RegExp(`centro\\s*${centro}`, 'i');
     const planesPFD = (planesRes.data || []).filter(p =>
       p.codigo_grupo === CODIGO_GRUPO_LAMINADO && p.estado === 'A' &&
@@ -5036,7 +5040,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     }
     setIsValidandoExportSap(true);
     try {
-      const ultimoPFD = await fetchUltimoPFDEspuma(centro);
+      const t0 = performance.now();
+      const log: string[] = [];
+      const ultimoPFD = await fetchUltimoPFDEspuma(centro, log);
       if (!ultimoPFD || ultimoPFD.detalles.length === 0) {
         addNotification('warning', `No hay un P3 guardado para el Centro ${centro}. Generá la Respuesta P3 primero (tab "Respuesta P3").`);
         return;
@@ -5061,12 +5067,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         addNotification('info', `El P3 #${plan.codigo_plan_grupo} del Centro ${centro} no tiene faltantes ni provisionales por convertir: no hay órdenes que crear en SAP.`);
         return;
       }
-      const versiones = await fetchVersionesFabricacionEspuma(centro, conConversion.map(g => cleanCode(g.lineas[0].codigo_material)));
+      const versiones = await medirPaso(log, "Versiones", fetchVersionesFabricacionEspuma(centro, conConversion.map(g => cleanCode(g.lineas[0].codigo_material))));
       setExportSapPreview({ plan, centro });
       setExportSapFilas(conConversion.map((g, i) => {
         const payload = buildSolicitudProduccionEspuma(g.lineas, centro, fechaInicioPlan, versiones, g.conversion);
         return { key: `${g.lineas[0]?.codigo_detalle_tactico}-${i}`, descripcion: descripcionMaterial(cleanCode(payload.CodigoMaterial)), payload };
       }));
+      setExportSapTiempos(`Preparado en ${((performance.now() - t0) / 1000).toFixed(1)} s — ${log.join(" · ")}`);
     } catch (e) {
       addNotification('error', `No se pudo completar la validación previa al envío: ${(e as Error).message}. Envío cancelado por seguridad.`);
     } finally {
@@ -7399,6 +7406,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
         abierto={exportSapFilas !== null}
         titulo={`Confirmar envío a SAP — P3 Corte Espuma ${exportSapPreview ? `(Centro ${exportSapPreview.centro})` : ''}`}
         descripcion={`Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Sale del P3 #${exportSapPreview?.plan.codigo_plan_grupo ?? ''} ya guardado: Cod. Orden Externa = codigo_detalle_tactico de la línea del material y Cant. Planificada = su cantidad. Esta acción no se puede deshacer desde acá.`}
+        tiempos={exportSapTiempos}
         filasIniciales={exportSapFilas}
         campos={SOLICITUD_PRODUCCION_FIELDS_ESPUMA}
         errorCampo={errorCampoSapEspuma}

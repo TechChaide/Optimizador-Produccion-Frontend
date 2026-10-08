@@ -52,7 +52,7 @@ import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones
 import { ejecucionPlanHtml, fechaHoraEjecucion } from '@/lib/ventana-plan';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
-import { VistaPreviaEnvioSap, versionesFabricacionCacheadas } from '@/components/VistaPreviaEnvioSap';
+import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
@@ -636,8 +636,11 @@ const soloFecha = (v: unknown): string => {
 const esPlanP3 = (valor: unknown): boolean => /\bp3\b/i.test(String(valor || ''));
 
 // Plan Grupo + Detalle Táctico completos, una sola descarga para todo el armado del envío a SAP.
-const descargarPlanesYDetalles = async (): Promise<{ planes: PlanGrupo[]; detalles: DetalleTactico[] }> => {
-  const [planesRes, detallesRes] = await Promise.all([planGrupoService.getAll(), detalleTacticoService.getAll()]);
+const descargarPlanesYDetalles = async (log: string[] = []): Promise<{ planes: PlanGrupo[]; detalles: DetalleTactico[] }> => {
+  const [planesRes, detallesRes] = await Promise.all([
+    medirPaso(log, "Plan Grupo", planGrupoService.getAll()),
+    medirPaso(log, "Detalle Táctico", detalleTacticoService.getAll()),
+  ]);
   return { planes: planesRes.data || [], detalles: detallesRes.data || [] };
 };
 
@@ -968,6 +971,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // Filas iniciales del diálogo "Confirmar envío a SAP" (payload real por fila, forma completa de
   // SolicitudProduccionHBPayload aunque queden campos en ''). Se arman una vez en handleExportTxt; las
   // ediciones y la X viven dentro de VistaPreviaEnvioSap y se envía tal cual lo que quedó ahí.
+  const [exportTxtTiempos, setExportTxtTiempos] = useState("");
   const [exportTxtFilas, setExportTxtFilas] = useState<{ key: string; descripcion: string; payload: SolicitudProduccionHBPayload }[] | null>(null);
   // Materiales de Venta Externa que bloquean "Exportar TXT" por no tener Respuesta P3 aprobada (ver
   // validarAprobacionVentaExterna) — antes esto solo lanzaba una notificación de error y dejaba al
@@ -4463,14 +4467,16 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       // bajaban dos veces, la primera sola antes de lo demás); la versión de fabricación sale de la
       // caché que ya se precargó con el plan de salida. Ninguno de los dos recuperos bloquea el envío
       // si falta: el payload sale con el campo en '' y se completa a mano en la vista previa.
-      const datosP3 = descargarPlanesYDetalles();
+      const t0 = performance.now();
+      const log: string[] = [];
+      const datosP3 = descargarPlanesYDetalles(log);
       const [noAprobados, versiones, codigoDetalleTacticoPorMaterial, puestos] = await Promise.all([
         datosP3.then(d => validarAprobacionVentaExterna(materiales, d)),
-        fetchVersionesFabricacionLaminado(materiales),
+        medirPaso(log, "Versiones", fetchVersionesFabricacionLaminado(materiales)),
         datosP3.then(d => fetchCodigoDetalleTacticoPorMaterial(d)),
         puestoTrabajoPorMaterial.size > 0
           ? Promise.resolve(undefined)
-          : serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo('1000', CODIGO_GRUPO_LAMINADO)
+          : medirPaso(log, "Hoja de ruta", serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo('1000', CODIGO_GRUPO_LAMINADO))
             .then(res => {
               const tiemposRows: RawApiRow[] = res?.data?.data || res?.data || [];
               setTiemposEnsambladoData(tiemposRows);
@@ -4496,6 +4502,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         descripcion: r.descripcion,
         payload: buildSolicitudProduccion(r, versiones, codigoDetalleTacticoPorMaterial, puestos),
       })));
+      setExportTxtTiempos(`Preparado en ${((performance.now() - t0) / 1000).toFixed(1)} s — ${log.join(" · ")}`);
     } catch (e) {
       addNotification('error', `No se pudo completar la validación previa al envío: ${(e as Error).message}. Envío cancelado por seguridad.`);
     } finally {
@@ -6073,6 +6080,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         abierto={exportTxtFilas !== null}
         titulo="Confirmar envío a SAP — Plan de Salida Laminado"
         descripcion="Revisa y edita si hace falta las órdenes de producción exactas que se van a crear en SAP/HANA (InsertarSolicitudProduccionHB) antes de enviarlas — cada celda es el campo real del payload, tal cual se manda. Esta acción no se puede deshacer desde acá."
+        tiempos={exportTxtTiempos}
         filasIniciales={exportTxtFilas}
         campos={SOLICITUD_PRODUCCION_FIELDS}
         enviando={isEnviandoSap}

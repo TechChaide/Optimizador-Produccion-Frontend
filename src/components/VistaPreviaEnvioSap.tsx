@@ -68,11 +68,13 @@ const FilaSap = memo(function FilaSap({ fila, index, campos, errorCampo, enviand
 });
 
 export const VistaPreviaEnvioSap = memo(function VistaPreviaEnvioSap({
-  abierto, titulo, descripcion, filasIniciales, campos, errorCampo, avisoErrores, enviando, onCancelar, onConfirmar,
+  abierto, titulo, descripcion, tiempos, filasIniciales, campos, errorCampo, avisoErrores, enviando, onCancelar, onConfirmar,
 }: {
   abierto: boolean;
   titulo: React.ReactNode;
   descripcion: React.ReactNode;
+  // Cuánto tardó cada paso del armado (ver medirPaso), para ubicar la demora sin suponer.
+  tiempos?: string;
   filasIniciales: Fila[] | null;
   campos: CampoSolicitudSap[];
   errorCampo?: (p: SolicitudProduccionHBPayload, campo: keyof SolicitudProduccionHBPayload) => string | null;
@@ -106,6 +108,7 @@ export const VistaPreviaEnvioSap = memo(function VistaPreviaEnvioSap({
           <div className="space-y-4 text-left text-sm">
             <div>
               <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Órdenes a crear ({filas.length})</span>
+              {tiempos && <p className="-mt-1 mb-2 text-[10px] text-slate-400 font-mono">{tiempos}</p>}
               <div className="border border-slate-100 rounded-xl overflow-auto max-h-[400px]">
                 <table className="text-[11px] border-collapse">
                   <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0 z-10">
@@ -138,6 +141,19 @@ export const VistaPreviaEnvioSap = memo(function VistaPreviaEnvioSap({
     </Dialog>
   );
 });
+
+// Mide un paso del armado del envío (pedido del usuario 2026-10-07: ubicar dónde se va el tiempo).
+// Anota "etiqueta x.x s" en `log` y lo deja también en la consola.
+export const medirPaso = async <T,>(log: string[], etiqueta: string, paso: Promise<T> | (() => Promise<T>)): Promise<T> => {
+  const t0 = performance.now();
+  try {
+    return await (typeof paso === 'function' ? paso() : paso);
+  } finally {
+    const s = (performance.now() - t0) / 1000;
+    log.push(`${etiqueta} ${s.toFixed(1)} s`);
+    console.info(`[Envío SAP] ${etiqueta}: ${s.toFixed(2)} s`);
+  }
+};
 
 // Versión de Fabricación por centro|material, compartida entre módulos y reutilizada mientras la
 // pestaña esté abierta: el endpoint es por material, y antes se pedía de nuevo en cada "Enviar a SAP"
