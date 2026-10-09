@@ -2296,7 +2296,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       <h1 style="margin:4px 0 0;font-size:20px;font-weight:700;color:#111827;">Gestión de tiempos y capacidad de Empaque Venta Externa / Muebles</h1>
       <p style="margin:6px 0 0;font-size:12px;color:#6b7280;text-transform:capitalize;">${fechaLabel} · Correo automático, no responder</p>${ventanaHtml}
     </td>
-  </tr>${bloqueCategoriaHtml('Detalle por categoría — Espumas (FERT/PT)', espumas)}${bloqueRollosHtml}${turnosHtml}
+  </tr>${/* Orden pedido por el usuario 2026-10-08: máquina arriba, luego materiales, al final los recuadros de capacidad. */ ''}${turnosHtml}${bloqueCategoriaHtml('Detalle por categoría — Espumas (FERT/PT)', espumas)}${bloqueRollosHtml}
   ${!espumas && !rollos ? `
   <tr>
     <td style="padding:10px 28px 4px;">
