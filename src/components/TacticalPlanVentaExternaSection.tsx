@@ -1075,11 +1075,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     if (!candidates || candidates.length === 0) return null;
     // Minutos por unidad de una fila: Tiempo_Min / Tiempo; si la fila trae el tiempo reportado en
     // HORAS para una cantidad (TiempoPlastificado + Cantidad, ej. 360 und = 0.127 h), se divide.
+    // Acepta texto con coma decimal ("0,0212"): Number() lo daba NaN y caía en 15 s/und.
+    const num = (v: unknown) => Number(String(v ?? '').trim().replace(',', '.')) || 0;
     const minPorUnidad = (t: Record<string, unknown>): number | null => {
-      const min = Number(t.Tiempo_Min || t.Tiempo || 0);
+      const min = num(t.Tiempo_Min) || num(t.Tiempo);
       if (min > 0) return min;
-      const horas = Number(t.TiempoPlastificado || 0);
-      const cant = Number(t.Cantidad || 0);
+      const horas = num(t.TiempoPlastificado);
+      const cant = num(t.Cantidad);
       return horas > 0 && cant > 0 ? (horas * 60) / cant : null;
     };
     const maq = String(maquina).trim().toUpperCase();
@@ -2660,6 +2662,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // como columnas informativas (mismo cruce matchTiempoEstandar que ya usa "Resumen Necesidades",
       // con el mismo respaldo de placeholder cuando el material no tiene tiempo estándar real).
       const lookup = centro === '1000' ? tiempoLookup1000 : tiempoLookup2000;
+      // Diagnóstico (usuario 2026-10-09: 20003095 salía en 15 s/und): qué trae el servicio de tiempos.
+      const sinTiempoPt = [...new Set(fertCubierto.map(o => extractMaterialInfo(o).code))].filter(c => c && matchTiempoEstandar(c, '', lookup) === null);
+      console.info(`[PFD-VENTA ${centro}] servicio de tiempos: ${lookup.size} materiales (grupos ${grupos.map(g => g.codigo_grupo).join(', ')}); PT sin tiempo (15 s/und): ${sinTiempoPt.length}${sinTiempoPt.length ? ` — ${sinTiempoPt.slice(0, 15).join(', ')}` : ''}`);
+      const ejemplo = fertCubierto.map(o => lookup.get(extractMaterialInfo(o).code)).find(Boolean) ?? [...lookup.values()][0];
+      if (ejemplo) console.info(`[PFD-VENTA ${centro}] fila de ejemplo del servicio:`, ejemplo[0]);
       const porMaterial = new Map<string, PfdVentaLinea>();
       fertCubierto.forEach(o => {
         const info = extractMaterialInfo(o);
