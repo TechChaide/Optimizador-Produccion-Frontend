@@ -20,7 +20,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, useAutoCargaPlanVigente, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
+import { useReportePlanTxt, useAutoCargaPlanVigente, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
@@ -2150,7 +2150,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
   // Resumen reactivo para el DASHBOARD en pantalla — usa lo que ya haya en `pfdVentaPreview` (última
   // vez que se generó, en esta sesión o antes); no dispara la explosión BOM en cada render, eso solo
-  // ocurre al pulsar "Generar" o "Enviar Reporte" (ver reporteGrupoEmpaque, que al guardar refresca la
+  // ocurre al pulsar "Generar" o "Enviar Reporte" (ver reporteFlujoEmpaque, que al guardar refresca la
   // trazabilidad justo antes de armar el correo para no depender de un preview desactualizado).
   const resumenEmpaquePorCentro = useMemo(() => {
     const calcularCentro = (centro: '1000' | '2000') => {
@@ -2370,7 +2370,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Rollos. Se usa el valor DEVUELTO, no el estado `pfdVentaPreview` (que por el cierre de este
   // render seguiría viendo la versión vieja hasta el próximo render).
   const fechaObjetivoEmpaque = fechasHorizonte.pt;
-  // Ambos centros en un solo respaldo, guardado en el reporte del Centro 1000 (ver grupo de reportes).
+  // Respaldo del módulo completo (ambos centros); lo guarda el reporte de cada centro, como en Corte Espuma.
   const capturarEstadoPlan = (): EstadoPlanVentaExterna => {
     const maquinasMtto = new Set(Object.values(mttoSAPEmpaque).flatMap(x => x.maquinas));
     return {
@@ -2439,13 +2439,15 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     asunto: asuntoReporteEmpaque('2000'),
     construirHtml: async () => construirReporteHtmlEmpaque('2000', await generarPfdVentaPreview('2000')),
     etiqueta: 'Centro 2000',
+    capturarEstado: capturarEstadoPlan,
+    restaurarEstado: restaurarEstadoPlan,
   });
-  // Los dos centros son el mismo reporte: un solo Guardar / Revisar / Enviar para ambos.
-  const reporteGrupoEmpaque = useReportePlanTxtGrupo([reporteFlujoEmpaque1000, reporteFlujoEmpaque2000]);
-  // Solo el reporte del Centro 1000 lleva el respaldo del módulo (ver reporteFlujoEmpaque1000).
+  // Un reporte por centro, como Laminado (usuario 2026-10-08): cada uno con su Guardar / Vista previa /
+  // Enviar. Hoy se trabaja con el 1000; el 2000 sigue el mismo esquema y se envía cuando esté formal.
+  const reporteFlujoEmpaque = { '1000': reporteFlujoEmpaque1000, '2000': reporteFlujoEmpaque2000 } as const;
   useAutoCargaPlanVigente({
     modulo: 'venta-espuma',
-    centros: ['1000'],
+    centros: ['1000', '2000'],
     listo: mounted,
     hayDatos: () => datosCargados || syncStep !== 'idle' || !!leerDeCache<SnapshotVentaExterna>(CACHE_VENTA_EXTERNA),
     restaurar: restaurarEstadoPlan,
@@ -2628,14 +2630,15 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // vacío, se omite con una notificación informativa y el loop sigue con el siguiente centro.
   // Fase 2 del panel (igual que Corte Espuma / Laminado): cada centro es un paso del panel (sin
   // toasts) y al final se guarda el reporte de Empaque (efecto reportePorGuardar, junto a
-  // reporteGrupoEmpaque) para cerrar con "Ver reporte y enviar". El envío sigue manual.
+  // reporteFlujoEmpaque, uno por centro) para cerrar con "Ver reporte Centro …". El envío sigue manual.
   const [reportePorGuardar, setReportePorGuardar] = useState(false);
   const handleGenerarYGuardarPfdVenta = async () => {
     setIsRunningPfdVentaSecuencia(true);
     panelProgreso.iniciar('Venta Externa — PFD-VENTA y reporte', [
       { id: 'pfd-1000', etiqueta: 'PFD-VENTA · Centro 1000' },
       { id: 'pfd-2000', etiqueta: 'PFD-VENTA · Centro 2000' },
-      { id: 'rep', etiqueta: 'Guardando reporte de Empaque (1000 y 2000)' },
+      { id: 'rep-1000', etiqueta: 'Guardando reporte de Empaque · Centro 1000' },
+      { id: 'rep-2000', etiqueta: 'Guardando reporte de Empaque · Centro 2000' },
     ]);
     try {
       for (const centro of ['1000', '2000'] as const) {
@@ -2661,7 +2664,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // El reporte de Empaque no depende de que el PFD-VENTA haya salido: se guarda igual.
       setReportePorGuardar(true);
     } catch (e) {
-      panelProgreso.actualizar('rep', { estado: 'omitido' });
+      panelProgreso.actualizar('rep-1000', { estado: 'omitido' });
+      panelProgreso.actualizar('rep-2000', { estado: 'omitido' });
       panelProgreso.concluir(`Error en PFD-VENTA: ${(e as Error).message}`);
     } finally {
       setIsRunningPfdVentaSecuencia(false);
@@ -2672,17 +2676,23 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     if (!reportePorGuardar) return;
     setReportePorGuardar(false);
     void (async () => {
-      panelProgreso.actualizar('rep', { estado: 'en_curso' });
-      // Secuencial: construirHtml refresca el preview FERT/PT de cada centro (ver guardarTodos).
-      const oks: boolean[] = [];
-      for (const f of reporteGrupoEmpaque.flujos) oks.push(await f.guardar({ sinConfirmar: true, silencioso: true }));
-      const ok = oks.some(Boolean);
-      panelProgreso.actualizar('rep', ok
-        ? { estado: oks.every(Boolean) ? 'ok' : 'aviso', detalle: `Reporte del ${fechaObjetivoEmpaque} guardado en la carpeta compartida${oks.every(Boolean) ? '' : ' (un centro falló, reintenta desde "Enviar Reporte")'} — todavía no se envió.` }
-        : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
+      // Un reporte por centro (ver reporteFlujoEmpaque). Secuencial: construirHtml refresca el preview
+      // FERT/PT de cada centro.
+      const guardados: ('1000' | '2000')[] = [];
+      for (const centro of ['1000', '2000'] as const) {
+        panelProgreso.actualizar(`rep-${centro}`, { estado: 'en_curso' });
+        const ok = await reporteFlujoEmpaque[centro].guardar({ sinConfirmar: true, silencioso: true });
+        if (ok) guardados.push(centro);
+        panelProgreso.actualizar(`rep-${centro}`, ok
+          ? { estado: 'ok', detalle: `Reporte del ${fechaObjetivoEmpaque} guardado en la carpeta compartida — todavía no se envió.` }
+          : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte" del centro.' });
+      }
       panelProgreso.concluir(
-        ok ? 'PFD-VENTA y reporte guardados. Revisa y envía el reporte de Empaque.' : undefined,
-        ok ? [{ etiqueta: 'Ver reporte y enviar', onClick: () => { setActiveTab('resumen'); void reporteGrupoEmpaque.recuperarTodos(fechaObjetivoEmpaque); } }] : [],
+        guardados.length > 0 ? 'PFD-VENTA y reporte guardados. Revisa y envía el reporte de cada centro.' : undefined,
+        guardados.map(centro => ({
+          etiqueta: `Ver reporte Centro ${centro}`,
+          onClick: () => { setActiveTab('resumen'); void reporteFlujoEmpaque[centro].recuperar(); },
+        })),
       );
     })();
   }, [reportePorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -2970,32 +2980,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                 <h3 className="text-sm font-black text-gray-700 uppercase">Capacidad Operativa · Empaque</h3>
                 <p className="text-[10px] text-gray-400 mt-1">Turnos, operadores y mantenimiento de cada máquina de empaque — junto con las horas necesarias (mismo dato que sale en el correo), da el % de ocupación.</p>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <button
-                      type="button"
-                      className="flex items-center gap-1.5 rounded-2xl border border-cyan-200 bg-white px-4 py-2.5 text-xs font-bold uppercase tracking-wide text-cyan-700 hover:bg-cyan-50"
-                    >
-                      <Mail className="w-3.5 h-3.5" /> Enviar Reporte
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-80 p-4 space-y-3" align="end">
-                    <div>
-                      <p className="text-xs font-black uppercase tracking-widest text-slate-700">Gestión de tiempos y capacidad de Empaque</p>
-                      <p className="text-[10px] text-slate-400 mt-1">Venta Externa / Muebles — datos de Data Aprobada (respuesta ya verificada), no del PFD-VENTA.</p>
-                    </div>
-                    <ReportePlanTxtAccionesGrupo grupo={reporteGrupoEmpaque} />
-                    <p className="text-[9px] text-slate-400">Destinatarios precargados desde Grupo_correos_VentaExterna — editables en la vista previa.</p>
-                  </PopoverContent>
-                </Popover>
-                <ReportePlanTxtVistaPreviaGrupo
-                  grupo={reporteGrupoEmpaque}
-                  titulo="Empaque Venta Externa / Muebles"
-                  destinatarios={destinatariosReporteEmpaque}
-                  onDestinatariosChange={setDestinatariosReporteEmpaque}
-                />
-              </div>
             </div>
             {(['1000', '2000'] as const).map(centro => {
               const r = resumenEmpaquePorCentro[centro];
@@ -3023,6 +3007,31 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                           {r.ocupacionPct !== null ? `${r.ocupacionPct.toFixed(0)}%` : '—'}
                         </p>
                       </div>
+                      {/* Reporte propio de este centro (mismo esquema que Laminado, usuario 2026-10-08). */}
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            className="flex items-center gap-1.5 rounded-lg border border-cyan-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-widest text-cyan-700 hover:bg-cyan-50"
+                          >
+                            <Mail className="w-3.5 h-3.5" /> Enviar Reporte
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-80 p-4 space-y-3" align="end">
+                          <div>
+                            <p className="text-xs font-black uppercase tracking-widest text-slate-700">Empaque · Centro {centro}</p>
+                            <p className="text-[10px] text-slate-400 mt-1">Venta Externa / Muebles — gestión de tiempos y capacidad de este centro, con datos de Data Aprobada (respuesta ya verificada), no del PFD-VENTA.</p>
+                          </div>
+                          <ReportePlanTxtAcciones flujo={reporteFlujoEmpaque[centro]} />
+                          <p className="text-[9px] text-slate-400">Destinatarios precargados desde Grupo_correos_VentaExterna — editables en la vista previa.</p>
+                        </PopoverContent>
+                      </Popover>
+                      <ReportePlanTxtVistaPrevia
+                        flujo={reporteFlujoEmpaque[centro]}
+                        titulo={`Empaque Venta Externa / Muebles — Centro ${centro}`}
+                        destinatarios={destinatariosReporteEmpaque}
+                        onDestinatariosChange={setDestinatariosReporteEmpaque}
+                      />
                     </div>
                   </div>
 
