@@ -181,10 +181,11 @@ const DIAS_HABILES_PT_ENSAMBLADO = 2;
 // Consultas de BOM en paralelo por lote en el cálculo PFF (antes una por una, ver obtenerBomPFF).
 const LOTE_BOM_PFF = 8;
 
-// Días hábiles ANTES de la fecha de la necesidad en que SAP entrega la provisional que la responde.
-// 0 = el mismo día (flujo vigente, validado con MD04 2026-10-03). Se están probando en SAP las
-// provisionales a PT−1: si el usuario confirma que funcionan, se pasa a 1.
-const DESFASE_PROVISIONAL_DIAS_HABILES: number = 0;
+// Áreas cuya provisional SAP entrega 1 día hábil ANTES de la necesidad (PT−1). Confirmado por el
+// usuario 2026-10-08 para Ensamblado (P1/PFF) y Venta Externa; Muebles/Forros siguen con la fecha
+// exacta (validada con MD04 2026-10-03) hasta que SAP los ajuste. Transición: en esas áreas también
+// se acepta la provisional del mismo día del PT (creada con la regla anterior), con aviso.
+const AREA_PROVISIONAL_PT_MENOS_1 = (area: string): boolean => /^ensamblado|venta\s*externa/i.test(area);
 
 // Almacenes de stock disponible por centro para la Respuesta P3 (último fallback de la cascada
 // FERT → Provisional → Stock). Antes solo contaba 1006/2006 — verificado con datos reales (caso
@@ -831,8 +832,8 @@ const calcularMetricasCapacidad = (
   if (esVertical) {
     // Estimado de planta (usuario 2026-10-07, en evaluación): carga/descarga por LOTE + el corte
     // (T. Indiv del KPI × unidades). Láminas de cualquier espesor/densidad: 3.5 min por lote — una
-    // orden es un lote, sea de 1 unidad o de varias (promedian ~300 UN). Esquinas: 8.5 min por cada
-    // lote de 1 230 piezas.
+    // orden es un lote, sea de 1 unidad o de varias (órdenes pequeñas, de 1 a ~20 UN, de medidas
+    // irregulares; las de ~300 UN son esquinas). Esquinas: 8.5 min por cada lote de 1 230 piezas.
     const esEsquina = /ESQUINA/i.test(info.desc || '');
     const lotes = qty <= 0 ? 0 : esEsquina ? Math.ceil(qty / VERTICAL_ESQUINAS_POR_LOTE - 1e-9) : 1;
     const minutos = lotes * (esEsquina ? VERTICAL_MIN_POR_LOTE_ESQUINAS : VERTICAL_MIN_POR_LOTE_LAMINAS) + tIndiv * qty;
@@ -1185,12 +1186,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     };
   }, [restarDiasHabiles]);
 
-  // Fecha en que SAP debe entregar la provisional que responde a una necesidad (ver
-  // provisionalesQueCubrenPorCentro): hoy el mismo día; con DESFASE_PROVISIONAL_DIAS_HABILES > 0,
-  // esos días hábiles antes.
-  const fechaProvisionalEsperada = useCallback((fechaNecesidad: string): string => {
-    if (DESFASE_PROVISIONAL_DIAS_HABILES === 0 || !fechaNecesidad || fechaNecesidad === '—') return fechaNecesidad;
-    return format(restarDiasHabiles(parseFechaLocal(fechaNecesidad), DESFASE_PROVISIONAL_DIAS_HABILES), 'yyyy-MM-dd');
+  // Fechas en que SAP puede entregar la provisional que responde a una necesidad (ver
+  // provisionalesQueCubrenPorCentro): Ensamblado y Venta Externa a PT−1 hábil (o el mismo PT, en
+  // transición); las demás áreas, el mismo día.
+  const fechasProvisionalAceptadas = useCallback((fechaNecesidad: string, area: string): string[] => {
+    if (!fechaNecesidad || fechaNecesidad === '—' || !AREA_PROVISIONAL_PT_MENOS_1(area)) return [fechaNecesidad];
+    return [format(restarDiasHabiles(parseFechaLocal(fechaNecesidad), 1), 'yyyy-MM-dd'), fechaNecesidad];
   }, [restarDiasHabiles]);
 
   // Restricciones crudas del grupo Corte y Laminado de cada centro (se cargan en fetchDataAsync).
@@ -1786,8 +1787,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
       const origen = origenEnRango || origenCandidatos[0];
       const origenAmbiguo = origenCandidatos.length > 0 && !origenEnRango;
-      // Con DESFASE_PROVISIONAL_DIAS_HABILES = 0 llegar el día del PT es lo normal: sin aviso.
-      const llegaDiaPT = DESFASE_PROVISIONAL_DIAS_HABILES > 0 && !!origenEnRango && origenEnRango.area.startsWith('Ensamblado')
+      // Con PT−1 (AREA_PROVISIONAL_PT_MENOS_1) lo normal es llegar un día antes: el día del PT se avisa.
+      const llegaDiaPT = !!origenEnRango && origenEnRango.area.startsWith('Ensamblado')
         && fechaOrdenFin === ventanaLaminaEnsamblado(origenEnRango.fecha_inicio)?.pt;
 
       return {
@@ -2030,10 +2031,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         // Emparejamiento POR FECHA EXACTA (regla del usuario 2026-10-03, validada con MD04: FERT
         // 20007201 necesita 360 de 30008909 al 07-oct ↔ OrdPrv 0145201016 del 07-oct por 363 = lote):
         // la provisional responde a la necesidad si su FECHAFIN (disponibilidad en MD04) es el mismo día
-        // de la necesidad (PT del P1/PFF, PT del P2 de Venta Externa, fecha del P2 en las demás áreas)
-        // menos DESFASE_PROVISIONAL_DIAS_HABILES. Reemplaza la ventana [PT−2, PT] de Ensamblado y la
-        // tolerancia ±1/±2 por área que se usaba antes, que podían sumar la provisional de otro ciclo.
-        const coincide = candidatosP2.some(c => r.fechaFin === fechaProvisionalEsperada(c.fecha));
+        // de la necesidad (PT del P1/PFF, PT del P2 de Venta Externa, fecha del P2 en las demás áreas);
+        // desde 2026-10-08 Ensamblado y Venta Externa a PT−1 (ver fechasProvisionalAceptadas). Reemplaza
+        // la ventana [PT−2, PT] de Ensamblado y la tolerancia ±1/±2 por área que se usaba antes, que
+        // podían sumar la provisional de otro ciclo.
+        const coincide = candidatosP2.some(c => fechasProvisionalAceptadas(c.fecha, c.area).includes(r.fechaFin));
         if (!coincide) return;
         if (!map.has(r.material)) map.set(r.material, []);
         map.get(r.material)!.push(r);
@@ -2043,7 +2045,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     procesar('1000', provAuditAllUIO);
     procesar('2000', provAuditAllGYE);
     return porCentro;
-  }, [provAuditAllUIO, provAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro, clavesProvisionalesTransformadas, fechaProvisionalEsperada]);
+  }, [provAuditAllUIO, provAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro, clavesProvisionalesTransformadas, fechasProvisionalAceptadas]);
 
   const provisionalUnPorMaterialPorCentro = useMemo(() => {
     const porCentro: Record<string, Map<string, number>> = { '1000': new Map(), '2000': new Map() };
