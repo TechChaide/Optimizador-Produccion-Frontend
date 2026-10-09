@@ -54,6 +54,8 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
+import { sapCompartido, refrescarDatosSap, momentoDato } from '@/lib/datos-sap-compartidos';
+import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
@@ -638,8 +640,8 @@ const esPlanP3 = (valor: unknown): boolean => /\bp3\b/i.test(String(valor || '')
 // Plan Grupo + Detalle Táctico completos, una sola descarga para todo el armado del envío a SAP.
 const descargarPlanesYDetalles = async (log: string[] = []): Promise<{ planes: PlanGrupo[]; detalles: DetalleTactico[] }> => {
   const [planesRes, detallesRes] = await Promise.all([
-    medirPaso(log, "Plan Grupo", planGrupoService.getAll()),
-    medirPaso(log, "Detalle Táctico", detalleTacticoService.getAll()),
+    medirPaso(log, "Plan Grupo", sapCompartido.planGrupos()),
+    medirPaso(log, "Detalle Táctico", sapCompartido.detallesTacticos()),
   ]);
   return { planes: planesRes.data || [], detalles: detallesRes.data || [] };
 };
@@ -1376,12 +1378,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
       const [restrs, provs, kpiLooper, invSAP, ferts, skills, maint, tiempos] = await Promise.all([
         restriccionService.getAll(),
-        seguir('Órdenes provisionales', serviciosService.OrdenesProvisionalesPaginados(1, 20000)).catch(() => ({ data: [] })),
-        seguir('KPI Looper', serviciosService.getKPIMaestroLooper()).catch(() => ({ data: [] })),
-        seguir('Inventario SAP', serviciosService.getInventarioAñoActual()).catch(() => ({ data: [] })),
-        seguir('Órdenes FERT', serviciosService.getOrdenesFert(1, 20000)).catch(() => ({ data: [] })),
-        seguir('Habilidades de operadores', serviciosService.getCuboHabilidadesOP()).catch(() => ({ data: [] })),
-        seguir('Mantenimientos', serviciosService.ListarMantenimientoPreventivosProgramados()).catch(() => ({ data: [] })),
+        seguir('Órdenes provisionales', sapCompartido.ordenesProvisionales()).catch(() => ({ data: [] })),
+        seguir('KPI Looper', sapCompartido.kpiMaestroLooper()).catch(() => ({ data: [] })),
+        seguir('Inventario SAP', sapCompartido.inventarioAnioActual()).catch(() => ({ data: [] })),
+        seguir('Órdenes FERT', sapCompartido.ordenesFert()).catch(() => ({ data: [] })),
+        seguir('Habilidades de operadores', sapCompartido.cuboHabilidadesOP()).catch(() => ({ data: [] })),
+        seguir('Mantenimientos', sapCompartido.mantenimientosPreventivos()).catch(() => ({ data: [] })),
         seguir('Tiempos de laminado', serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo('1000', CODIGO_GRUPO_LAMINADO)).catch(() => ({ data: [] }))
       ]);
 
@@ -1479,7 +1481,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const fechaObjetivoP2 = format(nextBusinessDayCal(fechaBase ? parseISO(fechaBase) : new Date(), diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
       const fechaPTCiclo = format(nextBusinessDayCal(parseISO(fechaObjetivoP2), diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
 
-      const planGruposRes = await planGrupoService.getAll();
+      const planGruposRes = await sapCompartido.planGrupos();
       const candidatosP2 = (planGruposRes.data || []).filter((pg) => {
         const valor = String(pg.valor || '').trim();
         if (pg.estado !== 'A' || !gruposCodigos.includes(pg.codigo_grupo)) return false;
@@ -1528,7 +1530,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         return {};
       }
 
-      const detallesRes = await detalleTacticoService.getAll();
+      const detallesRes = await sapCompartido.detallesTacticos();
       const detalles = (detallesRes.data || []).filter((d) => planGrupoCodigos.includes(d.codigo_plan_grupo));
 
       const grouped: Record<string, NecesidadPlantaRow[]> = {};
@@ -2084,7 +2086,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     salidaBase: RespuestaSalidaRow[],
     needsParaDescripcion: UnifiedNeedRow[]
   ): Promise<EditableDetalleRow[]> => {
-    const detallesRes = await detalleTacticoService.getAll();
+    const detallesRes = await sapCompartido.detallesTacticos();
     const detallesPlan = (detallesRes.data || []).filter(d =>
       d.codigo_plan_grupo === plan.codigo_plan_grupo && d.estado === 'A'
     );
@@ -2207,7 +2209,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // debía respetar eso.
   const desactivarPlanesLaminadoSuperados = useCallback(async (codigoGrupo: number, fechaNuevoPlan: string, codigoPlanGrupoNuevo: number, esPFD: boolean): Promise<number> => {
     try {
-      const planesRes = await planGrupoService.getAll();
+      const planesRes = await sapCompartido.planGrupos();
       const superados = (planesRes.data || []).filter(p => {
         if (p.codigo_grupo !== codigoGrupo || p.estado !== 'A' || p.codigo_plan_grupo === codigoPlanGrupoNuevo) return false;
         // codigo_grupo=8 es compartido con la Respuesta P3/PFD de Corte Espuma (responden como el
@@ -2247,7 +2249,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     try {
       const fechasSeleccionadas = Array.from(selectedDates);
       const todayStr = format(new Date(), 'yyyy-MM-dd');
-      const planesRes = await planGrupoService.getAll();
+      const planesRes = await sapCompartido.planGrupos();
       const planesCandidatos = filtrarPlanesP3ActivosQueCubren(planesRes.data || [], fechasSeleccionadas, todayStr);
 
       // No-op silencioso: si ya se desactivó en un click previo, no vuelve a aparecer aquí.
@@ -3298,7 +3300,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   }, [planPreviewP3PFD, fetchNecesidadesPlanta, guardarPlanGrupoLaminado, panelProgreso]);
 
   // Paso 1 de edición: busca los PlanGrupo activos de Corte y Laminado directo por codigo_grupo
-  // (CODIGO_GRUPO_LAMINADO) en planGrupoService.getAll(), NO a través de "Necesidades Planta"
+  // (CODIGO_GRUPO_LAMINADO) en planGrupoService.getAll() (vía sapCompartido.planGrupos), NO a través de "Necesidades Planta"
   // (necesidadesPlantaData solo indexa planes con valor "...P2" de OTRAS áreas — este módulo nunca
   // crea un "P2" propio, solo "P3"/"PFD" al guardar, así que esos planes jamás aparecían ahí). Como
   // ahora pueden convivir varios PlanGrupo activos para el mismo grupo (P3 real y PFD de
@@ -3308,7 +3310,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const handleOpenEditarPlan = useCallback(async () => {
     setIsLoadingEditPlan(true);
     try {
-      const planesRes = await planGrupoService.getAll();
+      const planesRes = await sapCompartido.planGrupos();
       const planesGrupo = (planesRes.data || [])
         // "Rollos" filtra los planes propios de Laminado — codigo_grupo=8 es compartido con la
         // Respuesta P3/PFD de Corte Espuma, sin este filtro aparecerían acá para editar por error.
@@ -3795,7 +3797,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     });
     const horasOrdenes = ordenes.reduce((s, o) => s + o.horas, 0);
     // Turno anterior = turno Día de la fecha evaluada, recortado al inicio de la ventana. Lo que le
-    // queda se cuenta desde AHORA (CANTPENDIENTE es lo pendiente al sincronizar).
+    // queda se cuenta desde la hora en que se descargó la FERT (CANTPENDIENTE es lo pendiente a esa
+    // hora; con datos SAP compartidos puede ser anterior al clic en Sincronizar).
     const diaLbl = diaShiftOptions.find(o => o.v === selectedDiaShift)?.l;
     const iv = diaLbl && selectedDiaShift !== 'EMPTY' ? intervaloDeHorario(parseISO(ventanaPlan.baseStr), diaLbl) : null;
     const turnoAnterior = iv && ventanaPlan.inicio
@@ -3803,7 +3806,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       : null;
     // El MTTO del Looper que cae en ese turno (ej. lun 05/10 en la mañana) es del plan anterior: se
     // descuenta acá solo la parte que aún no pasó, y no toca la ventana nueva (empieza 19:00).
-    const ahora = new Date();
+    const ahora = momentoDato('fert') ?? new Date();
     const desde = turnoAnterior ? new Date(Math.max(ahora.getTime(), turnoAnterior.ini.getTime())) : null;
     // Una OT programada por día (0:00) cuenta en proporción a lo que le queda al turno.
     const totalTurno = turnoAnterior ? horasSolapadas(turnoAnterior.ini, turnoAnterior.fin, turnoAnterior.ini, turnoAnterior.fin) : 0;
@@ -4595,6 +4598,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       }
       const ok = resultados.filter(r => r.ok);
       const fallidos = resultados.filter(r => !r.ok);
+      // SAP ya tiene órdenes nuevas: la próxima lectura de FERT/provisionales va a SAP (ver datos-sap-compartidos).
+      if (ok.length > 0) refrescarDatosSap(['fert', 'provisionales']);
       if (fallidos.length === 0) {
         addNotification('success', `${ok.length} orden(es) de producción enviada(s) a SAP correctamente.`);
       } else {
@@ -5120,6 +5125,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
            )}>
               {syncStep !== 'idle' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Sincronizar y Generar Necesidades
            </Button>
+           <DatosSapEstado onActualizar={() => { void handleSincronizarYGenerar(); }} disabled={syncStep !== 'idle'} />
            <Popover>
             <PopoverTrigger asChild>
               <button className="h-10 px-5 rounded-2xl border border-gray-200 bg-white hover:border-red-500/50 flex items-center gap-3 font-black text-[11px] uppercase shadow-sm transition-all">

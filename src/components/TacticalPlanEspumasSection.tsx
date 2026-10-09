@@ -43,6 +43,8 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
+import { sapCompartido, refrescarDatosSap, momentoDato } from '@/lib/datos-sap-compartidos';
+import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
@@ -3688,14 +3690,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // completo — TS colapsaba TODAS las posiciones al tipo del array interno. Aparte, sin tocar.
       const timesPromise = seguir('Tiempos de corte', fetchTiemposCorteYLaminado());
       const [provsRes, fertsRes, invRes, skillsRes, maintRes, kpiRes, carruselesRes, cuboRes] = await Promise.all([
-        seguir('Órdenes provisionales', serviciosService.OrdenesProvisionalesPaginados(1, 20000)).catch(() => ({ data: [] })),
-        seguir('Órdenes FERT', serviciosService.getOrdenesFert(1, 20000)).catch(() => ({ data: [] })),
-        seguir('Inventario SAP', serviciosService.getInventarioAñoActual()).catch(() => ({ data: [] })),
-        seguir('Habilidades de operadores', serviciosService.getCuboHabilidadesOP()).catch(() => ({ data: [] })),
-        seguir('Mantenimientos', serviciosService.ListarMantenimientoPreventivosProgramados()).catch(() => ({ data: [] })),
-        seguir('KPI Looper', serviciosService.getKPIMaestroLooper()).catch(() => ({ data: [] })),
-        seguir('KPI Carruseles', serviciosService.getKPIMaestroCarruseles()).catch(() => ({ data: [] })),
-        seguir('Cubo de inventarios', serviciosService.getCuboInventarios(1, 50000)).catch(() => ({ data: [] }))
+        seguir('Órdenes provisionales', sapCompartido.ordenesProvisionales()).catch(() => ({ data: [] })),
+        seguir('Órdenes FERT', sapCompartido.ordenesFert()).catch(() => ({ data: [] })),
+        seguir('Inventario SAP', sapCompartido.inventarioAnioActual()).catch(() => ({ data: [] })),
+        seguir('Habilidades de operadores', sapCompartido.cuboHabilidadesOP()).catch(() => ({ data: [] })),
+        seguir('Mantenimientos', sapCompartido.mantenimientosPreventivos()).catch(() => ({ data: [] })),
+        seguir('KPI Looper', sapCompartido.kpiMaestroLooper()).catch(() => ({ data: [] })),
+        seguir('KPI Carruseles', sapCompartido.kpiMaestroCarruseles()).catch(() => ({ data: [] })),
+        seguir('Cubo de inventarios', sapCompartido.cuboInventarios()).catch(() => ({ data: [] }))
       ]);
       const timesRes = await timesPromise;
 
@@ -3715,7 +3717,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // Snapshot para no perder lo cargado al cambiar de módulo (ver CACHE_CORTE_ESPUMA). El P2 y el
       // PFF se agregan por su cuenta desde fetchNecesidadesPlanta / calcularNecesidadPFF.
       const previo = leerDeCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA);
-      const ahoraSync = new Date().toISOString();
+      // Hora de la FERT descargada (con datos SAP compartidos puede ser anterior al clic): el pendiente
+      // se concilia contra lo que quedaba del turno a esa hora.
+      const ahoraSync = (momentoDato('fert') ?? new Date()).toISOString();
       setMomentoSync(ahoraSync);
       guardarEnCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA, {
         momentoSync: ahoraSync,
@@ -3815,7 +3819,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // (inicio = hoy+1, fin = PT). Muebles (grupo 3) es subproceso: solo inicio = hoy+1.
       const fechaPTCiclo = format(addBusinessDaysCal(new Date(), DIAS_HABILES_PT_ENSAMBLADO, diasOverride ?? diasNoLaborables, laborablesHorizonte(laborablesExtraOverride ?? diasLaborablesExtra)), 'yyyy-MM-dd');
 
-      const planGruposRes = await planGrupoService.getAll();
+      const planGruposRes = await sapCompartido.planGrupos();
       const candidatosBase = (planGruposRes.data || []).filter((pg) => {
         const valor = String(pg.valor || '').trim();
         if (pg.estado !== 'A' || !gruposCodigos.includes(pg.codigo_grupo)) return false;
@@ -3854,7 +3858,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       }
 
       // 3. DetalleTactico asociado a los PlanGrupo encontrados
-      const detallesRes = await detalleTacticoService.getAll();
+      const detallesRes = await sapCompartido.detallesTacticos();
       const detalles = (detallesRes.data || []).filter((d) => planGrupoCodigos.includes(d.codigo_plan_grupo));
 
       const grouped: Record<string, NecesidadPlantaRow[]> = {};
@@ -3901,7 +3905,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const fetchPendientesTotales = useCallback(async () => {
     setIsLoadingPendientes(true);
     try {
-      const res = await serviciosService.getPendientesTotales(1, 20000);
+      const res = await sapCompartido.pendientesTotales();
       setPendientesTotales(res.data || []);
     } catch (e) {
       console.error('Error al recuperar Pendientes Totales', e);
@@ -4262,8 +4266,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     bomPFFCacheRef.current.clear();
     try {
       const [planesRes, detallesRes] = await Promise.all([
-        planGrupoService.getAll(),
-        detalleTacticoService.getAll(),
+        sapCompartido.planGrupos(),
+        sapCompartido.detallesTacticos(),
       ]);
       const planesTodos = planesRes.data || [];
       const detallesTodos = detallesRes.data || [];
@@ -4406,7 +4410,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // solo desactiva PFD viejos, un P3 nuevo solo P3 viejos — nunca uno al otro.
   const desactivarPlanesEspumaSuperados = useCallback(async (centro: '1000' | '2000', fechaNuevoPlan: string, codigoPlanGrupoNuevo: number, esPFD: boolean): Promise<number> => {
     try {
-      const planesRes = await planGrupoService.getAll();
+      const planesRes = await sapCompartido.planGrupos();
       const centroRegex = new RegExp(`centro\\s*${centro}`, 'i');
       const superados = (planesRes.data || []).filter(p => {
         if (p.codigo_grupo !== CODIGO_GRUPO_LAMINADO || p.estado !== 'A' || p.codigo_plan_grupo === codigoPlanGrupoNuevo) return false;
@@ -4445,7 +4449,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     plan: PlanGrupo,
     centro: '1000' | '2000'
   ): Promise<EditableDetalleRowEspuma[]> => {
-    const detallesRes = await detalleTacticoService.getAll();
+    const detallesRes = await sapCompartido.detallesTacticos();
     const detallesPlan = (detallesRes.data || []).filter(d =>
       d.codigo_plan_grupo === plan.codigo_plan_grupo && d.estado === 'A'
     );
@@ -4552,7 +4556,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     if (resultadoRestaurado) { addNotification('warning', 'Plan cargado de un reporte guardado (solo consulta): sincroniza para generar el P3, editar planes o exportar a SAP con datos vigentes.'); return; }
     setIsLoadingEditPlan(true);
     try {
-      const planesRes = await planGrupoService.getAll();
+      const planesRes = await sapCompartido.planGrupos();
       const centroRegex = new RegExp(`centro\\s*${centro}`, 'i');
       const planesGrupo = (planesRes.data || [])
         .filter(p => p.codigo_grupo === CODIGO_GRUPO_LAMINADO && p.estado === 'A' && /espuma/i.test(String(p.valor || '')) && centroRegex.test(String(p.valor || '')))
@@ -4938,8 +4942,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // romper el ciclo en curso. Desempate por fecha_inicio_plan y luego codigo_plan_grupo (el más nuevo).
   const fetchUltimoPFDEspuma = useCallback(async (centro: '1000' | '2000', log: string[] = []): Promise<{ plan: PlanGrupo; detalles: DetalleTactico[] } | null> => {
     const [planesRes, detallesRes] = await Promise.all([
-      medirPaso(log, "Plan Grupo", planGrupoService.getAll()),
-      medirPaso(log, "Detalle Táctico", detalleTacticoService.getAll()),
+      medirPaso(log, "Plan Grupo", sapCompartido.planGrupos()),
+      medirPaso(log, "Detalle Táctico", sapCompartido.detallesTacticos()),
     ]);
     const centroRegex = new RegExp(`centro\\s*${centro}`, 'i');
     const planesPFD = (planesRes.data || []).filter(p =>
@@ -5128,6 +5132,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       }
       const ok = resultados.filter(r => r.ok);
       const fallidos = resultados.filter(r => !r.ok);
+      // SAP ya tiene órdenes nuevas: la próxima lectura de FERT/provisionales va a SAP (ver datos-sap-compartidos).
+      if (ok.length > 0) refrescarDatosSap(['fert', 'provisionales']);
       if (fallidos.length === 0) {
         addNotification('success', `${ok.length} orden(es) de producción enviada(s) a SAP correctamente.`);
       } else {
@@ -6756,6 +6762,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                ? "border-blue-200 text-blue-700 hover:bg-blue-50"
                : "bg-blue-600 text-white hover:bg-blue-700 shadow-lg"
            )}>{syncStep !== 'idle' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Sincronizar y Generar Necesidades</Button>
+           <DatosSapEstado onActualizar={() => { void handleSincronizarYGenerar(); }} disabled={syncStep !== 'idle'} />
         </div>
       </div>
 

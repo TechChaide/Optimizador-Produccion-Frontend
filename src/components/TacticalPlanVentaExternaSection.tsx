@@ -12,6 +12,8 @@ import { restriccionService } from '@/services/restriccion.service';
 import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario, intervaloDeHorario, horasSolapadas } from '@/lib/restriccionesCapacidad';
 import { ejecucionPlanHtml, fechaHoraEjecucion } from '@/lib/ventana-plan';
 import { serviciosService } from '@/services/servicios.service';
+import { sapCompartido, refrescarDatosSap } from '@/lib/datos-sap-compartidos';
+import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { useAppContext } from '@/context/AppProvider';
@@ -604,11 +606,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
   const fetchOrdenes = async (onConsulta?: (nombre: string, ok: boolean) => void) => {
     try {
-      const pProv = serviciosService.OrdenesProvisionalesPaginados(1, 20000).then(
+      const pProv = sapCompartido.ordenesProvisionales().then(
         r => { onConsulta?.('Órdenes provisionales', true); return r; },
         () => { onConsulta?.('Órdenes provisionales', false); return { data: [] }; }
       );
-      const pFert = serviciosService.getOrdenesFert(1, 20000).then(
+      const pFert = sapCompartido.ordenesFert().then(
         r => { onConsulta?.('Órdenes FERT', true); return r; },
         () => { onConsulta?.('Órdenes FERT', false); return { data: [] }; }
       );
@@ -685,7 +687,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         fetchRestricciones(ids).then(r => { contar('Restricciones', true); return r; }),
         fetchOrdenes(contar),
         fetchTiemposEnsamblado(groups).then(r => { contar('Tiempos de ensamblado', true); return r; }),
-        serviciosService.ListarMantenimientoPreventivosProgramados().then(
+        sapCompartido.mantenimientosPreventivos().then(
           r => { contar('Mantenimientos', true); return (Array.isArray(r.data) ? r.data : r.data?.data || []) as Record<string, unknown>[]; },
           () => { contar('Mantenimientos', false); return [] as Record<string, unknown>[]; }
         ),
@@ -800,7 +802,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const fetchPendientesTotales = useCallback(async () => {
     setIsLoadingPendientes(true);
     try {
-      const res = await serviciosService.getPendientesTotales(1, 20000);
+      const res = await sapCompartido.pendientesTotales();
       setPendientesTotales(res.data || []);
     } catch (error) {
       console.error('Error cargando pendientes:', error);
@@ -1350,7 +1352,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     if (!grupoCentro) return { grupoCentro: null as Grupo | null, planActivo: null as PlanGrupo | null, planesActivos: [] as PlanGrupo[], planesP3: [] as PlanGrupo[], detallesPlanActivo: [] as DetalleTactico[] };
 
     const valorRegex = new RegExp(`plan\\s*t[aá]ctico.*centro.*${centro}.*p2.*${tipo}`, 'i');
-    const planesRes = await planGrupoService.getAll();
+    const planesRes = await sapCompartido.planGrupos();
     const todosLosPlanes = planesRes.data || [];
 
     // TODOS los P2 activos de este centro+tipo, no solo el primero que aparezca. Antes esto era un
@@ -1369,7 +1371,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
     if (!planActivo) return { grupoCentro, planActivo: null, planesActivos, planesP3: [], detallesPlanActivo: [] as DetalleTactico[] };
 
-    const detallesRes = await detalleTacticoService.getAll();
+    const detallesRes = await sapCompartido.detallesTacticos();
     const todosLosDetalles = detallesRes.data || [];
     const planPorCodigo = new Map(todosLosPlanes.map(pg => [pg.codigo_plan_grupo, pg]));
     const codigosP3 = new Set(
@@ -1625,7 +1627,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     const ptDiferido = format(addBusinessDaysCal(parseISO(fechasHorizonte.pt), 1, diasNoLaborables, laborablesHorizonte(diasLaborablesExtra)), 'yyyy-MM-dd');
     const valor = `Plan Táctico - Centro ${centro} - P2 - Venta - ${TIPO_TAG.ESPUMAS} - DIFERIDO`;
     const regex = new RegExp(`plan\\s*t[aá]ctico.*centro.*${centro}.*p2.*espumas.*diferido`, 'i');
-    const todos = (await planGrupoService.getAll()).data || [];
+    const todos = (await sapCompartido.planGrupos()).data || [];
     const apagados: number[] = [];
     for (const pg of todos) {
       if (pg.estado !== 'A' || pg.codigo_grupo !== grupoCentro.codigo_grupo || !regex.test(String(pg.valor || ''))) continue;
@@ -1724,7 +1726,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // Búsqueda propia del PFD-VENTA activo (mismo patrón que verificarPlanP2Activo, con su propia
       // regex — no se reutiliza esa función porque busca por "...p2...", no por "...pfd-venta...").
       const valorRegexPfd = new RegExp(`plan\\s*t[aá]ctico.*centro.*${centro}.*pfd-venta.*${tipo}`, 'i');
-      const planesRes = await planGrupoService.getAll();
+      const planesRes = await sapCompartido.planGrupos();
       const todosLosPlanes = planesRes.data || [];
       const planesActivosPfd = todosLosPlanes.filter(pg =>
         pg.estado === 'A' && pg.codigo_grupo === grupoP2.codigo_grupo && valorRegexPfd.test(String(pg.valor || ''))
@@ -1891,7 +1893,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const fetchDataAprobada = useCallback(async () => {
     setIsLoadingDataAprobada(true);
     try {
-      const [planesRes, detallesRes] = await Promise.all([planGrupoService.getAll(), detalleTacticoService.getAll()]);
+      const [planesRes, detallesRes] = await Promise.all([sapCompartido.planGrupos(), sapCompartido.detallesTacticos()]);
       const planes = planesRes.data || [];
       const detalles = detallesRes.data || [];
       const planPorCodigo = new Map(planes.map(pg => [pg.codigo_plan_grupo, pg]));
@@ -2875,6 +2877,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         )}>
           {syncStep !== 'idle' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Sincronizar
         </Button>
+        <DatosSapEstado onActualizar={() => { void handleSincronizarYGenerar(); }} disabled={syncStep !== 'idle'} />
       </div>
 
       {/* Barra de progreso SOLO de la fase "sincronizando" (sin indicador propio). La fase

@@ -4,6 +4,7 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { DetalleTactico } from "../types/interfaces";
 import { fetchWithAuth, extractErrorMessage } from "@/lib/http-client";
+import { marcarCambioTablasPropias } from "@/lib/tablas-propias-version";
 
 const API_URL = `${environment.apiURL}/api/detalle_tactico`;
 
@@ -25,11 +26,13 @@ export const detalleTacticoService = {
   },
 
   async save(detalle: DetalleTactico): Promise<BodyResponse<DetalleTactico>> {
+    marcarCambioTablasPropias();
     const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detalle),
     });
+    marcarCambioTablasPropias();
     if (!response.ok) {
       throw new Error(await extractErrorMessage(response, `Error ${response.status}: Error al guardar el detalle táctico`));
     }
@@ -37,10 +40,12 @@ export const detalleTacticoService = {
   },
 
   async delete(codigo_detalle_tactico: number): Promise<BodyResponse<void>> {
+    marcarCambioTablasPropias();
     const response = await fetchWithAuth(`${API_URL}/${codigo_detalle_tactico}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });
+    marcarCambioTablasPropias();
     if (!response.ok) {
       throw new Error(`Error ${response.status}: Error al eliminar el detalle táctico`);
     }

@@ -4,6 +4,7 @@ import type { BodyResponse } from "@/types/body-response";
 import { environment } from "@/environments/environments.prod";
 import { PlanGrupo } from "../types/interfaces";
 import { fetchWithAuth, extractErrorMessage } from "@/lib/http-client";
+import { marcarCambioTablasPropias } from "@/lib/tablas-propias-version";
 
 const API_URL = `${environment.apiURL}/api/plan_grupo`;
 
@@ -31,11 +32,13 @@ export const planGrupoService = {
   },
 
   async save(plan: PlanGrupo): Promise<BodyResponse<PlanGrupo>> {
+    marcarCambioTablasPropias();
     const response = await fetchWithAuth(`${API_URL}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(plan),
     });
+    marcarCambioTablasPropias();
     if (!response.ok) {
       throw new Error(await extractErrorMessage(response, `Error ${response.status}: No se pudo guardar el plan de grupo`));
     }
@@ -43,10 +46,12 @@ export const planGrupoService = {
   },
 
   async delete(codigo_plan_grupo: number): Promise<BodyResponse<void>> {
+    marcarCambioTablasPropias();
     const response = await fetchWithAuth(`${API_URL}/${codigo_plan_grupo}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     });
+    marcarCambioTablasPropias();
     if (!response.ok) {
       throw new Error(`Error ${response.status}: No se pudo eliminar el plan de grupo`);
     }

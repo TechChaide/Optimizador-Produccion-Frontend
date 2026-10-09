@@ -35,6 +35,8 @@ import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { useJornadaGrupo, type JornadaGrupoEditable } from '@/hooks/useJornadaGrupo';
 import { serviciosService } from '@/services/servicios.service';
+import { sapCompartido, refrescarDatosSap } from '@/lib/datos-sap-compartidos';
+import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { useRuntimeInspector } from '@/services/RuntimeInspector';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion } from '@/types/interfaces';
@@ -1288,10 +1290,10 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       const groupsIds = filteredGroups.map(g => g.codigo_grupo);
       const [restrsRes, provsRes, curadoRes, fertsRes, cuboRes] = await Promise.all([
         seguir('Restricciones', restriccionService.getAll()),
-        seguir('Órdenes provisionales', serviciosService.OrdenesProvisionalesPaginados(1, 20000)).catch(() => ({ data: [] })),
+        seguir('Órdenes provisionales', sapCompartido.ordenesProvisionales()).catch(() => ({ data: [] })),
         seguir('Tiempos de curado', serviciosService.getTiemposCuradoBloqueFormulado(1, 10000)).catch(() => ({ data: [] })),
-        seguir('Órdenes FERT', serviciosService.getOrdenesFert(1, 20000)).catch(() => ({ data: [] })),
-        seguir('Cubo de inventarios', serviciosService.getCuboInventarios(1, 50000)).catch(() => ({ data: [] }))
+        seguir('Órdenes FERT', sapCompartido.ordenesFert()).catch(() => ({ data: [] })),
+        seguir('Cubo de inventarios', sapCompartido.cuboInventarios()).catch(() => ({ data: [] }))
       ]);
       panelProgreso.actualizar('sap', {
         estado: fallidas.length > 0 ? 'aviso' : 'ok',
@@ -1832,6 +1834,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
           )}>
             {syncStep !== 'idle' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Sincronizar y Generar Necesidades
           </Button>
+          <DatosSapEstado onActualizar={() => { void handleSincronizarYGenerar(); }} disabled={syncStep !== 'idle'} />
           <Popover>
             <PopoverTrigger asChild>
               <Button
