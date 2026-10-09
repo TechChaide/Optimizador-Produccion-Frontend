@@ -2144,14 +2144,28 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // compacta por categoría/densidad.
   const bloqueEspumasEmpaque = (preview: PfdVentaPreview | undefined | null) => {
     if (!preview || preview.lineas.length === 0) return null;
-    const map = new Map<string, { categoria: string; materiales: number; cantidad: number; horas: number }>();
+    const map = new Map<string, { categoria: string; materiales: number; cantidad: number; horas: number; paquetes: number; paquetesEnrollar: number }>();
+    // Paquetes de planchas por material (ver paquetesPlancha), igual que la Salida de Datos.
+    const planchas = new Map<string, { cat: string; qty: number; esp: string; enrollar: boolean }>();
     preview.lineas.forEach(l => {
       const cat = l.categoria || '—';
-      if (!map.has(cat)) map.set(cat, { categoria: cat, materiales: 0, cantidad: 0, horas: 0 });
+      if (!map.has(cat)) map.set(cat, { categoria: cat, materiales: 0, cantidad: 0, horas: 0, paquetes: 0, paquetesEnrollar: 0 });
       const e = map.get(cat)!;
       e.materiales += 1;
       e.cantidad += l.cantidad;
       e.horas += l.tiempoHoras;
+      if (ES_PLANCHA.test(l.descripcion)) {
+        const k = `${cat}|${l.material}`;
+        const p = planchas.get(k) || { cat, qty: 0, esp: extractMaterialInfo({ NOMBRE: l.descripcion }).esp, enrollar: ES_C_PLANCHA.test(l.descripcion) };
+        p.qty += l.cantidad;
+        planchas.set(k, p);
+      }
+    });
+    planchas.forEach(p => {
+      const e = map.get(p.cat)!;
+      const n = paquetesPlancha(p.qty, p.esp);
+      e.paquetes += n;
+      if (p.enrollar) e.paquetesEnrollar += n;
     });
     const filas = Array.from(map.values()).sort((a, b) => b.horas - a.horas);
     return { filas, totalCantidad: filas.reduce((s, f) => s + f.cantidad, 0), totalHoras: filas.reduce((s, f) => s + f.horas, 0) };
@@ -2208,7 +2222,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     const ocupacionPct = capacidadHoras > 0 ? (totalHoras / capacidadHoras) * 100 : null;
     const ocupacionColor = ocupacionPct !== null && ocupacionPct > 100 ? '#b91c1c' : '#047857';
 
-    const bloqueCategoriaHtml = (titulo: string, b: { filas: { categoria: string; materiales: number; cantidad: number; horas: number }[]; totalHoras: number } | null) => !b ? '' : `
+    const bloqueCategoriaHtml = (titulo: string, b: { filas: { categoria: string; materiales: number; cantidad: number; horas: number; paquetes?: number; paquetesEnrollar?: number }[]; totalHoras: number } | null) => !b ? '' : `
   <tr>
     <td style="padding:18px 28px 4px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
@@ -2222,12 +2236,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Categoría</td>
           <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Materiales</td>
           <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Cantidad</td>
+          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#0f766e;border-bottom:1px solid #e5e7eb;">Paquetes (${ALTURA_PAQUETE_CM} cm)</td>
           <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Horas Empaque</td>
         </tr>${b.filas.map((f, i) => `
         <tr style="background:${i % 2 === 0 ? '#ffffff' : '#fafafa'};">
           <td style="padding:7px 10px;font-size:11px;font-weight:600;color:#111827;border-bottom:1px solid #f3f4f6;">${f.categoria}</td>
           <td align="right" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.materiales}</td>
           <td align="right" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.cantidad.toLocaleString()}</td>
+          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#0f766e;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.paquetes ? `${f.paquetes}${f.paquetesEnrollar ? ` <span style="font-size:9px;color:#7e22ce;">(${f.paquetesEnrollar} enrollar)</span>` : ''}` : '—'}</td>
           <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.horas.toFixed(2)}</td>
         </tr>`).join('')}
       </table>
@@ -2533,7 +2549,23 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         if (m.enrollar) entry.paquetesEnrollar += p;
       });
     });
-    if (data.length > 0) console.info(`[Empaque ${centroId}] tiempos del servicio: ${lookup.size} materiales; sin tiempo (15 s/und): ${sinTiempo.size}${sinTiempo.size ? ` — ${[...sinTiempo].slice(0, 15).join(', ')}` : ''}`);
+    // Muestreo C-PLANCHA vs PLANCHA de la misma densidad y medidas (usuario 2026-10-09: el enrollado
+    // está en medición; se espera que el tiempo del servicio de la C-PLANCHA ya sea mayor).
+    if (data.length > 0) {
+      const minDe = (filas: Record<string, unknown>[]) => matchTiempoEstandar(extractMaterialInfo(filas[0]).code, '', new Map([[extractMaterialInfo(filas[0]).code, filas]]));
+      const planchas = new Map<string, { code: string; min: number | null }>();
+      const cPlanchas: { code: string; clave: string; min: number | null }[] = [];
+      lookup.forEach(filas => {
+        const i = extractMaterialInfo(filas[0]);
+        if (!ES_PLANCHA.test(i.desc)) return;
+        const clave = `D${i.dens} ${i.ancho}X${i.largo}X${i.esp}`;
+        if (ES_C_PLANCHA.test(i.desc)) cPlanchas.push({ code: i.code, clave, min: minDe(filas) });
+        else if (!planchas.has(clave)) planchas.set(clave, { code: i.code, min: minDe(filas) });
+      });
+      const pares = cPlanchas.map(c => ({ 'C-PLANCHA': c.code, medida: c.clave, 'min/und C': c.min, PLANCHA: planchas.get(c.clave)?.code ?? '—', 'min/und P': planchas.get(c.clave)?.min ?? null }));
+      if (pares.length > 0) { console.info(`[Empaque ${centroId}] C-PLANCHA vs PLANCHA (tiempo del servicio, min/und):`); console.table(pares); }
+    }
+    if (data.length > 0) console.info(`[Empaque ${centroId}] tiempos del servicio:${lookup.size} materiales; sin tiempo (15 s/und): ${sinTiempo.size}${sinTiempo.size ? ` — ${[...sinTiempo].slice(0, 15).join(', ')}` : ''}`);
     return Array.from(map.values()).sort((a, b) =>
       a.maquina.localeCompare(b.maquina) || a.categoria.localeCompare(b.categoria) || a.espesor.localeCompare(b.espesor)
     );
