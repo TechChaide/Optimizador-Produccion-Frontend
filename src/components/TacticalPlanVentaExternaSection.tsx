@@ -128,6 +128,8 @@ interface PfdVentaPreview {
   lineas: PfdVentaLinea[];
   sinTrazabilidad: DataAprobadaRow[];
   ptCubiertos: Set<string>;
+  // Solo para el correo de Empaque (no se graba): FERT/PT de Rollos y # de rollos por categoría.
+  rollos?: { lineas: PfdVentaLinea[]; rollosPorCategoria: Record<string, number> };
 }
 
 // Cantidad viene como texto desde DetalleTactico (p.ej. "120.5000"); mismo criterio de limpieza
@@ -239,7 +241,7 @@ interface SnapshotVentaExterna {
 // Al cargar no se consulta SAP ni se reprocesa; es solo consulta: generar P2 / PFD-VENTA queda
 // bloqueado hasta Sincronizar. Cambiar su forma exige subir `version`.
 interface BloqueRollosEmpaque {
-  filas: (DataAprobadaRow & { estado: string; horas: number })[];
+  filas: { categoria: string; materiales: number; cantidad: number; rollos: number; horas: number }[];
   totalCantidad: number;
   totalHoras: number;
 }
@@ -436,6 +438,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // encontraba trazabilidad para nada (reportado por el usuario con datos reales) — ver
   // generarPfdVentaPreview.
   const [pfdVentaPreview, setPfdVentaPreview] = useState<Record<string, PfdVentaPreview>>({});
+  // Último preview generado: capturarEstadoPlan corre en el mismo cierre que construirHtml y el
+  // estado todavía no refleja el preview recién calculado.
+  const ultimoPfdVentaPreview = useRef<Record<string, PfdVentaPreview>>({});
   const [isGeneratingPfdVenta, setIsGeneratingPfdVenta] = useState<Record<string, boolean>>({});
   const [pfdVentaBomProgress, setPfdVentaBomProgress] = useState<Record<string, { current: number; total: number }>>({});
   const [savingPfdVenta, setSavingPfdVenta] = useState<Record<string, boolean>>({});
@@ -2171,22 +2176,31 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     return { filas, totalCantidad: filas.reduce((s, f) => s + f.cantidad, 0), totalHoras: filas.reduce((s, f) => s + f.horas, 0) };
   };
 
-  // Bloque Rollos: se queda a nivel COMPONENTE (Data Aprobada directo, cantidad verificada × tiempo
-  // estándar por material) porque hoy no existe trazabilidad componente→FERT/PT para Rollos (mismo
-  // límite ya documentado en generarPfdVentaPreview: "Rollos no tiene Data Aprobada con datos reales
-  // hoy") — se muestra igual, marcado aparte, en vez de omitirlo silenciosamente.
-  const bloqueRollosEmpaque = (centro: '1000' | '2000'): BloqueRollosEmpaque | null => {
+  // Bloque Rollos: nivel FERT/PT por categoría, igual que Espumas (usuario 2026-10-09) — ver
+  // preview.rollos en generarPfdVentaPreview (tiempo del servicio por FERT/PT, # Rollos por PesoUN
+  // del Maestro Looper). Solo Centro 1000.
+  const bloqueRollosEmpaque = (centro: '1000' | '2000', preview: PfdVentaPreview | undefined | null): BloqueRollosEmpaque | null => {
     if (centro !== '1000') return null;
-    if (resultadoRestaurado) return resultadoRestaurado.bloqueRollos1000;
-    const lookup = tiempoLookup1000;
-    const rows = dataAprobada['1000-ROLLOS'] || [];
-    const verificadas = rows.filter(r => r.respuestaCant > 0);
-    if (verificadas.length === 0) return null;
-    const filas = verificadas.map(r => {
-      const tiempoEstandarMin = matchTiempoEstandar(r.material, '', lookup);
-      const horas = tiempoEstandarMin !== null ? (r.respuestaCant * tiempoEstandarMin) / 60 : (r.respuestaCant * PACKING_TIME_PER_UNIT_SECONDS) / 3600;
-      return { ...r, estado: estadoDataAprobada(r), horas };
-    }).sort((a, b) => a.material.localeCompare(b.material));
+    if (resultadoRestaurado) {
+      const b = resultadoRestaurado.bloqueRollos1000;
+      // Planes guardados antes del 2026-10-09: filas por componente (material/respuestaCant).
+      const filasViejas = b?.filas as unknown as { categoria?: string; material?: string; respuestaCant?: number; horas: number }[] | undefined;
+      if (b && filasViejas?.some(f => f.categoria === undefined)) {
+        return { ...b, filas: filasViejas.map(f => ({ categoria: f.material ?? '—', materiales: 1, cantidad: f.respuestaCant ?? 0, rollos: 0, horas: f.horas })) };
+      }
+      return b;
+    }
+    const r = preview?.rollos;
+    if (!r || r.lineas.length === 0) return null;
+    const map = new Map<string, BloqueRollosEmpaque['filas'][number]>();
+    r.lineas.forEach(l => {
+      if (!map.has(l.categoria)) map.set(l.categoria, { categoria: l.categoria, materiales: 0, cantidad: 0, rollos: r.rollosPorCategoria[l.categoria] || 0, horas: 0 });
+      const e = map.get(l.categoria)!;
+      e.materiales += 1;
+      e.cantidad += l.cantidad;
+      e.horas += l.tiempoHoras;
+    });
+    const filas = Array.from(map.values()).sort((a, b) => b.horas - a.horas);
     return { filas, totalCantidad: filas.reduce((s, f) => s + f.cantidad, 0), totalHoras: filas.reduce((s, f) => s + f.horas, 0) };
   };
 
@@ -2197,7 +2211,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const resumenEmpaquePorCentro = useMemo(() => {
     const calcularCentro = (centro: '1000' | '2000') => {
       const espumas = bloqueEspumasEmpaque(pfdVentaPreview[centro]);
-      const rollos = bloqueRollosEmpaque(centro);
+      const rollos = bloqueRollosEmpaque(centro, pfdVentaPreview[centro]);
       const totalHoras = (espumas?.totalHoras || 0) + (rollos?.totalHoras || 0);
       const capacidadHoras = capacidadEmpaquePorCentro[centro];
       const ocupacionPct = capacidadHoras > 0 ? (totalHoras / capacidadHoras) * 100 : null;
@@ -2216,13 +2230,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const construirReporteHtmlEmpaque = (centro: '1000' | '2000', previewEspumas: PfdVentaPreview | null) => {
     const fechaLabel = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
     const espumas = bloqueEspumasEmpaque(previewEspumas);
-    const rollos = bloqueRollosEmpaque(centro);
+    const rollos = bloqueRollosEmpaque(centro, previewEspumas);
     const totalHoras = (espumas?.totalHoras || 0) + (rollos?.totalHoras || 0);
     const capacidadHoras = capacidadEmpaquePorCentro[centro];
     const ocupacionPct = capacidadHoras > 0 ? (totalHoras / capacidadHoras) * 100 : null;
     const ocupacionColor = ocupacionPct !== null && ocupacionPct > 100 ? '#b91c1c' : '#047857';
 
-    const bloqueCategoriaHtml = (titulo: string, b: { filas: { categoria: string; materiales: number; cantidad: number; horas: number; paquetes?: number; paquetesEnrollar?: number }[]; totalHoras: number } | null) => !b ? '' : `
+    // Misma tabla para Espumas (# de Paquetes) y Rollos (# Rollos), usuario 2026-10-09.
+    const bloqueCategoriaHtml = (titulo: string, b: { filas: { categoria: string; materiales: number; cantidad: number; horas: number; paquetes?: number; paquetesEnrollar?: number; rollos?: number }[]; totalHoras: number } | null, columna: 'paquetes' | 'rollos' = 'paquetes') => !b ? '' : `
   <tr>
     <td style="padding:18px 28px 4px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
@@ -2236,43 +2251,21 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Categoría</td>
           <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Materiales</td>
           <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Cantidad</td>
-          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#0f766e;border-bottom:1px solid #e5e7eb;">Paquetes (${ALTURA_PAQUETE_CM} cm)</td>
+          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#0f766e;border-bottom:1px solid #e5e7eb;">${columna === 'rollos' ? '# Rollos' : '# de Paquetes'}</td>
           <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Horas Empaque</td>
         </tr>${b.filas.map((f, i) => `
         <tr style="background:${i % 2 === 0 ? '#ffffff' : '#fafafa'};">
           <td style="padding:7px 10px;font-size:11px;font-weight:600;color:#111827;border-bottom:1px solid #f3f4f6;">${f.categoria}</td>
           <td align="right" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.materiales}</td>
           <td align="right" style="padding:7px 10px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.cantidad.toLocaleString()}</td>
-          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#0f766e;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.paquetes ? `${f.paquetes}${f.paquetesEnrollar ? ` <span style="font-size:9px;color:#7e22ce;">(${f.paquetesEnrollar} enrollar)</span>` : ''}` : '—'}</td>
+          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#0f766e;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${columna === 'rollos' ? (f.rollos ? f.rollos : '—') : f.paquetes ? `${f.paquetes}${f.paquetesEnrollar ? ` <span style="font-size:9px;color:#7e22ce;">(${f.paquetesEnrollar} enrollar)</span>` : ''}` : '—'}</td>
           <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.horas.toFixed(2)}</td>
         </tr>`).join('')}
       </table>
     </td>
   </tr>`;
 
-    const bloqueRollosHtml = !rollos ? '' : `
-  <tr>
-    <td style="padding:18px 28px 4px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
-        <tr>
-          <td style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Detalle por material — Rollos (nivel componente, sin trazabilidad FERT/PT todavía)</td>
-          <td align="right" style="font-size:10px;font-weight:700;color:#b45309;">${rollos.totalHoras.toFixed(2)} h</td>
-        </tr>
-      </table>
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
-        <tr style="background:#f9fafb;">
-          <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Material</td>
-          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Verificado</td>
-          <td align="right" style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Horas Empaque</td>
-        </tr>${rollos.filas.map((f, i) => `
-        <tr style="background:${i % 2 === 0 ? '#ffffff' : '#fafafa'};">
-          <td style="padding:7px 10px;font-size:11px;color:#4338ca;font-family:ui-monospace,Consolas,monospace;border-bottom:1px solid #f3f4f6;">${f.material}</td>
-          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#1d4ed8;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.respuestaCant.toLocaleString()}</td>
-          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${f.horas.toFixed(2)}</td>
-        </tr>`).join('')}
-      </table>
-    </td>
-  </tr>`;
+    const bloqueRollosHtml = bloqueCategoriaHtml('Detalle por material — Rollos (FERT/PT)', rollos, 'rollos');
 
     // Turnos/operadores de Empaque — mismo esquema ya aprobado (imagen compartida): Día/Noche/Sábado,
     // operadores por turno (informativo) y mantenimiento preventivo real.
@@ -2428,11 +2421,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       empaqueConfig,
       dataAprobada,
       necesidadEspumas1000, necesidadEspumas2000, necesidadRollos1000, necesidadRollos2000,
-      pfdVentaPreview,
+      pfdVentaPreview: { ...pfdVentaPreview, ...ultimoPfdVentaPreview.current },
       resultado: {
         hoy: resultadoRestaurado?.hoy ?? format(new Date(), 'yyyy-MM-dd'),
         summaryData: { '1000': summaryData1000, '2000': summaryData2000 },
-        bloqueRollos1000: bloqueRollosEmpaque('1000'),
+        bloqueRollos1000: bloqueRollosEmpaque('1000', ultimoPfdVentaPreview.current['1000'] ?? pfdVentaPreview['1000']),
       },
     };
   };
@@ -2459,6 +2452,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     setNecesidadRollos1000(e.necesidadRollos1000 ?? []);
     setNecesidadRollos2000(e.necesidadRollos2000 ?? []);
     setPfdVentaPreview(e.pfdVentaPreview ?? {});
+    ultimoPfdVentaPreview.current = e.pfdVentaPreview ?? {};
     setResultadoRestaurado(e.resultado);
     setDatosCargados(true);
     setPlanCargadoDe(origen);
@@ -2683,11 +2677,59 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         entry.tiempoHoras += tiempoHoras;
       });
 
+      // Rollos a nivel FERT/PT para el correo de Empaque (usuario 2026-10-09), con el mismo BOM: el
+      // tiempo sale del servicio por el material FERT/PT (el componente LAMINA CILINDRICA no tiene
+      // tiempo de empaque y caía en 15 s/und). # Rollos = peso verificado del componente (kg) ÷
+      // PesoUN del Maestro Looper, redondeado hacia arriba, sumado a la categoría de su FERT/PT.
+      const rollosAprobados = (dataAprobada[`${centro}-ROLLOS`] || []).filter(r => estadoDataAprobada(r) !== 'pendiente');
+      let rollos: PfdVentaPreview['rollos'];
+      if (rollosAprobados.length > 0) {
+        const pesoRollo = new Map<string, number>();
+        try {
+          const res = await sapCompartido.kpiMaestroLooper();
+          const filas = (Array.isArray(res.data) ? res.data : res.data?.data || []) as Record<string, unknown>[];
+          filas.forEach(f => { const peso = Number(f.PesoUN) || 0; if (peso > 0) pesoRollo.set(cleanCode(f.Material), peso); });
+        } catch (error) {
+          console.warn('[Empaque] Maestro Looper sin respuesta — # Rollos queda en 0:', (error as Error).message);
+        }
+        const ptRollo = new Set<string>();
+        const rollosPorCategoria: Record<string, number> = {};
+        const sinPeso: string[] = [];
+        rollosAprobados.forEach(r => {
+          const padres = trazabilidad[r.material] || [];
+          padres.forEach(pt => ptRollo.add(pt));
+          const fertPadre = fertOrigen.find(o => padres.includes(cleanCode(o.MATERIAL)));
+          if (!fertPadre) return;
+          const categoria = String(fertPadre.CATEGORIA || fertPadre.Categoria || fertPadre.categoria || '—').trim() || '—';
+          const peso = pesoRollo.get(r.material) ?? pesoRollo.get(cleanCode(fertPadre.MATERIAL));
+          if (!peso) { sinPeso.push(r.material); return; }
+          rollosPorCategoria[categoria] = (rollosPorCategoria[categoria] || 0) + Math.ceil(r.respuestaCant / peso);
+        });
+        if (sinPeso.length > 0) console.info(`[Empaque ${centro}] Rollos sin PesoUN en Maestro Looper: ${sinPeso.join(', ')}`);
+        const porMaterialRollo = new Map<string, PfdVentaLinea>();
+        fertOrigen.filter(o => ptRollo.has(cleanCode(o.MATERIAL))).forEach(o => {
+          const info = extractMaterialInfo(o);
+          if (!info.code) return;
+          const qty = Number(o.CANTPROGRAMADA || o.CANTIDAD || 0);
+          const categoria = String(o.CATEGORIA || o.Categoria || o.categoria || '—').trim() || '—';
+          const maquina = String(o.MAQUINA || o.Maquina || o.RECURSO || '').trim();
+          const tiempoEstandarMin = matchTiempoEstandar(info.code, maquina, lookup);
+          const tiempoHoras = tiempoEstandarMin !== null ? (qty * tiempoEstandarMin) / 60 : (qty * PACKING_TIME_PER_UNIT_SECONDS) / 3600;
+          if (!porMaterialRollo.has(info.code)) porMaterialRollo.set(info.code, { material: info.code, descripcion: info.desc, categoria, cantidad: 0, tiempoHoras: 0 });
+          const entry = porMaterialRollo.get(info.code)!;
+          entry.cantidad += qty;
+          entry.tiempoHoras += tiempoHoras;
+        });
+        if (porMaterialRollo.size > 0) rollos = { lineas: Array.from(porMaterialRollo.values()), rollosPorCategoria };
+      }
+
       const preview: PfdVentaPreview = {
         sinTrazabilidad,
         ptCubiertos,
         lineas: Array.from(porMaterial.values()).sort((a, b) => a.material.localeCompare(b.material)),
+        rollos,
       };
+      ultimoPfdVentaPreview.current = { ...ultimoPfdVentaPreview.current, [centro]: preview };
       setPfdVentaPreview(prev => ({ ...prev, [centro]: preview }));
       return preview;
     } catch (error) {
