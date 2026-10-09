@@ -352,10 +352,10 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
   if (filtered.length === 0) {
     return (
       <div className="space-y-2">
-        <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">{space.title} (0)</h4>
-        <p className="text-[9px] font-bold text-slate-300 uppercase tracking-widest px-2">Filtro: {filterLabel}</p>
+        <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-2">{space.title} (0)</h4>
+        <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2">Filtro: {filterLabel}</p>
         <div className="py-10 text-center bg-gray-50/30 rounded-3xl border-2 border-dashed border-gray-100 mb-8">
-          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">
             0 de {data.length} registros de curado coinciden con este filtro
           </p>
         </div>
@@ -387,16 +387,16 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
     <div className="space-y-2">
       <div className="px-2 flex items-baseline justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
-          <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{space.title} ({filtered.length})</h4>
+          <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{space.title} ({filtered.length})</h4>
           <span className="text-[9px] font-black uppercase tracking-wider bg-emerald-50 text-emerald-700 rounded-full px-3 py-1">Disponible: {formatNum(unidadesDisponible, 1)} UN</span>
           <span className="text-[9px] font-black uppercase tracking-wider bg-amber-50 text-amber-700 rounded-full px-3 py-1">Pendiente Curado: {formatNum(unidadesPendiente, 1)} UN</span>
         </div>
-        <p className="text-[9px] font-bold text-slate-300 uppercase tracking-widest">Filtro: {filterLabel}</p>
+        <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Filtro: {filterLabel}</p>
       </div>
       <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left mb-2">
         <div className="overflow-x-auto max-h-[500px]">
           <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-            <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-400 tracking-widest z-10">
+            <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-10">
               <tr>
                 {COLUMNAS_CURADO.map((col, i) => (
                   <th key={i} className="px-4 py-4 border-r border-gray-100 whitespace-nowrap uppercase">
@@ -449,12 +449,12 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
         </div>
       </div>
       <div className="flex items-center justify-between px-2 mb-8">
-        <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+        <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">
           Mostrando {(paginaActual - 1) * CURADO_PAGE_SIZE + 1}–{Math.min(paginaActual * CURADO_PAGE_SIZE, filtered.length)} de {filtered.length}
         </p>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" className="h-7 px-3 text-[9px] font-black uppercase rounded-xl" disabled={paginaActual <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>Anterior</Button>
-          <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Página {paginaActual} / {totalPaginas}</span>
+          <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Página {paginaActual} / {totalPaginas}</span>
           <Button variant="outline" size="sm" className="h-7 px-3 text-[9px] font-black uppercase rounded-xl" disabled={paginaActual >= totalPaginas} onClick={() => setPage(p => Math.min(totalPaginas, p + 1))}>Siguiente</Button>
         </div>
       </div>
@@ -660,7 +660,7 @@ const JornadaCentroPanel: React.FC<{ titulo: string; jornada: JornadaGrupoEditab
       { etiqueta: 'Sábado', valor: jornada.sabado, set: jornada.setSabado, opciones: jornada.opcionesDia, horas: jornada.horasBrutas.sabado },
     ]).map(t => (
       <div key={t.etiqueta} className="flex items-center gap-2">
-        <span className="text-[9px] font-black text-slate-400 uppercase w-12">{t.etiqueta}</span>
+        <span className="text-[9px] font-black text-slate-500 uppercase w-12">{t.etiqueta}</span>
         <select value={t.valor} onChange={e => t.set(e.target.value)} className="flex-1 bg-white border border-gray-200 rounded-md px-2 py-1 text-[10px] font-black text-indigo-700 outline-none">
           {t.opciones.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
         </select>
@@ -668,7 +668,7 @@ const JornadaCentroPanel: React.FC<{ titulo: string; jornada: JornadaGrupoEditab
       </div>
     ))}
     <div className="flex items-center gap-2">
-      <span className="text-[9px] font-black text-slate-400 uppercase w-12">Paros %</span>
+      <span className="text-[9px] font-black text-slate-500 uppercase w-12">Paros %</span>
       <input type="number" min={0} max={100} value={jornada.paroPct} onChange={e => jornada.setParoPct(Math.min(100, Math.max(0, Number(e.target.value) || 0)))} className="w-16 bg-white border border-gray-200 rounded-md px-2 py-1 text-[10px] font-black text-slate-700 outline-none" />
     </div>
     <p className="text-[9px] font-bold text-slate-500">
@@ -1454,7 +1454,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-              <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-400 tracking-widest z-20">
+              <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-20">
                 <tr>
                   <th className="px-4 py-4 text-left border-r border-gray-100">FORMULADO</th>
                   <th className="px-6 py-4 text-left border-r border-gray-100">NOMBRECOMPONENTE</th>
@@ -1483,7 +1483,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         </tr>
                         {group.items.map((row, idx) => (
                           <tr key={idx} className="hover:bg-slate-50 transition-colors font-mono text-[9px]">
-                            <td className="px-4 py-2 border-r border-gray-100 text-slate-300 pl-8 text-left">{row.codFormulado}</td>
+                            <td className="px-4 py-2 border-r border-gray-100 text-slate-400 pl-8 text-left">{row.codFormulado}</td>
                             <td className="px-6 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[220px]">{row.nombreComponente}</td>
                             <td className="px-4 py-2 border-r border-gray-100 text-indigo-600 font-black">{row.componente}</td>
                             <td className="px-6 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[220px]">{row.nombre}</td>
@@ -1530,7 +1530,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-              <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-400 tracking-widest z-20">
+              <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-20">
                 <tr>
                   <th className="px-6 py-4 text-left border-r border-gray-100 w-32">Bloque Formulado</th>
                   <th className="px-3 py-4 border-r border-gray-100 text-slate-500">Centro</th>
@@ -1571,7 +1571,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         <td className="px-3 py-3 border-r border-gray-100 font-black text-slate-500">{row.centro}</td>
                         <td className="px-4 py-3 text-left font-mono font-black text-indigo-700 bg-indigo-50/10 border-r border-gray-100 whitespace-nowrap">{row.corrida}</td>
                         <td className="px-6 py-3 text-left uppercase text-slate-900 font-black text-[9px] border-r border-gray-100 truncate max-w-[300px]">{row.blockDesc}</td>
-                        <td className="px-3 py-3 border-r border-gray-100 font-mono text-slate-400">{row.dens}</td>
+                        <td className="px-3 py-3 border-r border-gray-100 font-mono text-slate-500">{row.dens}</td>
                         <td className="px-3 py-3 border-r border-gray-100 font-black text-blue-700 bg-blue-50/10">{row.apertura}</td>
                         <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-slate-700 bg-slate-50/10">{row.totalBloquesProv.toFixed(2)}</td>
                         <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-purple-700 bg-purple-50/10">{row.totalBloquesFert.toFixed(2)}</td>
@@ -1584,7 +1584,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         <td className="px-6 py-3 text-right font-mono font-black text-yellow-700 bg-yellow-50/30">{row.planReposicion}</td>
                       </tr>
                       {isExp && row.ferts.map((f, fIdx: number) => (
-                        <tr key={`${idx}-${fIdx}`} className="bg-slate-50/50 text-[9px] text-slate-400 font-medium">
+                        <tr key={`${idx}-${fIdx}`} className="bg-slate-50/50 text-[9px] text-slate-500 font-medium">
                           <td className="px-6 py-1.5 text-left pl-10 italic">{f.code}</td>
                           <td></td>
                           <td></td>
@@ -1632,13 +1632,13 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     return (
       <div className="space-y-2">
         <div className="px-2 flex items-center justify-between">
-          <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Evaluación Stock / En Curado / Stock Útil por Material</h4>
-          <p className="text-[9px] font-bold text-slate-300 uppercase tracking-widest">Stock (UN) = Stock (KG) ÷ Lote Mínimo (igual que Inventarios) · En Curado separado por proceso (Leader / Cofama), no combinado</p>
+          <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Evaluación Stock / En Curado / Stock Útil por Material</h4>
+          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Stock (UN) = Stock (KG) ÷ Lote Mínimo (igual que Inventarios) · En Curado separado por proceso (Leader / Cofama), no combinado</p>
         </div>
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left mb-8">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-              <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-400 tracking-widest z-10">
+              <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-10">
                 <tr>
                   <th className="px-4 py-4 text-left border-r border-gray-100">Material</th>
                   <th className="px-6 py-4 text-left border-r border-gray-100">Descripción</th>
@@ -1669,7 +1669,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         <tr className="hover:bg-slate-50 transition-colors">
                           <td className="px-4 py-3 text-left font-mono font-black text-indigo-600 border-r border-gray-100">{row.materialCode}</td>
                           <td className="px-6 py-3 text-left uppercase text-slate-700 border-r border-gray-100 truncate max-w-[280px]">{row.descripcion}</td>
-                          <td className="px-4 py-3 border-r border-gray-100 font-mono text-slate-400">{row.loteMin > 0 ? formatNum(row.loteMin, 0) : '—'}</td>
+                          <td className="px-4 py-3 border-r border-gray-100 font-mono text-slate-500">{row.loteMin > 0 ? formatNum(row.loteMin, 0) : '—'}</td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-emerald-600 bg-emerald-50/10">{formatNum(row.stockKg, 0)}</td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-emerald-800 bg-emerald-50/20">{row.stockUN.toFixed(1)}</td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-amber-700 bg-amber-50/20">{row.stockEnCuradoLeaderUN.toFixed(1)}</td>
@@ -1705,7 +1705,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       return (
         <div className="flex flex-col items-center justify-center p-20 gap-4">
           <Loader2 className="w-10 h-10 animate-spin text-primary" />
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest animate-pulse">Sincronizando SAP...</p>
+          <p className="text-xs font-bold text-gray-500 uppercase tracking-widest animate-pulse">Sincronizando SAP...</p>
         </div>
       );
     }
@@ -1716,7 +1716,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
            {isProcessingResumen ? (
              <div className="py-32 text-center">
                 <Loader2 className="w-12 h-12 animate-spin mx-auto text-primary mb-6" />
-                <p className="text-[11px] font-black uppercase text-slate-400 tracking-widest">Ejecutando Explosión Técnica BOM: {resumenProgress.current} / {resumenProgress.total}</p>
+                <p className="text-[11px] font-black uppercase text-slate-500 tracking-widest">Ejecutando Explosión Técnica BOM: {resumenProgress.current} / {resumenProgress.total}</p>
              </div>
            ) : (
              <>
@@ -1735,7 +1735,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
            {(!curadoData || curadoData.length === 0) && (
              <div className="py-24 text-center bg-gray-50/30 rounded-3xl border-2 border-dashed border-gray-100">
                <TableIcon className="w-16 h-16 text-indigo-100 mx-auto" />
-               <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-4">Sin datos técnicos de curado en SAP</p>
+               <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mt-4">Sin datos técnicos de curado en SAP</p>
              </div>
            )}
         </div>
@@ -1764,7 +1764,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       case 'inventario': return (
         <div className="animate-in fade-in duration-300 text-left">
           <Card className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
-            <div className="px-6 pt-5 pb-3 flex items-start gap-2 text-slate-400">
+            <div className="px-6 pt-5 pb-3 flex items-start gap-2 text-slate-500">
               <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
               <p className="text-[10px] leading-relaxed">
                 Fuente: <span className="font-black text-slate-500">CuboInventarios SAP</span>. <span className="font-black text-green-600">Stock (KG)</span> es el <code className="font-mono">StockActual</code> reportado por SAP.
@@ -1773,7 +1773,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             </div>
             <div className="overflow-x-auto max-h-[600px] relative">
               <table className="w-full border-collapse text-center font-sans text-[10px]">
-                <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-400 tracking-widest z-10">
+                <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-10">
                   <tr>
                     <th className="px-6 py-5 border-r border-gray-100">Material</th>
                     <th className="px-6 py-5 border-r border-gray-100 text-left">Descripción del Bloque (SAP)</th>
@@ -1782,11 +1782,11 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                     <th className="px-3 py-5 border-r border-gray-100 text-purple-700">Clase Aprov.</th>
                     <th className="px-3 py-5 border-r border-gray-100 bg-green-50/50 text-green-700">
                       Stock (KG)
-                      <span className="block normal-case font-normal text-gray-400 text-[7px] tracking-normal mt-0.5">StockActual SAP</span>
+                      <span className="block normal-case font-normal text-gray-500 text-[7px] tracking-normal mt-0.5">StockActual SAP</span>
                     </th>
                     <th className="px-3 py-5 border-r border-gray-100 bg-blue-50/50 text-blue-700">
                       Stock (UN)
-                      <span className="block normal-case font-normal text-gray-400 text-[7px] tracking-normal mt-0.5">KG ÷ Lote Mín.</span>
+                      <span className="block normal-case font-normal text-gray-500 text-[7px] tracking-normal mt-0.5">KG ÷ Lote Mín.</span>
                     </th>
                     <th className="px-3 py-5 border-r border-gray-100 bg-amber-50/50 text-amber-700">Lote Mín. (KG)</th>
                     <th className="px-3 py-5 border-r border-gray-100 bg-amber-50/50 text-amber-700">Lote Máx. (KG)</th>
@@ -1857,7 +1857,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             <PopoverContent className="w-80 p-4 space-y-3" align="end">
               <div>
                 <p className="text-xs font-black uppercase tracking-widest text-slate-700">Reporte de producción <span className="text-amber-600">(en desarrollo)</span></p>
-                <p className="text-[10px] text-slate-400 mt-1">Bloque Formulado — necesidad, stock y plan de reposición. Guarda el plan y envíalo después desde la vista previa.</p>
+                <p className="text-[10px] text-slate-500 mt-1">Bloque Formulado — necesidad, stock y plan de reposición. Guarda el plan y envíalo después desde la vista previa.</p>
               </div>
               <ReportePlanTxtAccionesGrupo grupo={reporteGrupo} />
             </PopoverContent>
@@ -1874,7 +1874,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             </PopoverTrigger>
             <PopoverContent className="w-[520px] p-4" align="end">
               <p className="text-xs font-black uppercase tracking-widest text-slate-700 mb-1">Jornada laboral</p>
-              <p className="text-[10px] text-slate-400 mb-3">Precargada desde las restricciones del grupo; puedes ajustarla. Aún no entra en ningún cálculo del módulo.</p>
+              <p className="text-[10px] text-slate-500 mb-3">Precargada desde las restricciones del grupo; puedes ajustarla. Aún no entra en ningún cálculo del módulo.</p>
               <div className="grid grid-cols-2 gap-4">
                 <JornadaCentroPanel titulo="Quito (1000)" jornada={jornada1000} sinGrupo={codigoGrupoFormulacion1000 === null} />
                 <JornadaCentroPanel titulo="Guayaquil (2000)" jornada={jornada2000} sinGrupo={codigoGrupoFormulacion2000 === null} />
@@ -1907,11 +1907,11 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                     <Button variant="ghost" size="icon" onClick={() => setViewDate(prev => addMonths(prev, 1))} className="h-8 w-8 hover:bg-white"><ChevronRight className="w-4 h-4" /></Button>
                   </div>
                 </div>
-                <p className="text-[9px] font-bold text-slate-300 uppercase tracking-widest mb-2">
+                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-2">
                   {!rangeStart ? 'Elige la fecha de inicio' : !rangeEnd ? 'Elige la fecha de fin' : 'Rango seleccionado — click reinicia'}
                 </p>
                 <div className="grid grid-cols-7 gap-y-1 text-center mb-4">
-                  {['LU', 'MA', 'MI', 'JU', 'VI', 'SA', 'DO'].map(d => <div key={d} className="text-[9px] font-black text-slate-300 uppercase py-1">{d}</div>)}
+                  {['LU', 'MA', 'MI', 'JU', 'VI', 'SA', 'DO'].map(d => <div key={d} className="text-[9px] font-black text-slate-400 uppercase py-1">{d}</div>)}
                   {calendarDaysList.map((day, idx) => {
                     if (!day) return <div key={idx} />;
                     const dStr = format(day, 'yyyy-MM-dd');

@@ -915,7 +915,7 @@ const DateFilterPopover: React.FC<{
             </div>
           </div>
           <div className="grid grid-cols-7 gap-y-1.5 text-center mb-4">
-            {['LU', 'MA', 'MI', 'JU', 'VI', 'SA', 'DO'].map(d => <div key={d} className="text-[9px] font-black text-slate-300 uppercase py-1">{d}</div>)}
+            {['LU', 'MA', 'MI', 'JU', 'VI', 'SA', 'DO'].map(d => <div key={d} className="text-[9px] font-black text-slate-400 uppercase py-1">{d}</div>)}
             {calendarDaysList.map((day, idx) => {
               if (!day) return <div key={idx} />;
               const dStr = format(day, 'yyyy-MM-dd');
@@ -5361,8 +5361,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return (
       <div key={id} className={cn("col-span-1 border-r border-gray-100 flex flex-col font-sans", !activa && "bg-slate-50/80")}>
         <div className="p-3 border-b border-gray-100 text-center">
-          <p className={cn("text-xs font-black uppercase tracking-tight", activa ? "text-slate-800" : "text-slate-400 line-through")}>{id}</p>
-          <p className={cn("text-[9px] font-bold uppercase truncate", activa ? "text-slate-500" : "text-slate-400")}>{name}</p>
+          <p className={cn("text-xs font-black uppercase tracking-tight", activa ? "text-slate-800" : "text-slate-500 line-through")}>{id}</p>
+          <p className={cn("text-[9px] font-bold uppercase truncate", activa ? "text-slate-500" : "text-slate-500")}>{name}</p>
           {/* Apagar la máquina cuando no hay demanda que la justifique: deja de aportar horas a la
               capacidad, sin tener que borrarle los turnos (que significa "aún no lo definí"). */}
           <button
@@ -5372,7 +5372,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
               "mt-1.5 w-full rounded-md px-2 py-1 text-[9px] font-black uppercase tracking-wider transition-colors border",
               activa
                 ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
-                : "bg-slate-100 text-slate-400 border-slate-200 hover:bg-slate-200"
+                : "bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200"
             )}
             title={activa ? 'Máquina en servicio: sus horas suman a la capacidad. Click para apagarla.' : 'Máquina fuera de servicio: no aporta capacidad. Click para encenderla.'}
           >
@@ -5390,23 +5390,23 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             <p className="text-[9px] font-black text-slate-600 uppercase tracking-wide">{labelProceso} · {id}</p>
 
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wide">Rendim. (%)</span>
+              <span className="text-[8px] font-bold text-slate-500 uppercase tracking-wide">Rendim. (%)</span>
               <span className="text-[10px] font-black text-slate-700">{rendimPct !== null ? rendimPct : '100% fijo'}</span>
             </div>
 
             {ocupacion.estado === 'sin-fecha' || ocupacion.estado === 'sin-mapeo' ? (
               <div title={ocupacion.estado === 'sin-fecha' ? "Elige una fecha en 'Evaluar Capacidad' para calcular el detalle de este recurso." : "Esta máquina no tiene un código de Hoja de Ruta/Puesto de Trabajo SAP asociado (ver MACHINE_SAP_CODES_POR_PLANTA)."}>
-                <p className="text-[8px] font-bold text-gray-400 uppercase">{ocupacion.estado === 'sin-fecha' ? 'Sin fecha' : 'Sin mapeo SAP'}</p>
+                <p className="text-[8px] font-bold text-gray-500 uppercase">{ocupacion.estado === 'sin-fecha' ? 'Sin fecha' : 'Sin mapeo SAP'}</p>
               </div>
             ) : (
               <>
                 <div className="flex items-center justify-between gap-2" title={`Suma real de tTotal de las órdenes cuya Hoja de Ruta/Puesto de Trabajo coincide con esta máquina, para la fecha elegida en 'Evaluar Capacidad'.${ocupacion.pendienteAnterior && ocupacion.pendienteAnterior.pendiente > 0.05 ? `
 Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteAnterior.dia), 'EEE dd/MM', { locale: es })}: ${ocupacion.pendienteAnterior.pendiente.toFixed(1)} h − turno restante ${Math.min(ocupacion.pendienteAnterior.restante, ocupacion.pendienteAnterior.pendiente).toFixed(1)} h = pasa ${ocupacion.pendienteAnterior.pasa.toFixed(1)} h (turno medido desde la sincronización, con paros, rendimiento y MTTO).` : ''}`}>
-                  <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wide">Tiempo Proceso</span>
+                  <span className="text-[8px] font-bold text-slate-500 uppercase tracking-wide">Tiempo Proceso</span>
                   <span className="text-[10px] font-black text-slate-700">{ocupacion.horas.toFixed(1)}h</span>
                 </div>
                 <div className="flex items-center justify-between gap-2" title="Horas programadas (Día+Noche+Sábado) de este recurso, sin descontar paros ni rendimiento.">
-                  <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wide">Tiempo Máquina</span>
+                  <span className="text-[8px] font-bold text-slate-500 uppercase tracking-wide">Tiempo Máquina</span>
                   <span className="text-[10px] font-black text-slate-700">{ocupacion.tiempoMaquinaBruto.toFixed(1)}h</span>
                 </div>
                 <div
@@ -5438,7 +5438,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
           <div className="space-y-2 pt-2 border-t border-gray-100">
             <p className="text-[9px] font-black text-slate-500 uppercase tracking-wide">Turno Noche</p>
             {sinTurnoNoche ? (
-              <p className="w-full bg-slate-100 text-slate-400 font-black text-[10px] uppercase rounded px-2 py-1.5 border border-gray-200 text-center" title="Esta máquina no se enciende en el turno noche (modelo operativo de la planta).">
+              <p className="w-full bg-slate-100 text-slate-500 font-black text-[10px] uppercase rounded px-2 py-1.5 border border-gray-200 text-center" title="Esta máquina no se enciende en el turno noche (modelo operativo de la planta).">
                 No opera de noche
               </p>
             ) : (
@@ -5794,7 +5794,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 )}
                 {estimada && (
                   <span className="inline-flex cursor-help shrink-0" title="Verticales todavía no tiene máquinas cargadas con horario propio: se usa un estimado (un turno día de carrusel) como referencia.">
-                    <AlertCircle className="w-3.5 h-3.5 text-slate-400" />
+                    <AlertCircle className="w-3.5 h-3.5 text-slate-500" />
                   </span>
                 )}
               </div>
@@ -5815,7 +5815,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             <div className="flex items-center justify-between gap-2">
               <span className="text-[9px] font-black text-slate-600 uppercase tracking-widest">% Ocupación</span>
               {fechasSel.length === 0 ? (
-                <span className="text-[10px] font-bold text-slate-400">Sin fecha</span>
+                <span className="text-[10px] font-bold text-slate-500">Sin fecha</span>
               ) : (
                 <span
                   className={cn("text-base font-black tracking-tighter", ocupacionPctProceso !== null && ocupacionPctProceso > 100 ? "text-red-600" : "text-emerald-700")}
@@ -5827,7 +5827,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             </div>
             {fechasSel.length > 0 && codigosSinAtribuirProceso.length > 0 && (
               <div
-                className="text-[8px] font-bold text-slate-400 uppercase leading-tight"
+                className="text-[8px] font-bold text-slate-500 uppercase leading-tight"
                 title="Horas de órdenes cuyo código de Hoja de Ruta/Puesto de Trabajo no está asociado a ninguna máquina de esta planta. Cuentan en el % Ocupación del proceso, pero no en la tarjeta de ninguna máquina."
               >
                 Sin mapeo: {codigosSinAtribuirProceso.map(([codigo, h]) => `${codigo} ${h.toFixed(1)}h`).join(' · ')}
@@ -6066,10 +6066,10 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 <PopoverContent className="w-80 p-4 space-y-3" align="end">
                   <div>
                     <p className="text-xs font-black uppercase tracking-widest text-slate-700">Reporte de producción</p>
-                    <p className="text-[10px] text-slate-400 mt-1">Gestión de tiempos y ocupación por proceso — {planta === 'UIO' ? 'Quito' : 'Guayaquil'}. Guarda el plan antes de exportar a SAP y envíalo después desde la vista previa.</p>
+                    <p className="text-[10px] text-slate-500 mt-1">Gestión de tiempos y ocupación por proceso — {planta === 'UIO' ? 'Quito' : 'Guayaquil'}. Guarda el plan antes de exportar a SAP y envíalo después desde la vista previa.</p>
                   </div>
                   <ReportePlanTxtAcciones flujo={reporteFlujo[planta]} />
-                  <p className="text-[9px] text-slate-400">Destinatarios precargados desde Grupo_Correos_Corte_Espuma — editables en la vista previa.</p>
+                  <p className="text-[9px] text-slate-500">Destinatarios precargados desde Grupo_Correos_Corte_Espuma — editables en la vista previa.</p>
                 </PopoverContent>
               </Popover>
               <ReportePlanTxtVistaPrevia
@@ -6277,7 +6277,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             >
               <span className="text-[10px] font-black text-amber-700 uppercase tracking-wide cursor-help">Sin clasif. (fondo)</span>
               <span className="text-[11px] font-black tabular-nums text-amber-700">{plannedSinClasificar.toFixed(1)}h</span>
-              <span className="text-[8px] font-bold text-slate-400">resp. {respSinClasificar.join(', ')}</span>
+              <span className="text-[8px] font-bold text-slate-500">resp. {respSinClasificar.join(', ')}</span>
             </div>
           </div>
         )}
@@ -6502,7 +6502,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
         <h3 className="text-xs font-black uppercase text-slate-800 tracking-widest flex items-center gap-2"><div className="w-2.5 h-2.5 rounded-full bg-red-600" /> {title} ({data.length})</h3>
         {data.length > 0 && (
           <div className="flex items-center gap-6 flex-wrap rounded-xl border border-slate-100 bg-slate-50/60 px-5 py-3">
-            <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Total del bloque</span>
+            <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">Total del bloque</span>
             {([
               { l: 'Cantidad', v: formatNum(totales.cant, 0), color: 'text-slate-800' },
               { l: 'Peso (Kg)', v: formatNum(totales.peso, 0), color: 'text-slate-800' },
@@ -6510,7 +6510,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               { l: 'Cargas', v: formatNum(totales.cargas, 0), color: 'text-amber-700' },
             ]).map(m => (
               <div key={m.l} className="flex items-baseline gap-1.5">
-                <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">{m.l}</span>
+                <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500">{m.l}</span>
                 <span className={cn("text-sm font-black tabular-nums", m.color)}>{m.v}</span>
               </div>
             ))}
@@ -6525,7 +6525,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                   <div key={l} className="flex items-baseline gap-1.5" title={`${d.necesidad.toFixed(1)}h de necesidad de ${l.toLowerCase()}, contra ${d.capacidad.toFixed(1)}h de capacidad instalada (Horas Efectivas de 1 día).`}>
                     <span className="text-[9px] font-bold uppercase tracking-wider text-cyan-600">{l}</span>
                     <span className="text-sm font-black tabular-nums text-slate-800">{d.necesidad.toFixed(1)}h</span>
-                    <span className="text-[9px] font-bold text-slate-400">/ {d.capacidad.toFixed(1)}h</span>
+                    <span className="text-[9px] font-bold text-slate-500">/ {d.capacidad.toFixed(1)}h</span>
                     <span className={cn("text-sm font-black tabular-nums", d.pct !== null && d.pct > 100 ? "text-red-600" : "text-emerald-700")}>
                       {d.pct !== null ? `${d.pct.toFixed(0)}%` : '—'}
                     </span>
@@ -6550,7 +6550,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full text-center border-collapse text-[10px]">
-              <thead className="bg-gray-50 sticky top-0 z-20 text-[9px] font-bold uppercase text-gray-400">
+              <thead className="bg-gray-50 sticky top-0 z-20 text-[9px] font-bold uppercase text-gray-500">
                 <tr>
                   <th className="px-4 py-4 border-r border-gray-100 text-left w-32">Material</th>
                   <th className="px-6 py-4 border-r border-gray-100 text-left min-w-[200px]">Descripción</th>
@@ -6612,7 +6612,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         <td colSpan={4} className="text-right pr-6 italic opacity-30 uppercase font-black tracking-widest text-[9px]">Subtotales de Bloque:</td>
                         <td className="border-r border-slate-50"></td>
                         <td className="px-3 py-3 font-black text-slate-900 bg-yellow-50 text-center text-[12px]">{formatNum(tCant, 0)}</td>
-                        <td className="px-3 py-3 font-black text-slate-400 opacity-40">{formatNum(tKg, 0)}</td>
+                        <td className="px-3 py-3 font-black text-slate-500 opacity-40">{formatNum(tKg, 0)}</td>
                         <td colSpan={2}></td>
                         <td className="px-4 py-3 bg-indigo-50 text-indigo-700 font-black">{tH.toFixed(2)}h</td>
                         <td className="px-3 py-3 bg-amber-50 text-amber-700 font-black">{tBatches}</td>
@@ -6639,7 +6639,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                               más débil) */}
                           <td className={cn(
                             "px-3 py-2 border-r border-slate-50",
-                            row.sinGeometria ? "bg-gray-100 text-gray-400 italic"
+                            row.sinGeometria ? "bg-gray-100 text-gray-500 italic"
                               : row.tIndiv === 0 ? "bg-red-500 text-white animate-pulse font-black"
                               : row.tIndivEstimadoNivel === '3c' ? "bg-orange-50 text-orange-700 font-black"
                               : row.tIndivEstimado ? "bg-amber-50 text-amber-700 font-black" : "text-indigo-400"
@@ -6660,7 +6660,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           </td>
 
                           <td className="px-4 py-2 border-r border-gray-100 bg-indigo-50 text-indigo-800 font-black">
-                            {row.sinGeometria ? <span className="text-[8px] uppercase tracking-wider text-gray-400 italic font-normal">Sin dato</span> : row.tTotal.toFixed(2)}
+                            {row.sinGeometria ? <span className="text-[8px] uppercase tracking-wider text-gray-500 italic font-normal">Sin dato</span> : row.tTotal.toFixed(2)}
                           </td>
                           <td className="px-3 py-2 border-r border-slate-50 bg-amber-50 text-amber-700 font-black">{row.nroCargas}</td>
                           <td className="px-3 py-2 border-r border-slate-50 font-black">{Math.round(row.undBatch)}</td>
@@ -6695,7 +6695,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                               {row.origenArea ? (
                                 <div className="flex flex-col items-start">
                                   <span className="font-black text-slate-700 uppercase">{row.origenArea}</span>
-                                  <span className="text-[8px] text-slate-400">
+                                  <span className="text-[8px] text-slate-500">
                                     Grupo #{row.origenCodigoGrupo}{!hideOrigenPlanGrupo && ` · Plan Grupo #${row.origenCodigoPlanGrupo}`}
                                   </span>
                                   {row.origenAmbiguo && (
@@ -6752,7 +6752,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
       <div className="flex items-center justify-between pb-4 border-b border-gray-100">
         <div className="flex items-center space-x-3 text-left">
           <div className="p-2 bg-red-600/10 rounded-xl shadow-inner"><Scissors className="w-6 h-6 text-red-600" /></div>
-          <div><h2 className="text-xl font-black text-gray-800 uppercase tracking-tighter">Programación Táctica Corte Espuma</h2><p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">Capacidad Carrusel 3.2m | Auditoría Técnica SAP</p></div>
+          <div><h2 className="text-xl font-black text-gray-800 uppercase tracking-tighter">Programación Táctica Corte Espuma</h2><p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest mt-1">Capacidad Carrusel 3.2m | Auditoría Técnica SAP</p></div>
         </div>
         <div className="flex items-center gap-3">
            {/* "Sincronizar y Generar Necesidades": un solo botón — trae datos crudos de SAP y, al
@@ -6876,7 +6876,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 <div className="flex items-start justify-between gap-3 flex-wrap">
                   <div>
                     <p className="text-xs font-black uppercase tracking-widest text-slate-700">Verificación BOM · P2 Muebles / P1-PFF Ensamblado</p>
-                    <p className="text-[10px] text-slate-400 mt-1">
+                    <p className="text-[10px] text-slate-500 mt-1">
                       Cantidad de cada FERT del plan × CANTIDAD_ACUMULADA de cada línea del BOM que llega a un componente de corte. Se suman todas las líneas (nivel 1 = directa del FERT, nivel 2+ = vía semielaborado); solo se descarta la fila corrupta de SAP (relación directa con acumulada ≠ unitaria). Clic en una fila para ver las líneas.
                     </p>
                     {verificacionBomP2Errores.length > 0 && (
@@ -6888,7 +6888,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 <div className="overflow-x-auto">
                   <table className="w-full text-[10px]">
                     <thead>
-                      <tr className="text-left text-slate-400 uppercase tracking-wider border-b border-slate-100">
+                      <tr className="text-left text-slate-500 uppercase tracking-wider border-b border-slate-100">
                         <th className="py-1.5 pr-2">Centro</th>
                         <th className="py-1.5 pr-2">Origen · Plan</th>
                         <th className="py-1.5 pr-2">Componente</th>
@@ -6922,11 +6922,11 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                               <tr>
                                 <td colSpan={9} className="bg-slate-50/70 px-3 py-2">
                                   {f.lineas.length === 0 ? (
-                                    <p className="text-[9px] text-slate-400">Ningún FERT de este plan lleva este componente en su BOM — la necesidad registrada no sale de estos FERT.</p>
+                                    <p className="text-[9px] text-slate-500">Ningún FERT de este plan lleva este componente en su BOM — la necesidad registrada no sale de estos FERT.</p>
                                   ) : (
                                     <table className="w-full text-[9px]">
                                       <thead>
-                                        <tr className="text-left text-slate-400 uppercase">
+                                        <tr className="text-left text-slate-500 uppercase">
                                           <th className="pr-2">FERT</th><th className="pr-2 text-right">Cant. FERT</th><th className="pr-2 text-right">Nivel SAP</th><th className="pr-2">Nivel BOM</th><th className="pr-2">Material padre</th>
                                           <th className="pr-2 text-right">Cant. unitaria</th><th className="pr-2 text-right">Cant. acumulada</th><th className="pr-2">Unidad</th><th className="pr-2 text-right">Consumo</th>
                                         </tr>
@@ -6954,7 +6954,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             )}
             {isCalculandoPFF && (
               <div className="space-y-1.5">
-                <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest">
+                <p className="text-[10px] font-black uppercase text-slate-500 tracking-widest">
                   {(() => {
                     // Mismo criterio que tenía el botón "Generar Necesidades" que este paso reemplazó:
                     // refleja el ÚLTIMO tipo de plan de Ensamblado leído por centro (P1 activo aún sin
@@ -6999,11 +6999,11 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               </div>
             )}
             {necesidadesPlantaLoading ? (
-              <div className="flex items-center justify-center py-24 text-slate-300"><Loader2 className="w-6 h-6 animate-spin" /></div>
+              <div className="flex items-center justify-center py-24 text-slate-400"><Loader2 className="w-6 h-6 animate-spin" /></div>
             ) : (
               <>
                 <div className="pt-4 space-y-8">
-                  <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                  <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">
                     Capacidad que representaría cortar toda esta demanda en carrusel — mismo cálculo que Órdenes FERT/Provisionales.
                   </p>
                   {renderAuditTable(necesidadCapacidadUIO, 'Necesidades Planta — Capacidad Quito', true, 'Código Plan Grupo', 'Grupo Origen', true, true, true)}
@@ -7076,7 +7076,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                   </div>
                   <div className="overflow-x-auto max-h-[500px]">
                     <table className="w-full text-center border-collapse text-[10px]">
-                      <thead className="bg-gray-50 sticky top-0 z-20 text-[9px] font-bold uppercase text-gray-400">
+                      <thead className="bg-gray-50 sticky top-0 z-20 text-[9px] font-bold uppercase text-gray-500">
                         <tr>
                           <th className="px-4 py-3 border-r border-gray-100 text-left">Material</th>
                           <th className="px-4 py-3 border-r border-gray-100 text-left">Descripción</th>
@@ -7095,7 +7095,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                       </thead>
                       <tbody className="divide-y divide-gray-50 font-bold text-slate-700">
                         {rows.length === 0 ? (
-                          <tr><td colSpan={13} className="py-16 text-slate-300 uppercase font-black tracking-widest italic opacity-50 text-center">Sin materiales de Necesidades Planta para este centro</td></tr>
+                          <tr><td colSpan={13} className="py-16 text-slate-400 uppercase font-black tracking-widest italic opacity-50 text-center">Sin materiales de Necesidades Planta para este centro</td></tr>
                         ) : rows.map((row, idx) => (
                           <tr key={idx} className="hover:bg-gray-50/50 transition-colors font-mono text-[10px]">
                             <td className="px-4 py-3 border-r border-slate-50 text-left text-indigo-600 font-black">{row.material}</td>
@@ -7108,8 +7108,8 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                               {row.fertCubre > 0 && <div className="text-[8px] font-black uppercase text-indigo-500" title="FERT liberada al PT del P2 de Venta Externa: cuenta como cobertura">cubre {formatNum(row.fertCubre, 0)}</div>}
                             </td>
                             <td className="px-4 py-3 border-r border-slate-50 text-slate-900 font-black bg-yellow-50">{formatNum(row.cubierto, 0)}</td>
-                            <td className={cn("px-4 py-3 border-r border-slate-50 font-black bg-orange-50/20", row.faltante > 0 ? "text-orange-700" : "text-slate-300")}>{formatNum(row.faltante, 0)}</td>
-                            <td className={cn("px-4 py-3 border-r border-slate-50 font-black bg-orange-50/40", row.aP3 > 0 ? "text-orange-800" : "text-slate-300")}>{formatNum(row.aP3, 0)}</td>
+                            <td className={cn("px-4 py-3 border-r border-slate-50 font-black bg-orange-50/20", row.faltante > 0 ? "text-orange-700" : "text-slate-400")}>{formatNum(row.faltante, 0)}</td>
+                            <td className={cn("px-4 py-3 border-r border-slate-50 font-black bg-orange-50/40", row.aP3 > 0 ? "text-orange-800" : "text-slate-400")}>{formatNum(row.aP3, 0)}</td>
                             <td className="px-4 py-3 border-r border-slate-50 text-slate-500 bg-slate-50/20">{row.fertAnterior > 0 ? formatNum(row.fertAnterior, 0) : '—'}</td>
                             <td className="px-4 py-3 border-r border-slate-50">
                               <Badge
@@ -7137,7 +7137,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                 </Badge>
                               )}
                             </td>
-                            <td className="px-4 py-3 text-slate-400">{row.origenes}</td>
+                            <td className="px-4 py-3 text-slate-500">{row.origenes}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -7191,7 +7191,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
               <div className="overflow-x-auto max-h-[600px]">
                 <table className="w-full text-center border-collapse text-[10px]">
-                  <thead className="bg-gray-50 sticky top-0 z-10 text-[9px] font-bold uppercase text-gray-400">
+                  <thead className="bg-gray-50 sticky top-0 z-10 text-[9px] font-bold uppercase text-gray-500">
                     <tr>
                       <th className="px-4 py-5 border-r border-gray-100">Centro</th>
                       <th className="px-6 py-5 border-r border-gray-100">Planta</th>
@@ -7207,7 +7207,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                   </thead>
                   <tbody className="divide-y divide-gray-50 font-black text-[11px] text-slate-700">
                     {uniqueMantenimientosSAP.length === 0 ? (
-                      <tr><td colSpan={10} className="py-24 text-slate-300 uppercase font-black tracking-widest italic opacity-50 text-center">Sin mantenimientos programados detectados</td></tr>
+                      <tr><td colSpan={10} className="py-24 text-slate-400 uppercase font-black tracking-widest italic opacity-50 text-center">Sin mantenimientos programados detectados</td></tr>
                     ) : (
                       uniqueMantenimientosSAP.map((row, i) => {
                         const iniStr = getProp(row, ['FECHA_OT_PRG_INI']).trim();
@@ -7226,8 +7226,8 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                             <td className="px-4 py-3 border-r border-dashed border-gray-100 uppercase font-bold text-red-600">{idMaquina}</td>
                             <td className="px-6 py-3 border-r border-dashed border-gray-100 uppercase font-black text-left">{getProp(row, ['MAQUINA'])}</td>
                             <td className="px-6 py-3 border-r border-dashed border-gray-100 uppercase text-left">{getProp(row, ['LineaProceso'])}</td>
-                            <td className="px-5 py-3 border-r border-dashed border-gray-100 font-mono text-center text-slate-400">{iniStr}</td>
-                            <td className="px-5 py-3 border-r border-dashed border-gray-100 font-mono text-center text-slate-400">{finStr}</td>
+                            <td className="px-5 py-3 border-r border-dashed border-gray-100 font-mono text-center text-slate-500">{iniStr}</td>
+                            <td className="px-5 py-3 border-r border-dashed border-gray-100 font-mono text-center text-slate-500">{finStr}</td>
                             <td className="px-6 py-3 font-mono text-indigo-700 bg-indigo-50/30 text-center font-black">{diffHrs.toFixed(2)}</td>
                             <td className="px-6 py-3 bg-emerald-50/20 text-left">
                               {link ? (
@@ -7258,7 +7258,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 <div className="p-2 bg-slate-600 rounded-xl text-white shadow-lg"><Info className="w-4 h-4" /></div>
                 <div>
                   <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Validar Stock — Data Cruda</h3>
-                  <p className="text-[10px] font-bold text-slate-400">Tal cual la devuelve /InventarioAnioActual (inventarioSAP), sin pasar por el filtro de ALMACENES_STOCK_POR_CENTRO. Solo lectura/auditoría — no afecta el plan.</p>
+                  <p className="text-[10px] font-bold text-slate-500">Tal cual la devuelve /InventarioAnioActual (inventarioSAP), sin pasar por el filtro de ALMACENES_STOCK_POR_CENTRO. Solo lectura/auditoría — no afecta el plan.</p>
                 </div>
               </div>
               <Input
@@ -7286,7 +7286,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
               <div className="overflow-x-auto max-h-[600px] relative text-center">
                 <table className="w-full border-collapse text-center font-sans text-[10px]">
-                  <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[8px] text-gray-400 sticky top-0 z-10">
+                  <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[8px] text-gray-500 sticky top-0 z-10">
                     <tr>
                       <th className="px-4 py-5 border-r border-gray-100">Material (limpio)</th>
                       <th className="px-4 py-5 border-r border-gray-100">Material (crudo)</th>
@@ -7306,7 +7306,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         return cleanCode(codigo).includes(q) || codigo.toUpperCase().includes(q);
                       });
                       if (rows.length === 0) {
-                        return <tr><td colSpan={7} className="py-24 text-slate-300 font-black uppercase tracking-widest italic text-center">Sin filas en inventarioSAP{q ? ` para "${debugStockQuery}"` : ''}</td></tr>;
+                        return <tr><td colSpan={7} className="py-24 text-slate-400 font-black uppercase tracking-widest italic text-center">Sin filas en inventarioSAP{q ? ` para "${debugStockQuery}"` : ''}</td></tr>;
                       }
                       return rows.map((inv, i) => {
                         const materialCrudo = getProp(inv, ['MATERIAL', 'Material', 'CodMaterial', 'MATERIAL_ID', 'CODIGO']);
@@ -7329,7 +7329,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                               )}
                             </td>
                             <td className="px-4 py-3 border-r border-dashed border-gray-100 font-mono text-emerald-700 bg-emerald-50/20 text-center font-black">{libreUtilizacion || '0'}</td>
-                            <td className="px-6 py-3 text-left font-mono text-[9px] text-slate-400 whitespace-pre-wrap break-all">{JSON.stringify(inv)}</td>
+                            <td className="px-6 py-3 text-left font-mono text-[9px] text-slate-500 whitespace-pre-wrap break-all">{JSON.stringify(inv)}</td>
                           </tr>
                         );
                       });
@@ -7372,7 +7372,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                       )}
                       <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
                         <table className="w-full text-[11px] border-collapse">
-                          <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
+                          <thead className="bg-gray-50 text-gray-500 uppercase font-bold sticky top-0">
                             <tr>
                               <th className="px-3 py-2 text-left">Material</th>
                               <th className="px-3 py-2 text-right">Necesidad P2</th>
@@ -7387,11 +7387,11 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                             {preview.p3.rows.map((row, i) => (
                               <tr key={i}>
                                 <td className="px-3 py-2 text-left font-mono">{row.material}</td>
-                                <td className="px-3 py-2 text-right font-mono text-slate-400">{formatNum(row.necesidad, 0)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-slate-500">{formatNum(row.necesidad, 0)}</td>
                                 <td className="px-3 py-2 text-right font-mono text-amber-700">{formatNum(row.stock, 0)}</td>
                                 <td className="px-3 py-2 text-right font-mono text-sky-700">{formatNum(row.provisional, 0)}</td>
                                 <td className="px-3 py-2 text-right font-mono text-slate-500">{formatNum(row.cubierto, 0)}</td>
-                                <td className={cn("px-3 py-2 text-right font-mono font-black bg-orange-50/40", row.cantidadUnidades > 0 ? "text-orange-700" : "text-slate-300")}>{formatNum(row.cantidadUnidades, 0)}</td>
+                                <td className={cn("px-3 py-2 text-right font-mono font-black bg-orange-50/40", row.cantidadUnidades > 0 ? "text-orange-700" : "text-slate-400")}>{formatNum(row.cantidadUnidades, 0)}</td>
                                 <td className="px-3 py-2 text-left">
                                   <Badge
                                     className={cn(
@@ -7552,7 +7552,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
           {planesGrupoDisponibles && (
             <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[320px] overflow-y-auto">
               <table className="w-full text-[11px] border-collapse">
-                <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
+                <thead className="bg-gray-50 text-gray-500 uppercase font-bold sticky top-0">
                   <tr>
                     <th className="px-3 py-2 text-left w-8"></th>
                     <th className="px-3 py-2 text-left">Código</th>
@@ -7612,7 +7612,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales ({editPlanPreview.rows.filter(r => !r.marcadoEliminar).length})</span>
                 <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[280px] overflow-y-auto">
                   <table className="w-full text-[11px] border-collapse">
-                    <thead className="bg-gray-50 text-gray-400 uppercase font-bold sticky top-0">
+                    <thead className="bg-gray-50 text-gray-500 uppercase font-bold sticky top-0">
                       <tr>
                         <th className="px-3 py-2 text-left">Material</th>
                         <th className="px-3 py-2 text-left">Descripción</th>
@@ -7645,7 +7645,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         </tr>
                       ))}
                       {editPlanPreview.rows.length === 0 && (
-                        <tr><td colSpan={4} className="py-8 text-center text-slate-300 uppercase font-black tracking-widest italic">Sin materiales</td></tr>
+                        <tr><td colSpan={4} className="py-8 text-center text-slate-400 uppercase font-black tracking-widest italic">Sin materiales</td></tr>
                       )}
                     </tbody>
                   </table>
