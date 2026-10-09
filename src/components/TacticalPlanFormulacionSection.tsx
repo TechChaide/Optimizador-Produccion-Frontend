@@ -42,7 +42,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion } from '@/types/interfaces';
 import type { CuboInventariosItem } from '@/types/types';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
+import { useReportePlanTxt, useAutoCargaPlanVigente, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
@@ -1163,6 +1163,14 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
   });
   // Los dos centros son el mismo reporte: un solo Guardar / Revisar / Enviar para ambos.
   const reporteGrupo = useReportePlanTxtGrupo([reporteFlujo1000, reporteFlujo2000]);
+  // Solo el reporte del Centro 1000 lleva el respaldo del módulo (ver reporteFlujo1000).
+  useAutoCargaPlanVigente({
+    modulo: 'formulacion',
+    centros: ['1000'],
+    listo: mounted,
+    hayDatos: () => datosCargados || syncStep !== 'idle' || !!leerDeCache<SnapshotFormulacion>(CACHE_FORMULACION),
+    restaurar: restaurarEstadoPlan,
+  });
 
   // Fase 2 del panel (igual que los otros 3 módulos): tras generar necesidades, guarda el reporte de
   // ambos centros (reemplaza el existente) y cierra con "Ver reporte y enviar". El envío sigue manual.

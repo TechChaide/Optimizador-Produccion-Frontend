@@ -368,6 +368,23 @@ export const buscarUltimoPlanTxt = async (p: { modulo: ModuloPlanTxt; centro: Ce
   }
 };
 
+/**
+ * Plan vigente al abrir un módulo sin datos de la sesión (usuario 2026-10-06 en Laminado, extendido a
+ * los 4 módulos el 2026-10-08): el último reporte con respaldo entre hoy−5 y hoy+3, buscando en los
+ * centros dados y quedándose con la fecha objetivo más reciente (a igual fecha, el último guardado).
+ */
+export const buscarPlanVigente = async (modulo: ModuloPlanTxt, centros: CentroPlanTxt[]): Promise<(PlanTxtRecuperado & { fechaObjetivo: string }) | null> => {
+  const hoy = new Date();
+  const fechas = Array.from({ length: 9 }, (_, i) => {
+    const d = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate() + 3 - i);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+  const planes = await Promise.all(centros.map(centro => buscarUltimoPlanTxt({ modulo, centro, fechas })));
+  return planes
+    .filter((p): p is PlanTxtRecuperado & { fechaObjetivo: string } => !!p?.estado)
+    .sort((a, b) => b.fechaObjetivo.localeCompare(a.fechaObjetivo) || String(b.modificado).localeCompare(String(a.modificado)))[0] ?? null;
+};
+
 /** Borra la foto HTML del correo (nunca el TXT). Se usa tras un envío exitoso; lanza Error si falla. */
 export const eliminarFotoCorreoPlanTxt = async (p: CriteriosPlanTxt): Promise<void> => {
   const res = await fetch(`${urlApiPlanesTxt()}?${qsPlanTxt(p, 'json')}`, { method: 'DELETE' });

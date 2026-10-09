@@ -20,7 +20,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
+import { useReportePlanTxt, useAutoCargaPlanVigente, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
@@ -262,8 +262,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const { addNotification } = useAppContext();
 
   const [mounted, setMounted] = useState(false);
-  // Abre en el primer paso del flujo; "Cargar en el módulo" aterriza en Resumen (ver restaurarEstadoPlan).
-  const [activeTab, setActiveTab] = useState('planP2');
+  // Abre en Resumen (paso 3), donde se carga el último plan guardado (useAutoCargaPlanVigente) — mismo
+  // criterio que los otros módulos (usuario 2026-10-08; antes abría en Plan P2).
+  const [activeTab, setActiveTab] = useState('resumen');
   // El módulo YA NO sincroniza solo al abrirse — ver handleSincronizarYGenerar. Este flag distingue
   // "todavía no se pidió nada" del estado vacío real, para mostrar el aviso correcto.
   const [datosCargados, setDatosCargados] = useState(false);
@@ -2441,6 +2442,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   });
   // Los dos centros son el mismo reporte: un solo Guardar / Revisar / Enviar para ambos.
   const reporteGrupoEmpaque = useReportePlanTxtGrupo([reporteFlujoEmpaque1000, reporteFlujoEmpaque2000]);
+  // Solo el reporte del Centro 1000 lleva el respaldo del módulo (ver reporteFlujoEmpaque1000).
+  useAutoCargaPlanVigente({
+    modulo: 'venta-espuma',
+    centros: ['1000'],
+    listo: mounted,
+    hayDatos: () => datosCargados || syncStep !== 'idle' || !!leerDeCache<SnapshotVentaExterna>(CACHE_VENTA_EXTERNA),
+    restaurar: restaurarEstadoPlan,
+  });
 
   const calculateSummary = (data: Record<string, unknown>[], centroId: string) => {
     const lookup = centroId === '1000' ? tiempoLookup1000 : tiempoLookup2000;
@@ -2930,10 +2939,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               Provisionales y FERT quedan OCULTAS (opción A, solo consulta): sus TabsContent y datos se
               conservan porque alimentan cálculos (filterData, fertC*ParaP2, BOM). */}
           {[
-            { v: 'planP2', l: 'Plan P2', i: Layers },
-            { v: 'dataAprobada', l: 'Data Aprobada', i: ClipboardCheck },
-            { v: 'pendientes', l: 'Pendientes', i: Clock },
-            { v: 'resumen', l: 'Resumen', i: LayoutDashboard }
+            // 2026-10-08 (usuario): numeradas como en los otros módulos — 1 P2 → 2 respuesta (PFD-VENTA)
+            // → 3 resumen; Pendientes (consulta de pedidos) al final sin número. Se abre en Resumen.
+            { v: 'planP2', l: '1 · Plan P2', i: Layers },
+            { v: 'dataAprobada', l: '2 · Data Aprobada', i: ClipboardCheck },
+            { v: 'resumen', l: '3 · Resumen', i: LayoutDashboard },
+            { v: 'pendientes', l: 'Pendientes', i: Clock }
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[9px] font-bold uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-sm">
               <tab.i className="w-3.5 h-3.5" /> {tab.l}

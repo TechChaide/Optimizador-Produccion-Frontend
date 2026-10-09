@@ -32,7 +32,7 @@ import { useAppContext } from '@/context/AppProvider';
 import { serviciosService } from '@/services/servicios.service';
 import { cn } from '@/lib/utils';
 import {
-  consultarPlanTxt, eliminarFotoCorreoPlanTxt, guardarPlanTxt, obtenerPlanTxt,
+  buscarPlanVigente, consultarPlanTxt, eliminarFotoCorreoPlanTxt, guardarPlanTxt, obtenerPlanTxt,
   type CentroPlanTxt, type ModuloPlanTxt, type PlanTxtRecuperado,
 } from '@/lib/planes-txt';
 
@@ -90,6 +90,35 @@ export interface FlujoReportePlanTxt {
 
 const NOTA_CORREO = 'Este correo fue generado automáticamente, favor no responder.';
 const horaCorta = (iso: string | null) => (iso ? format(new Date(iso), 'dd/MM HH:mm') : '—');
+
+/**
+ * Plan vigente al abrir el módulo (Laminado 2026-10-06, extendido a Corte Espuma, Venta Externa y
+ * Formulación 2026-10-08): si no hay datos de la sesión, carga en modo consulta el último reporte
+ * guardado (ver buscarPlanVigente) hasta que se sincronice uno nuevo. Sin SAP. Se intenta una sola vez,
+ * cuando `listo`; hayDatos() se vuelve a mirar al llegar el plan para no pisar una sincronización que
+ * empezó mientras tanto.
+ */
+export function useAutoCargaPlanVigente(p: {
+  modulo: ModuloPlanTxt;
+  centros: CentroPlanTxt[];
+  listo?: boolean;
+  hayDatos: () => boolean;
+  restaurar: (estado: unknown, origen: OrigenEstadoPlan) => boolean;
+}): void {
+  const intentada = useRef(false);
+  const actual = useRef(p);
+  actual.current = p;
+  useEffect(() => {
+    if (p.listo === false || intentada.current) return;
+    intentada.current = true;
+    if (actual.current.hayDatos()) return;
+    // Sin cleanup a propósito: con la guarda del ref, el doble montaje de Strict Mode cancelaría la única carga.
+    void buscarPlanVigente(actual.current.modulo, actual.current.centros).then(plan => {
+      if (!plan || actual.current.hayDatos()) return;
+      actual.current.restaurar(plan.estado, { fechaObjetivo: plan.fechaObjetivo, guardadoEn: plan.modificado });
+    });
+  }, [p.listo]);
+}
 
 export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePlanTxt {
   const { addNotification } = useAppContext();

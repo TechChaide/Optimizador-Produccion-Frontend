@@ -5207,9 +5207,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="grid grid-cols-6 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
+          {/* Orden del flujo, igual en los 4 módulos (usuario 2026-10-08): 1 necesidades / P2 → 2
+              respuesta P3 (en Laminado vive en Resumen Necesidades, junto a la capacidad y el reporte) →
+              3 salida a SAP; consultas al final sin número. Se abre en Resumen Necesidades. */}
           {[
-            { v: 'resumen', l: 'Resumen Necesidades', i: LayoutDashboard },
-            { v: 'necesidadesPlanta', l: 'Necesidades Planta', i: Boxes },
+            { v: 'necesidadesPlanta', l: '1 · Necesidades Planta', i: Boxes },
+            { v: 'resumen', l: '2 · Resumen Necesidades', i: LayoutDashboard },
+            { v: 'salida', l: '3 · Salida de Datos', i: ClipboardList },
             // Tab "Provisionales" (v: 'ordenes') oculto: dejó de aportar al cálculo de Resumen
             // Necesidades (ver handleProcessResumen) y su tabla es solo auditoría manual de SAP.
             // El TabsContent y filteredOrders se conservan en el código (no se eliminan) porque
@@ -5217,7 +5221,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             // handleProcessResumen.
             { v: 'ordenesFert', l: 'Órdenes FERT', i: ShoppingCart },
             { v: 'inventario', l: 'Inventarios SAP', i: Database },
-            { v: 'salida', l: 'Salida de Datos', i: ClipboardList },
             // Tab de solo validación/auditoría — no participa del cálculo del plan. Muestra la data
             // cruda tal cual la devuelve tiemposEnsambladoByGrupoYCentroPR2, sin pasar por
             // resolvePuestoTrabajo, para poder confirmar contra el origen casos como PuestoTrabajo

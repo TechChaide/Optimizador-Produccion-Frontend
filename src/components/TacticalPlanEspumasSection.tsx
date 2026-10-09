@@ -59,7 +59,7 @@ import type { Grupo, PlanGrupo, DetalleTactico, Restriccion } from '@/types/inte
 import { CODIGO_GRUPO_P2_MUEBLES, esP2ParaModulo } from '@/lib/p2-destino';
 import type { BodyResponse } from '@/types/body-response';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
+import { useReportePlanTxt, useAutoCargaPlanVigente, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, laborablesHorizonte, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, addDays } from 'date-fns';
@@ -3419,6 +3419,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     restaurarEstado: restaurarEstadoPlan,
   });
   const reporteFlujo = { UIO: reporteFlujoUIO, GYE: reporteFlujoGYE };
+  useAutoCargaPlanVigente({
+    modulo: 'corte-espuma',
+    centros: ['1000', '2000'],
+    hayDatos: () => datosCargados || syncStep !== 'idle' || !!leerDeCache<SnapshotCorteEspuma>(CACHE_CORTE_ESPUMA),
+    restaurar: restaurarEstadoPlan,
+  });
 
   // Fase 2 del panel: guarda el reporte de cada centro confirmado en P3/PFD (sin preguntar si ya
   // había uno: el P3 recién confirmado lo reemplaza) y deja "Ver reporte y enviar" como siguiente
@@ -6816,9 +6822,12 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             pedido del usuario 2026-10-03). Provisionales, Órdenes FERT y Validar Stock (solo consulta/
             auditoría: la data cruda de SAP, ver sus TabsContent más abajo) quedan OCULTAS pero su
             contenido se conserva para consultas internas: para volver a mostrarlas basta agregarlas a
-            esta lista y subir grid-cols. */}
+            esta lista y subir grid-cols.
+            Orden del flujo, igual en los 4 módulos (usuario 2026-10-08): 1 necesidades / P2 → 2 respuesta
+            (P3 y salida a SAP) → 3 resumen (capacidad, reporte y planes guardados); consultas al final sin
+            número. Se abre en el resumen (paso 3), donde se carga el último plan guardado. */}
         <TabsList className="grid grid-cols-4 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
-          {[ { v: 'resumen', l: 'Capacidad Operativa', i: LayoutDashboard }, { v: 'necesidadesPlanta', l: 'Necesidades Planta', i: Database }, { v: 'respuestaP3', l: 'Respuesta P3', i: Save }, { v: 'mantenimiento', l: 'Mantenimiento SAP', i: Wrench },
+          {[ { v: 'necesidadesPlanta', l: '1 · Necesidades Planta', i: Database }, { v: 'respuestaP3', l: '2 · Respuesta P3', i: Save }, { v: 'resumen', l: '3 · Capacidad Operativa', i: LayoutDashboard }, { v: 'mantenimiento', l: 'Mantenimiento SAP', i: Wrench },
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[10px] font-black uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-lg data-[state=active]:text-red-600 rounded-xl"><tab.i className="w-4 h-4" /> {tab.l}</TabsTrigger>
           ))}
