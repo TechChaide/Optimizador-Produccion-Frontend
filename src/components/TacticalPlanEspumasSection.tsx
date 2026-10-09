@@ -1188,10 +1188,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
   // Fechas en que SAP puede entregar la provisional que responde a una necesidad (ver
   // provisionalesQueCubrenPorCentro): Ensamblado y Venta Externa a PT−1 hábil (o el mismo PT, en
-  // transición); las demás áreas, el mismo día.
-  const fechasProvisionalAceptadas = useCallback((fechaNecesidad: string, area: string): string[] => {
+  // transición); las demás áreas, el mismo día. N2 del PFF (subproceso vía semielaborado, usuario
+  // 2026-10-08): misma regla un nivel antes — su necesidad es PT−1, así que la provisional llega a PT−2.
+  const fechasProvisionalAceptadas = useCallback((fechaNecesidad: string, area: string, nivel2: boolean = false): string[] => {
     if (!fechaNecesidad || fechaNecesidad === '—' || !AREA_PROVISIONAL_PT_MENOS_1(area)) return [fechaNecesidad];
-    return [format(restarDiasHabiles(parseFechaLocal(fechaNecesidad), 1), 'yyyy-MM-dd'), fechaNecesidad];
+    const pt = parseFechaLocal(fechaNecesidad);
+    const fechas = [format(restarDiasHabiles(pt, 1), 'yyyy-MM-dd'), fechaNecesidad];
+    if (nivel2) fechas.unshift(format(restarDiasHabiles(pt, 2), 'yyyy-MM-dd'));
+    return fechas;
   }, [restarDiasHabiles]);
 
   // Restricciones crudas del grupo Corte y Laminado de cada centro (se cargan en fetchDataAsync).
@@ -1970,7 +1974,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // 30008653. Las filas PFF sí traen `fecha_inicio` (la del plan de Ensamblado), así que basta
   // incluirlas para que la tolerancia de fecha pueda evaluarse.
   const fechasP2PorMaterialPorCentro = useMemo(() => {
-    const porCentro: Record<string, Map<string, { fecha: string; area: string }[]>> = { '1000': new Map(), '2000': new Map() };
+    const porCentro: Record<string, Map<string, { fecha: string; area: string; nivel2?: boolean }[]>> = { '1000': new Map(), '2000': new Map() };
     Object.entries(necesidadesPlantaConPFF).forEach(([area, rows]) => {
       rows.forEach(row => {
         const centro = String(row.centro || '');
@@ -1980,7 +1984,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (!map.has(key)) map.set(key, []);
         // Venta Externa: sus FERT van fechadas al PT (fecha_fin_plan); fecha_inicio_plan es la recuperación.
         const fecha = /venta\s*externa/i.test(area) && row.fecha_fin && row.fecha_fin !== '—' ? row.fecha_fin : row.fecha_inicio;
-        map.get(key)!.push({ fecha, area });
+        // N2 del PFF (vía semielaborado): su necesidad es un día hábil antes del PT (ver fechasProvisionalAceptadas).
+        map.get(key)!.push({ fecha, area, nivel2: Number(row.cantidad_nivel2 || 0) > 0 });
       });
     });
     return porCentro;
@@ -2035,7 +2040,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         // desde 2026-10-08 Ensamblado y Venta Externa a PT−1 (ver fechasProvisionalAceptadas). Reemplaza
         // la ventana [PT−2, PT] de Ensamblado y la tolerancia ±1/±2 por área que se usaba antes, que
         // podían sumar la provisional de otro ciclo.
-        const coincide = candidatosP2.some(c => fechasProvisionalAceptadas(c.fecha, c.area).includes(r.fechaFin));
+        const coincide = candidatosP2.some(c => fechasProvisionalAceptadas(c.fecha, c.area, c.nivel2).includes(r.fechaFin));
         if (!coincide) return;
         if (!map.has(r.material)) map.set(r.material, []);
         map.get(r.material)!.push(r);
