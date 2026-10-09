@@ -769,7 +769,7 @@ const MaterialSummaryTable: React.FC<{ data: Record<string, NecesidadPlantaRow[]
       <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
         <div className="overflow-x-auto max-h-[500px]">
           <table className="w-full text-center border-collapse text-[10px]">
-            <thead className="bg-gray-50 sticky top-0 z-20 text-[9px] font-bold uppercase text-gray-500">
+            <thead className="bg-gray-50 sticky top-0 z-20 text-[10px] font-bold uppercase text-gray-500">
               <tr>
                 <th className="px-6 py-4 border-r border-gray-100 text-left">Código Material</th>
                 <th className="px-6 py-4 border-r border-gray-100 font-black bg-amber-50 text-amber-700">Cantidad Total Consumo</th>
@@ -800,7 +800,7 @@ const MaterialSummaryTable: React.FC<{ data: Record<string, NecesidadPlantaRow[]
                       <tr>
                         <td colSpan={4} className="p-0 bg-slate-50/60 border-b border-slate-100">
                           <div className="px-6 py-4">
-                            <table className="w-full text-center border-collapse text-[9px]">
+                            <table className="w-full text-center border-collapse text-[10px]">
                               <thead>
                                 <tr className="bg-gray-50 text-gray-500 uppercase font-bold tracking-tighter">
                                   <th className="px-4 py-2 border-r border-gray-100 text-left">Almacén</th>
@@ -5312,7 +5312,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                           style={{ width: `${resumenProgress.total > 0 ? Math.min((resumenProgress.current / resumenProgress.total) * 100, 100) : 0}%` }}
                         />
                       </div>
-                      <p className="text-[9px] font-bold text-slate-400 mt-2 tabular-nums">
+                      <p className="text-[10px] font-bold text-slate-400 mt-2 tabular-nums">
                         {resumenProgress.total > 0 ? Math.round((resumenProgress.current / resumenProgress.total) * 100) : 0}%
                       </p>
                     </td></tr>
@@ -5330,7 +5330,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                                    aunque sigan siendo grupos internamente distintos (groupKey = apertura|densidad). */}
                                <div className="flex flex-col leading-tight">
                                   <span className="font-black text-[10px] uppercase tracking-widest text-slate-700">D{group.densidad}</span>
-                                  <span className="text-[8px] font-bold text-slate-500 uppercase tracking-wide">Apertura {group.apertura}</span>
+                                  <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Apertura {group.apertura}</span>
                                </div>
                             </td>
                             <td className="px-6 py-4 text-left font-black uppercase">
@@ -5341,7 +5341,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                                     <div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-green-500" /><span className="text-indigo-900">CORRIDA LOOPER D-{group.densidad}</span></div>
                                   )}
                                   <div className="flex items-center gap-1.5 normal-case" onClick={(e) => e.stopPropagation()}>
-                                     <span className="text-[9px] text-slate-500 font-black uppercase tracking-wide">Corridas</span>
+                                     <span className="text-[10px] text-slate-500 font-black uppercase tracking-wide">Corridas</span>
                                      <button
                                        type="button"
                                        onClick={() => { setCorridasDraft(prev => { const n = { ...prev }; delete n[groupKey]; return n; }); handleUpdateCorridasBloque(group.apertura, group.densidad, Math.max(0, group.runs - 1)); }}
@@ -5368,7 +5368,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                                        title="Agregar una corrida"
                                        className="w-5 h-5 flex items-center justify-center rounded border border-slate-300 bg-white text-slate-600 font-black leading-none hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-400"
                                      >+</button>
-                                     <span className="text-[9px] text-slate-500 font-bold whitespace-nowrap">recomendado: {group.items[0]?.runsRecomendado ?? 0}</span>
+                                     <span className="text-[10px] text-slate-500 font-bold whitespace-nowrap">recomendado: {group.items[0]?.runsRecomendado ?? 0}</span>
                                      {(() => {
                                        const recomendado = group.items[0]?.runsRecomendado ?? 0;
                                        const delta = group.runs - recomendado;
@@ -5382,7 +5382,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                                        return (
                                          <>
                                            <span className={cn(
-                                             "text-[8px] font-black rounded px-1.5 py-0.5 flex items-center gap-1 whitespace-nowrap border",
+                                             "text-[9px] font-black rounded px-1.5 py-0.5 flex items-center gap-1 whitespace-nowrap border",
                                              isRefuerzo ? "text-sky-700 bg-sky-50 border-sky-300" : "text-amber-700 bg-amber-50 border-amber-300"
                                            )}>
                                              {isRefuerzo ? <Info className="w-2.5 h-2.5" /> : <AlertCircle className="w-2.5 h-2.5" />}
@@ -5424,7 +5424,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                               </td>
                               <td className="px-6 py-3 border-r border-gray-100 text-left text-slate-900 font-black uppercase leading-tight truncate max-w-[250px]">
                                 {item.descripcion}
-                                {nested && <span className="ml-2 text-[8px] font-black normal-case tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 align-middle whitespace-nowrap">Otra máquina · no cuenta corrida</span>}
+                                {nested && <span className="ml-2 text-[9px] font-black normal-case tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 align-middle whitespace-nowrap">Otra máquina · no cuenta corrida</span>}
                               </td>
                               <td className="px-2 py-3 border-r border-gray-100 font-mono text-slate-700">{Math.round(item.peso).toLocaleString()}</td>
                               <td className="px-2 py-3 border-r border-gray-100 text-slate-700">{item.densidad}</td>
@@ -5462,14 +5462,14 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                                             "w-3 h-3 rounded-full",
                                             enVerde ? "bg-green-500" : "bg-red-500 shadow-[0_0_8px_#ef4444]"
                                           )} />
-                                          <span className={cn("text-[8px] font-black uppercase tracking-tighter", enVerde ? "text-green-700" : "text-red-700")}>
+                                          <span className={cn("text-[9px] font-black uppercase tracking-tighter", enVerde ? "text-green-700" : "text-red-700")}>
                                             {!item.hasDeficit ? "STOCK OK" : aprobado ? "CORRIDA ASIGNADA" : "STOCK BAJO"}
                                           </span>
-                                          <span className="text-[9px] text-slate-900 font-black font-mono" title="Participación dentro del bloque — solo Forros/Muebles, Venta Externa no compite por este %">
+                                          <span className="text-[10px] text-slate-900 font-black font-mono" title="Participación dentro del bloque — solo Forros/Muebles, Venta Externa no compite por este %">
                                             {(item.porcentajeNecesidad * 100).toFixed(1)}%
                                           </span>
                                           {item.necVentaExternaUn > 0 && (
-                                            <span className="text-[7px] text-indigo-700 font-black font-mono bg-indigo-50 border border-indigo-200 rounded px-1 py-0.5" title="Necesidad de Venta Externa — se cubre según prioridad y stock disponible; puede quedar corta y aplazarse sin bloquear nada">
+                                            <span className="text-[8px] text-indigo-700 font-black font-mono bg-indigo-50 border border-indigo-200 rounded px-1 py-0.5" title="Necesidad de Venta Externa — se cubre según prioridad y stock disponible; puede quedar corta y aplazarse sin bloquear nada">
                                               VE: {item.necVentaExternaUn.toLocaleString()} UN
                                             </span>
                                           )}
@@ -5479,7 +5479,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                                               onClick={(e) => { e.stopPropagation(); toggleAprobarDeficit(item.material, item.apertura, item.densidad); }}
                                               title={aprobado ? "Aprobado con corrida ya asignada — click para revertir" : "Stock bajo pero ya tiene corrida asignada: aprobar confirma que la corrida corrige la necesidad"}
                                               className={cn(
-                                                "flex items-center gap-1 text-[7px] font-black uppercase tracking-wide rounded px-1.5 py-0.5 border whitespace-nowrap",
+                                                "flex items-center gap-1 text-[8px] font-black uppercase tracking-wide rounded px-1.5 py-0.5 border whitespace-nowrap",
                                                 aprobado ? "bg-emerald-50 text-emerald-700 border-emerald-300" : "bg-red-50 text-red-700 border-red-300 animate-pulse"
                                               )}
                                             >
@@ -5602,7 +5602,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               {planPreviewP3PFD && (
                 <div className="space-y-8 text-left text-sm">
                   <div>
-                    <span className="inline-block text-[9px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 rounded-full px-3 py-1 mb-3">P3 — Plan real</span>
+                    <span className="inline-block text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 rounded-full px-3 py-1 mb-3">P3 — Plan real</span>
                     <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
                       <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{planPreviewP3PFD.p3.valor}</div>
                       <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Respuesta</span>{planPreviewP3PFD.p3.fechaInicio}</div>
@@ -5678,7 +5678,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                             <input type="radio" readOnly checked={planGrupoSeleccionado === p.codigo_plan_grupo} className="accent-indigo-600" />
                           </td>
                           <td className="px-3 py-2 font-mono font-black">
-                            #{p.codigo_plan_grupo}{idx === 0 && <span className="ml-2 text-[8px] font-black uppercase text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5 py-0.5">Último guardado</span>}
+                            #{p.codigo_plan_grupo}{idx === 0 && <span className="ml-2 text-[9px] font-black uppercase text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5 py-0.5">Último guardado</span>}
                           </td>
                           <td className="px-3 py-2">{p.valor}</td>
                           <td className="px-3 py-2 font-mono">{soloFecha(p.fecha_inicio_plan) || '—'}</td>
@@ -5787,7 +5787,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
         <TabsContent value="necesidadesPlanta" className="animate-in fade-in duration-300 space-y-10 text-left">
           <div className="flex items-center justify-between">
-            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
               Se actualiza automáticamente al guardar o editar un plan. Usa este botón si otra área registró cambios.
             </p>
             <Button
@@ -5812,7 +5812,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200 border-collapse font-sans text-[11px] text-center">
-                <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[9px] text-gray-500 sticky top-0 z-10">
+                <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[10px] text-gray-500 sticky top-0 z-10">
                   <tr>
                     <th className="px-6 py-5 border-r border-gray-100">Orden</th>
                     <th className="px-6 py-5 border-r border-gray-100">Fecha Inicio</th>
@@ -5834,7 +5834,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                       return (
                         <tr key={i} className="hover:bg-slate-50 transition-colors">
                           <td className="px-6 py-4 font-black text-slate-900 border-r border-gray-50">{getProp(o, ['ORDENPREVISIONAL', 'ORDEN']) || '—'}</td>
-                          <td className="px-6 py-4 border-r border-gray-50 font-mono text-[9px] text-slate-500 text-center">{getProp(o, ['FECHAINICIO', 'FECHA']) || '—'}</td>
+                          <td className="px-6 py-4 border-r border-gray-50 font-mono text-[10px] text-slate-500 text-center">{getProp(o, ['FECHAINICIO', 'FECHA']) || '—'}</td>
                           <td className="px-6 py-4 font-mono font-black text-red-600 border-r border-gray-50 tracking-tighter text-sm text-center">{code}</td>
                           <td className="px-6 py-4 text-left border-r border-gray-100 text-slate-800 font-black uppercase leading-tight max-w-[450px]">{desc}</td>
                           <td className="px-6 py-4 font-black text-slate-900 border-r border-gray-50 font-mono text-sm text-center">{Number(getProp(o, ['CANTPROGRAMADA', 'CANTIDAD', 'CANT_PROG']) || 0).toLocaleString()}</td>
@@ -5855,7 +5855,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200 border-collapse font-sans text-[11px] text-center">
-                <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[9px] text-gray-500 sticky top-0 z-10">
+                <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[10px] text-gray-500 sticky top-0 z-10">
                   <tr>
                     <th className="px-6 py-5 border-r border-gray-100">Orden FERT</th>
                     <th className="px-6 py-5 border-r border-gray-100">Fecha</th>
@@ -5883,7 +5883,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                       return (
                         <tr key={i} className="hover:bg-indigo-50/20 transition-colors">
                           <td className="px-6 py-4 font-black text-slate-900 border-r border-gray-50 text-center">{orderNum}</td>
-                          <td className="px-6 py-4 border-r border-gray-50 font-mono text-[9px] text-slate-500 text-center">{date}</td>
+                          <td className="px-6 py-4 border-r border-gray-50 font-mono text-[10px] text-slate-500 text-center">{date}</td>
                           <td className="px-6 py-4 font-mono font-black text-red-600 border-r border-gray-50 tracking-tighter text-sm text-center">{code}</td>
                           <td className="px-6 py-4 text-left border-r border-white/10 text-slate-800 font-black uppercase leading-tight max-w-[450px]">{desc}</td>
                           <td className="px-6 py-4 font-black text-slate-900 border-r border-gray-50 font-mono text-sm text-center">{qty.toLocaleString()}</td>
@@ -5910,7 +5910,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <Card className="rounded-2xl border border-blue-100 shadow-sm overflow-hidden bg-white">
             <div className="overflow-x-auto max-h-[600px] relative text-center">
               <table className="w-full border-collapse text-center font-sans text-[10px]">
-                <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[8px] text-gray-500 sticky top-0 z-10">
+                <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[9px] text-gray-500 sticky top-0 z-10">
                   <tr>
                     <th className="px-4 py-5 border-r border-gray-100">Material</th>
                     <th className="px-6 py-5 border-r border-gray-100 text-left">Nombre</th>
@@ -5955,7 +5955,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               <div className="p-2 bg-red-600 rounded-xl text-white shadow-lg"><ClipboardList className="w-4 h-4" /></div>
               <div>
                 <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Plan de Salida — Corridas Looper</h3>
-                <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">
+                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
                   Prioridad: 1) Déficit de stock &nbsp;2) % de déficit &nbsp;3) Mayor consumo (Kg) — corridas intercaladas por grupo
                 </p>
               </div>
@@ -5970,7 +5970,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
             <div className="overflow-x-auto max-h-[600px] relative">
               <table className="w-full border-collapse font-sans text-[11px] text-center">
-                <thead className="sticky top-0 z-20 bg-gray-50 uppercase font-bold tracking-widest text-[9px] text-gray-500">
+                <thead className="sticky top-0 z-20 bg-gray-50 uppercase font-bold tracking-widest text-[10px] text-gray-500">
                   <tr>
                     <th className="px-4 py-4 border-r border-gray-100">Fecha</th>
                     <th className="px-6 py-4 border-r border-gray-100 text-left">Corrida / Apertura</th>
@@ -6000,7 +6000,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                                 className="bg-white border border-gray-200 rounded-lg px-2 py-1 text-[10px] font-black text-slate-700 outline-none focus:border-red-400"
                               />
                             ) : (
-                              <span className="text-[9px] text-slate-400 font-mono">{row.fecha}</span>
+                              <span className="text-[10px] text-slate-400 font-mono">{row.fecha}</span>
                             )}
                           </td>
                           <td className="px-6 py-3 border-r border-gray-100 text-left font-black uppercase text-slate-800">{row.corrida}</td>
@@ -6010,7 +6010,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                           </td>
                           <td className="px-6 py-3 border-r border-gray-100 text-left uppercase leading-tight truncate max-w-[280px]" title={row.descripcion}>
                             {row.descripcion}
-                            {row.isConvNested && <span className="ml-2 text-[8px] font-black normal-case tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 align-middle whitespace-nowrap">Otra máquina · no cuenta corrida</span>}
+                            {row.isConvNested && <span className="ml-2 text-[9px] font-black normal-case tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 align-middle whitespace-nowrap">Otra máquina · no cuenta corrida</span>}
                           </td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono text-red-900 bg-[#fee2e2]/30">{Math.round(row.planUn).toLocaleString()}</td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono text-red-900 bg-[#fee2e2]/30">{formatNum(row.planKg, 1)}</td>
@@ -6035,7 +6035,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               <div className="p-2 bg-amber-600 rounded-xl text-white shadow-lg"><ClipboardList className="w-4 h-4" /></div>
               <div>
                 <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Simulación — Salida de Datos por Respuesta (Paso 3)</h3>
-                <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">
+                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
                   Materiales referenciados en &quot;Necesidades Planta&quot; · con corrida = cantidad planificada · sin corrida = stock disponible (bodegas + Producción Diaria) · aún no se graba en base de datos
                 </p>
               </div>
@@ -6045,7 +6045,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
             <div className="overflow-x-auto max-h-[600px] relative">
               <table className="w-full border-collapse font-sans text-[11px] text-center">
-                <thead className="sticky top-0 z-20 bg-gray-50 uppercase font-bold tracking-widest text-[9px] text-gray-500">
+                <thead className="sticky top-0 z-20 bg-gray-50 uppercase font-bold tracking-widest text-[10px] text-gray-500">
                   <tr>
                     <th className="px-4 py-4 border-r border-gray-100">Material</th>
                     <th className="px-6 py-4 border-r border-gray-100 text-left min-w-[220px]">Descripción</th>
@@ -6065,7 +6065,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                         <td className="px-6 py-3 border-r border-gray-100 text-left uppercase leading-tight truncate max-w-[280px]" title={row.descripcion}>{row.descripcion}</td>
                         <td className="px-4 py-3 border-r border-gray-100 text-left font-mono text-slate-500">{row.origenes}</td>
                         <td className="px-4 py-3 border-r border-gray-100">
-                          <span className={cn("text-[9px] font-black uppercase px-2 py-1 rounded-full", row.tieneCorrida ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-amber-50 text-amber-700 border border-amber-200")}>
+                          <span className={cn("text-[10px] font-black uppercase px-2 py-1 rounded-full", row.tieneCorrida ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-amber-50 text-amber-700 border border-amber-200")}>
                             {row.tieneCorrida ? 'Sí — plan' : 'No — stock'}
                           </span>
                         </td>
@@ -6099,7 +6099,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <Card className="rounded-2xl border border-slate-200 shadow-sm overflow-hidden bg-white">
             <div className="overflow-x-auto max-h-[600px] relative text-center">
               <table className="w-full border-collapse text-center font-sans text-[10px]">
-                <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[8px] text-gray-500 sticky top-0 z-10">
+                <thead className="bg-gray-50 uppercase font-bold tracking-widest text-[9px] text-gray-500 sticky top-0 z-10">
                   <tr>
                     <th className="px-4 py-5 border-r border-gray-100">Material (limpio)</th>
                     <th className="px-4 py-5 border-r border-gray-100">CodMaterial / Material (crudo)</th>
@@ -6125,7 +6125,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                         <td className="px-4 py-3 border-r border-dashed border-gray-100 font-mono text-slate-500 text-center">{getProp(t, ['CodMaterial', 'MATERIAL', 'Material']) || '—'}</td>
                         <td className="px-4 py-3 border-r border-dashed border-gray-100 font-mono text-amber-700 bg-amber-50/30 text-center font-black">{getProp(t, ['PuestoTrabajo']) || '—'}</td>
                         <td className="px-4 py-3 border-r border-dashed border-gray-100 font-mono text-slate-600 text-center">{getProp(t, ['PuestoTrabajoLinea']) || '—'}</td>
-                        <td className="px-6 py-3 text-left font-mono text-[9px] text-slate-500 whitespace-pre-wrap break-all">{JSON.stringify(t)}</td>
+                        <td className="px-6 py-3 text-left font-mono text-[10px] text-slate-500 whitespace-pre-wrap break-all">{JSON.stringify(t)}</td>
                       </tr>
                     ));
                   })()}

@@ -353,7 +353,7 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
     return (
       <div className="space-y-2">
         <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-2">{space.title} (0)</h4>
-        <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2">Filtro: {filterLabel}</p>
+        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-2">Filtro: {filterLabel}</p>
         <div className="py-10 text-center bg-gray-50/30 rounded-3xl border-2 border-dashed border-gray-100 mb-8">
           <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">
             0 de {data.length} registros de curado coinciden con este filtro
@@ -388,15 +388,15 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
       <div className="px-2 flex items-baseline justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{space.title} ({filtered.length})</h4>
-          <span className="text-[9px] font-black uppercase tracking-wider bg-emerald-50 text-emerald-700 rounded-full px-3 py-1">Disponible: {formatNum(unidadesDisponible, 1)} UN</span>
-          <span className="text-[9px] font-black uppercase tracking-wider bg-amber-50 text-amber-700 rounded-full px-3 py-1">Pendiente Curado: {formatNum(unidadesPendiente, 1)} UN</span>
+          <span className="text-[10px] font-black uppercase tracking-wider bg-emerald-50 text-emerald-700 rounded-full px-3 py-1">Disponible: {formatNum(unidadesDisponible, 1)} UN</span>
+          <span className="text-[10px] font-black uppercase tracking-wider bg-amber-50 text-amber-700 rounded-full px-3 py-1">Pendiente Curado: {formatNum(unidadesPendiente, 1)} UN</span>
         </div>
-        <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Filtro: {filterLabel}</p>
+        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Filtro: {filterLabel}</p>
       </div>
       <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left mb-2">
         <div className="overflow-x-auto max-h-[500px]">
           <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-            <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-10">
+            <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-10">
               <tr>
                 {COLUMNAS_CURADO.map((col, i) => (
                   <th key={i} className="px-4 py-4 border-r border-gray-100 whitespace-nowrap uppercase">
@@ -420,7 +420,7 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
                   <React.Fragment key={idx}>
                     {nuevoGrupo && (
                       <tr className="bg-indigo-50/60">
-                        <td colSpan={COLUMNAS_CURADO.length} className="px-4 py-2 text-left text-[9px] font-black uppercase tracking-widest text-indigo-700">
+                        <td colSpan={COLUMNAS_CURADO.length} className="px-4 py-2 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">
                           {aperturaGroupLabel(row.__apertura)}
                         </td>
                       </tr>
@@ -449,13 +449,13 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
         </div>
       </div>
       <div className="flex items-center justify-between px-2 mb-8">
-        <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">
+        <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
           Mostrando {(paginaActual - 1) * CURADO_PAGE_SIZE + 1}–{Math.min(paginaActual * CURADO_PAGE_SIZE, filtered.length)} de {filtered.length}
         </p>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" className="h-7 px-3 text-[9px] font-black uppercase rounded-xl" disabled={paginaActual <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>Anterior</Button>
-          <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Página {paginaActual} / {totalPaginas}</span>
-          <Button variant="outline" size="sm" className="h-7 px-3 text-[9px] font-black uppercase rounded-xl" disabled={paginaActual >= totalPaginas} onClick={() => setPage(p => Math.min(totalPaginas, p + 1))}>Siguiente</Button>
+          <Button variant="outline" size="sm" className="h-7 px-3 text-[10px] font-black uppercase rounded-xl" disabled={paginaActual <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>Anterior</Button>
+          <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Página {paginaActual} / {totalPaginas}</span>
+          <Button variant="outline" size="sm" className="h-7 px-3 text-[10px] font-black uppercase rounded-xl" disabled={paginaActual >= totalPaginas} onClick={() => setPage(p => Math.min(totalPaginas, p + 1))}>Siguiente</Button>
         </div>
       </div>
     </div>
@@ -653,14 +653,14 @@ interface SnapshotFormulacion {
 const JornadaCentroPanel: React.FC<{ titulo: string; jornada: JornadaGrupoEditable; sinGrupo: boolean }> = ({ titulo, jornada, sinGrupo }) => (
   <div className="space-y-2">
     <p className="text-[10px] font-black uppercase tracking-widest text-slate-700">{titulo}</p>
-    {sinGrupo && <p className="text-[9px] text-amber-600 font-bold">Sin grupo para este centro — jornada estándar.</p>}
+    {sinGrupo && <p className="text-[10px] text-amber-600 font-bold">Sin grupo para este centro — jornada estándar.</p>}
     {([
       { etiqueta: 'Día', valor: jornada.dia, set: jornada.setDia, opciones: jornada.opcionesDia, horas: jornada.horasBrutas.dia },
       { etiqueta: 'Noche', valor: jornada.noche, set: jornada.setNoche, opciones: jornada.opcionesNoche, horas: jornada.horasBrutas.noche },
       { etiqueta: 'Sábado', valor: jornada.sabado, set: jornada.setSabado, opciones: jornada.opcionesDia, horas: jornada.horasBrutas.sabado },
     ]).map(t => (
       <div key={t.etiqueta} className="flex items-center gap-2">
-        <span className="text-[9px] font-black text-slate-500 uppercase w-12">{t.etiqueta}</span>
+        <span className="text-[10px] font-black text-slate-500 uppercase w-12">{t.etiqueta}</span>
         <select value={t.valor} onChange={e => t.set(e.target.value)} className="flex-1 bg-white border border-gray-200 rounded-md px-2 py-1 text-[10px] font-black text-indigo-700 outline-none">
           {t.opciones.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
         </select>
@@ -668,13 +668,13 @@ const JornadaCentroPanel: React.FC<{ titulo: string; jornada: JornadaGrupoEditab
       </div>
     ))}
     <div className="flex items-center gap-2">
-      <span className="text-[9px] font-black text-slate-500 uppercase w-12">Paros %</span>
+      <span className="text-[10px] font-black text-slate-500 uppercase w-12">Paros %</span>
       <input type="number" min={0} max={100} value={jornada.paroPct} onChange={e => jornada.setParoPct(Math.min(100, Math.max(0, Number(e.target.value) || 0)))} className="w-16 bg-white border border-gray-200 rounded-md px-2 py-1 text-[10px] font-black text-slate-700 outline-none" />
     </div>
-    <p className="text-[9px] font-bold text-slate-500">
+    <p className="text-[10px] font-bold text-slate-500">
       Brutas {jornada.horasBrutas.total.toFixed(2)} h → Efectivas <span className="text-emerald-600">{jornada.horasEfectivas.total.toFixed(2)} h</span>
     </p>
-    {jornada.numTurnos >= 3 && <p className="text-[9px] text-amber-600 font-bold">NUM_TURNOS = 3: el tercer turno aún no tiene horario propio.</p>}
+    {jornada.numTurnos >= 3 && <p className="text-[10px] text-amber-600 font-bold">NUM_TURNOS = 3: el tercer turno aún no tiene horario propio.</p>}
   </div>
 );
 
@@ -1454,7 +1454,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-              <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-20">
+              <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-20">
                 <tr>
                   <th className="px-4 py-4 text-left border-r border-gray-100">FORMULADO</th>
                   <th className="px-6 py-4 text-left border-r border-gray-100">NOMBRECOMPONENTE</th>
@@ -1482,7 +1482,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                           <td className="px-4 py-2 bg-indigo-50 text-indigo-800 font-black">{formatNum(subtotal, 1)}</td>
                         </tr>
                         {group.items.map((row, idx) => (
-                          <tr key={idx} className="hover:bg-slate-50 transition-colors font-mono text-[9px]">
+                          <tr key={idx} className="hover:bg-slate-50 transition-colors font-mono text-[10px]">
                             <td className="px-4 py-2 border-r border-gray-100 text-slate-400 pl-8 text-left">{row.codFormulado}</td>
                             <td className="px-6 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[220px]">{row.nombreComponente}</td>
                             <td className="px-4 py-2 border-r border-gray-100 text-indigo-600 font-black">{row.componente}</td>
@@ -1530,7 +1530,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-              <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-20">
+              <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-20">
                 <tr>
                   <th className="px-6 py-4 text-left border-r border-gray-100 w-32">Bloque Formulado</th>
                   <th className="px-3 py-4 border-r border-gray-100 text-slate-500">Centro</th>
@@ -1570,7 +1570,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         </td>
                         <td className="px-3 py-3 border-r border-gray-100 font-black text-slate-500">{row.centro}</td>
                         <td className="px-4 py-3 text-left font-mono font-black text-indigo-700 bg-indigo-50/10 border-r border-gray-100 whitespace-nowrap">{row.corrida}</td>
-                        <td className="px-6 py-3 text-left uppercase text-slate-900 font-black text-[9px] border-r border-gray-100 truncate max-w-[300px]">{row.blockDesc}</td>
+                        <td className="px-6 py-3 text-left uppercase text-slate-900 font-black text-[10px] border-r border-gray-100 truncate max-w-[300px]">{row.blockDesc}</td>
                         <td className="px-3 py-3 border-r border-gray-100 font-mono text-slate-500">{row.dens}</td>
                         <td className="px-3 py-3 border-r border-gray-100 font-black text-blue-700 bg-blue-50/10">{row.apertura}</td>
                         <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-slate-700 bg-slate-50/10">{row.totalBloquesProv.toFixed(2)}</td>
@@ -1584,7 +1584,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         <td className="px-6 py-3 text-right font-mono font-black text-yellow-700 bg-yellow-50/30">{row.planReposicion}</td>
                       </tr>
                       {isExp && row.ferts.map((f, fIdx: number) => (
-                        <tr key={`${idx}-${fIdx}`} className="bg-slate-50/50 text-[9px] text-slate-500 font-medium">
+                        <tr key={`${idx}-${fIdx}`} className="bg-slate-50/50 text-[10px] text-slate-500 font-medium">
                           <td className="px-6 py-1.5 text-left pl-10 italic">{f.code}</td>
                           <td></td>
                           <td></td>
@@ -1601,7 +1601,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                   );
                 })}
               </tbody>
-              <tfoot className="bg-gray-100 text-gray-800 font-black text-[9px] uppercase border-t-2 border-gray-200 sticky bottom-0 z-20">
+              <tfoot className="bg-gray-100 text-gray-800 font-black text-[10px] uppercase border-t-2 border-gray-200 sticky bottom-0 z-20">
                 <tr>
                   <td colSpan={8} className="px-6 py-4 text-right tracking-widest border-r border-gray-200">Totales de Sección</td>
                   <td className="px-6 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{formatNum(tStockKg, 0)}</td>
@@ -1633,12 +1633,12 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       <div className="space-y-2">
         <div className="px-2 flex items-center justify-between">
           <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Evaluación Stock / En Curado / Stock Útil por Material</h4>
-          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Stock (UN) = Stock (KG) ÷ Lote Mínimo (igual que Inventarios) · En Curado separado por proceso (Leader / Cofama), no combinado</p>
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Stock (UN) = Stock (KG) ÷ Lote Mínimo (igual que Inventarios) · En Curado separado por proceso (Leader / Cofama), no combinado</p>
         </div>
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left mb-8">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-              <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-10">
+              <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-10">
                 <tr>
                   <th className="px-4 py-4 text-left border-r border-gray-100">Material</th>
                   <th className="px-6 py-4 text-left border-r border-gray-100">Descripción</th>
@@ -1661,7 +1661,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                       <React.Fragment key={idx}>
                         {nuevoGrupo && (
                           <tr className="bg-indigo-50/60">
-                            <td colSpan={8} className="px-4 py-2 text-left text-[9px] font-black uppercase tracking-widest text-indigo-700">
+                            <td colSpan={8} className="px-4 py-2 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">
                               {aperturaGroupLabel(row.apertura)}
                             </td>
                           </tr>
@@ -1682,7 +1682,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                 )}
               </tbody>
               {data.length > 0 && (
-                <tfoot className="bg-gray-100 text-gray-800 font-black text-[9px] uppercase border-t-2 border-gray-200 sticky bottom-0 z-10">
+                <tfoot className="bg-gray-100 text-gray-800 font-black text-[10px] uppercase border-t-2 border-gray-200 sticky bottom-0 z-10">
                   <tr>
                     <td colSpan={3} className="px-4 py-4 text-right tracking-widest border-r border-gray-200">Totales</td>
                     <td className="px-4 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{formatNum(tStockKg, 0)}</td>
@@ -1773,7 +1773,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             </div>
             <div className="overflow-x-auto max-h-[600px] relative">
               <table className="w-full border-collapse text-center font-sans text-[10px]">
-                <thead className="bg-gray-50 sticky top-0 text-[9px] font-bold uppercase text-gray-500 tracking-widest z-10">
+                <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-10">
                   <tr>
                     <th className="px-6 py-5 border-r border-gray-100">Material</th>
                     <th className="px-6 py-5 border-r border-gray-100 text-left">Descripción del Bloque (SAP)</th>
@@ -1782,11 +1782,11 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                     <th className="px-3 py-5 border-r border-gray-100 text-purple-700">Clase Aprov.</th>
                     <th className="px-3 py-5 border-r border-gray-100 bg-green-50/50 text-green-700">
                       Stock (KG)
-                      <span className="block normal-case font-normal text-gray-500 text-[7px] tracking-normal mt-0.5">StockActual SAP</span>
+                      <span className="block normal-case font-normal text-gray-500 text-[8px] tracking-normal mt-0.5">StockActual SAP</span>
                     </th>
                     <th className="px-3 py-5 border-r border-gray-100 bg-blue-50/50 text-blue-700">
                       Stock (UN)
-                      <span className="block normal-case font-normal text-gray-500 text-[7px] tracking-normal mt-0.5">KG ÷ Lote Mín.</span>
+                      <span className="block normal-case font-normal text-gray-500 text-[8px] tracking-normal mt-0.5">KG ÷ Lote Mín.</span>
                     </th>
                     <th className="px-3 py-5 border-r border-gray-100 bg-amber-50/50 text-amber-700">Lote Mín. (KG)</th>
                     <th className="px-3 py-5 border-r border-gray-100 bg-amber-50/50 text-amber-700">Lote Máx. (KG)</th>
@@ -1808,7 +1808,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         <td className="px-3 py-3 border-r border-gray-100 font-mono text-blue-500 bg-blue-50/30">{row.loteMin > 0 ? formatNum(row.stockUN, 2) : '—'}</td>
                         <td className="px-3 py-3 border-r border-gray-100 font-mono text-amber-700 bg-amber-50/30">{row.loteMin > 0 ? formatNum(row.loteMin, 0) : '—'}</td>
                         <td className="px-3 py-3 border-r border-gray-100 font-mono text-amber-700 bg-amber-50/30">{row.loteMax > 0 ? formatNum(row.loteMax, 0) : '—'}</td>
-                        <td className="px-3 py-3 text-[9px] text-blue-600 uppercase font-black">{row.RespCtrlProd || '—'}</td>
+                        <td className="px-3 py-3 text-[10px] text-blue-600 uppercase font-black">{row.RespCtrlProd || '—'}</td>
                       </tr>
                     ))
                   )}
@@ -1907,11 +1907,11 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                     <Button variant="ghost" size="icon" onClick={() => setViewDate(prev => addMonths(prev, 1))} className="h-8 w-8 hover:bg-white"><ChevronRight className="w-4 h-4" /></Button>
                   </div>
                 </div>
-                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-2">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">
                   {!rangeStart ? 'Elige la fecha de inicio' : !rangeEnd ? 'Elige la fecha de fin' : 'Rango seleccionado — click reinicia'}
                 </p>
                 <div className="grid grid-cols-7 gap-y-1 text-center mb-4">
-                  {['LU', 'MA', 'MI', 'JU', 'VI', 'SA', 'DO'].map(d => <div key={d} className="text-[9px] font-black text-slate-400 uppercase py-1">{d}</div>)}
+                  {['LU', 'MA', 'MI', 'JU', 'VI', 'SA', 'DO'].map(d => <div key={d} className="text-[10px] font-black text-slate-400 uppercase py-1">{d}</div>)}
                   {calendarDaysList.map((day, idx) => {
                     if (!day) return <div key={idx} />;
                     const dStr = format(day, 'yyyy-MM-dd');
