@@ -635,7 +635,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         try {
           const res = await serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(String(g.centro), g.codigo_grupo);
           const actualData = res.data?.data || res.data || [];
-          if (Array.isArray(actualData)) allTiempos.push(...actualData);
+          // Centro del grupo pedido si la fila no lo trae (tiemposPorCentro filtra por él).
+          if (Array.isArray(actualData)) allTiempos.push(...actualData.map((t: Record<string, unknown>) => (t.CENTRO || t.Centro || t.centro ? t : { ...t, Centro: String(g.centro) })));
         } catch {
           console.warn(`Error cargando tiempos para grupo ${g.codigo_grupo}`);
         }
@@ -1030,8 +1031,15 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     const fechas = eachDayOfInterval({ start: parseISO(inicio), end: parseISO(fin) }).map(d => format(d, 'yyyy-MM-dd'));
     return { inicio, fin, fechas };
   }, [selectedDates]);
-  const tiemposC1000 = useMemo(() => filterData(tiemposEnsamblado, '1000', false), [tiemposEnsamblado, grupos, restricciones]);
-  const tiemposC2000 = useMemo(() => filterData(tiemposEnsamblado, '2000', false), [tiemposEnsamblado, grupos, restricciones]);
+  // Tiempos de ensamblado: SOLO por centro (2026-10-08). Antes pasaban por filterData, que además
+  // filtra por responsable/almacén/sector de las ÓRDENES: las filas de tiempos no traen responsable,
+  // así que desde que la restricción RespCtrlProd se lee sin distinguir mayúsculas se descartaban
+  // todas y cada material caía en PACKING_TIME_PER_UNIT_SECONDS (15 s/und) — caso del usuario:
+  // 20003095 D17 100X200X2, 300 und = 1.25 h, cuando lo reportado es 360 und = 0.127 h. Ya vienen
+  // pedidos por los grupos de Venta Externa (fetchTiemposEnsamblado), no hace falta otro filtro.
+  const tiemposPorCentro = (centro: string) => tiemposEnsamblado.filter(t => String(t.CENTRO || t.Centro || t.centro || '').trim() === centro);
+  const tiemposC1000 = useMemo(() => tiemposPorCentro('1000'), [tiemposEnsamblado]); // eslint-disable-line react-hooks/exhaustive-deps
+  const tiemposC2000 = useMemo(() => tiemposPorCentro('2000'), [tiemposEnsamblado]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Lookup de tiempos estándar por material+centro para match en Provisionales/FERT
   const buildTiempoLookup = (tiempos: Record<string, unknown>[]) => {
@@ -1049,12 +1057,21 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const matchTiempoEstandar = (materialCode: string, maquina: string, lookup: Map<string, Record<string, unknown>[]>) => {
     const candidates = lookup.get(materialCode);
     if (!candidates || candidates.length === 0) return null;
-    const byMaquina = candidates.find(t => {
-      const linea = String(t.Linea || t.PuestoTrabajoLinea || '').trim().toUpperCase();
-      return linea && linea === String(maquina).trim().toUpperCase();
-    });
-    const match = byMaquina || candidates[0];
-    return Number(match.Tiempo_Min || match.Tiempo || 0);
+    // Minutos por unidad de una fila: Tiempo_Min / Tiempo; si la fila trae el tiempo reportado en
+    // HORAS para una cantidad (TiempoPlastificado + Cantidad, ej. 360 und = 0.127 h), se divide.
+    const minPorUnidad = (t: Record<string, unknown>): number | null => {
+      const min = Number(t.Tiempo_Min || t.Tiempo || 0);
+      if (min > 0) return min;
+      const horas = Number(t.TiempoPlastificado || 0);
+      const cant = Number(t.Cantidad || 0);
+      return horas > 0 && cant > 0 ? (horas * 60) / cant : null;
+    };
+    const maq = String(maquina).trim().toUpperCase();
+    // Filas de tiemposEnsambladoByGrupoYCentroPR2: CodMaterial, PuestoTrabajo, PuestoTrabajoLinea, Tiempo_Min.
+    const byMaquina = maq ? candidates.find(t => minPorUnidad(t) !== null
+      && [t.Linea, t.PuestoTrabajoLinea, t.PuestoTrabajo, t.Maquina].some(v => String(v || '').trim().toUpperCase() === maq)) : undefined;
+    const match = byMaquina || candidates.find(t => minPorUnidad(t) !== null);
+    return match ? minPorUnidad(match) : null;
   };
 
   // Línea de producción real (ej. "Carruseles - LINEA 1") para poblar linea_produccion al grabar
@@ -2456,6 +2473,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const calculateSummary = (data: Record<string, unknown>[], centroId: string) => {
     const lookup = centroId === '1000' ? tiempoLookup1000 : tiempoLookup2000;
     const map = new Map<string, { centro: string; maquina: string; categoria: string; densidad: string; espesor: string; tipo: string; totalOrdenes: number; totalCantidad: number; totalTiempoEmpaque: number }>();
+    // Diagnóstico (2026-10-08): materiales que no encuentran tiempo en el servicio y usan 15 s/und.
+    const sinTiempo = new Set<string>();
     data.forEach(o => {
       const categoria = String(o.CATEGORIA || o.Categoria || o.categoria || '').trim();
       if (!categoria || categoria === 'N/A') return;
@@ -2476,6 +2495,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // respaldo en vez de mostrar 0h, que sería más engañoso todavía.
       const tiempoEstandarMin = matchTiempoEstandar(info.code, maquina, lookup);
       const empaqueHours = tiempoEstandarMin !== null ? (qty * tiempoEstandarMin) / 60 : (qty * PACKING_TIME_PER_UNIT_SECONDS) / 3600;
+      if (tiempoEstandarMin === null) sinTiempo.add(info.code);
 
       if (!map.has(key)) {
         map.set(key, { centro: centroId, maquina, categoria, densidad, espesor, tipo, totalOrdenes: 0, totalCantidad: 0, totalTiempoEmpaque: 0 });
@@ -2485,6 +2505,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       entry.totalCantidad += qty;
       entry.totalTiempoEmpaque += empaqueHours;
     });
+    if (data.length > 0) console.info(`[Empaque ${centroId}] tiempos del servicio: ${lookup.size} materiales; sin tiempo (15 s/und): ${sinTiempo.size}${sinTiempo.size ? ` — ${[...sinTiempo].slice(0, 15).join(', ')}` : ''}`);
     return Array.from(map.values()).sort((a, b) =>
       a.maquina.localeCompare(b.maquina) || a.categoria.localeCompare(b.categoria) || a.espesor.localeCompare(b.espesor)
     );
