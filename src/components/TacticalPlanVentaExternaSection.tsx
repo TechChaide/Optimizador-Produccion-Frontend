@@ -653,18 +653,19 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
   const fetchTiemposEnsamblado = async (filteredGroups: Grupo[]) => {
     try {
-      const allTiempos: Record<string, unknown>[] = [];
-      for (const g of filteredGroups) {
-        if (!g.centro) continue;
+      // Grupos en paralelo (antes uno tras otro) y por la caché compartida (sapCompartido).
+      const porGrupo = await Promise.all(filteredGroups.filter(g => g.centro).map(async g => {
         try {
-          const res = await serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(String(g.centro), g.codigo_grupo);
+          const res = await sapCompartido.tiemposEnsambladoPR2(String(g.centro), g.codigo_grupo);
           const actualData = res.data?.data || res.data || [];
           // Centro del grupo pedido si la fila no lo trae (tiemposPorCentro filtra por él).
-          if (Array.isArray(actualData)) allTiempos.push(...actualData.map((t: Record<string, unknown>) => (t.CENTRO || t.Centro || t.centro ? t : { ...t, Centro: String(g.centro) })));
+          return Array.isArray(actualData) ? actualData.map((t: Record<string, unknown>) => (t.CENTRO || t.Centro || t.centro ? t : { ...t, Centro: String(g.centro) })) : [];
         } catch {
           console.warn(`Error cargando tiempos para grupo ${g.codigo_grupo}`);
+          return [];
         }
-      }
+      }));
+      const allTiempos: Record<string, unknown>[] = porGrupo.flat();
       setTiemposEnsamblado(allTiempos);
       return allTiempos;
     } catch (error) {

@@ -3657,7 +3657,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const fetchTiemposCorteYLaminado = useCallback(async (): Promise<BodyResponse<RawApiRow[]>> => {
     const resArr = await Promise.all(
       Object.entries(CODIGO_GRUPO_CORTE_POR_CENTRO).map(([centro, codigoGrupo]) =>
-        serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(centro, codigoGrupo).catch(() => ({ data: [] }))
+        sapCompartido.tiemposEnsambladoPR2(centro, codigoGrupo).catch(() => ({ data: [] }))
       )
     );
     return { data: resArr.flatMap(r => r.data?.data || r.data || []) };

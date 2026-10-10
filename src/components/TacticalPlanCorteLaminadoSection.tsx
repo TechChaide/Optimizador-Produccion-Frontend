@@ -1384,7 +1384,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         seguir('Órdenes FERT', sapCompartido.ordenesFert()).catch(() => ({ data: [] })),
         seguir('Habilidades de operadores', sapCompartido.cuboHabilidadesOP()).catch(() => ({ data: [] })),
         seguir('Mantenimientos', sapCompartido.mantenimientosPreventivos()).catch(() => ({ data: [] })),
-        seguir('Tiempos de laminado', serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo('1000', CODIGO_GRUPO_LAMINADO)).catch(() => ({ data: [] }))
+        seguir('Tiempos de laminado', sapCompartido.tiemposEnsambladoPR2('1000', CODIGO_GRUPO_LAMINADO)).catch(() => ({ data: [] }))
       ]);
 
       const restriccionesFiltradas = (restrs.data || []).filter((r) => ids.includes(r.codigo_grupo));
@@ -4532,7 +4532,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         datosP3.then(d => fetchCodigoDetalleTacticoPorMaterial(d)),
         puestoTrabajoPorMaterial.size > 0
           ? Promise.resolve(undefined)
-          : medirPaso(log, "Hoja de ruta", serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo('1000', CODIGO_GRUPO_LAMINADO))
+          : medirPaso(log, "Hoja de ruta", sapCompartido.tiemposEnsambladoPR2('1000', CODIGO_GRUPO_LAMINADO))
             .then(res => {
               const tiemposRows: RawApiRow[] = res?.data?.data || res?.data || [];
               setTiemposEnsambladoData(tiemposRows);

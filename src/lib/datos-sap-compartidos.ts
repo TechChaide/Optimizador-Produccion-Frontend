@@ -33,7 +33,10 @@ export type ClaveDatoSap =
   | 'mantenimientos'
   | 'kpiLooper'
   | 'kpiCarruseles'
-  | 'pendientesTotales';
+  | 'pendientesTotales'
+  // tiemposEnsambladoByGrupoYCentroPR2 por Centro+Grupo (ej. 'tiemposPR2:1000:8', que piden Corte
+  // Espuma y Laminado por igual).
+  | `tiemposPR2:${string}`;
 
 type ClaveDato = ClaveDatoSap | 'planGrupo' | 'detalleTactico';
 
@@ -105,6 +108,8 @@ export const sapCompartido = {
   kpiMaestroLooper: () => compartir('kpiLooper', () => serviciosService.getKPIMaestroLooper()),
   kpiMaestroCarruseles: () => compartir('kpiCarruseles', () => serviciosService.getKPIMaestroCarruseles()),
   pendientesTotales: () => compartir('pendientesTotales', () => serviciosService.getPendientesTotales(1, 20000)),
+  tiemposEnsambladoPR2: (centro: string, codigoGrupo: number) =>
+    compartir(`tiemposPR2:${centro}:${codigoGrupo}`, () => serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(centro, codigoGrupo)),
   planGrupos: () => compartir('planGrupo', () => planGrupoService.getAll()),
   detallesTacticos: () => compartir('detalleTactico', () => detalleTacticoService.getAll()),
 };
