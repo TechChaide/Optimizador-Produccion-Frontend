@@ -2223,7 +2223,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
   // Personal que se puede asignar en Empaque (línea de proceso EMPAQUE de cuboHabilidadesOP) y, si
   // no hay nadie, las líneas que sí trae el servicio para identificar la correcta.
-  const operadoresEmpaque = useMemo(() => habilidadesOP.filter(o => o.linea.includes(LINEA_PROCESO_EMPAQUE)), [habilidadesOP]);
+  // Una vez por persona: el mismo operador puede tener varias líneas que contienen "EMPAQUE" y se
+  // repetía en el selector (aviso de React por clave duplicada, ej. 2073).
+  const operadoresEmpaque = useMemo(() => {
+    const porCodigo = new Map<string, OperadorHabilidad>();
+    habilidadesOP.forEach(o => { if (o.linea.includes(LINEA_PROCESO_EMPAQUE) && !porCodigo.has(o.codigo)) porCodigo.set(o.codigo, o); });
+    return [...porCodigo.values()];
+  }, [habilidadesOP]);
   const lineasProcesoDisponibles = useMemo(() => [...new Set(habilidadesOP.map(o => o.linea).filter(Boolean))].sort(), [habilidadesOP]);
 
   const capacidadEmpaquePorCentro = useMemo(() => {
