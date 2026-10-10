@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario, intervaloDeHorario, horasSolapadas } from '@/lib/restriccionesCapacidad';
-import { ejecucionPlanHtml, fechaHoraEjecucion } from '@/lib/ventana-plan';
+import { ejecucionPlanHtml, fechaHoraEjecucion, turnoDiaMtto } from '@/lib/ventana-plan';
 import { serviciosService } from '@/services/servicios.service';
 import { sapCompartido, refrescarDatosSap } from '@/lib/datos-sap-compartidos';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
@@ -2147,14 +2147,17 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         const ordenes = maquinasSAP.length === 0 ? [] : mantenimientosSAP.flatMap(row => {
           const maquina = norm(getProp(row, ['ID_MAQUINA', 'MAQUINA']));
           if (!maquinasSAP.includes(maquina)) return [];
-          const ini = new Date(String(getProp(row, ['FECHA_OT_PRG_INI'])));
+          // Regla única (usuario 2026-10-09, ver turnoDiaMtto): cuenta completo en el turno DÍA (o
+          // Sábado) de su fecha, nunca en la Noche.
+          const iniStr = String(getProp(row, ['FECHA_OT_PRG_INI']) || getProp(row, ['FECHA_PRO']));
+          const turno = turnoDiaMtto(iniStr, turnos);
+          if (!turno) return [];
+          const ini = new Date(iniStr);
           const fin = new Date(String(getProp(row, ['FECHA_OT_PRG_FIN'])));
-          if (isNaN(ini.getTime()) || isNaN(fin.getTime()) || fin <= ini) return [];
-          const enVentana = turnos.reduce((acc, t) => acc + horasSolapadas(ini, fin, t.ini, t.fin), 0);
-          if (enVentana <= 0) return [];
-          const durMin = Number(getProp(row, ['Duracion_Minutos'])) || 0;
-          const horas = durMin > 0 ? Math.min(durMin / 60, enVentana) : enVentana;
-          return [{ maquina, inicio: format(ini, 'EEE dd/MM HH:mm', { locale: es }), horas }];
+          const durMin = Number(getProp(row, ['Duracion_Minutos'])) || Number(getProp(row, ['TIEMPO'])) || 0;
+          const horas = durMin > 0 ? durMin / 60 : (!isNaN(ini.getTime()) && !isNaN(fin.getTime()) && fin > ini ? (fin.getTime() - ini.getTime()) / 3600000 : 0);
+          if (horas <= 0) return [];
+          return [{ maquina, inicio: format(isNaN(ini.getTime()) ? turno.ini : ini, 'EEE dd/MM HH:mm', { locale: es }), horas }];
         });
         resultado[m.id] = { horas: ordenes.reduce((acc, o) => acc + o.horas, 0), maquinas: maquinasSAP, ordenes };
       });
