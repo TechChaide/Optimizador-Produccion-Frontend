@@ -1,23 +1,45 @@
-import { addDays, format, getDay, parseISO } from 'date-fns';
+import { addDays, format, getDay, isValid, parseISO } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { fechaLocalEcuador } from '@/lib/dias-laborables';
+import { horasSolapadas } from '@/lib/restriccionesCapacidad';
 
 /**
- * Turno donde se descuenta una OT de mantenimiento (regla del usuario 2026-10-09, para Corte Espuma,
- * Laminado y Venta Externa): SISMAC carga el mantenimiento con fecha/hora y SIEMPRE lo ejecuta en el
- * turno DÍA de esa fecha (o el Sábado, si ese día es sábado con turno) — nunca en la Noche, aunque la
- * hora caiga de noche. Una OT de sábado o domingo sin turno pasa al lunes (como ya hacía Laminado).
- * Devuelve el turno de la ventana del plan en que cuenta COMPLETA, o null si ese día no está en la
- * ventana (ej. la noche del plan es del día anterior: su mantenimiento es de ese día, no del plan).
+ * Horas de una OT de mantenimiento dentro de la ventana del plan — regla única de Corte Espuma,
+ * Laminado y Venta Externa (usuario 2026-10-09, con ejemplos):
+ *  1. OT con HORA real (ej. 13/10 22:35 → 23:35): cuenta en el turno donde realmente cae — Día, Noche
+ *     o Sábado — solo lo que solapa (tope: su duración). Ventana mar 13/10 21:00 → mié 14/10 15:45:
+ *     esa OT es de la Noche del martes → descuenta 1 h; una de 14/10 11:35 → 12:35 cae en el Día.
+ *  2. OT solo con FECHA (SISMAC programa por día a las 0:00, o la hora real no toca ningún turno):
+ *     cuenta COMPLETA en el turno DÍA (o Sábado) de esa fecha — nunca en la Noche. Sábado o domingo
+ *     sin turno pasa al lunes.
+ * Devuelve las horas y el turno donde cuenta, o null si no cae en la ventana.
  */
-export const turnoDiaMtto = <T extends { turno: string; ini: Date }>(fechaOT: unknown, turnos: T[]): T | null => {
-  const dia = fechaLocalEcuador(fechaOT);
+export const mttoEnVentana = <T extends { turno: string; ini: Date; fin: Date }>(
+  ot: { inicio: unknown; fin: unknown; fecha?: unknown; duracionH: number },
+  turnos: T[],
+): { horas: number; turno: T; conHora: boolean } | null => {
+  const ini = new Date(String(ot.inicio ?? ''));
+  const fin = new Date(String(ot.fin ?? ''));
+  const conHora = isValid(ini) && format(ini, 'HH:mm') !== '00:00';
+  if (conHora && isValid(fin) && fin > ini) {
+    let mejor: { turno: T; horas: number } | null = null;
+    let total = 0;
+    turnos.forEach(t => {
+      const h = horasSolapadas(ini, fin, t.ini, t.fin);
+      total += h;
+      if (h > 0 && (!mejor || h > mejor.horas)) mejor = { turno: t, horas: h };
+    });
+    if (mejor && total > 0) return { horas: ot.duracionH > 0 ? Math.min(ot.duracionH, total) : total, turno: (mejor as { turno: T }).turno, conHora: true };
+  }
+  // Por fecha: turno Día (o Sábado) de ese día, nunca la Noche.
+  if (!(ot.duracionH > 0)) return null;
+  const dia = fechaLocalEcuador(ot.fecha || ot.inicio);
   if (!dia) return null;
   const turnoDe = (d: string) => turnos.find(t => t.turno !== 'Noche' && format(t.ini, 'yyyy-MM-dd') === d) ?? null;
-  const turno = turnoDe(dia);
-  if (turno) return turno;
+  let turno = turnoDe(dia);
   const wd = getDay(parseISO(dia));
-  return wd === 6 || wd === 0 ? turnoDe(format(addDays(parseISO(dia), wd === 6 ? 2 : 1), 'yyyy-MM-dd')) : null;
+  if (!turno && (wd === 6 || wd === 0)) turno = turnoDe(format(addDays(parseISO(dia), wd === 6 ? 2 : 1), 'yyyy-MM-dd'));
+  return turno ? { horas: ot.duracionH, turno, conHora: false } : null;
 };
 
 // Ventana del plan de producción (Corte Espuma / Corte Laminado): desde la noche anterior hasta el

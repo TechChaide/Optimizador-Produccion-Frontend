@@ -49,7 +49,7 @@ import {
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario, intervaloDeHorario, horasSolapadas } from '@/lib/restriccionesCapacidad';
-import { ejecucionPlanHtml, fechaHoraEjecucion, turnoDiaMtto } from '@/lib/ventana-plan';
+import { ejecucionPlanHtml, fechaHoraEjecucion, mttoEnVentana } from '@/lib/ventana-plan';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
@@ -3683,17 +3683,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // en minutos): esa hora no cae en ningún turno y antes la OT quedaba en 0 h (caso lun 12/10, LO00).
   // Una OT a las 0:00 cuenta entera en el turno Día/Sábado de ese día (sábado o domingo sin turno →
   // lunes, como la pestaña Mantenimiento); una OT con hora real cuenta solo lo que solapa los turnos.
-  // Regla única (usuario 2026-10-09, ver turnoDiaMtto): el MTTO cuenta completo en el turno DÍA (o
-  // Sábado) de su fecha, nunca en la Noche — antes una OT con hora real contaba lo que solapara
-  // cualquier turno, incluida la Noche.
+  // Regla única de los 3 módulos (ver mttoEnVentana): con hora real, el turno donde cae (también la
+  // Noche); solo con fecha (SISMAC, 0:00), completo en el turno Día de ese día.
   const horasMttoEnTurnos = (m: RawApiRow, turnos: { turno: string; ini: Date; fin: Date }[]): { horas: number; inicio: Date; porDia: boolean } | null => {
-    const dur = duracionMttoH(m);
     const iniStr = getProp(m, ['FECHA_OT_PRG_INI']) || getProp(m, ['FECHA_PRO']);
-    if (dur <= 0) return null;
-    const turno = turnoDiaMtto(getProp(m, ['FECHA_PRO']) || iniStr, turnos);
-    const ini = new Date(iniStr);
-    const conHora = isValid(ini) && format(ini, 'HH:mm') !== '00:00';
-    return turno ? { horas: dur, inicio: conHora ? ini : turno.ini, porDia: !conHora } : null;
+    const r = mttoEnVentana({ inicio: iniStr, fin: getProp(m, ['FECHA_OT_PRG_FIN']), fecha: getProp(m, ['FECHA_PRO']) || iniStr, duracionH: duracionMttoH(m) }, turnos);
+    return r ? { horas: r.horas, inicio: r.conHora ? new Date(iniStr) : r.turno.ini, porDia: !r.conHora } : null;
   };
 
   // Operación Adicional: tareas de MTTO preventivo del Looper (ver mantenimientosLooper).

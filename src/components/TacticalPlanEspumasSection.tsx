@@ -51,7 +51,7 @@ import { restriccionService } from '@/services/restriccion.service';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { pasoPanelDiagnosticoP2, type DiagnosticoP2 } from '@/lib/diagnostico-p2';
 import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario, intervaloDeHorario, horasSolapadas } from '@/lib/restriccionesCapacidad';
-import { ejecucionPlanHtml, fechaHoraEjecucion, turnoDiaMtto } from '@/lib/ventana-plan';
+import { ejecucionPlanHtml, fechaHoraEjecucion, mttoEnVentana } from '@/lib/ventana-plan';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { useAppContext } from '@/context/AppProvider';
@@ -2773,12 +2773,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const turnos = planta === 'UIO' || planta === 'GYE' ? turnosVentanaMaquina(planta, target, fecha) : [];
     const delDia = (m: RawApiRow) => fechaLocalEcuador(getProp(m, ['FECHA_OT_PRG_INI'])) === fecha;
     if (turnos.length === 0) return filas.filter(delDia).reduce((sum, row) => sum + getMttoDurationH(row), 0);
-    // Regla única (usuario 2026-10-09, ver turnoDiaMtto): el MTTO cuenta completo en el turno DÍA (o
-    // Sábado) de su fecha, nunca en la Noche. Antes contaba lo que solapara cualquier turno (también
-    // la Noche) y una OT de SISMAC a las 0:00 no solapaba nada y quedaba en 0.
-    return filas.reduce((sum, row) => (
-      turnoDiaMtto(getProp(row, ['FECHA_OT_PRG_INI']) || getProp(row, ['FECHA_PRO']), turnos) ? sum + getMttoDurationH(row) : sum
-    ), 0);
+    // Regla única de los 3 módulos (ver mttoEnVentana): con hora real, el turno donde cae (también la
+    // Noche); solo con fecha (SISMAC, 0:00), completo en el turno Día de ese día — antes esa OT no
+    // solapaba ningún turno y quedaba en 0.
+    return filas.reduce((sum, row) => {
+      const iniStr = getProp(row, ['FECHA_OT_PRG_INI']) || getProp(row, ['FECHA_PRO']);
+      const r = mttoEnVentana({ inicio: iniStr, fin: getProp(row, ['FECHA_OT_PRG_FIN']), fecha: getProp(row, ['FECHA_PRO']) || iniStr, duracionH: getMttoDurationH(row) }, turnos);
+      return sum + (r?.horas ?? 0);
+    }, 0);
   }, [uniqueMantenimientosSAP, turnosVentanaMaquina]);
 
   // Pendiente FERT = solo el EXCESO del turno (regla de Laminado, usuario 2026-10-06; desde 2026-10-07 con
