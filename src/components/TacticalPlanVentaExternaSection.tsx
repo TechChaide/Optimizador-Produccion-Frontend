@@ -3276,23 +3276,24 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                                 className="w-12 bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] font-black text-slate-700 outline-none text-right"
                               />
                               <span className="text-[10px] font-black text-slate-500">%</span>
+                              {/* Operadores por turno: informativos (no multiplican la capacidad) hasta la
+                                  asignación por habilidades (pendiente, ver cuboHabilidadesOP). */}
+                              <span className="ml-2 text-[9px] font-bold text-slate-500 uppercase">Operadores</span>
+                              <input
+                                type="number" min={0} value={comun(t.op) === '' ? '' : comun(t.op) as number}
+                                placeholder="Mixto"
+                                onChange={(e) => setPlanta({ [t.op]: Number(e.target.value) || 0 } as Partial<EmpaqueShiftConfig>)}
+                                className="w-12 bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] font-black text-slate-700 outline-none text-right"
+                              />
                             </div>
                           );
                         })}
                       </div>
 
-                      {/* Barra del grupo: el rendimiento se edita una vez para todas las máquinas. */}
+                      {/* Barra del grupo. El rendimiento se edita solo en el recuadro de cada máquina
+                          (usuario 2026-10-09: no duplicarlo). */}
                       <div className="flex items-center justify-center gap-2 py-1.5 border-b-2 border-teal-300 bg-teal-50/50">
                         <span className="text-[10px] font-black uppercase tracking-widest text-teal-700">Empaque ({maquinas.length})</span>
-                        <span className="text-[9px] font-bold text-teal-700/70 uppercase">Rend.</span>
-                        <input
-                          type="number" min={0} max={100}
-                          value={comun('rendimiento') === '' ? '' : comun('rendimiento') as number}
-                          placeholder="Mixto"
-                          onChange={(e) => setPlanta({ rendimiento: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })}
-                          title={`Precargado desde la restricción ${maquinas.map(m => m.restriccionRendimiento).join(', ')} del grupo; editable para un ajuste puntual.`}
-                          className="w-12 bg-white border border-teal-200 rounded px-1 py-0.5 text-[10px] font-black text-teal-700 outline-none focus:border-teal-500"
-                        />
                       </div>
 
                       <div className="grid" style={{ gridTemplateColumns: `repeat(${maquinas.length}, minmax(0, 1fr))` }}>
@@ -3324,8 +3325,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                                   {c.activa ? 'En servicio' : 'Fuera de servicio'}
                                 </button>
                               </div>
-                              <div className="p-3 grid grid-cols-1 md:grid-cols-3 gap-3">
-                                <div className="space-y-3">
+                              {/* Con una sola máquina los turnos se fijan solo arriba (usuario 2026-10-09: no
+                                  duplicar la selección); con varias, cada columna permite el ajuste puntual. */}
+                              <div className={cn("p-3 grid grid-cols-1 gap-3", maquinas.length > 1 ? "md:grid-cols-3" : "")}>
+                                <div className={cn("gap-3", maquinas.length > 1 ? "space-y-3" : "grid grid-cols-1 md:grid-cols-2 items-start")}>
                                   <div className="space-y-1">
                                     <p className="text-[10px] font-black text-slate-500 uppercase tracking-wide">
                                       Mtto Preventivo{c.mttoManual ? ' (ajustado)' : sap && sap.maquinas.length > 0 ? ` · SAP ${sap.maquinas.join(', ')}` : ''}
@@ -3380,7 +3383,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                                     </div>
                                   </div>
                                 </div>
-                                <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                {maquinas.length > 1 && <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3">
                                   {turnosPlanta.map(t => (
                                     <div key={t.campo} className="space-y-2">
                                       <p className="text-[10px] font-black text-slate-500 uppercase tracking-wide">Turno {t.etiqueta}</p>
@@ -3401,7 +3404,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                                       </div>
                                     </div>
                                   ))}
-                                </div>
+                                </div>}
                               </div>
                             </div>
                           );
