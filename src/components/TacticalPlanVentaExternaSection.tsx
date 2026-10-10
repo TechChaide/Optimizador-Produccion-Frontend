@@ -33,7 +33,6 @@ import {
 } from "@/components/ui/popover";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 import { Progress } from "@/components/ui/progress";
-import { VentaExternaTiemposServicioTab, minPorUnidadTiempo } from '@/components/VentaExternaTiemposServicioTab';
 
 // Respaldo SOLO para cuando el material no tiene tiempo estándar real en el catálogo SAP (ver
 // calculateSummary/matchTiempoEstandar) — antes era el único cálculo usado, sobreestimando el
@@ -644,7 +643,23 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     }
   };
 
-  const fetchTiemposEnsamblado = async (filteredGroups: Grupo[]) => {
+  // Tabla completa /TiemposEnsamblado (getTiemposEnsamblado), paginada como en useTiemposFertData.
+  const fetchTiemposEnsambladoCompleto = async (): Promise<Record<string, unknown>[]> => {
+    const todos: Record<string, unknown>[] = [];
+    const pageSize = 10000;
+    for (let page = 1; page <= 30; page++) {
+      const res = await serviciosService.getTiemposEnsamblado(page, pageSize);
+      const filas = (Array.isArray(res?.data) ? res.data : res?.data?.data || []) as Record<string, unknown>[];
+      todos.push(...filas);
+      const total = Number((res as { totalRegistros?: number; totalRecords?: number })?.totalRegistros || (res as { totalRecords?: number })?.totalRecords || 0);
+      if (filas.length < pageSize || (total > 0 && todos.length >= total)) break;
+    }
+    return todos;
+  };
+
+  // fertPromesa: las Órdenes FERT de la misma sincronización, para traer de la tabla completa solo
+  // los materiales que de verdad se planifican (no las ~decenas de miles de filas de toda la planta).
+  const fetchTiemposEnsamblado = async (filteredGroups: Grupo[], fertPromesa?: Promise<Record<string, unknown>[]>) => {
     try {
       const allTiempos: Record<string, unknown>[] = [];
       for (const g of filteredGroups) {
@@ -656,6 +671,27 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           if (Array.isArray(actualData)) allTiempos.push(...actualData.map((t: Record<string, unknown>) => (t.CENTRO || t.Centro || t.centro ? t : { ...t, Centro: String(g.centro) })));
         } catch {
           console.warn(`Error cargando tiempos para grupo ${g.codigo_grupo}`);
+        }
+      }
+      // Respaldo (usuario 2026-10-09): con los grupos de Venta Externa el PR2 no trae los PT de
+      // Empaque (20003095 salía a 15 s/und) → se completa con la tabla completa getTiemposEnsamblado,
+      // solo para materiales FERT de los centros 1000/2000 que el PR2 no trajo. Las filas del PR2 van
+      // primero, así matchTiempoEstandar las sigue prefiriendo.
+      if (fertPromesa) {
+        try {
+          const [completo, fert] = await Promise.all([fetchTiemposEnsambladoCompleto(), fertPromesa]);
+          const codigo = (t: Record<string, unknown>) => extractMaterialInfo(t).code;
+          const enPr2 = new Set(allTiempos.map(t => `${String(t.CENTRO || t.Centro || t.centro || '').trim()}|${codigo(t)}`));
+          const fertCodigos = new Set(fert.map(codigo));
+          const extra = completo.filter(t => {
+            const c = String(t.CENTRO || t.Centro || t.centro || '').trim();
+            return (c === '1000' || c === '2000') && fertCodigos.has(codigo(t)) && !enPr2.has(`${c}|${codigo(t)}`);
+          });
+          allTiempos.push(...extra);
+          const ejemplo = completo.filter(t => codigo(t) === '20003095');
+          console.info(`[Tiempos VE] PR2 (grupos VE): ${allTiempos.length - extra.length} filas; TiemposEnsamblado completo: ${completo.length} filas, ${extra.length} agregadas para FERT sin tiempo PR2. 20003095 en TiemposEnsamblado: ${ejemplo.length}`, ejemplo);
+        } catch (error) {
+          console.warn('[Tiempos VE] TiemposEnsamblado completo sin respuesta:', (error as Error).message);
         }
       }
       setTiemposEnsamblado(allTiempos);
@@ -702,10 +738,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       const groups = await fetchGrupos();
       contar('Grupos', groups.length > 0);
       const ids = groups.map(g => g.codigo_grupo);
+      const ordenesPromesa = fetchOrdenes(contar);
       const [restrs, ordenesRes, tiempos, mttos] = await Promise.all([
         fetchRestricciones(ids).then(r => { contar('Restricciones', true); return r; }),
-        fetchOrdenes(contar),
-        fetchTiemposEnsamblado(groups).then(r => { contar('Tiempos de ensamblado', true); return r; }),
+        ordenesPromesa,
+        fetchTiemposEnsamblado(groups, ordenesPromesa.then(o => o.ordenesFert)).then(r => { contar('Tiempos de ensamblado', true); return r; }),
         sapCompartido.mantenimientosPreventivos().then(
           r => { contar('Mantenimientos', true); return (Array.isArray(r.data) ? r.data : r.data?.data || []) as Record<string, unknown>[]; },
           () => { contar('Mantenimientos', false); return [] as Record<string, unknown>[]; }
@@ -1076,8 +1113,15 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     if (!candidates || candidates.length === 0) return null;
     // Minutos por unidad de una fila: Tiempo_Min / Tiempo; si la fila trae el tiempo reportado en
     // HORAS para una cantidad (TiempoPlastificado + Cantidad, ej. 360 und = 0.127 h), se divide.
-    // Acepta coma decimal; la regla vive en VentaExternaTiemposServicioTab (la misma que muestra esa pestaña).
-    const minPorUnidad = minPorUnidadTiempo;
+    // Acepta texto con coma decimal ("0,0212"): Number() lo daba NaN y caía en 15 s/und.
+    const num = (v: unknown) => Number(String(v ?? '').trim().replace(',', '.')) || 0;
+    const minPorUnidad = (t: Record<string, unknown>): number | null => {
+      const min = num(t.Tiempo_Min) || num(t.Tiempo);
+      if (min > 0) return min;
+      const horas = num(t.TiempoPlastificado);
+      const cant = num(t.Cantidad);
+      return horas > 0 && cant > 0 ? (horas * 60) / cant : null;
+    };
     const maq = String(maquina).trim().toUpperCase();
     // Filas de tiemposEnsambladoByGrupoYCentroPR2: CodMaterial, PuestoTrabajo, PuestoTrabajoLinea, Tiempo_Min.
     const byMaquina = maq ? candidates.find(t => minPorUnidad(t) !== null
@@ -3070,7 +3114,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid grid-cols-5 h-10 bg-gray-50/80 p-1 rounded-xl border border-gray-100 mb-6">
+        <TabsList className="grid grid-cols-4 h-10 bg-gray-50/80 p-1 rounded-xl border border-gray-100 mb-6">
           {/* Pestañas en el orden del flujo (mismo criterio que Espuma/Laminado, decisión del usuario
               2026-10-02): Plan P2 → Data Aprobada → Pendientes → Resumen (capacidad de Empaque + reporte).
               Provisionales y FERT quedan OCULTAS (opción A, solo consulta): sus TabsContent y datos se
@@ -3081,9 +3125,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             { v: 'planP2', l: '1 · Plan P2', i: Layers },
             { v: 'dataAprobada', l: '2 · Data Aprobada', i: ClipboardCheck },
             { v: 'resumen', l: '3 · Resumen', i: LayoutDashboard },
-            { v: 'pendientes', l: 'Pendientes', i: Clock },
-            // 2026-10-09 (usuario): consulta del servicio de tiempos para verificar el cálculo de Empaque.
-            { v: 'tiemposServicio', l: 'Tiempos (servicio)', i: Search }
+            { v: 'pendientes', l: 'Pendientes', i: Clock }
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[9px] font-bold uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-sm">
               <tab.i className="w-3.5 h-3.5" /> {tab.l}
@@ -4181,14 +4223,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               </div>
             );
           })}
-        </TabsContent>
-
-        <TabsContent value="tiemposServicio" className="space-y-6 animate-in fade-in duration-300">
-          <VentaExternaTiemposServicioTab
-            grupos={grupos}
-            tiemposModulo={{ '1000': tiemposC1000.length, '2000': tiemposC2000.length }}
-            lineasPfd={{ '1000': pfdVentaPreview['1000']?.lineas ?? [], '2000': pfdVentaPreview['2000']?.lineas ?? [] }}
-          />
         </TabsContent>
       </Tabs>
       <PanelProgreso panel={panelProgreso} />
