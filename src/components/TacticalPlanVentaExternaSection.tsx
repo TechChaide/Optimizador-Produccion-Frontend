@@ -643,23 +643,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     }
   };
 
-  // Tabla completa /TiemposEnsamblado (getTiemposEnsamblado), paginada como en useTiemposFertData.
-  const fetchTiemposEnsambladoCompleto = async (): Promise<Record<string, unknown>[]> => {
-    const todos: Record<string, unknown>[] = [];
-    const pageSize = 10000;
-    for (let page = 1; page <= 30; page++) {
-      const res = await serviciosService.getTiemposEnsamblado(page, pageSize);
-      const filas = (Array.isArray(res?.data) ? res.data : res?.data?.data || []) as Record<string, unknown>[];
-      todos.push(...filas);
-      const total = Number((res as { totalRegistros?: number; totalRecords?: number })?.totalRegistros || (res as { totalRecords?: number })?.totalRecords || 0);
-      if (filas.length < pageSize || (total > 0 && todos.length >= total)) break;
-    }
-    return todos;
-  };
-
-  // fertPromesa: las Órdenes FERT de la misma sincronización, para traer de la tabla completa solo
-  // los materiales que de verdad se planifican (no las ~decenas de miles de filas de toda la planta).
-  const fetchTiemposEnsamblado = async (filteredGroups: Grupo[], fertPromesa?: Promise<Record<string, unknown>[]>) => {
+  const fetchTiemposEnsamblado = async (filteredGroups: Grupo[]) => {
     try {
       const allTiempos: Record<string, unknown>[] = [];
       for (const g of filteredGroups) {
@@ -671,27 +655,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           if (Array.isArray(actualData)) allTiempos.push(...actualData.map((t: Record<string, unknown>) => (t.CENTRO || t.Centro || t.centro ? t : { ...t, Centro: String(g.centro) })));
         } catch {
           console.warn(`Error cargando tiempos para grupo ${g.codigo_grupo}`);
-        }
-      }
-      // Respaldo (usuario 2026-10-09): con los grupos de Venta Externa el PR2 no trae los PT de
-      // Empaque (20003095 salía a 15 s/und) → se completa con la tabla completa getTiemposEnsamblado,
-      // solo para materiales FERT de los centros 1000/2000 que el PR2 no trajo. Las filas del PR2 van
-      // primero, así matchTiempoEstandar las sigue prefiriendo.
-      if (fertPromesa) {
-        try {
-          const [completo, fert] = await Promise.all([fetchTiemposEnsambladoCompleto(), fertPromesa]);
-          const codigo = (t: Record<string, unknown>) => extractMaterialInfo(t).code;
-          const enPr2 = new Set(allTiempos.map(t => `${String(t.CENTRO || t.Centro || t.centro || '').trim()}|${codigo(t)}`));
-          const fertCodigos = new Set(fert.map(codigo));
-          const extra = completo.filter(t => {
-            const c = String(t.CENTRO || t.Centro || t.centro || '').trim();
-            return (c === '1000' || c === '2000') && fertCodigos.has(codigo(t)) && !enPr2.has(`${c}|${codigo(t)}`);
-          });
-          allTiempos.push(...extra);
-          const ejemplo = completo.filter(t => codigo(t) === '20003095');
-          console.info(`[Tiempos VE] PR2 (grupos VE): ${allTiempos.length - extra.length} filas; TiemposEnsamblado completo: ${completo.length} filas, ${extra.length} agregadas para FERT sin tiempo PR2. 20003095 en TiemposEnsamblado: ${ejemplo.length}`, ejemplo);
-        } catch (error) {
-          console.warn('[Tiempos VE] TiemposEnsamblado completo sin respuesta:', (error as Error).message);
         }
       }
       setTiemposEnsamblado(allTiempos);
@@ -738,11 +701,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       const groups = await fetchGrupos();
       contar('Grupos', groups.length > 0);
       const ids = groups.map(g => g.codigo_grupo);
-      const ordenesPromesa = fetchOrdenes(contar);
       const [restrs, ordenesRes, tiempos, mttos] = await Promise.all([
         fetchRestricciones(ids).then(r => { contar('Restricciones', true); return r; }),
-        ordenesPromesa,
-        fetchTiemposEnsamblado(groups, ordenesPromesa.then(o => o.ordenesFert)).then(r => { contar('Tiempos de ensamblado', true); return r; }),
+        fetchOrdenes(contar),
+        fetchTiemposEnsamblado(groups).then(r => { contar('Tiempos de ensamblado', true); return r; }),
         sapCompartido.mantenimientosPreventivos().then(
           r => { contar('Mantenimientos', true); return (Array.isArray(r.data) ? r.data : r.data?.data || []) as Record<string, unknown>[]; },
           () => { contar('Mantenimientos', false); return [] as Record<string, unknown>[]; }
