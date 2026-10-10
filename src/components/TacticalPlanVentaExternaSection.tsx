@@ -38,6 +38,11 @@ import { Progress } from "@/components/ui/progress";
 // calculateSummary/matchTiempoEstandar) — antes era el único cálculo usado, sobreestimando el
 // tiempo real hasta ~22x en casos verificados (ver comentario en calculateSummary).
 const PACKING_TIME_PER_UNIT_SECONDS = 15;
+// KPIMaestroCarruseles solo de los centros de Venta Externa y con los 3 campos que se usan (respaldo
+// del tiempo de empaque, ver conRespaldoCarruseles) — para no inflar la caché del módulo.
+const reducirCarruseles = (filas: Record<string, unknown>[]) => filas
+  .filter(c => ['1000', '2000'].includes(String(c.Centro ?? '').trim()))
+  .map(c => ({ Material: c.Material, Centro: String(c.Centro).trim(), TiempoCorte: c.TiempoCorte }));
 // Paquetes de planchas (usuario 2026-10-08): se apilan hasta 60 cm de altura nominal. Unidades por
 // paquete = ⌊60 / espesor (cm)⌋; paquetes = ⌈unidades del material / unidades por paquete⌉ (se arman
 // por material). Las C-PLANCHA siguen el mismo proceso y además se ENROLLA el paquete.
@@ -214,6 +219,8 @@ interface SnapshotVentaExterna {
   ordenesFert: Record<string, unknown>[];
   tiemposEnsamblado: Record<string, unknown>[];
   mantenimientosSAP?: Record<string, unknown>[];
+  // KPIMaestroCarruseles reducido (Material/Centro/TiempoCorte) — respaldo del tiempo de empaque.
+  kpiCarruseles?: Record<string, unknown>[];
   diasNoLaborables: string[];
   diasLaborablesExtra: string[];
   // Resultado YA CALCULADO del tab "Data Aprobada" (ver fetchDataAprobada) — a diferencia del resto
@@ -311,6 +318,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Mantenimiento preventivo programado en SAP (ListarMantenimientoPreventivosProgramados), solo para
   // las máquinas de Empaque (ver mttoSAPEmpaque).
   const [mantenimientosSAP, setMantenimientosSAP] = useState<Record<string, unknown>[]>([]);
+  const [kpiCarruseles, setKpiCarruseles] = useState<Record<string, unknown>[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   // Días NO laborables (feriados + días que la planta decide no trabajar) del calendario configurado.
   // Vacío = solo se saltan fines de semana. Se carga en el init de abajo.
@@ -688,7 +696,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       { id: 'p2gen', etiqueta: 'Generando P2 (Espumas / Rollos)' },
     ]);
     panelProgreso.actualizar('fecha', { estado: 'ok' });
-    const TOTAL_CONSULTAS = 6;
+    const TOTAL_CONSULTAS = 7;
     let hechas = 0;
     const fallidas: string[] = [];
     const contar = (nombre: string, ok: boolean) => {
@@ -701,7 +709,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       const groups = await fetchGrupos();
       contar('Grupos', groups.length > 0);
       const ids = groups.map(g => g.codigo_grupo);
-      const [restrs, ordenesRes, tiempos, mttos] = await Promise.all([
+      const [restrs, ordenesRes, tiempos, mttos, carruseles] = await Promise.all([
         fetchRestricciones(ids).then(r => { contar('Restricciones', true); return r; }),
         fetchOrdenes(contar),
         fetchTiemposEnsamblado(groups).then(r => { contar('Tiempos de ensamblado', true); return r; }),
@@ -709,8 +717,15 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           r => { contar('Mantenimientos', true); return (Array.isArray(r.data) ? r.data : r.data?.data || []) as Record<string, unknown>[]; },
           () => { contar('Mantenimientos', false); return [] as Record<string, unknown>[]; }
         ),
+        // Respaldo del tiempo de empaque (usuario 2026-10-09, ver tiempoLookup): misma descarga
+        // compartida que Corte Espuma; solo se guarda Material/Centro/TiempoCorte de 1000/2000.
+        sapCompartido.kpiMaestroCarruseles().then(
+          r => { contar('KPI Carruseles', true); return reducirCarruseles((Array.isArray(r.data) ? r.data : r.data?.data || []) as Record<string, unknown>[]); },
+          () => { contar('KPI Carruseles', false); return [] as Record<string, unknown>[]; }
+        ),
       ]);
       setMantenimientosSAP(mttos);
+      setKpiCarruseles(carruseles);
       panelProgreso.actualizar('datos', {
         estado: fallidas.length > 0 ? 'aviso' : 'ok',
         detalle: fallidas.length > 0 ? `Sin respuesta: ${fallidas.join(', ')} — se siguió con datos vacíos.` : undefined,
@@ -725,6 +740,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         ordenesFert: ordenesRes.ordenesFert,
         tiemposEnsamblado: tiempos,
         mantenimientosSAP: mttos,
+        kpiCarruseles: carruseles,
         diasNoLaborables: [...noLaborables],
         diasLaborablesExtra: [...laborablesExtra],
         // Data Aprobada y la Necesidad BOM se sincronizan aparte (ver fetchDataAprobada y
@@ -806,6 +822,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       setOrdersFert(snap.ordenesFert);
       setTiemposEnsamblado(snap.tiemposEnsamblado);
       setMantenimientosSAP(snap.mantenimientosSAP || []);
+      setKpiCarruseles(snap.kpiCarruseles || []);
       setDiasNoLaborables(new Set(snap.diasNoLaborables));
       setDiasLaborablesExtra(new Set(snap.diasLaborablesExtra || []));
       setDataAprobada(snap.dataAprobada || {});
@@ -1067,8 +1084,22 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     });
     return map;
   };
-  const tiempoLookup1000 = useMemo(() => buildTiempoLookup(tiemposC1000), [tiemposC1000]);
-  const tiempoLookup2000 = useMemo(() => buildTiempoLookup(tiemposC2000), [tiemposC2000]);
+  // Respaldo (usuario 2026-10-09): el PR2 de los grupos de Venta Externa no trae los PT de Empaque
+  // (20003095 caía en 15 s/und). El dato real está en KPIMaestroCarruseles: TiempoCorte en SEGUNDOS
+  // por unidad (20003095 = 1.27 s → 300 und = 0.106 h). Solo para materiales sin fila en el PR2; se
+  // agrega como fila Tiempo_Min = TiempoCorte / 60, así matchTiempoEstandar no cambia.
+  const conRespaldoCarruseles = (lookup: Map<string, Record<string, unknown>[]>, centro: string) => {
+    kpiCarruseles.forEach(c => {
+      if (String(c.Centro ?? '').trim() !== centro) return;
+      const code = extractMaterialInfo(c).code;
+      const seg = Number(String(c.TiempoCorte ?? '').replace(',', '.')) || 0;
+      if (!code || seg <= 0 || lookup.has(code)) return;
+      lookup.set(code, [{ CodMaterial: code, Centro: centro, Tiempo_Min: seg / 60, Fuente: 'KPIMaestroCarruseles' }]);
+    });
+    return lookup;
+  };
+  const tiempoLookup1000 = useMemo(() => conRespaldoCarruseles(buildTiempoLookup(tiemposC1000), '1000'), [tiemposC1000, kpiCarruseles]); // eslint-disable-line react-hooks/exhaustive-deps
+  const tiempoLookup2000 = useMemo(() => conRespaldoCarruseles(buildTiempoLookup(tiemposC2000), '2000'), [tiemposC2000, kpiCarruseles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const matchTiempoEstandar = (materialCode: string, maquina: string, lookup: Map<string, Record<string, unknown>[]>) => {
     const candidates = lookup.get(materialCode);
