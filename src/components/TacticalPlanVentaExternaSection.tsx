@@ -3569,9 +3569,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                       {center.d.map((o, i) => {
                         const info = extractMaterialInfo(o);
                         const qty = Number(o.CANTPROGRAMADA || o.CANTIDAD || 0);
-                        const empaqueHours = (qty * PACKING_TIME_PER_UNIT_SECONDS) / 3600;
                         const maquina = String(o.MAQUINA || o.Maquina || o.RECURSO || '—');
                         const tiempoEstandar = matchTiempoEstandar(info.code, maquina, center.lookup);
+                        // Mismo tiempo que el resto del módulo (PR2 → KPIMaestroCarruseles → 15 s/und).
+                        const empaqueHours = tiempoEstandar !== null ? (qty * tiempoEstandar) / 60 : (qty * PACKING_TIME_PER_UNIT_SECONDS) / 3600;
                         // Confirmado con datos reales (export de OrdenesProvisionalesPaginados): el campo NO
                         // se llama PEDIDO/POSICION como en FERT — se llama PEDIDOVENTAS/POSICIONPEDIDO. Por
                         // eso salían vacíos antes. buildCodBuscar trata ausentes como 0 (parseQty), no como
@@ -3667,9 +3668,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                       {center.d.map((o, i) => {
                         const info = extractMaterialInfo(o);
                         const qty = Number(o.CANTPROGRAMADA || o.CANTIDAD || 0);
-                        const empaqueHours = (qty * PACKING_TIME_PER_UNIT_SECONDS) / 3600;
                         const maquina = String(o.MAQUINA || o.RECURSO || '—');
                         const tiempoEstandar = matchTiempoEstandar(info.code, maquina, center.lookup);
+                        // Mismo tiempo que el resto del módulo (PR2 → KPIMaestroCarruseles → 15 s/und).
+                        const empaqueHours = tiempoEstandar !== null ? (qty * tiempoEstandar) / 60 : (qty * PACKING_TIME_PER_UNIT_SECONDS) / 3600;
                         const codBuscar = buildCodBuscar(o.POSICION, o.PEDIDO, o.MATERIAL);
 
                         return (
