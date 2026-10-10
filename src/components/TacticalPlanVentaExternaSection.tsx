@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/popover";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 import { Progress } from "@/components/ui/progress";
+import { VentaExternaTiemposServicioTab, minPorUnidadTiempo } from '@/components/VentaExternaTiemposServicioTab';
 
 // Respaldo SOLO para cuando el material no tiene tiempo estándar real en el catálogo SAP (ver
 // calculateSummary/matchTiempoEstandar) — antes era el único cálculo usado, sobreestimando el
@@ -1075,15 +1076,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     if (!candidates || candidates.length === 0) return null;
     // Minutos por unidad de una fila: Tiempo_Min / Tiempo; si la fila trae el tiempo reportado en
     // HORAS para una cantidad (TiempoPlastificado + Cantidad, ej. 360 und = 0.127 h), se divide.
-    // Acepta texto con coma decimal ("0,0212"): Number() lo daba NaN y caía en 15 s/und.
-    const num = (v: unknown) => Number(String(v ?? '').trim().replace(',', '.')) || 0;
-    const minPorUnidad = (t: Record<string, unknown>): number | null => {
-      const min = num(t.Tiempo_Min) || num(t.Tiempo);
-      if (min > 0) return min;
-      const horas = num(t.TiempoPlastificado);
-      const cant = num(t.Cantidad);
-      return horas > 0 && cant > 0 ? (horas * 60) / cant : null;
-    };
+    // Acepta coma decimal; la regla vive en VentaExternaTiemposServicioTab (la misma que muestra esa pestaña).
+    const minPorUnidad = minPorUnidadTiempo;
     const maq = String(maquina).trim().toUpperCase();
     // Filas de tiemposEnsambladoByGrupoYCentroPR2: CodMaterial, PuestoTrabajo, PuestoTrabajoLinea, Tiempo_Min.
     const byMaquina = maq ? candidates.find(t => minPorUnidad(t) !== null
@@ -3076,7 +3070,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid grid-cols-4 h-10 bg-gray-50/80 p-1 rounded-xl border border-gray-100 mb-6">
+        <TabsList className="grid grid-cols-5 h-10 bg-gray-50/80 p-1 rounded-xl border border-gray-100 mb-6">
           {/* Pestañas en el orden del flujo (mismo criterio que Espuma/Laminado, decisión del usuario
               2026-10-02): Plan P2 → Data Aprobada → Pendientes → Resumen (capacidad de Empaque + reporte).
               Provisionales y FERT quedan OCULTAS (opción A, solo consulta): sus TabsContent y datos se
@@ -3087,7 +3081,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             { v: 'planP2', l: '1 · Plan P2', i: Layers },
             { v: 'dataAprobada', l: '2 · Data Aprobada', i: ClipboardCheck },
             { v: 'resumen', l: '3 · Resumen', i: LayoutDashboard },
-            { v: 'pendientes', l: 'Pendientes', i: Clock }
+            { v: 'pendientes', l: 'Pendientes', i: Clock },
+            // 2026-10-09 (usuario): consulta del servicio de tiempos para verificar el cálculo de Empaque.
+            { v: 'tiemposServicio', l: 'Tiempos (servicio)', i: Search }
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[9px] font-bold uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-sm">
               <tab.i className="w-3.5 h-3.5" /> {tab.l}
@@ -4185,6 +4181,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               </div>
             );
           })}
+        </TabsContent>
+
+        <TabsContent value="tiemposServicio" className="space-y-6 animate-in fade-in duration-300">
+          <VentaExternaTiemposServicioTab
+            grupos={grupos}
+            tiemposModulo={{ '1000': tiemposC1000.length, '2000': tiemposC2000.length }}
+            lineasPfd={{ '1000': pfdVentaPreview['1000']?.lineas ?? [], '2000': pfdVentaPreview['2000']?.lineas ?? [] }}
+          />
         </TabsContent>
       </Tabs>
       <PanelProgreso panel={panelProgreso} />
