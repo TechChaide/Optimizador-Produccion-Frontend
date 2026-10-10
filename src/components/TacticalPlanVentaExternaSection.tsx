@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { ShoppingCart, Package, Loader2, LayoutDashboard, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Filter, TrendingUp, Box, X, Layers, Wand2, Save, ClipboardCheck, RefreshCw, Clock, Search, Mail, AlertCircle, FileText } from 'lucide-react';
+import { ShoppingCart, Package, Loader2, LayoutDashboard, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Filter, TrendingUp, Box, X, Layers, Wand2, Save, ClipboardCheck, RefreshCw, Clock, Search, Mail, AlertCircle, FileText, Wrench } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -502,8 +502,15 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // restriccionesCapacidad.ts). Sin restricción: jornada estándar (Día 07:00-15:45, Noche
   // 21:00-05:30, Sábado manual 07:00-13:00).
   const codigoGrupoVentaExternaDe = useCallback(
-    (centro: '1000' | '2000') => grupos.find(g => String(g.centro) === centro)?.codigo_grupo ?? -1,
-    [grupos]
+    // Si el centro tiene varios grupos de Venta Externa, el que tiene más restricciones activas (el
+    // que de verdad se configura). Antes se tomaba el primero y, si las restricciones estaban en otro,
+    // salían Rendimiento 100%, jornada estándar y "Sin restricción MANTENIMIENTO" (usuario 2026-10-09).
+    (centro: '1000' | '2000') => {
+      const delCentro = grupos.filter(g => String(g.centro).trim() === centro);
+      const activas = (codigo: number) => restricciones.filter(r => r.codigo_grupo === codigo && r.estado === 'A').length;
+      return [...delCentro].sort((a, b) => activas(b.codigo_grupo) - activas(a.codigo_grupo))[0]?.codigo_grupo ?? -1;
+    },
+    [grupos, restricciones]
   );
   const jornadaEmpaquePorCentro = useMemo(() => ({
     '1000': jornadaDesdeRestricciones(restricciones, codigoGrupoVentaExternaDe('1000')),
@@ -2128,11 +2135,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     };
     const resultado: Record<string, { horas: number; maquinas: string[]; ordenes: { maquina: string; inicio: string; horas: number }[] }> = {};
     (['1000', '2000'] as const).forEach(centro => {
-      const grupo = codigoGrupoVentaExternaDe(centro);
-      const maquinasSAP = restricciones
-        .filter(r => r.codigo_grupo === grupo && r.estado === 'A' && norm(r.nombre_restriccion) === 'MANTENIMIENTO')
+      // Todos los grupos de Venta Externa del centro (usuario 2026-10-09: la restricción MANTENIMIENTO
+      // MEE01 existía, pero en un grupo distinto del primero y salía "Sin restricción").
+      const gruposCentro = grupos.filter(g => String(g.centro).trim() === centro).map(g => g.codigo_grupo);
+      const maquinasSAP = [...new Set(restricciones
+        .filter(r => gruposCentro.includes(r.codigo_grupo) && r.estado === 'A' && norm(r.nombre_restriccion) === 'MANTENIMIENTO')
         .flatMap(r => String(r.valor_restriccion || '').split(/[&,;]/).map(norm))
-        .filter(Boolean);
+        .filter(Boolean))];
       EMPAQUE_MACHINES_BY_CENTRO[centro].forEach(m => {
         const turnos = ventanaEmpaque.turnosDe(m.id);
         const ordenes = maquinasSAP.length === 0 ? [] : mantenimientosSAP.flatMap(row => {
@@ -2151,7 +2160,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       });
     });
     return resultado;
-  }, [restricciones, codigoGrupoVentaExternaDe, mantenimientosSAP, ventanaEmpaque]);
+  }, [restricciones, grupos, mantenimientosSAP, ventanaEmpaque]);
   // Mantenimiento que se descuenta: el ajustado a mano, o el que trae SAP para la ventana.
   const mttoEmpaqueDe = useCallback((id: string) => {
     const c = empaqueConfig[id];
@@ -2159,21 +2168,25 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     return c.mttoManual ? c.mttoPreventivoHoras : (mttoSAPEmpaque[id]?.horas ?? 0);
   }, [empaqueConfig, mttoSAPEmpaque]);
 
-  const capacidadEmpaquePorCentro = useMemo(() => {
-    const calcular = (centro: '1000' | '2000') => EMPAQUE_MACHINES_BY_CENTRO[centro].reduce((total, m) => {
-      const c = empaqueConfig[m.id];
-      if (!c || !c.activa) return total;
-      const hDay = shiftOptionsEmpaque.find(o => o.v === c.day)?.h || 0;
-      const hNight = nightShiftOptionsEmpaque.find(o => o.v === c.night)?.h || 0;
-      // El Turno Sábado solo suma si un sábado cae dentro de la ventana del plan (ver ventanaEmpaque).
-      const hSat = ventanaEmpaque.sabadoCuenta ? (shiftOptionsEmpaque.find(o => o.v === c.saturday)?.h || 0) : 0;
-      // Rendimiento de la máquina (Rendimiento_<máquina>, ej. Electrotecks 56%) sobre las horas netas
-      // de paros; luego se descuenta el mantenimiento — mismo orden que Corte Espuma.
-      const neto = (hDay * (1 - c.paroDay / 100) + hNight * (1 - c.paroNight / 100) + hSat * (1 - c.paroSaturday / 100)) * (c.rendimiento / 100);
-      return total + Math.max(0, neto - mttoEmpaqueDe(m.id));
-    }, 0);
-    return { '1000': calcular('1000'), '2000': calcular('2000') };
+  // Horas de UNA máquina de empaque: bruto (Día+Noche+Sábado, sin paros ni rendimiento — "Tiempo
+  // Máquina" de la columna, como Corte Espuma) y neto (con paros y rendimiento, menos mantenimiento).
+  const horasMaquinaEmpaque = useCallback((id: string) => {
+    const c = empaqueConfig[id];
+    if (!c || !c.activa) return { bruto: 0, neto: 0 };
+    const hDay = shiftOptionsEmpaque.find(o => o.v === c.day)?.h || 0;
+    const hNight = nightShiftOptionsEmpaque.find(o => o.v === c.night)?.h || 0;
+    // El Turno Sábado solo suma si un sábado cae dentro de la ventana del plan (ver ventanaEmpaque).
+    const hSat = ventanaEmpaque.sabadoCuenta ? (shiftOptionsEmpaque.find(o => o.v === c.saturday)?.h || 0) : 0;
+    // Rendimiento de la máquina (Rendimiento_<máquina>, ej. Electrotecks 56%) sobre las horas netas
+    // de paros; luego se descuenta el mantenimiento — mismo orden que Corte Espuma.
+    const neto = (hDay * (1 - c.paroDay / 100) + hNight * (1 - c.paroNight / 100) + hSat * (1 - c.paroSaturday / 100)) * (c.rendimiento / 100);
+    return { bruto: hDay + hNight + hSat, neto: Math.max(0, neto - mttoEmpaqueDe(id)) };
   }, [empaqueConfig, shiftOptionsEmpaque, nightShiftOptionsEmpaque, ventanaEmpaque.sabadoCuenta, mttoEmpaqueDe]);
+
+  const capacidadEmpaquePorCentro = useMemo(() => {
+    const calcular = (centro: '1000' | '2000') => EMPAQUE_MACHINES_BY_CENTRO[centro].reduce((total, m) => total + horasMaquinaEmpaque(m.id).neto, 0);
+    return { '1000': calcular('1000'), '2000': calcular('2000') };
+  }, [horasMaquinaEmpaque]);
 
   // Bloque Espumas del resumen de Empaque: nivel FERT/PT (producto TERMINADO que de verdad se empaca),
   // no el componente/semi-elaborado — sube desde Data Aprobada "completo" hasta su FERT/PT padre
@@ -3147,37 +3160,49 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               </div>
             </div>
             {(['1000', '2000'] as const).map(centro => {
+              // Mismo esquema que Capacidad Operativa de Corte Espuma (usuario 2026-10-09): cabecera,
+              // ejecución del plan, turnos de la planta (aplican a todas las máquinas), barra del grupo
+              // con el rendimiento, una columna por máquina (renderMachineCol) y abajo el agregado
+              // Capacidad Total / % Ocupación. Mismo cálculo de antes (horasMaquinaEmpaque).
               const r = resumenEmpaquePorCentro[centro];
               const maquinas = EMPAQUE_MACHINES_BY_CENTRO[centro];
               const sobreCapacidad = r.ocupacionPct !== null && r.ocupacionPct > 100;
+              const activas = maquinas.filter(m => empaqueConfig[m.id]?.activa);
+              const mttoCentro = maquinas.reduce((s, m) => s + (empaqueConfig[m.id]?.activa ? mttoEmpaqueDe(m.id) : 0), 0);
+              const setMaquina = (id: string, patch: Partial<EmpaqueShiftConfig>) => setEmpaqueConfig(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+              const setPlanta = (patch: Partial<EmpaqueShiftConfig>) => setEmpaqueConfig(prev => {
+                const next = { ...prev };
+                maquinas.forEach(m => { if (next[m.id]) next[m.id] = { ...next[m.id], ...patch }; });
+                return next;
+              });
+              // Valor común de un campo entre las máquinas del centro ('' = Mixto).
+              const comun = <K extends keyof EmpaqueShiftConfig>(k: K): EmpaqueShiftConfig[K] | '' => {
+                const valores = new Set(maquinas.map(m => empaqueConfig[m.id]?.[k]));
+                return valores.size === 1 ? [...valores][0] as EmpaqueShiftConfig[K] : '';
+              };
+              const turnosPlanta = [
+                { campo: 'day' as const, paro: 'paroDay' as const, op: 'operadoresDay' as const, etiqueta: 'Día', opciones: shiftOptionsEmpaque, color: 'text-amber-700' },
+                { campo: 'night' as const, paro: 'paroNight' as const, op: 'operadoresNight' as const, etiqueta: 'Noche', opciones: nightShiftOptionsEmpaque, color: 'text-purple-700' },
+                { campo: 'saturday' as const, paro: 'paroSaturday' as const, op: 'operadoresSaturday' as const, etiqueta: 'Sábado', opciones: shiftOptionsEmpaque, color: 'text-amber-700' },
+              ];
+              const turnosSinHorario = activas.flatMap(m => [
+                empaqueConfig[m.id]?.day === 'EMPTY' ? `${m.id} día` : null,
+                empaqueConfig[m.id]?.night === 'EMPTY' ? `${m.id} noche` : null,
+              ].filter(Boolean) as string[]);
               return (
-                <div key={centro} className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
-                  <div className="px-6 py-4 bg-slate-50/70 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
+                <div key={centro} className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left font-sans">
+                  <div className="px-8 py-4 bg-slate-50/70 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-baseline gap-3">
-                      <h4 className="text-lg font-black tracking-tighter text-gray-800">CENTRO {centro}</h4>
+                      <h4 className="text-xl font-black tracking-tighter text-gray-800">CENTRO {centro}</h4>
                       <p className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Gestión de Tiempos · Empaque</p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <div className="text-center px-3 py-1.5 rounded-lg border border-gray-200 bg-white min-w-[92px]">
-                        <p className="text-[9px] font-black uppercase text-slate-500 tracking-widest">Horas Necesarias</p>
-                        <p className="text-sm font-black text-slate-800 tabular-nums">{r.totalHoras.toFixed(2)} h</p>
-                      </div>
-                      <div className="text-center px-3 py-1.5 rounded-lg border border-gray-200 bg-white min-w-[92px]">
-                        <p className="text-[9px] font-black uppercase text-slate-500 tracking-widest">Capacidad</p>
-                        <p className="text-sm font-black text-slate-800 tabular-nums">{r.capacidadHoras.toFixed(2)} h</p>
-                      </div>
-                      <div className={cn("text-center px-3 py-1.5 rounded-lg border min-w-[92px]", sobreCapacidad ? "border-red-200 bg-red-50" : "border-emerald-200 bg-emerald-50")}>
-                        <p className={cn("text-[9px] font-black uppercase tracking-widest", sobreCapacidad ? "text-red-700" : "text-emerald-700")}>% Ocupación</p>
-                        <p className={cn("text-sm font-black tabular-nums", sobreCapacidad ? "text-red-700" : "text-emerald-700")}>
-                          {r.ocupacionPct !== null ? `${r.ocupacionPct.toFixed(0)}%` : '—'}
-                        </p>
-                      </div>
                       {/* Reporte propio de este centro (mismo esquema que Laminado, usuario 2026-10-08). */}
                       <Popover>
                         <PopoverTrigger asChild>
                           <button
                             type="button"
-                            className="flex items-center gap-1.5 rounded-lg border border-cyan-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-widest text-cyan-700 hover:bg-cyan-50"
+                            className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50"
                           >
                             <Mail className="w-3.5 h-3.5" /> Enviar Reporte
                           </button>
@@ -3202,8 +3227,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
                   {ventanaEmpaque[centro] && (
                     <div
-                      className="mx-6 mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 bg-blue-50/50 border border-blue-100 rounded-lg px-3 py-1.5"
-                      title="Desde la noche del día hábil anterior hasta el fin del turno día del plan (siguiente día hábil). El Turno Sábado solo suma si un sábado cae dentro."
+                      className="mx-8 mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 bg-blue-50/50 border border-blue-100 rounded-lg px-3 py-1.5"
+                      title="Desde la noche del día hábil anterior hasta el fin del turno día del plan (siguiente día hábil). El MTTO solo resta si cae dentro de los turnos. El Turno Sábado solo suma si un sábado cae dentro."
                     >
                       <span className="text-[9px] font-black uppercase tracking-widest text-blue-700">Ejecución del plan de producción</span>
                       <span className="text-[11px] font-black text-slate-700 tabular-nums">
@@ -3217,119 +3242,206 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                     </div>
                   )}
 
-                  <div className="p-4 space-y-4">
-                    {maquinas.length === 0 ? (
-                      <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest text-center py-6">Sin máquina de empaque registrada en este centro</p>
-                    ) : maquinas.map(m => {
-                      const c = empaqueConfig[m.id];
-                      if (!c) return null;
-                      const setC = (patch: Partial<EmpaqueShiftConfig>) => setEmpaqueConfig(prev => ({ ...prev, [m.id]: { ...prev[m.id], ...patch } }));
-                      return (
-                        <div key={m.id} className={cn("rounded-xl border border-gray-100 p-4 space-y-3", !c.activa && "bg-slate-50/80")}>
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <p className={cn("text-xs font-black uppercase tracking-tight", c.activa ? "text-slate-800" : "text-slate-500 line-through")}>{m.nombre}</p>
-                              <p className={cn("text-[10px] font-bold uppercase", c.activa ? "text-slate-500" : "text-slate-400")}>{m.id}</p>
+                  {maquinas.length === 0 ? (
+                    <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest text-center py-6">Sin máquina de empaque registrada en este centro</p>
+                  ) : (
+                    <>
+                      {/* Turnos de la planta: aplican a todas las máquinas del centro (como Corte Espuma);
+                          cada columna permite el ajuste puntual. */}
+                      <div className="px-8 py-3 bg-white border-b border-gray-100 flex flex-col gap-1.5">
+                        {turnosPlanta.map(t => {
+                          const valor = comun(t.campo);
+                          const paro = comun(t.paro);
+                          const horasBase = t.opciones.find(o => o.v === valor)?.h || 0;
+                          return (
+                            <div key={t.campo} className="flex items-center gap-3">
+                              <span className="text-[10px] font-black text-slate-500 uppercase w-14">{t.etiqueta}</span>
+                              <select
+                                value={valor}
+                                onChange={(e) => setPlanta({ [t.campo]: e.target.value } as Partial<EmpaqueShiftConfig>)}
+                                className={cn("bg-white border border-slate-200 rounded-md px-2 py-1 text-[10px] font-black outline-none appearance-none cursor-pointer w-[160px]", t.color)}
+                                title={`Aplica este horario a las ${maquinas.length} máquina(s) de empaque del centro ${centro}.`}
+                              >
+                                {valor === '' && <option value="">— Mixto —</option>}
+                                {t.opciones.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                              </select>
+                              <span className={cn("text-[10px] font-black whitespace-nowrap tabular-nums w-10", t.color)}>{horasBase}h</span>
+                              <span className="text-[9px] font-bold text-slate-500 uppercase">Paro</span>
+                              <input
+                                type="number" min={0} max={100} value={paro === '' ? '' : paro}
+                                placeholder="Mixto"
+                                onChange={(e) => setPlanta({ [t.paro]: Number(e.target.value) || 0 } as Partial<EmpaqueShiftConfig>)}
+                                className="w-12 bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] font-black text-slate-700 outline-none text-right"
+                              />
+                              <span className="text-[10px] font-black text-slate-500">%</span>
                             </div>
-                            {/* Botón de encendido/apagado (no checkbox) — mismo patrón que "En servicio"/
-                                "Fuera de servicio" en renderMachineCol de Corte Espuma: apagar la máquina
-                                cuando no hay demanda que la justifique, sin borrar sus turnos. */}
-                            <button
-                              type="button"
-                              onClick={() => setC({ activa: !c.activa })}
-                              className={cn(
-                                "rounded-md px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition-colors border shrink-0",
-                                c.activa
-                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
-                                  : "bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200"
-                              )}
-                              title={c.activa ? 'Máquina en servicio: sus horas suman a la capacidad. Click para apagarla.' : 'Máquina fuera de servicio: no aporta capacidad. Click para encenderla.'}
-                            >
-                              {c.activa ? 'En servicio' : 'Fuera de servicio'}
-                            </button>
-                          </div>
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            {([
-                              { key: 'day' as const, paroKey: 'paroDay' as const, opKey: 'operadoresDay' as const, label: 'Día', opts: shiftOptionsEmpaque, color: 'text-amber-700' },
-                              { key: 'night' as const, paroKey: 'paroNight' as const, opKey: 'operadoresNight' as const, label: 'Noche', opts: nightShiftOptionsEmpaque, color: 'text-purple-700' },
-                              { key: 'saturday' as const, paroKey: 'paroSaturday' as const, opKey: 'operadoresSaturday' as const, label: 'Sábado', opts: shiftOptionsEmpaque, color: 'text-amber-700' },
-                            ]).map(turno => (
-                              <div key={turno.key} className="border border-gray-200 rounded-lg p-2.5 space-y-1.5 bg-slate-50/40">
-                                <p className={cn("text-[10px] font-black uppercase tracking-wide", turno.color)}>{turno.label}</p>
-                                <select
-                                  value={c[turno.key]}
-                                  onChange={(e) => setC({ [turno.key]: e.target.value } as Partial<EmpaqueShiftConfig>)}
-                                  className={cn("w-full bg-white font-black text-[11px] rounded px-2 py-1.5 outline-none border border-gray-200", turno.color)}
+                          );
+                        })}
+                      </div>
+
+                      {/* Barra del grupo: el rendimiento se edita una vez para todas las máquinas. */}
+                      <div className="flex items-center justify-center gap-2 py-1.5 border-b-2 border-teal-300 bg-teal-50/50">
+                        <span className="text-[10px] font-black uppercase tracking-widest text-teal-700">Empaque ({maquinas.length})</span>
+                        <span className="text-[9px] font-bold text-teal-700/70 uppercase">Rend.</span>
+                        <input
+                          type="number" min={0} max={100}
+                          value={comun('rendimiento') === '' ? '' : comun('rendimiento') as number}
+                          placeholder="Mixto"
+                          onChange={(e) => setPlanta({ rendimiento: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })}
+                          title={`Precargado desde la restricción ${maquinas.map(m => m.restriccionRendimiento).join(', ')} del grupo; editable para un ajuste puntual.`}
+                          className="w-12 bg-white border border-teal-200 rounded px-1 py-0.5 text-[10px] font-black text-teal-700 outline-none focus:border-teal-500"
+                        />
+                      </div>
+
+                      <div className="grid" style={{ gridTemplateColumns: `repeat(${maquinas.length}, minmax(0, 1fr))` }}>
+                        {maquinas.map(m => {
+                          const c = empaqueConfig[m.id];
+                          if (!c) return null;
+                          const sap = mttoSAPEmpaque[m.id];
+                          const h = horasMaquinaEmpaque(m.id);
+                          // La necesidad de Empaque no viene por máquina: con una sola máquina activa es
+                          // toda suya; con varias solo se muestra el agregado de abajo.
+                          const tiempoProceso = c.activa && activas.length === 1 ? r.totalHoras : null;
+                          const pct = tiempoProceso !== null && h.neto > 0 ? (tiempoProceso / h.neto) * 100 : null;
+                          return (
+                            <div key={m.id} className={cn("col-span-1 border-r border-gray-100 last:border-r-0 flex flex-col", !c.activa && "bg-slate-50/80")}>
+                              <div className="p-3 border-b border-gray-100 text-center">
+                                <p className={cn("text-xs font-black uppercase tracking-tight", c.activa ? "text-slate-800" : "text-slate-500 line-through")}>{m.nombre}</p>
+                                <p className="text-[10px] font-bold uppercase truncate text-slate-500">{m.id}</p>
+                                <button
+                                  type="button"
+                                  onClick={() => setMaquina(m.id, { activa: !c.activa })}
+                                  className={cn(
+                                    "mt-1.5 w-full max-w-xs rounded-md px-2 py-1 text-[10px] font-black uppercase tracking-wider transition-colors border",
+                                    c.activa
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                                      : "bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200"
+                                  )}
+                                  title={c.activa ? 'Máquina en servicio: sus horas suman a la capacidad. Click para apagarla.' : 'Máquina fuera de servicio: no aporta capacidad. Click para encenderla.'}
                                 >
-                                  {turno.opts.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
-                                </select>
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Paro %</span>
-                                  <input
-                                    type="number" min={0} max={100} value={c[turno.paroKey]}
-                                    onChange={(e) => setC({ [turno.paroKey]: Number(e.target.value) || 0 } as Partial<EmpaqueShiftConfig>)}
-                                    className="w-14 bg-white border border-gray-200 rounded px-1.5 py-1 text-[10px] font-bold text-slate-700 outline-none text-right"
-                                  />
-                                </div>
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Operadores</span>
-                                  <input
-                                    type="number" min={0} value={c[turno.opKey]}
-                                    onChange={(e) => setC({ [turno.opKey]: Number(e.target.value) || 0 } as Partial<EmpaqueShiftConfig>)}
-                                    className="w-14 bg-white border border-gray-200 rounded px-1.5 py-1 text-[10px] font-bold text-slate-700 outline-none text-right"
-                                  />
-                                </div>
+                                  {c.activa ? 'En servicio' : 'Fuera de servicio'}
+                                </button>
                               </div>
-                            ))}
-                          </div>
-                          <div
-                            className="flex items-center justify-between gap-2 border-t border-gray-100 pt-2.5"
-                            title={`Precargado desde la restricción ${m.restriccionRendimiento} del grupo; editable para un ajuste puntual.`}
-                          >
-                            <span className="text-[10px] font-black text-slate-500 uppercase tracking-wide">Rendimiento máquina %</span>
-                            <input
-                              type="number" min={0} max={100} value={c.rendimiento}
-                              onChange={(e) => setC({ rendimiento: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })}
-                              className="w-16 bg-white border border-gray-200 rounded px-1.5 py-1 text-[10px] font-black text-slate-700 outline-none text-right"
-                            />
-                          </div>
-                          {(() => {
-                            const sap = mttoSAPEmpaque[m.id];
-                            return (
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-wide">
-                                    Mantenimiento Preventivo{c.mttoManual ? ' (ajustado)' : sap && sap.maquinas.length > 0 ? ` (SAP ${sap.maquinas.join(', ')})` : ''}
-                                  </span>
-                                  <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 rounded px-2 py-1">
-                                    <input
-                                      type="number" min={0} step={0.25} value={Number(mttoEmpaqueDe(m.id).toFixed(2))}
-                                      onChange={(e) => setC({ mttoPreventivoHoras: Number(e.target.value) || 0, mttoManual: true })}
-                                      className="w-14 bg-transparent text-[10px] font-black text-indigo-700 outline-none text-right"
-                                    />
-                                    <span className="text-[10px] font-black text-indigo-700">h</span>
+                              <div className="p-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div className="space-y-3">
+                                  <div className="space-y-1">
+                                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-wide">
+                                      Mtto Preventivo{c.mttoManual ? ' (ajustado)' : sap && sap.maquinas.length > 0 ? ` · SAP ${sap.maquinas.join(', ')}` : ''}
+                                    </p>
+                                    <div className="flex items-center justify-center gap-1 bg-indigo-50 border border-indigo-200 rounded p-1.5">
+                                      <input
+                                        type="number" min={0} step={0.25} value={Number(mttoEmpaqueDe(m.id).toFixed(2))}
+                                        onChange={(e) => setMaquina(m.id, { mttoPreventivoHoras: Number(e.target.value) || 0, mttoManual: true })}
+                                        className="w-14 bg-transparent text-[10px] font-black text-indigo-700 outline-none text-right"
+                                      />
+                                      <span className="text-[10px] font-black text-indigo-700">H</span>
+                                    </div>
+                                    {sap && sap.ordenes.length > 0 && (
+                                      <p className="text-[9px] text-slate-500">SAP en la ventana: {sap.ordenes.map(o => `${o.maquina} ${o.inicio} (${o.horas.toFixed(2)} h)`).join(' · ')}</p>
+                                    )}
+                                    {sap && sap.maquinas.length > 0 && sap.ordenes.length === 0 && !c.mttoManual && (
+                                      <p className="text-[9px] text-slate-500">SAP {sap.maquinas.join(', ')}: sin mantenimiento dentro de la ventana.</p>
+                                    )}
+                                    {sap && sap.maquinas.length === 0 && (
+                                      <p className="text-[9px] text-amber-600">Sin restricción MANTENIMIENTO en los grupos de Venta Externa del centro: se escribe a mano.</p>
+                                    )}
+                                    {c.mttoManual && sap && sap.maquinas.length > 0 && (
+                                      <button type="button" onClick={() => setMaquina(m.id, { mttoManual: false })} className="text-[9px] font-black uppercase text-indigo-700 hover:underline">
+                                        Volver a lo de SAP ({sap.horas.toFixed(2)} h)
+                                      </button>
+                                    )}
+                                  </div>
+                                  <div className="border border-gray-200 rounded-lg p-2 space-y-1.5 bg-slate-50/40">
+                                    <p className="text-[10px] font-black text-slate-600 uppercase tracking-wide">Empaque · {m.id}</p>
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Rendim. (%)</span>
+                                      <input
+                                        type="number" min={0} max={100} value={c.rendimiento}
+                                        onChange={(e) => setMaquina(m.id, { rendimiento: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })}
+                                        className="w-12 bg-white border border-gray-200 rounded px-1 py-0.5 text-[10px] font-black text-slate-700 outline-none text-right"
+                                      />
+                                    </div>
+                                    <div className="flex items-center justify-between gap-2" title="Horas de empaque que necesita el plan (mismo dato que sale en el correo).">
+                                      <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Tiempo Proceso</span>
+                                      <span className="text-[10px] font-black text-slate-700">{tiempoProceso !== null ? `${tiempoProceso.toFixed(1)}h` : '—'}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-2" title="Horas programadas (Día+Noche+Sábado) de este recurso, sin descontar paros ni rendimiento.">
+                                      <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Tiempo Máquina</span>
+                                      <span className="text-[10px] font-black text-slate-700">{h.bruto.toFixed(1)}h</span>
+                                    </div>
+                                    <div
+                                      className={cn("flex items-center justify-between gap-2 rounded p-1 -mx-1", pct !== null && pct > 100 ? "bg-red-50" : "bg-emerald-50")}
+                                      title={`Ocupación Recurso = Tiempo Proceso / capacidad neta (${h.neto.toFixed(2)}h con paros, rendimiento y MTTO).`}
+                                    >
+                                      <span className={cn("text-[9px] font-bold uppercase tracking-wide", pct !== null && pct > 100 ? "text-red-700" : "text-emerald-700")}>Ocupación Recurso</span>
+                                      <span className={cn("text-[10px] font-black", pct !== null && pct > 100 ? "text-red-700" : "text-emerald-700")}>{pct !== null ? `${pct.toFixed(0)}%` : '—'}</span>
+                                    </div>
                                   </div>
                                 </div>
-                                {sap && sap.ordenes.length > 0 && (
-                                  <p className="text-[10px] text-slate-500">
-                                    SAP en la ventana: {sap.ordenes.map(o => `${o.maquina} ${o.inicio} (${o.horas.toFixed(2)} h)`).join(' · ')}
-                                  </p>
-                                )}
-                                {sap && sap.maquinas.length === 0 && (
-                                  <p className="text-[10px] text-amber-600">Sin restricción MANTENIMIENTO en el grupo: el mantenimiento se escribe a mano.</p>
-                                )}
-                                {c.mttoManual && sap && sap.maquinas.length > 0 && (
-                                  <button type="button" onClick={() => setC({ mttoManual: false })} className="text-[10px] font-black uppercase text-indigo-700 hover:underline">
-                                    Volver a lo de SAP ({sap.horas.toFixed(2)} h)
-                                  </button>
-                                )}
+                                <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                  {turnosPlanta.map(t => (
+                                    <div key={t.campo} className="space-y-2">
+                                      <p className="text-[10px] font-black text-slate-500 uppercase tracking-wide">Turno {t.etiqueta}</p>
+                                      <select
+                                        value={c[t.campo]}
+                                        onChange={(e) => setMaquina(m.id, { [t.campo]: e.target.value } as Partial<EmpaqueShiftConfig>)}
+                                        className={cn("w-full bg-white font-black text-[11px] rounded px-2 py-1.5 outline-none border border-gray-200", t.color)}
+                                      >
+                                        {t.opciones.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                                      </select>
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Operadores</span>
+                                        <input
+                                          type="number" min={0} value={c[t.op]}
+                                          onChange={(e) => setMaquina(m.id, { [t.op]: Number(e.target.value) || 0 } as Partial<EmpaqueShiftConfig>)}
+                                          className="w-12 bg-white border border-gray-200 rounded px-1 py-0.5 text-[10px] font-bold text-slate-700 outline-none text-right"
+                                        />
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
                               </div>
-                            );
-                          })()}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Agregado del grupo (renderProcesoConfig de Corte Espuma): Capacidad Total y % Ocupación. */}
+                      <div className="flex justify-center p-3 border-t-2 bg-teal-50/30 border-teal-200">
+                        <div className="w-full max-w-sm space-y-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] font-black uppercase tracking-widest text-teal-700">Capacidad Total Empaque ({activas.length})</span>
+                            <div className="flex items-baseline gap-1">
+                              <span className="text-base font-black text-blue-700 tracking-tighter">{r.capacidadHoras.toFixed(1)}h</span>
+                              {turnosSinHorario.length > 0 && (
+                                <span className="inline-flex cursor-help shrink-0" title={`Turnos sin horario: ${turnosSinHorario.join(', ')}. Sus horas no entran en la capacidad.`}>
+                                  <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                                </span>
+                              )}
+                              {mttoCentro > 0 && (
+                                <span className="inline-flex cursor-help shrink-0" title={`Mantenimiento en la ventana del plan: −${mttoCentro.toFixed(2)}h, ya descontado de esta capacidad.`}>
+                                  <Wrench className="w-3.5 h-3.5 text-indigo-600" />
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between gap-2" title="Espumas (FERT/PT) + Rollos — mismo dato que sale en el correo.">
+                            <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Horas Necesarias</span>
+                            <span className="text-sm font-black text-slate-800 tabular-nums">{r.totalHoras.toFixed(2)}h</span>
+                          </div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest">% Ocupación</span>
+                            <span
+                              className={cn("text-base font-black tracking-tighter", sobreCapacidad ? "text-red-600" : "text-emerald-700")}
+                              title={`${r.totalHoras.toFixed(1)}h de ${r.capacidadHoras.toFixed(1)}h de capacidad`}
+                            >
+                              {r.ocupacionPct !== null ? `${r.ocupacionPct.toFixed(0)}%` : '—'}
+                            </span>
+                          </div>
                         </div>
-                      );
-                    })}
-                  </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               );
             })}
