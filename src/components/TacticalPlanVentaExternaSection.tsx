@@ -38,6 +38,25 @@ import { Progress } from "@/components/ui/progress";
 // calculateSummary/matchTiempoEstandar) — antes era el único cálculo usado, sobreestimando el
 // tiempo real hasta ~22x en casos verificados (ver comentario en calculateSummary).
 const PACKING_TIME_PER_UNIT_SECONDS = 15;
+// Personal de cuboHabilidadesOP (código, nombre y línea de proceso), sin repetidos. El código puede
+// venir como 'CodigoOperador ' (con espacio, igual que lo lee Corte Espuma).
+interface OperadorHabilidad { codigo: string; nombre: string; linea: string }
+const reducirHabilidades = (filas: Record<string, unknown>[]): OperadorHabilidad[] => {
+  const val = (f: Record<string, unknown>, keys: string[]) => String(keys.map(k => f[k]).find(v => v !== undefined && v !== null && String(v).trim() !== '') ?? '').trim();
+  const vistos = new Map<string, OperadorHabilidad>();
+  filas.forEach(f => {
+    const codigo = val(f, ['CodigoOperador ', 'CodigoOperador', 'CODIGO_OPERADOR']);
+    const linea = val(f, ['LineaProceso', 'LINEA_PROCESO']).toUpperCase();
+    if (!codigo) return;
+    const k = `${codigo}|${linea}`;
+    if (!vistos.has(k)) vistos.set(k, { codigo, nombre: val(f, ['NombreOperador', 'NOMBRE_OPERADOR']) || codigo, linea });
+  });
+  return [...vistos.values()].sort((a, b) => a.nombre.localeCompare(b.nombre));
+};
+// Línea de proceso de Empaque en cuboHabilidadesOP (usuario 2026-10-09: "saldría de empaque";
+// confirmar con el dato real — si nadie coincide, el Resumen muestra las líneas que trae el servicio).
+const LINEA_PROCESO_EMPAQUE = 'EMPAQUE';
+
 // KPIMaestroCarruseles solo de los centros de Venta Externa y con los 3 campos que se usan (respaldo
 // del tiempo de empaque, ver conRespaldoCarruseles) — para no inflar la caché del módulo.
 const reducirCarruseles = (filas: Record<string, unknown>[]) => filas
@@ -78,6 +97,11 @@ interface EmpaqueShiftConfig {
   operadoresDay: number;
   operadoresNight: number;
   operadoresSaturday: number;
+  // Operadores asignados por turno (códigos de cuboHabilidadesOP, usuario 2026-10-09); tantos
+  // puestos como operadores<Turno>. Opcional: planes guardados antes no lo traen.
+  asignadosDay?: string[];
+  asignadosNight?: string[];
+  asignadosSaturday?: string[];
   mttoPreventivoHoras: number;
   // true = el planificador escribió el mantenimiento a mano; false = se usa lo que trae SAP para la
   // ventana del plan (máquinas de la restricción MANTENIMIENTO, ver mttoSAPEmpaque).
@@ -221,6 +245,8 @@ interface SnapshotVentaExterna {
   mantenimientosSAP?: Record<string, unknown>[];
   // KPIMaestroCarruseles reducido (Material/Centro/TiempoCorte) — respaldo del tiempo de empaque.
   kpiCarruseles?: Record<string, unknown>[];
+  // Personal de cuboHabilidadesOP reducido (código, nombre, línea de proceso) — asignación en Empaque.
+  habilidadesOP?: OperadorHabilidad[];
   diasNoLaborables: string[];
   diasLaborablesExtra: string[];
   // Resultado YA CALCULADO del tab "Data Aprobada" (ver fetchDataAprobada) — a diferencia del resto
@@ -319,6 +345,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // las máquinas de Empaque (ver mttoSAPEmpaque).
   const [mantenimientosSAP, setMantenimientosSAP] = useState<Record<string, unknown>[]>([]);
   const [kpiCarruseles, setKpiCarruseles] = useState<Record<string, unknown>[]>([]);
+  const [habilidadesOP, setHabilidadesOP] = useState<OperadorHabilidad[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   // Días NO laborables (feriados + días que la planta decide no trabajar) del calendario configurado.
   // Vacío = solo se saltan fines de semana. Se carga en el init de abajo.
@@ -704,7 +731,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       { id: 'p2gen', etiqueta: 'Generando P2 (Espumas / Rollos)' },
     ]);
     panelProgreso.actualizar('fecha', { estado: 'ok' });
-    const TOTAL_CONSULTAS = 7;
+    const TOTAL_CONSULTAS = 8;
     let hechas = 0;
     const fallidas: string[] = [];
     const contar = (nombre: string, ok: boolean) => {
@@ -717,7 +744,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       const groups = await fetchGrupos();
       contar('Grupos', groups.length > 0);
       const ids = groups.map(g => g.codigo_grupo);
-      const [restrs, ordenesRes, tiempos, mttos, carruseles] = await Promise.all([
+      const [restrs, ordenesRes, tiempos, mttos, carruseles, habilidades] = await Promise.all([
         fetchRestricciones(ids).then(r => { contar('Restricciones', true); return r; }),
         fetchOrdenes(contar),
         fetchTiemposEnsamblado(groups).then(r => { contar('Tiempos de ensamblado', true); return r; }),
@@ -731,9 +758,16 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           r => { contar('KPI Carruseles', true); return reducirCarruseles((Array.isArray(r.data) ? r.data : r.data?.data || []) as Record<string, unknown>[]); },
           () => { contar('KPI Carruseles', false); return [] as Record<string, unknown>[]; }
         ),
+        // Personal por habilidades para asignar operadores de Empaque (misma descarga compartida
+        // que Corte Espuma y Laminado).
+        sapCompartido.cuboHabilidadesOP().then(
+          r => { contar('Habilidades de operadores', true); return reducirHabilidades((Array.isArray(r.data) ? r.data : r.data?.data || []) as Record<string, unknown>[]); },
+          () => { contar('Habilidades de operadores', false); return [] as OperadorHabilidad[]; }
+        ),
       ]);
       setMantenimientosSAP(mttos);
       setKpiCarruseles(carruseles);
+      setHabilidadesOP(habilidades);
       panelProgreso.actualizar('datos', {
         estado: fallidas.length > 0 ? 'aviso' : 'ok',
         detalle: fallidas.length > 0 ? `Sin respuesta: ${fallidas.join(', ')} — se siguió con datos vacíos.` : undefined,
@@ -749,6 +783,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         tiemposEnsamblado: tiempos,
         mantenimientosSAP: mttos,
         kpiCarruseles: carruseles,
+        habilidadesOP: habilidades,
         diasNoLaborables: [...noLaborables],
         diasLaborablesExtra: [...laborablesExtra],
         // Data Aprobada y la Necesidad BOM se sincronizan aparte (ver fetchDataAprobada y
@@ -831,6 +866,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       setTiemposEnsamblado(snap.tiemposEnsamblado);
       setMantenimientosSAP(snap.mantenimientosSAP || []);
       setKpiCarruseles(snap.kpiCarruseles || []);
+      setHabilidadesOP(snap.habilidadesOP || []);
       setDiasNoLaborables(new Set(snap.diasNoLaborables));
       setDiasLaborablesExtra(new Set(snap.diasLaborablesExtra || []));
       setDataAprobada(snap.dataAprobada || {});
@@ -2185,6 +2221,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     return { bruto: hDay + hNight + hSat, neto: Math.max(0, neto - mttoEmpaqueDe(id)) };
   }, [empaqueConfig, shiftOptionsEmpaque, nightShiftOptionsEmpaque, ventanaEmpaque.sabadoCuenta, mttoEmpaqueDe]);
 
+  // Personal que se puede asignar en Empaque (línea de proceso EMPAQUE de cuboHabilidadesOP) y, si
+  // no hay nadie, las líneas que sí trae el servicio para identificar la correcta.
+  const operadoresEmpaque = useMemo(() => habilidadesOP.filter(o => o.linea.includes(LINEA_PROCESO_EMPAQUE)), [habilidadesOP]);
+  const lineasProcesoDisponibles = useMemo(() => [...new Set(habilidadesOP.map(o => o.linea).filter(Boolean))].sort(), [habilidadesOP]);
+
   const capacidadEmpaquePorCentro = useMemo(() => {
     const calcular = (centro: '1000' | '2000') => EMPAQUE_MACHINES_BY_CENTRO[centro].reduce((total, m) => total + horasMaquinaEmpaque(m.id).neto, 0);
     return { '1000': calcular('1000'), '2000': calcular('2000') };
@@ -3183,9 +3224,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                 return valores.size === 1 ? [...valores][0] as EmpaqueShiftConfig[K] : '';
               };
               const turnosPlanta = [
-                { campo: 'day' as const, paro: 'paroDay' as const, op: 'operadoresDay' as const, etiqueta: 'Día', opciones: shiftOptionsEmpaque, color: 'text-amber-700' },
-                { campo: 'night' as const, paro: 'paroNight' as const, op: 'operadoresNight' as const, etiqueta: 'Noche', opciones: nightShiftOptionsEmpaque, color: 'text-purple-700' },
-                { campo: 'saturday' as const, paro: 'paroSaturday' as const, op: 'operadoresSaturday' as const, etiqueta: 'Sábado', opciones: shiftOptionsEmpaque, color: 'text-amber-700' },
+                { campo: 'day' as const, paro: 'paroDay' as const, op: 'operadoresDay' as const, asig: 'asignadosDay' as const, etiqueta: 'Día', opciones: shiftOptionsEmpaque, color: 'text-amber-700' },
+                { campo: 'night' as const, paro: 'paroNight' as const, op: 'operadoresNight' as const, asig: 'asignadosNight' as const, etiqueta: 'Noche', opciones: nightShiftOptionsEmpaque, color: 'text-purple-700' },
+                { campo: 'saturday' as const, paro: 'paroSaturday' as const, op: 'operadoresSaturday' as const, asig: 'asignadosSaturday' as const, etiqueta: 'Sábado', opciones: shiftOptionsEmpaque, color: 'text-amber-700' },
               ];
               const turnosSinHorario = activas.flatMap(m => [
                 empaqueConfig[m.id]?.day === 'EMPTY' ? `${m.id} día` : null,
@@ -3256,7 +3297,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                           const paro = comun(t.paro);
                           const horasBase = t.opciones.find(o => o.v === valor)?.h || 0;
                           return (
-                            <div key={t.campo} className="flex items-center gap-3">
+                            <div key={t.campo} className="flex flex-wrap items-center gap-x-3 gap-y-1">
                               <span className="text-[10px] font-black text-slate-500 uppercase w-14">{t.etiqueta}</span>
                               <select
                                 value={valor}
@@ -3276,18 +3317,54 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                                 className="w-12 bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] font-black text-slate-700 outline-none text-right"
                               />
                               <span className="text-[10px] font-black text-slate-500">%</span>
-                              {/* Operadores por turno: informativos (no multiplican la capacidad) hasta la
-                                  asignación por habilidades (pendiente, ver cuboHabilidadesOP). */}
+                              {/* Operadores por turno (no multiplican la capacidad) y su asignación por
+                                  habilidades (cuboHabilidadesOP, línea de proceso EMPAQUE, usuario
+                                  2026-10-09): un selector por puesto. Solo en pantalla, no va al correo. */}
                               <span className="ml-2 text-[9px] font-bold text-slate-500 uppercase">Operadores</span>
                               <input
-                                type="number" min={0} value={comun(t.op) === '' ? '' : comun(t.op) as number}
+                                type="number" min={0} max={12} value={comun(t.op) === '' ? '' : comun(t.op) as number}
                                 placeholder="Mixto"
-                                onChange={(e) => setPlanta({ [t.op]: Number(e.target.value) || 0 } as Partial<EmpaqueShiftConfig>)}
+                                onChange={(e) => setPlanta({ [t.op]: Math.min(12, Math.max(0, Number(e.target.value) || 0)) } as Partial<EmpaqueShiftConfig>)}
                                 className="w-12 bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] font-black text-slate-700 outline-none text-right"
                               />
+                              {(() => {
+                                const base = empaqueConfig[maquinas[0].id];
+                                const puestos = Math.min(12, Number(comun(t.op) === '' ? base?.[t.op] ?? 0 : comun(t.op)) || 0);
+                                const asignados = base?.[t.asig] ?? [];
+                                if (puestos === 0 || operadoresEmpaque.length === 0) return null;
+                                return Array.from({ length: puestos }, (_, i) => {
+                                  const actual = asignados[i] ?? '';
+                                  const ocupados = new Set(asignados.filter((c, j) => j !== i && c));
+                                  const conocido = !actual || operadoresEmpaque.some(o => o.codigo === actual);
+                                  return (
+                                    <select
+                                      key={i}
+                                      value={actual}
+                                      onChange={(e) => {
+                                        const next = Array.from({ length: puestos }, (_, j) => asignados[j] ?? '');
+                                        next[i] = e.target.value;
+                                        setPlanta({ [t.asig]: next } as Partial<EmpaqueShiftConfig>);
+                                      }}
+                                      className={cn("bg-white border rounded px-1.5 py-0.5 text-[10px] outline-none max-w-[150px]", actual ? "border-slate-200 text-slate-700 font-bold" : "border-dashed border-slate-300 text-slate-400")}
+                                      title={`${t.etiqueta} · operador ${i + 1}`}
+                                    >
+                                      <option value="">— OP{i + 1} —</option>
+                                      {!conocido && <option value={actual}>{actual}</option>}
+                                      {operadoresEmpaque.map(o => (
+                                        <option key={o.codigo} value={o.codigo} disabled={ocupados.has(o.codigo)}>{o.nombre}</option>
+                                      ))}
+                                    </select>
+                                  );
+                                });
+                              })()}
                             </div>
                           );
                         })}
+                        {habilidadesOP.length > 0 && operadoresEmpaque.length === 0 && (
+                          <p className="text-[10px] text-amber-600">
+                            Sin personal con línea de proceso &quot;{LINEA_PROCESO_EMPAQUE}&quot; en el cubo de habilidades. Líneas disponibles: {lineasProcesoDisponibles.join(' · ') || '—'}.
+                          </p>
+                        )}
                       </div>
 
                       {/* Barra del grupo. El rendimiento se edita solo en el recuadro de cada máquina
