@@ -341,12 +341,13 @@ export const obtenerPlanTxt = async (p: CriteriosPlanTxt): Promise<PlanTxtRecupe
 };
 
 /** ¿Ya hay un plan guardado para estos criterios? null si no existe; lanza Error si la carpeta no responde. */
-export const consultarPlanTxt = async (p: CriteriosPlanTxt): Promise<{ ruta: string; modificado: string } | null> => {
+// fotoCorreo: false si ya no queda la foto del correo (se borra tras enviarlo bien).
+export const consultarPlanTxt = async (p: CriteriosPlanTxt): Promise<{ ruta: string; modificado: string; fotoCorreo?: boolean } | null> => {
   const res = await fetch(`${urlApiPlanesTxt()}?${qsPlanTxt(p, 'meta')}`, { cache: 'no-store' });
   if (res.status === 404) return null;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `No se pudo consultar el TXT (HTTP ${res.status})`);
-  return data as { ruta: string; modificado: string };
+  return data as { ruta: string; modificado: string; fotoCorreo?: boolean };
 };
 
 /**

@@ -120,6 +120,19 @@ export function useAutoCargaPlanVigente(p: {
   }, [p.listo]);
 }
 
+/**
+ * Mismo plan vigente que useAutoCargaPlanVigente, pero a pedido ("Ver último reporte" de la barra
+ * Estado del día, flujo en dos etapas 2026-10-12): false si no hay reporte o no se pudo restaurar.
+ */
+export async function cargarUltimoReporte(
+  modulo: ModuloPlanTxt,
+  centros: CentroPlanTxt[],
+  restaurar: (estado: unknown, origen: OrigenEstadoPlan) => boolean,
+): Promise<boolean> {
+  const plan = await buscarPlanVigente(modulo, centros);
+  return !!plan && restaurar(plan.estado, { fechaObjetivo: plan.fechaObjetivo, guardadoEn: plan.modificado });
+}
+
 export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePlanTxt {
   const { addNotification } = useAppContext();
   const [estado, setEstado] = useState<EstadoReportePlanTxt>(config.fechaObjetivo ? 'verificando' : 'sin-fecha');

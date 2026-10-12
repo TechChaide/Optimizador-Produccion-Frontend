@@ -330,7 +330,7 @@ export const PanelProgreso: React.FC<{ panel: PanelProgresoControl }> = ({ panel
             <button
               key={a.etiqueta}
               type="button"
-              onClick={() => { a.onClick(); panel.cerrar(); }}
+              onClick={() => { panel.cerrar(); a.onClick(); }}
               className="flex-1 min-w-[140px] h-8 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase tracking-widest"
             >
               {a.etiqueta}

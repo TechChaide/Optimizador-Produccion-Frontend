@@ -218,7 +218,9 @@ export async function GET(req: NextRequest) {
     if (formato === 'meta') {
       try {
         const st = await fs.stat(ruta);
-        return NextResponse.json({ ruta, modificado: st.mtime.toISOString() });
+        // fotoCorreo: false = ya se envió (la foto se borra tras un envío exitoso), ver estado-dia.ts.
+        const fotoCorreo = await fs.stat(rutaHtml(ruta)).then(() => true, () => false);
+        return NextResponse.json({ ruta, modificado: st.mtime.toISOString(), fotoCorreo });
       } catch (e) {
         if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
         return errorFs(e, 'consultar');
