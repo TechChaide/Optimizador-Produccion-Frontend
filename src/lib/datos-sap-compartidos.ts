@@ -23,6 +23,7 @@ import { serviciosService } from '@/services/servicios.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { leerVersionTablasPropias } from '@/lib/tablas-propias-version';
+import type { DetalleTactico } from '@/types/interfaces';
 
 export type ClaveDatoSap =
   | 'provisionales'
@@ -122,6 +123,25 @@ export const sapCompartido = {
     compartir(`tiemposPR2:${centro}:${codigoGrupo}`, () => serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(centro, codigoGrupo)),
   planGrupos: () => compartir('planGrupo', conReintentoRed(() => planGrupoService.getAll())),
   detallesTacticos: () => compartir('detalleTactico', conReintentoRed(() => detalleTacticoService.getAll())),
+};
+
+/**
+ * Detalles activos de los planes indicados, uno por plan con /detalle_tactico/plan_grupo/:codigo (sin
+ * bajar la tabla completa). Si ese endpoint falla (p. ej. 404 en un backend que todavía no lo tiene
+ * desplegado), filtra la descarga completa: mismo resultado, solo más lento.
+ */
+export const detallesDePlanes = async (codigos: number[]): Promise<DetalleTactico[]> => {
+  const unicos = Array.from(new Set(codigos.filter(c => Number.isInteger(c) && c > 0)));
+  if (unicos.length === 0) return [];
+  try {
+    const respuestas = await Promise.all(unicos.map(c => detalleTacticoService.getByPlanGrupo(c)));
+    return respuestas.flatMap(r => r.data || []);
+  } catch (e) {
+    console.warn('[detalle_tactico/plan_grupo] No disponible, se usa la tabla completa:', (e as Error).message);
+    const set = new Set(unicos);
+    const todos = (await sapCompartido.detallesTacticos()).data || [];
+    return todos.filter(d => d.estado === 'A' && set.has(d.codigo_plan_grupo));
+  }
 };
 
 /**

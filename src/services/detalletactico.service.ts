@@ -17,6 +17,16 @@ export const detalleTacticoService = {
     return response.json();
   },
 
+  // Detalles activos de UN plan grupo (endpoint del backend 2026-10-12): el envío a SAP solo necesita
+  // los codigo_detalle_tactico del P3/PFD guardado, no la tabla completa de getAll.
+  async getByPlanGrupo(codigo_plan_grupo: number): Promise<BodyListResponse<DetalleTactico>> {
+    const response = await fetchWithAuth(`${API_URL}/plan_grupo/${codigo_plan_grupo}`);
+    if (!response.ok) {
+      throw new Error(await extractErrorMessage(response, `Error ${response.status}: Error al obtener los Detalles Tácticos del plan ${codigo_plan_grupo}`));
+    }
+    return response.json();
+  },
+
   async getById(codigo_detalle_tactico: number): Promise<BodyResponse<DetalleTactico>> {
     const response = await fetchWithAuth(`${API_URL}/${codigo_detalle_tactico}`);
     if (!response.ok) {

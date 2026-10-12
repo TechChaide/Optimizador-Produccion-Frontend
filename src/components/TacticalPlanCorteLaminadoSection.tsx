@@ -54,7 +54,7 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
-import { sapCompartido, refrescarDatosSap, momentoDato } from '@/lib/datos-sap-compartidos';
+import { sapCompartido, refrescarDatosSap, momentoDato, detallesDePlanes } from '@/lib/datos-sap-compartidos';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
@@ -638,13 +638,10 @@ const soloFecha = (v: unknown): string => {
 const esPlanP3 = (valor: unknown): boolean => /\bp3\b/i.test(String(valor || ''));
 
 // Plan Grupo + Detalle Táctico completos, una sola descarga para todo el armado del envío a SAP.
-const descargarPlanesYDetalles = async (log: string[] = []): Promise<{ planes: PlanGrupo[]; detalles: DetalleTactico[] }> => {
-  const [planesRes, detallesRes] = await Promise.all([
-    medirPaso(log, "Plan Grupo", sapCompartido.planGrupos()),
-    medirPaso(log, "Detalle Táctico", sapCompartido.detallesTacticos()),
-  ]);
-  return { planes: planesRes.data || [], detalles: detallesRes.data || [] };
-};
+// Desde 2026-10-12 solo baja Plan Grupo (tabla chica): los detalles se piden por plan con
+// detallesDePlanes (/detalle_tactico/plan_grupo/:codigo) en vez de la tabla completa.
+const descargarPlanes = async (log: string[] = []): Promise<PlanGrupo[]> =>
+  (await medirPaso(log, "Plan Grupo", sapCompartido.planGrupos())).data || [];
 
 // Los días hábiles viven en @/lib/dias-laborables y contemplan feriados / días no trabajados del
 // calendario configurado (Configuraciones → Calendario Área). Dentro del componente se usa el wrapper
@@ -4295,15 +4292,25 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // resto del módulo. Materiales sin origen Venta Externa (Forros/Muebles/Prensado) no se validan acá.
   // `datos` (opcional): planes/detalles ya descargados — handleExportTxt los baja UNA vez y los comparte
   // con fetchCodigoDetalleTacticoPorMaterial (detalle_tactico completo son decenas de miles de filas).
-  const validarAprobacionVentaExterna = useCallback(async (materiales: string[], datos?: { planes: PlanGrupo[]; detalles: DetalleTactico[] }): Promise<string[]> => {
+  const validarAprobacionVentaExterna = useCallback(async (materiales: string[], planesDados?: PlanGrupo[]): Promise<string[]> => {
     const materialesVE = materiales.filter(m => {
       const origenes = materialOrigenesPlantaMap.get(String(Number(m)));
       return !!origenes && Array.from(origenes.keys()).some(c => planGruposVentaExternaSet.has(c));
     });
     if (materialesVE.length === 0) return [];
 
-    const { planes, detalles } = datos ?? await descargarPlanesYDetalles();
+    const planes = planesDados ?? await descargarPlanes();
     const planPorCodigo = new Map(planes.map(pg => [pg.codigo_plan_grupo, pg]));
+    // Solo pueden responder P3 ACTIVOS no anteriores al P2 más viejo en juego (ver criterio abajo):
+    // se bajan los detalles de esos planes y no la tabla completa.
+    const fechasP2 = Array.from(new Set(materialesVE.flatMap(m => Array.from(materialOrigenesPlantaMap.get(String(Number(m)))?.keys() || []))))
+      .filter(c => planGruposVentaExternaSet.has(c))
+      .map(c => soloFecha(planPorCodigo.get(c)?.fecha_inicio_plan));
+    const fechaMinP2 = fechasP2.some(f => !f) ? '' : fechasP2.sort()[0] || '';
+    const candidatosP3 = planes
+      .filter(pg => pg.estado === 'A' && esPlanP3(pg.valor) && (!fechaMinP2 || !soloFecha(pg.fecha_inicio_plan) || soloFecha(pg.fecha_inicio_plan) >= fechaMinP2))
+      .map(pg => pg.codigo_plan_grupo);
+    const detalles = await detallesDePlanes(candidatosP3);
 
     return materialesVE.filter(m => {
       const matNum = Number(m);
@@ -4362,10 +4369,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // (tab "Resumen Necesidades"); la corrida que arma outputPlanRows es una simulación en memoria que
   // no trae codigo_detalle_tactico propio. Si un material no aparece en esa Respuesta P3 (todavía no
   // se generó, o cambió desde entonces), el campo queda en '' y se corrige a mano en la vista previa.
-  const fetchCodigoDetalleTacticoPorMaterial = useCallback(async (datos?: { planes: PlanGrupo[]; detalles: DetalleTactico[] }): Promise<Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>> => {
-    const { planes, detalles } = datos ?? await descargarPlanesYDetalles();
+  const fetchCodigoDetalleTacticoPorMaterial = useCallback(async (planesDados?: PlanGrupo[], log: string[] = []): Promise<Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>> => {
+    const planes = planesDados ?? await descargarPlanes();
     const planesRes = { data: planes };
-    const detallesRes = { data: detalles };
     // codigo_grupo=8 es compartido con la Respuesta P3/PFD de Corte Espuma (mismo grupo SAP, ver
     // handleAbrirRespuestaP3PFD) -- sin el filtro "Rollos" acá, un P3 de Espuma más reciente que el de
     // Laminado ganaba el desempate de abajo y el map salía armado con los DetalleTactico de Espuma,
@@ -4398,7 +4404,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // siempre con "el primero que encuentre" para todas las corridas de ese material.
     const map = new Map<string, { codigo_detalle_tactico: number; cantidad: number }[]>();
     if (!planP3Reciente) return map;
-    (detallesRes.data || [])
+    // Solo los detalles de ESE P3 (endpoint por plan_grupo, 2026-10-12), no la tabla completa.
+    (await medirPaso(log, `Detalle P3 #${planP3Reciente.codigo_plan_grupo}`, detallesDePlanes([planP3Reciente.codigo_plan_grupo])))
       .filter(d => d.codigo_plan_grupo === planP3Reciente.codigo_plan_grupo && d.estado === 'A')
       .forEach(d => {
         const key = cleanCode(d.codigo_material);
@@ -4507,18 +4514,19 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     setIsValidandoExportTxt(true);
     try {
       const materiales = Array.from(new Set(rows.map(r => r.material)));
-      // Todo en paralelo (pedido del usuario 2026-10-07, la vista previa tardaba): Plan Grupo + Detalle
-      // Táctico se bajan UNA vez y sirven para la validación VE y para codigo_detalle_tactico (antes se
-      // bajaban dos veces, la primera sola antes de lo demás); la versión de fabricación sale de la
+      // Todo en paralelo (pedido del usuario 2026-10-07, la vista previa tardaba): Plan Grupo se baja
+      // UNA vez y sirve para la validación VE y para codigo_detalle_tactico; desde 2026-10-12 cada uno
+      // pide solo los detalles de sus planes (/detalle_tactico/plan_grupo/:codigo), no la tabla
+      // completa; la versión de fabricación sale de la
       // caché que ya se precargó con el plan de salida. Ninguno de los dos recuperos bloquea el envío
       // si falta: el payload sale con el campo en '' y se completa a mano en la vista previa.
       const t0 = performance.now();
       const log: string[] = [];
-      const datosP3 = descargarPlanesYDetalles(log);
+      const datosP3 = descargarPlanes(log);
       const [noAprobados, versiones, codigoDetalleTacticoPorMaterial, puestos] = await Promise.all([
         datosP3.then(d => validarAprobacionVentaExterna(materiales, d)),
         medirPaso(log, "Versiones", fetchVersionesFabricacionLaminado(materiales)),
-        datosP3.then(d => fetchCodigoDetalleTacticoPorMaterial(d)),
+        datosP3.then(d => fetchCodigoDetalleTacticoPorMaterial(d, log)),
         puestoTrabajoPorMaterial.size > 0
           ? Promise.resolve(undefined)
           : medirPaso(log, "Hoja de ruta", sapCompartido.tiemposEnsambladoPR2('1000', CODIGO_GRUPO_LAMINADO))

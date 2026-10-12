@@ -43,7 +43,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
-import { sapCompartido, refrescarDatosSap, momentoDato } from '@/lib/datos-sap-compartidos';
+import { sapCompartido, refrescarDatosSap, momentoDato, detallesDePlanes } from '@/lib/datos-sap-compartidos';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
 import { grupoService } from '@/services/grupo.service';
@@ -4958,10 +4958,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // centro). Desde 2026-10-03 es el P3 (= faltante, ya no se graba PFD); se aceptan PFD viejos para no
   // romper el ciclo en curso. Desempate por fecha_inicio_plan y luego codigo_plan_grupo (el más nuevo).
   const fetchUltimoPFDEspuma = useCallback(async (centro: '1000' | '2000', log: string[] = []): Promise<{ plan: PlanGrupo; detalles: DetalleTactico[] } | null> => {
-    const [planesRes, detallesRes] = await Promise.all([
-      medirPaso(log, "Plan Grupo", sapCompartido.planGrupos()),
-      medirPaso(log, "Detalle Táctico", sapCompartido.detallesTacticos()),
-    ]);
+    // Solo Plan Grupo completo; los detalles se piden únicamente del PFD elegido (endpoint por
+    // plan_grupo, 2026-10-12) en vez de la tabla completa de detalle_tactico.
+    const planesRes = await medirPaso(log, "Plan Grupo", sapCompartido.planGrupos());
     const centroRegex = new RegExp(`centro\\s*${centro}`, 'i');
     const planesPFD = (planesRes.data || []).filter(p =>
       p.codigo_grupo === CODIGO_GRUPO_LAMINADO && p.estado === 'A' &&
@@ -4974,7 +4973,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       if (fechaActual !== fechaMas) return fechaActual > fechaMas ? actual : mas;
       return actual.codigo_plan_grupo > mas.codigo_plan_grupo ? actual : mas;
     }, planesPFD[0]);
-    const detalles = (detallesRes.data || []).filter(d => d.codigo_plan_grupo === planReciente.codigo_plan_grupo && d.estado === 'A');
+    const detalles = (await medirPaso(log, `Detalle PFD #${planReciente.codigo_plan_grupo}`, detallesDePlanes([planReciente.codigo_plan_grupo])))
+      .filter(d => d.codigo_plan_grupo === planReciente.codigo_plan_grupo && d.estado === 'A');
     return { plan: planReciente, detalles };
   }, []);
 
