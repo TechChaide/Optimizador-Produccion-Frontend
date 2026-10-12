@@ -97,6 +97,16 @@ const compartir = <T,>(clave: ClaveDato, pedir: () => Promise<T>): Promise<T> =>
   return entrada.promesa.then(r => copia(r as T));
 };
 
+// Plan Grupo / Detalle Táctico se bajan completos (el backend no filtra) y la descarga es larga: un
+// corte de red ("NetworkError ..." / "Failed to fetch", TypeError de fetch) se reintenta una vez
+// tras 2 s (12-10, Generar P2 de Venta Externa). Un error HTTP del servidor no se reintenta.
+const conReintentoRed = <T,>(pedir: () => Promise<T>) => (): Promise<T> =>
+  pedir().catch(e => {
+    if (!(e instanceof TypeError)) throw e;
+    console.warn('[datos compartidos] Corte de red, reintentando una vez:', e.message);
+    return new Promise<T>((ok, mal) => setTimeout(() => pedir().then(ok, mal), 2000));
+  });
+
 /** Consultas SAP compartidas — mismas firmas y respuestas que serviciosService. */
 export const sapCompartido = {
   ordenesProvisionales: () => compartir('provisionales', () => serviciosService.OrdenesProvisionalesPaginados(1, 20000)),
@@ -110,8 +120,8 @@ export const sapCompartido = {
   pendientesTotales: () => compartir('pendientesTotales', () => serviciosService.getPendientesTotales(1, 20000)),
   tiemposEnsambladoPR2: (centro: string, codigoGrupo: number) =>
     compartir(`tiemposPR2:${centro}:${codigoGrupo}`, () => serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(centro, codigoGrupo)),
-  planGrupos: () => compartir('planGrupo', () => planGrupoService.getAll()),
-  detallesTacticos: () => compartir('detalleTactico', () => detalleTacticoService.getAll()),
+  planGrupos: () => compartir('planGrupo', conReintentoRed(() => planGrupoService.getAll())),
+  detallesTacticos: () => compartir('detalleTactico', conReintentoRed(() => detalleTacticoService.getAll())),
 };
 
 /**

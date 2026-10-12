@@ -1458,12 +1458,21 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // activo cuyo codigo_plan_grupo_padre apunte a ese P2 pero cuyo codigo_plan_grupo sea otro plan.
   // Si ya fue consumido, no se debe reemplazar en silencio (rompería la trazabilidad del P3 activo);
   // si no fue consumido, se desactiva (estado 'I') y se libera el paso para crear el nuevo.
+  // Lectura de Plan Grupo / Detalle Táctico hecha UNA vez al inicio de "Generar P2" (ver
+  // handleGenerarTodosPlanesP2). Sin ella, cada guardado invalidaba la caché y el siguiente
+  // centro/tipo volvía a bajar la tabla completa: 12-10 la tercera descarga (Espumas 2000) cortó con
+  // "NetworkError". Cada centro+tipo solo mira sus propios planes, así que lo que grabó el anterior
+  // no cambia lo que este necesita.
+  const lecturaP2Ref = useRef<{ planes: Promise<{ data?: PlanGrupo[] }>; detalles: Promise<{ data?: DetalleTactico[] }> } | null>(null);
+  const leerPlanesP2 = () => lecturaP2Ref.current?.planes ?? sapCompartido.planGrupos();
+  const leerDetallesP2 = () => lecturaP2Ref.current?.detalles ?? sapCompartido.detallesTacticos();
+
   const verificarPlanP2Activo = async (centro: '1000' | '2000', tipo: 'ESPUMAS' | 'ROLLOS') => {
     const grupoCentro = grupos.find(g => String(g.centro).trim() === centro);
     if (!grupoCentro) return { grupoCentro: null as Grupo | null, planActivo: null as PlanGrupo | null, planesActivos: [] as PlanGrupo[], planesP3: [] as PlanGrupo[], detallesPlanActivo: [] as DetalleTactico[] };
 
     const valorRegex = new RegExp(`plan\\s*t[aá]ctico.*centro.*${centro}.*p2.*${tipo}`, 'i');
-    const planesRes = await sapCompartido.planGrupos();
+    const planesRes = await leerPlanesP2();
     const todosLosPlanes = planesRes.data || [];
 
     // TODOS los P2 activos de este centro+tipo, no solo el primero que aparezca. Antes esto era un
@@ -1482,7 +1491,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
     if (!planActivo) return { grupoCentro, planActivo: null, planesActivos, planesP3: [], detallesPlanActivo: [] as DetalleTactico[] };
 
-    const detallesRes = await sapCompartido.detallesTacticos();
+    const detallesRes = await leerDetallesP2();
     const todosLosDetalles = detallesRes.data || [];
     const planPorCodigo = new Map(todosLosPlanes.map(pg => [pg.codigo_plan_grupo, pg]));
     const codigosP3 = new Set(
@@ -1738,7 +1747,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     const ptDiferido = format(addBusinessDaysCal(parseISO(fechasHorizonte.pt), 1, diasNoLaborables, laborablesHorizonte(diasLaborablesExtra)), 'yyyy-MM-dd');
     const valor = `Plan Táctico - Centro ${centro} - P2 - Venta - ${TIPO_TAG.ESPUMAS} - DIFERIDO`;
     const regex = new RegExp(`plan\\s*t[aá]ctico.*centro.*${centro}.*p2.*espumas.*diferido`, 'i');
-    const todos = (await sapCompartido.planGrupos()).data || [];
+    const todos = (await leerPlanesP2()).data || [];
     const apagados: number[] = [];
     for (const pg of todos) {
       if (pg.estado !== 'A' || pg.codigo_grupo !== grupoCentro.codigo_grupo || !regex.test(String(pg.valor || ''))) continue;
@@ -1930,6 +1939,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // muestran en el panel; desde el botón manual sigue el toast de siempre.
   const handleGenerarTodosPlanesP2 = useCallback(async (silencioso = false, onAvance?: (hechos: number, total: number) => void): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string }> => {
     setIsSavingAllPlanP2(true);
+    // Una sola lectura para los 3 guardados (ver lecturaP2Ref). Se consumen con .catch para no dejar
+    // una promesa rechazada sin manejar si ningún combo llega a leerla.
+    const planes = sapCompartido.planGrupos();
+    const detalles = sapCompartido.detallesTacticos();
+    planes.catch(() => {}); detalles.catch(() => {});
+    lecturaP2Ref.current = { planes, detalles };
     try {
       const combos: Array<{ centro: '1000' | '2000'; tipo: 'ESPUMAS' | 'ROLLOS' }> = [
         { centro: '1000', tipo: 'ESPUMAS' },
@@ -1972,6 +1987,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       if (!silencioso) addNotification('error', `Error al generar los P2: ${(e as Error).message}`);
       return { estado: 'error', mensaje: (e as Error).message };
     } finally {
+      lecturaP2Ref.current = null;
       setIsSavingAllPlanP2(false);
     }
   }, [generarPlanP2Core, addNotification]);
