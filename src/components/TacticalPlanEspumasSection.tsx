@@ -3878,9 +3878,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         return;
       }
 
-      // 3. DetalleTactico asociado a los PlanGrupo encontrados
-      const detallesRes = await sapCompartido.detallesTacticos();
-      const detalles = (detallesRes.data || []).filter((d) => planGrupoCodigos.includes(d.codigo_plan_grupo));
+      // 3. DetalleTactico asociado a los PlanGrupo encontrados (solo esos planes, endpoint por plan_grupo
+      //    2026-10-12; antes se bajaba la tabla completa).
+      const detalles = (await detallesDePlanes(planGrupoCodigos)).filter((d) => planGrupoCodigos.includes(d.codigo_plan_grupo));
 
       const grouped: Record<string, NecesidadPlantaRow[]> = {};
       const ferts: NecesidadPlantaRow[] = [];
@@ -4286,12 +4286,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     setPffDiagnostico({ sinMatch: [], conError: [] });
     bomPFFCacheRef.current.clear();
     try {
-      const [planesRes, detallesRes] = await Promise.all([
-        sapCompartido.planGrupos(),
-        sapCompartido.detallesTacticos(),
-      ]);
-      const planesTodos = planesRes.data || [];
-      const detallesTodos = detallesRes.data || [];
+      // Solo los detalles de los planes de Ensamblado (P1/PFF) activos de Quito y Guayaquil, que es lo
+      // único que usa la PFF (2026-10-12): antes bajaba detalle_tactico completo (~80 MB) y por el
+      // servidor publicado cortaba con "Failed to fetch". detallesDePlanes usa el endpoint por plan_grupo
+      // (si el backend aún no lo tiene, filtra la tabla completa como antes).
+      const planesTodos = (await sapCompartido.planGrupos()).data || [];
+      const codigosEnsamblado = planesTodos
+        .filter(p => (p.codigo_grupo === CODIGO_GRUPO_ENSAMBLADO_QUITO || p.codigo_grupo === CODIGO_GRUPO_ENSAMBLADO_GUAYAQUIL) && p.estado === 'A' && ES_PLAN_ENSAMBLADO_FIRME(p.valor))
+        .map(p => p.codigo_plan_grupo);
+      const detallesTodos = await detallesDePlanes(codigosEnsamblado);
 
       const totalMateriales = (codigoGrupo: number) => {
         const codigosPlan = new Set(
@@ -4470,8 +4473,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     plan: PlanGrupo,
     centro: '1000' | '2000'
   ): Promise<EditableDetalleRowEspuma[]> => {
-    const detallesRes = await sapCompartido.detallesTacticos();
-    const detallesPlan = (detallesRes.data || []).filter(d =>
+    const detallesPlan = (await detallesDePlanes([plan.codigo_plan_grupo])).filter(d =>
       d.codigo_plan_grupo === plan.codigo_plan_grupo && d.estado === 'A'
     );
     const claveMaterial = (m: string | number) => String(Number(m));

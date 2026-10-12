@@ -1527,8 +1527,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         return {};
       }
 
-      const detallesRes = await sapCompartido.detallesTacticos();
-      const detalles = (detallesRes.data || []).filter((d) => planGrupoCodigos.includes(d.codigo_plan_grupo));
+      // Solo los detalles de esos P2 (endpoint por plan_grupo, 2026-10-12; antes la tabla completa).
+      const detalles = (await detallesDePlanes(planGrupoCodigos)).filter((d) => planGrupoCodigos.includes(d.codigo_plan_grupo));
 
       const grouped: Record<string, NecesidadPlantaRow[]> = {};
       detalles.forEach((d) => {
@@ -2083,8 +2083,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     salidaBase: RespuestaSalidaRow[],
     needsParaDescripcion: UnifiedNeedRow[]
   ): Promise<EditableDetalleRow[]> => {
-    const detallesRes = await sapCompartido.detallesTacticos();
-    const detallesPlan = (detallesRes.data || []).filter(d =>
+    const detallesPlan = (await detallesDePlanes([plan.codigo_plan_grupo])).filter(d =>
       d.codigo_plan_grupo === plan.codigo_plan_grupo && d.estado === 'A'
     );
     const claveMaterial = (m: string | number) => String(Number(m));

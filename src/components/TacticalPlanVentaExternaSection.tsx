@@ -1951,7 +1951,15 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     // Una sola lectura para los 3 guardados (ver lecturaP2Ref). Se consumen con .catch para no dejar
     // una promesa rechazada sin manejar si ningún combo llega a leerla.
     const planes = sapCompartido.planGrupos();
-    const detalles = sapCompartido.detallesTacticos();
+    // Solo los detalles que usa verificarPlanP2Activo (2026-10-12, endpoint por plan_grupo): los P2 de
+    // VE activos y los P3 activos creados desde el P2 más viejo (sus respuestas). Antes, tabla completa.
+    const detalles = planes.then(async r => {
+      const todos = r.data || [];
+      const p2 = todos.filter(pg => pg.estado === 'A' && /p2\s*-\s*venta/i.test(String(pg.valor || '')));
+      const desde = p2.map(pg => soloFecha(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)).filter(Boolean).sort()[0] || '';
+      const p3 = todos.filter(pg => pg.estado === 'A' && esPlanP3(pg.valor) && (!desde || (soloFecha(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)) >= desde));
+      return { data: await detallesDePlanes([...p2, ...p3].map(pg => pg.codigo_plan_grupo)) };
+    });
     planes.catch(() => {}); detalles.catch(() => {});
     lecturaP2Ref.current = { planes, detalles };
     try {

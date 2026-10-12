@@ -108,12 +108,31 @@ const conReintentoRed = <T,>(pedir: () => Promise<T>) => (): Promise<T> =>
     return new Promise<T>((ok, mal) => setTimeout(() => pedir().then(ok, mal), 2000));
   });
 
+// Cubo de inventarios en páginas (2026-10-12): de una sola vez eran ~51 MB, que por el servidor publicado
+// se cortaban ("Sin respuesta: Cubo de inventarios"), y además pedía 50 000 filas cuando hay ~53 000
+// (totalRegistros): se perdían ~3 000. Ahora: página 1, luego el resto de a 2 en paralelo, cada una con
+// reintento ante corte de red; la respuesta conserva la forma de antes ({ data, length, totalRegistros }).
+const FILAS_PAGINA_CUBO = 10000;
+type RespuestaCubo = Awaited<ReturnType<typeof serviciosService.getCuboInventarios>>;
+const descargarCuboPaginado = async (): Promise<RespuestaCubo> => {
+  const pagina = (p: number) => conReintentoRed(() => serviciosService.getCuboInventarios(p, FILAS_PAGINA_CUBO))();
+  const primera = await pagina(1);
+  const filas = [...((primera.data as unknown[]) || [])];
+  const total = Number((primera as { totalRegistros?: number }).totalRegistros) || filas.length;
+  const paginas = Array.from({ length: Math.max(0, Math.ceil(total / FILAS_PAGINA_CUBO) - 1) }, (_, i) => i + 2);
+  for (let i = 0; i < paginas.length; i += 2) {
+    const lote = await Promise.all(paginas.slice(i, i + 2).map(p => pagina(p)));
+    lote.forEach(r => filas.push(...((r.data as unknown[]) || [])));
+  }
+  return { ...primera, data: filas, length: filas.length } as RespuestaCubo;
+};
+
 /** Consultas SAP compartidas — mismas firmas y respuestas que serviciosService. */
 export const sapCompartido = {
   ordenesProvisionales: () => compartir('provisionales', () => serviciosService.OrdenesProvisionalesPaginados(1, 20000)),
   ordenesFert: () => compartir('fert', () => serviciosService.getOrdenesFert(1, 20000)),
   inventarioAnioActual: () => compartir('inventario', () => serviciosService.getInventarioAñoActual()),
-  cuboInventarios: () => compartir('cuboInventarios', () => serviciosService.getCuboInventarios(1, 50000)),
+  cuboInventarios: () => compartir('cuboInventarios', descargarCuboPaginado),
   cuboHabilidadesOP: () => compartir('habilidades', () => serviciosService.getCuboHabilidadesOP()),
   mantenimientosPreventivos: () => compartir('mantenimientos', () => serviciosService.ListarMantenimientoPreventivosProgramados()),
   kpiMaestroLooper: () => compartir('kpiLooper', () => serviciosService.getKPIMaestroLooper()),
