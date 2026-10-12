@@ -13,6 +13,8 @@
  *
  * Vigencia: los datos se reusan hasta que el usuario pulse "Actualizar datos SAP" (refrescarDatosSap)
  * o hasta que se envíen órdenes a SAP (se refrescan FERT y provisionales, que son las que cambian).
+ * Excepción: el Cubo de inventarios se baja UNA vez al día (SAP lo actualiza una sola vez) y queda en el
+ * navegador (cache-diaria); "Actualizar datos SAP" no lo vuelve a pedir.
  * Una respuesta vacía o con error no se guarda: la próxima lectura vuelve a pedirla.
  *
  * Plan Grupo y Detalle Táctico (tablas propias, no SAP) solo se comparten por unos segundos, para no
@@ -24,6 +26,7 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { leerVersionTablasPropias } from '@/lib/tablas-propias-version';
 import type { DetalleTactico } from '@/types/interfaces';
+import { leerDiario, guardarDiario } from '@/lib/cache-diaria';
 
 export type ClaveDatoSap =
   | 'provisionales'
@@ -113,6 +116,7 @@ const conReintentoRed = <T,>(pedir: () => Promise<T>) => (): Promise<T> =>
 // (totalRegistros): se perdían ~3 000. Ahora: página 1, luego el resto de a 2 en paralelo, cada una con
 // reintento ante corte de red; la respuesta conserva la forma de antes ({ data, length, totalRegistros }).
 const FILAS_PAGINA_CUBO = 10000;
+const CLAVE_CUBO_DIARIO = 'cuboInventarios';
 type RespuestaCubo = Awaited<ReturnType<typeof serviciosService.getCuboInventarios>>;
 const descargarCuboPaginado = async (): Promise<RespuestaCubo> => {
   const pagina = (p: number) => conReintentoRed(() => serviciosService.getCuboInventarios(p, FILAS_PAGINA_CUBO))();
@@ -132,7 +136,13 @@ export const sapCompartido = {
   ordenesProvisionales: () => compartir('provisionales', () => serviciosService.OrdenesProvisionalesPaginados(1, 20000)),
   ordenesFert: () => compartir('fert', () => serviciosService.getOrdenesFert(1, 20000)),
   inventarioAnioActual: () => compartir('inventario', () => serviciosService.getInventarioAñoActual()),
-  cuboInventarios: () => compartir('cuboInventarios', descargarCuboPaginado),
+  cuboInventarios: () => compartir('cuboInventarios', async () => {
+    const guardado = await leerDiario<RespuestaCubo>(CLAVE_CUBO_DIARIO);
+    if (guardado) return guardado.valor;
+    const r = await descargarCuboPaginado();
+    if (Array.isArray(r?.data) && r.data.length > 0) void guardarDiario(CLAVE_CUBO_DIARIO, r);
+    return r;
+  }),
   cuboHabilidadesOP: () => compartir('habilidades', () => serviciosService.getCuboHabilidadesOP()),
   mantenimientosPreventivos: () => compartir('mantenimientos', () => serviciosService.ListarMantenimientoPreventivosProgramados()),
   kpiMaestroLooper: () => compartir('kpiLooper', () => serviciosService.getKPIMaestroLooper()),
@@ -168,7 +178,8 @@ export const detallesDePlanes = async (codigos: number[]): Promise<DetalleTactic
  * ("Actualizar datos SAP"); las tablas propias se descartan siempre.
  */
 export const refrescarDatosSap = (claves?: ClaveDatoSap[]): void => {
-  const aBorrar: ClaveDato[] = claves ? [...claves, ...CLAVES_TABLAS_PROPIAS] : Array.from(entradas.keys());
+  // El cubo es diario: solo se descarta si se pide explícito (claves con 'cuboInventarios').
+  const aBorrar: ClaveDato[] = claves ? [...claves, ...CLAVES_TABLAS_PROPIAS] : Array.from(entradas.keys()).filter(c => c !== 'cuboInventarios');
   aBorrar.forEach(c => entradas.delete(c));
   notificar();
 };
@@ -177,7 +188,8 @@ export const refrescarDatosSap = (claves?: ClaveDatoSap[]): void => {
 export const momentoDatosSap = (): Date | null => {
   let min: number | null = null;
   entradas.forEach((e, clave) => {
-    if (CLAVES_TABLAS_PROPIAS.includes(clave) || e.momento === null) return;
+    // El cubo (diario) no marca la hora: "Actualizar datos SAP" no lo refresca.
+    if (CLAVES_TABLAS_PROPIAS.includes(clave) || clave === 'cuboInventarios' || e.momento === null) return;
     if (min === null || e.momento < min) min = e.momento;
   });
   return min === null ? null : new Date(min);
