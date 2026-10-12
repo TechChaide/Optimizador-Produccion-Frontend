@@ -54,7 +54,7 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
-import { sapCompartido, refrescarDatosSap, momentoDato, detallesDePlanes } from '@/lib/datos-sap-compartidos';
+import { sapCompartido, refrescarDatosSap, momentoDato, detallesDePlanes, refrescarAlSincronizar } from '@/lib/datos-sap-compartidos';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
@@ -1578,6 +1578,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // que es quien cierra el panel (mismo flujo que Corte Espuma).
   const panelProgreso = usePanelProgreso();
   const ejecutarSincronizacion = useCallback(async (fecha: string | null, noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
+    refrescarAlSincronizar(); // FERT y provisionales siempre frescas; cubo (día) y MTTO (semana) se reusan
     setIsLoading(true);
     setSyncStep('sincronizando');
     // La fecha escogida ES el filtro del resumen (FERT de ese día); sin fecha = Plan Maestro.

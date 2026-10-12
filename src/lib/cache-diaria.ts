@@ -10,9 +10,18 @@ const ALMACEN = 'consultas';
 
 interface EntradaDiaria<T> { fecha: string; guardadoEn: string; valor: T }
 
-const hoyLocal = () => {
+const fechaLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const hoyLocal = () => fechaLocal(new Date());
+
+/**
+ * Periodo semanal que arranca el MIÉRCOLES (fecha del miércoles más reciente, incluido hoy): los
+ * mantenimientos preventivos se cargan cada miércoles y no cambian hasta la siguiente carga (usuario
+ * 2026-10-12).
+ */
+export const periodoDesdeMiercoles = (): string => {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  d.setDate(d.getDate() - ((d.getDay() - 3 + 7) % 7));
+  return fechaLocal(d);
 };
 
 const abrir = (): Promise<IDBDatabase> => new Promise((ok, mal) => {
@@ -36,19 +45,22 @@ const operar = async <R,>(modo: IDBTransactionMode, fn: (s: IDBObjectStore) => I
   }
 };
 
-/** Valor guardado HOY para la clave, o null (otro día, sin guardar o IndexedDB no disponible). */
-export const leerDiario = async <T,>(clave: string): Promise<{ valor: T; guardadoEn: Date } | null> => {
+/**
+ * Valor guardado para la clave en el periodo vigente (por defecto HOY; otro periodo, p. ej.
+ * periodoDesdeMiercoles()), o null (otro periodo, sin guardar o IndexedDB no disponible).
+ */
+export const leerDiario = async <T,>(clave: string, periodo: string = hoyLocal()): Promise<{ valor: T; guardadoEn: Date } | null> => {
   try {
     const e = await operar<EntradaDiaria<T> | undefined>('readonly', s => s.get(clave));
-    return e && e.fecha === hoyLocal() ? { valor: e.valor, guardadoEn: new Date(e.guardadoEn) } : null;
+    return e && e.fecha === periodo ? { valor: e.valor, guardadoEn: new Date(e.guardadoEn) } : null;
   } catch {
     return null;
   }
 };
 
-export const guardarDiario = async <T,>(clave: string, valor: T): Promise<void> => {
+export const guardarDiario = async <T,>(clave: string, valor: T, periodo: string = hoyLocal()): Promise<void> => {
   try {
-    await operar('readwrite', s => s.put({ fecha: hoyLocal(), guardadoEn: new Date().toISOString(), valor } satisfies EntradaDiaria<T>, clave));
+    await operar('readwrite', s => s.put({ fecha: periodo, guardadoEn: new Date().toISOString(), valor } satisfies EntradaDiaria<T>, clave));
   } catch {
     // Sin caché: la próxima sincronización lo vuelve a bajar.
   }

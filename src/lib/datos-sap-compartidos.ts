@@ -13,8 +13,10 @@
  *
  * Vigencia: los datos se reusan hasta que el usuario pulse "Actualizar datos SAP" (refrescarDatosSap)
  * o hasta que se envíen órdenes a SAP (se refrescan FERT y provisionales, que son las que cambian).
- * Excepción: el Cubo de inventarios se baja UNA vez al día (SAP lo actualiza una sola vez) y queda en el
- * navegador (cache-diaria); "Actualizar datos SAP" no lo vuelve a pedir.
+ * Qué se vuelve a consultar y cuándo (usuario 2026-10-12): FERT y provisionales en CADA sincronización
+ * (refrescarAlSincronizar: son las únicas que cambian en el día); Cubo de inventarios UNA vez al día y
+ * Mantenimientos UNA vez por semana (se cargan cada miércoles), ambos guardados en el navegador
+ * (cache-diaria) — "Actualizar datos SAP" no los vuelve a pedir. El resto se comparte en la sesión.
  * Una respuesta vacía o con error no se guarda: la próxima lectura vuelve a pedirla.
  *
  * Plan Grupo y Detalle Táctico (tablas propias, no SAP) solo se comparten por unos segundos, para no
@@ -26,7 +28,7 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { leerVersionTablasPropias } from '@/lib/tablas-propias-version';
 import type { DetalleTactico } from '@/types/interfaces';
-import { leerDiario, guardarDiario } from '@/lib/cache-diaria';
+import { leerDiario, guardarDiario, periodoDesdeMiercoles } from '@/lib/cache-diaria';
 
 export type ClaveDatoSap =
   | 'provisionales'
@@ -117,6 +119,9 @@ const conReintentoRed = <T,>(pedir: () => Promise<T>) => (): Promise<T> =>
 // reintento ante corte de red; la respuesta conserva la forma de antes ({ data, length, totalRegistros }).
 const FILAS_PAGINA_CUBO = 10000;
 const CLAVE_CUBO_DIARIO = 'cuboInventarios';
+const CLAVE_MTTO_SEMANAL = 'mantenimientos';
+// Datos con su propia vigencia (día / semana): ni "Actualizar datos SAP" ni la hora del chip los toman.
+const CLAVES_PERIODICAS: ClaveDato[] = ['cuboInventarios', 'mantenimientos'];
 type RespuestaCubo = Awaited<ReturnType<typeof serviciosService.getCuboInventarios>>;
 const descargarCuboPaginado = async (): Promise<RespuestaCubo> => {
   const pagina = (p: number) => conReintentoRed(() => serviciosService.getCuboInventarios(p, FILAS_PAGINA_CUBO))();
@@ -144,7 +149,14 @@ export const sapCompartido = {
     return r;
   }),
   cuboHabilidadesOP: () => compartir('habilidades', () => serviciosService.getCuboHabilidadesOP()),
-  mantenimientosPreventivos: () => compartir('mantenimientos', () => serviciosService.ListarMantenimientoPreventivosProgramados()),
+  mantenimientosPreventivos: () => compartir('mantenimientos', async () => {
+    const periodo = periodoDesdeMiercoles();
+    const guardado = await leerDiario<Awaited<ReturnType<typeof serviciosService.ListarMantenimientoPreventivosProgramados>>>(CLAVE_MTTO_SEMANAL, periodo);
+    if (guardado) return guardado.valor;
+    const r = await serviciosService.ListarMantenimientoPreventivosProgramados();
+    if (!respuestaVacia(r)) void guardarDiario(CLAVE_MTTO_SEMANAL, r, periodo);
+    return r;
+  }),
   kpiMaestroLooper: () => compartir('kpiLooper', () => serviciosService.getKPIMaestroLooper()),
   kpiMaestroCarruseles: () => compartir('kpiCarruseles', () => serviciosService.getKPIMaestroCarruseles()),
   pendientesTotales: () => compartir('pendientesTotales', () => serviciosService.getPendientesTotales(1, 20000)),
@@ -178,18 +190,24 @@ export const detallesDePlanes = async (codigos: number[]): Promise<DetalleTactic
  * ("Actualizar datos SAP"); las tablas propias se descartan siempre.
  */
 export const refrescarDatosSap = (claves?: ClaveDatoSap[]): void => {
-  // El cubo es diario: solo se descarta si se pide explícito (claves con 'cuboInventarios').
-  const aBorrar: ClaveDato[] = claves ? [...claves, ...CLAVES_TABLAS_PROPIAS] : Array.from(entradas.keys()).filter(c => c !== 'cuboInventarios');
+  // Cubo (diario) y mantenimientos (semanal): solo se descartan si se piden explícito.
+  const aBorrar: ClaveDato[] = claves ? [...claves, ...CLAVES_TABLAS_PROPIAS] : Array.from(entradas.keys()).filter(c => !CLAVES_PERIODICAS.includes(c));
   aBorrar.forEach(c => entradas.delete(c));
   notificar();
 };
+
+/**
+ * Al iniciar CADA sincronización de un módulo (usuario 2026-10-12): FERT y provisionales son las únicas
+ * consultas que cambian durante el día, así que siempre se vuelven a pedir; el resto se reusa.
+ */
+export const refrescarAlSincronizar = (): void => refrescarDatosSap(['fert', 'provisionales']);
 
 /** Hora del dato SAP más antiguo en uso (null si no hay nada descargado). */
 export const momentoDatosSap = (): Date | null => {
   let min: number | null = null;
   entradas.forEach((e, clave) => {
-    // El cubo (diario) no marca la hora: "Actualizar datos SAP" no lo refresca.
-    if (CLAVES_TABLAS_PROPIAS.includes(clave) || clave === 'cuboInventarios' || e.momento === null) return;
+    // Cubo y mantenimientos tienen su propia vigencia: no marcan la hora ("Actualizar" no los refresca).
+    if (CLAVES_TABLAS_PROPIAS.includes(clave) || CLAVES_PERIODICAS.includes(clave) || e.momento === null) return;
     if (min === null || e.momento < min) min = e.momento;
   });
   return min === null ? null : new Date(min);

@@ -43,7 +43,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
-import { sapCompartido, refrescarDatosSap, momentoDato, detallesDePlanes } from '@/lib/datos-sap-compartidos';
+import { sapCompartido, refrescarDatosSap, momentoDato, detallesDePlanes, refrescarAlSincronizar } from '@/lib/datos-sap-compartidos';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
 import { grupoService } from '@/services/grupo.service';
@@ -5220,6 +5220,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Fecha evaluada → Datos SAP (x/9 consultas) → Necesidades planta (P2) → Necesidad PFF. La última fase corre en el efecto autoGenerarPendiente,
   // que es quien cierra el panel.
   const ejecutarSincronizacion = useCallback(async (noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
+    refrescarAlSincronizar(); // FERT y provisionales siempre frescas; cubo (día) y MTTO (semana) se reusan
     setSyncStep('sincronizando');
     setPlanCargadoDe(null);
     setResultadoRestaurado(null);

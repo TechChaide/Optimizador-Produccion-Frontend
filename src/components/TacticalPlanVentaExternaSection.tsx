@@ -12,7 +12,7 @@ import { restriccionService } from '@/services/restriccion.service';
 import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones, opcionesConHorarios, claveDeHorario, intervaloDeHorario, horasSolapadas } from '@/lib/restriccionesCapacidad';
 import { ejecucionPlanHtml, fechaHoraEjecucion, mttoEnVentana } from '@/lib/ventana-plan';
 import { serviciosService } from '@/services/servicios.service';
-import { sapCompartido, refrescarDatosSap, detallesDePlanes } from '@/lib/datos-sap-compartidos';
+import { sapCompartido, refrescarDatosSap, detallesDePlanes, refrescarAlSincronizar } from '@/lib/datos-sap-compartidos';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
@@ -720,6 +720,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // continuar en Data Aprobada (antes generaba el P2 solo, y al volver en la tarde a cerrar el ciclo
   // lo regeneraba encima del que Laminado/Corte Espuma ya habían respondido).
   const ejecutarSincronizacion = useCallback(async (desde: string, hasta: string, noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
+    refrescarAlSincronizar(); // FERT y provisionales siempre frescas; cubo (día) y MTTO (semana) se reusan
     setIsLoading(true);
     setSyncStep('sincronizando');
     const fechas = eachDayOfInterval({ start: parseISO(desde), end: parseISO(hasta) }).map(d => format(d, 'yyyy-MM-dd'));

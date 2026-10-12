@@ -35,7 +35,7 @@ import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { useJornadaGrupo, type JornadaGrupoEditable } from '@/hooks/useJornadaGrupo';
 import { serviciosService } from '@/services/servicios.service';
-import { sapCompartido, refrescarDatosSap } from '@/lib/datos-sap-compartidos';
+import { sapCompartido, refrescarDatosSap, refrescarAlSincronizar } from '@/lib/datos-sap-compartidos';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { useRuntimeInspector } from '@/services/RuntimeInspector';
 import { useAppContext } from '@/context/AppProvider';
@@ -1265,6 +1265,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
   // Panel: Rango evaluado → Datos SAP (x/5) → Generando necesidades (fase en el efecto
   // autoGenerarPendiente, que cierra el panel). El rango se elige antes, en handleSincronizarYGenerar.
   const ejecutarSincronizacion = useCallback(async (desde: string | null, hasta: string | null) => {
+    refrescarAlSincronizar(); // FERT y provisionales siempre frescas; cubo (día) y MTTO (semana) se reusan
     setIsLoading(true);
     setSyncStep('sincronizando');
     // El rango escogido ES el filtro de fechas del resumen (sin rango = Plan Maestro).
