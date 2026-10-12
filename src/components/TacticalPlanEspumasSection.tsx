@@ -219,7 +219,7 @@ type ProcesoCorte = 'carrusel' | 'vertical' | 'cnc';
 // (ver MACHINE_SAP_CODES_UIO) para la fecha elegida en "Evaluar Capacidad" — 'sin-fecha' y
 // 'sin-mapeo' son estados informativos, no ceros: evitan que "no hay dato" se lea como "máquina libre".
 type OcupacionMaquinaInfo =
-  | { estado: 'ok'; horas: number; capNeta: number; tiempoMaquinaBruto: number; pct: number | null; pendienteAnterior?: { dia: string; pendiente: number; restante: number; pasa: number } }
+  | { estado: 'ok'; horas: number; capNeta: number; tiempoMaquinaBruto: number; pct: number | null; pendienteAnterior?: { dia: string; pendiente: number; restante: number; pasa: number }; desglose?: { origen: string; horas: number; ordenes: number }[] }
   | { estado: 'sin-mapeo' }
   | { estado: 'sin-fecha' };
 // Código real de puesto de trabajo SAP para la Cortadora CNC (HR-CTCNC) — verificado con el maestro
@@ -5416,6 +5416,18 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                   <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Tiempo Proceso</span>
                   <span className="text-[10px] font-black text-slate-700">{ocupacion.horas.toFixed(1)}h</span>
                 </div>
+                {/* De dónde salen esas horas (2026-10-12): para detectar necesidad contada dos veces
+                    (necesidad sin orden de un plan que ya tiene FERT con otra fecha). */}
+                {ocupacion.desglose && ocupacion.desglose.length > 0 && (
+                  <div className="pl-2 border-l-2 border-slate-200 space-y-0.5">
+                    {ocupacion.desglose.map(d => (
+                      <div key={d.origen} className={cn("flex items-center justify-between gap-2 text-[9px]", d.origen.includes('SIN orden') ? "text-amber-700 font-bold" : "text-slate-500")}>
+                        <span className="truncate" title={`${d.origen} · ${d.ordenes} línea(s)`}>{d.origen}</span>
+                        <span className="font-mono shrink-0">{d.horas.toFixed(1)}h</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-2" title="Horas programadas (Día+Noche+Sábado) de este recurso, sin descontar paros ni rendimiento.">
                   <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Tiempo Máquina</span>
                   <span className="text-[10px] font-black text-slate-700">{ocupacion.tiempoMaquinaBruto.toFixed(1)}h</span>
@@ -5920,10 +5932,26 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
       if (fechasSel.length === 0) return { estado: 'sin-fecha' };
       if (!MACHINE_SAP_CODES_POR_PLANTA[planta][id]) return { estado: 'sin-mapeo' };
       // asignacionMaquinaOrden: HR exclusiva, material propio (LA02 GYE) o HR compartida (fracción).
-      const horas = filasSeleccion.reduce((s, x) => {
+      // Desglose por origen (usuario 2026-10-12, sospecha de necesidad duplicada): qué parte del Tiempo
+      // Proceso es FERT del día, provisional, necesidad sin orden y pendiente de días anteriores. Las
+      // primeras backlogSeleccion.length filas son el backlog (ver filasSeleccion).
+      const corta = (d: string) => (d ? format(parseFechaLocal(d), 'dd/MM') : '—');
+      const origenDe = (x: (typeof filasSeleccion)[number], i: number) => {
+        const delBacklog = i < backlogSeleccion.length;
+        if (x.estado === 'FERT') return delBacklog ? `Pendiente FERT fin ${corta(x.row.fechaFin)} (exceso del turno)` : `FERT del ${corta(x.fecha)}`;
+        if (x.estado === 'Ya firme') return `Provisional ${delBacklog ? 'de plan anterior ' : ''}${corta(x.fecha)}`;
+        return delBacklog ? `Necesidad SIN orden de plan aún activo ${corta(x.fecha)}` : `Necesidad SIN orden del ${corta(x.fecha)}`;
+      };
+      const desgloseMap = new Map<string, { horas: number; ordenes: number }>();
+      const horas = filasSeleccion.reduce((s, x, i) => {
         const asignada = asignacionMaquinaOrden(planta, normalizarCodigoMaquina(x.row.maquina), x.row.material).find(a => a.id === id);
-        return s + (asignada ? x.row.tTotal * asignada.fraccion : 0);
+        if (!asignada) return s;
+        const h = x.row.tTotal * asignada.fraccion;
+        const d = desgloseMap.get(origenDe(x, i)) ?? { horas: 0, ordenes: 0 };
+        desgloseMap.set(origenDe(x, i), { horas: d.horas + h, ordenes: d.ordenes + 1 });
+        return s + h;
       }, 0);
+      const desglose = Array.from(desgloseMap, ([origen, v]) => ({ origen, ...v })).filter(d => d.horas > 0.05).sort((a, b) => b.horas - a.horas);
       const capNeta = horasDeMaquina(id);
       const tiempoMaquinaBruto = horasMaquinaBruto(id);
       // Ocupación Recurso (pedido por el usuario, ver recuadro "{Proceso} · {ID}" en renderMachineCol):
@@ -5931,7 +5959,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
       // rendimiento y paros descontados). Distinto criterio a propósito: acá se quiere ver qué tanto
       // del tiempo de reloj programado (crudo) se está usando de verdad.
       const pct = tiempoMaquinaBruto > 0 ? (horas / tiempoMaquinaBruto) * 100 : null;
-      return { estado: 'ok', horas, capNeta, tiempoMaquinaBruto, pct, pendienteAnterior: pendienteAnteriorPorMaquina.get(id) };
+      return { estado: 'ok', horas, capNeta, tiempoMaquinaBruto, pct, pendienteAnterior: pendienteAnteriorPorMaquina.get(id), desglose };
     };
 
     // Sugerencias de redistribución entre carruseles (pedido por el usuario, ver
