@@ -2870,7 +2870,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       .map(dia => ({ dia, horas: horasDe(enTurno.filter(x => (x.row.fechaFin || x.fecha) === dia)) }))
       .filter(d => d.horas > 0.05);
     const resumen = tot.pendiente > 0.05 ? { dia: diaAnterior, ...tot, anteriores } : null;
-    return { filas: [...backlogNecesidad.filter(x => !esFertBacklog(x)), ...ajuste.filas], pendientes: ajuste.filas, resumen, porMaquina: ajuste.porMaquina };
+    // Hacia atrás SOLO FERT pendientes (usuario 2026-10-12): la necesidad sin orden de planes de fechas
+    // anteriores que siguen activos ya no suma — esa necesidad normalmente ya es FERT (con otra fecha) y
+    // se contaba dos veces (caso CR04 234 % en la ventana del 13/10). El día evaluado sigue usando su
+    // plan: FERT del día o, si aún no hay, la necesidad de los planes de esa fecha (resolverFecha).
+    return { filas: ajuste.filas, pendientes: ajuste.filas, resumen, porMaquina: ajuste.porMaquina };
   }, [restarDiasHabiles, ajustePendienteTurnoAnterior]);
 
   // Auditoría (solo lectura, pedido del usuario 2026-10-07): cada FERT con cantidad pendiente hasta la
