@@ -15,7 +15,8 @@
  * o hasta que se envíen órdenes a SAP (se refrescan FERT y provisionales, que son las que cambian).
  * Qué se vuelve a consultar y cuándo (usuario 2026-10-12): FERT y provisionales en CADA sincronización
  * (refrescarAlSincronizar: son las únicas que cambian en el día); Cubo de inventarios UNA vez al día y
- * Mantenimientos UNA vez por semana (se cargan cada miércoles), ambos guardados en el navegador
+ * Mantenimientos UNA vez por semana (se cargan al final del miércoles o el jueves: el jueves se consultan
+ * en cada sincronización y de viernes a miércoles se usa la última copia del jueves), ambos en el navegador
  * (cache-diaria) — "Actualizar datos SAP" no los vuelve a pedir. El resto se comparte en la sesión.
  * Una respuesta vacía o con error no se guarda: la próxima lectura vuelve a pedirla.
  *
@@ -28,7 +29,7 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { leerVersionTablasPropias } from '@/lib/tablas-propias-version';
 import type { DetalleTactico } from '@/types/interfaces';
-import { leerDiario, guardarDiario, periodoDesdeMiercoles } from '@/lib/cache-diaria';
+import { leerDiario, guardarDiario, periodoDesdeJueves, esJuevesHoy } from '@/lib/cache-diaria';
 
 export type ClaveDatoSap =
   | 'provisionales'
@@ -150,8 +151,10 @@ export const sapCompartido = {
   }),
   cuboHabilidadesOP: () => compartir('habilidades', () => serviciosService.getCuboHabilidadesOP()),
   mantenimientosPreventivos: () => compartir('mantenimientos', async () => {
-    const periodo = periodoDesdeMiercoles();
-    const guardado = await leerDiario<Awaited<ReturnType<typeof serviciosService.ListarMantenimientoPreventivosProgramados>>>(CLAVE_MTTO_SEMANAL, periodo);
+    const periodo = periodoDesdeJueves();
+    // El jueves la carga semanal puede llegar en cualquier momento: se consulta siempre y se guarda la
+    // última; de viernes a miércoles se usa esa copia.
+    const guardado = esJuevesHoy() ? null : await leerDiario<Awaited<ReturnType<typeof serviciosService.ListarMantenimientoPreventivosProgramados>>>(CLAVE_MTTO_SEMANAL, periodo);
     if (guardado) return guardado.valor;
     const r = await serviciosService.ListarMantenimientoPreventivosProgramados();
     if (!respuestaVacia(r)) void guardarDiario(CLAVE_MTTO_SEMANAL, r, periodo);
@@ -200,7 +203,8 @@ export const refrescarDatosSap = (claves?: ClaveDatoSap[]): void => {
  * Al iniciar CADA sincronización de un módulo (usuario 2026-10-12): FERT y provisionales son las únicas
  * consultas que cambian durante el día, así que siempre se vuelven a pedir; el resto se reusa.
  */
-export const refrescarAlSincronizar = (): void => refrescarDatosSap(['fert', 'provisionales']);
+// El jueves también el mantenimiento: su carga semanal puede llegar ese día (ver mantenimientosPreventivos).
+export const refrescarAlSincronizar = (): void => refrescarDatosSap(esJuevesHoy() ? ['fert', 'provisionales', 'mantenimientos'] : ['fert', 'provisionales']);
 
 /** Hora del dato SAP más antiguo en uso (null si no hay nada descargado). */
 export const momentoDatosSap = (): Date | null => {

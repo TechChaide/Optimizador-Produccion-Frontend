@@ -14,15 +14,18 @@ const fechaLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).p
 const hoyLocal = () => fechaLocal(new Date());
 
 /**
- * Periodo semanal que arranca el MIÉRCOLES (fecha del miércoles más reciente, incluido hoy): los
- * mantenimientos preventivos se cargan cada miércoles y no cambian hasta la siguiente carga (usuario
- * 2026-10-12).
+ * Periodo semanal que arranca el JUEVES (fecha del jueves más reciente, incluido hoy): los
+ * mantenimientos preventivos se cargan al final del miércoles o, como máximo, el jueves, y no cambian
+ * hasta la siguiente carga (usuario 2026-10-12).
  */
-export const periodoDesdeMiercoles = (): string => {
+export const periodoDesdeJueves = (): string => {
   const d = new Date();
-  d.setDate(d.getDate() - ((d.getDay() - 3 + 7) % 7));
+  d.setDate(d.getDate() - ((d.getDay() - 4 + 7) % 7));
   return fechaLocal(d);
 };
+
+/** ¿Hoy es jueves? Ese día la carga semanal puede llegar en cualquier momento. */
+export const esJuevesHoy = (): boolean => new Date().getDay() === 4;
 
 const abrir = (): Promise<IDBDatabase> => new Promise((ok, mal) => {
   if (typeof indexedDB === 'undefined') { mal(new Error('IndexedDB no disponible')); return; }
@@ -47,7 +50,7 @@ const operar = async <R,>(modo: IDBTransactionMode, fn: (s: IDBObjectStore) => I
 
 /**
  * Valor guardado para la clave en el periodo vigente (por defecto HOY; otro periodo, p. ej.
- * periodoDesdeMiercoles()), o null (otro periodo, sin guardar o IndexedDB no disponible).
+ * periodoDesdeJueves()), o null (otro periodo, sin guardar o IndexedDB no disponible).
  */
 export const leerDiario = async <T,>(clave: string, periodo: string = hoyLocal()): Promise<{ valor: T; guardadoEn: Date } | null> => {
   try {
