@@ -84,10 +84,15 @@ export const VistaPreviaEnvioSap = memo(function VistaPreviaEnvioSap({
   onConfirmar: (payloads: SolicitudProduccionHBPayload[]) => void;
 }) {
   const [filas, setFilas] = useState<Fila[]>([]);
-  useEffect(() => { setFilas(filasIniciales ?? []); }, [filasIniciales]);
+  // PuestoTrabajo va a SAP en MAYÚSCULAS (pedido del usuario 2026-10-12): el catálogo PR2 trae
+  // valores como "Carruseles"/"Looper"; se normaliza al abrir y en cada edición manual.
+  useEffect(() => {
+    setFilas((filasIniciales ?? []).map(f => ({ ...f, payload: { ...f.payload, PuestoTrabajo: String(f.payload.PuestoTrabajo ?? '').trim().toUpperCase() } })));
+  }, [filasIniciales]);
 
   const onCambio = useCallback((index: number, campo: keyof SolicitudProduccionHBPayload, valor: string | number) => {
-    setFilas(prev => prev.map((f, i) => i === index ? { ...f, payload: { ...f.payload, [campo]: valor } } : f));
+    const v = campo === 'PuestoTrabajo' ? String(valor).toUpperCase() : valor;
+    setFilas(prev => prev.map((f, i) => i === index ? { ...f, payload: { ...f.payload, [campo]: v } } : f));
   }, []);
   const onQuitar = useCallback((index: number) => {
     setFilas(prev => prev.filter((_, i) => i !== index));

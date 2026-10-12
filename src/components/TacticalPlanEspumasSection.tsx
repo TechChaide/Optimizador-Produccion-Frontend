@@ -3450,12 +3450,22 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
         if (ok) guardados.push(planta);
       }
+      // Orden SAP → reporte (usuario 2026-10-12): primero exportar el PFD a SAP y después revisar y
+      // enviar el correo. El reporte ya quedó guardado como foto del P3 (no se recalcula con las FERT
+      // nuevas); el correo de Espuma no lleva orden SAP por material, así que solo cambia el orden.
+      const nombre = (planta: 'UIO' | 'GYE') => guardados.length > 1 ? (planta === 'UIO' ? ' Quito' : ' Guayaquil') : '';
       panelProgreso.concluir(
-        guardados.length > 0 ? 'P3 y reporte guardados. Exporta a SAP si corresponde y luego revisa y envía el reporte.' : undefined,
-        guardados.map(planta => ({
-          etiqueta: guardados.length > 1 ? `Ver reporte ${planta === 'UIO' ? 'Quito' : 'Guayaquil'}` : 'Ver reporte y enviar',
-          onClick: () => { setActiveTab('resumen'); void reporteFlujo[planta].recuperar(); },
-        })),
+        guardados.length > 0 ? 'P3 y reporte guardados. 1) Exporta el PFD a SAP; 2) luego revisa y envía el reporte.' : undefined,
+        [
+          ...guardados.map(planta => ({
+            etiqueta: `1 · Exportar a SAP${nombre(planta)}`,
+            onClick: () => { setActiveTab('respuestaP3'); void handleExportSap(planta === 'UIO' ? '1000' : '2000'); },
+          })),
+          ...guardados.map(planta => ({
+            etiqueta: `2 · Ver reporte y enviar${nombre(planta)}`,
+            onClick: () => { setActiveTab('resumen'); void reporteFlujo[planta].recuperar(); },
+          })),
+        ],
       );
     })();
   }, [reportesPorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -6067,7 +6077,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 <PopoverContent className="w-80 p-4 space-y-3" align="end">
                   <div>
                     <p className="text-xs font-black uppercase tracking-widest text-slate-700">Reporte de producción</p>
-                    <p className="text-[10px] text-slate-500 mt-1">Gestión de tiempos y ocupación por proceso — {planta === 'UIO' ? 'Quito' : 'Guayaquil'}. Guarda el plan antes de exportar a SAP y envíalo después desde la vista previa.</p>
+                    <p className="text-[10px] text-slate-500 mt-1">Gestión de tiempos y ocupación por proceso — {planta === 'UIO' ? 'Quito' : 'Guayaquil'}. El plan se guarda al confirmar el P3; exporta primero a SAP (pestaña 2) y luego envía el reporte desde la vista previa.</p>
                   </div>
                   <ReportePlanTxtAcciones flujo={reporteFlujo[planta]} />
                   <p className="text-[10px] text-slate-500">Destinatarios precargados desde Grupo_Correos_Corte_Espuma — editables en la vista previa.</p>
@@ -7063,7 +7073,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl h-9 px-5 text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2"
                         title="Genera y previsualiza en un solo paso la Respuesta P3 (cobertura) y el PFD (faltante a fabricar) de este centro."
                       >
-                        <Save className="w-4 h-4" /> Generar Respuesta · P3 {nombrePlanta}
+                        <Save className="w-4 h-4" /> 1 · Generar Respuesta · P3 {nombrePlanta}
                       </Button>
                       <Button
                         onClick={() => handleExportSap(centro)}
@@ -7071,7 +7081,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl h-9 px-5 text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2"
                         title="Envía a SAP (InsertarSolicitudProduccionHB) el P3 ya guardado más reciente de este centro — una orden por material. Generá la Respuesta P3 primero si todavía no existe."
                       >
-                        {isValidandoExportSap ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} Exportar a SAP · PFD {nombrePlanta}
+                        {isValidandoExportSap ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} 2 · Exportar a SAP · PFD {nombrePlanta}
                       </Button>
                     </div>
                   </div>

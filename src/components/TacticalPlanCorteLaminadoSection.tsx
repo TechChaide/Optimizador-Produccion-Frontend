@@ -5234,16 +5234,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               revisar/ajustar filas más abajo. P3 y PFD se fusionaron en un solo botón/diálogo
               2026-09-22 (mismo cambio que Corte Espuma, ver handleAbrirRespuestaP3PFD) — "Editar
               Plan" queda como acción secundaria (outline), no forma parte del flujo de generación. */}
+          {/* 2026-10-12: "Generar Respuesta · P3" se movió a Salida de Datos (pedido del usuario),
+              junto a Enviar a SAP; aquí queda solo Editar Plan. */}
           <div className="flex items-center gap-3 flex-wrap justify-end">
-            <Button
-              onClick={handleAbrirRespuestaP3PFD}
-              disabled={isSavingPlanP3PFD || respuestaSalidaRows.every(r => r.cantidadKg <= 0)}
-              className="rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white shadow-lg"
-              title="Genera y previsualiza la Respuesta P3 (stock + corridas). Al confirmar, el panel guarda el P3 y el reporte."
-            >
-              {isSavingPlanP3PFD ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardList className="w-4 h-4" />}
-              {isSavingPlanP3PFD ? 'Guardando...' : 'Generar Respuesta · P3 - Rollos'}
-            </Button>
             <Button
               onClick={handleOpenEditarPlan}
               disabled={isLoadingEditPlan}
@@ -5950,8 +5943,20 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               </div>
             </div>
             <div className="flex items-center gap-3">
+              {/* Desde 2026-10-12 vive acá (antes en Resumen Necesidades): el P3 sale igual
+                  (respuestaSalidaRows con las aprobaciones/ajustes de Resumen Necesidades); el orden
+                  queda 1) Generar P3 → 2) Enviar a SAP. */}
+              <Button
+                onClick={handleAbrirRespuestaP3PFD}
+                disabled={isSavingPlanP3PFD || respuestaSalidaRows.every(r => r.cantidadKg <= 0)}
+                className="rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white shadow-lg"
+                title="Genera y previsualiza la Respuesta P3 (stock + corridas). Al confirmar, el panel guarda el P3 y el reporte."
+              >
+                {isSavingPlanP3PFD ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardList className="w-4 h-4" />}
+                {isSavingPlanP3PFD ? 'Guardando...' : '1 · Generar Respuesta · P3 - Rollos'}
+              </Button>
               <Button onClick={handleExportTxt} disabled={isValidandoExportTxt} className="bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2">
-                {isValidandoExportTxt ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} {isValidandoExportTxt ? 'Validando…' : 'Enviar a SAP'}
+                {isValidandoExportTxt ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} {isValidandoExportTxt ? 'Validando…' : '2 · Enviar a SAP'}
               </Button>
             </div>
           </div>
