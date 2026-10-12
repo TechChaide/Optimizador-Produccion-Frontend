@@ -2534,7 +2534,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   <tr>
     <td style="padding:0 28px 28px;">
       <p style="margin:16px 0 0;font-size:11px;line-height:1.6;color:#9ca3af;border-top:1px solid #e5e7eb;padding-top:16px;">
-        Espumas a nivel FERT/PT (trazabilidad desde Data Aprobada verificada); Rollos todavía a nivel componente (ver nota en su tabla).
         Este correo fue generado automáticamente por el Optimizador de Producción, favor no responder.
         Para dudas sobre estos datos, contacta a Planificación Táctica.
       </p>
