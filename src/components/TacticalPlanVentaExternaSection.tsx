@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { ShoppingCart, Package, Loader2, LayoutDashboard, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Filter, TrendingUp, Box, X, Layers, Wand2, Save, ClipboardCheck, RefreshCw, Clock, Search, Mail, AlertCircle, FileText, Wrench, CheckCircle2 } from 'lucide-react';
+import { ShoppingCart, Package, Loader2, LayoutDashboard, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Filter, X, Layers, Wand2, Save, ClipboardCheck, RefreshCw, Clock, Search, Mail, AlertCircle, FileText, Wrench, CheckCircle2 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -20,8 +20,8 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, cargarUltimoReporte, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
-import { EstadoDelDia, useEstadoDelDia } from '@/components/EstadoDelDia';
+import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
+import { useEstadoDelDia } from '@/components/EstadoDelDia';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
@@ -331,7 +331,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // handleGenerarP2ConPanel —, porque generarlo solo al sincronizar en la tarde pisaba el P2 que
   // Laminado/Corte Espuma ya habían respondido.)
   // Cambia tras cada acción que graba (P2, PFD-VENTA) para que el estado del día (✓ de las
-  // pestañas-paso y pestaña Cierre) se vuelva a consultar.
+  // pestañas-paso) se vuelva a consultar.
   const [recargaEstadoDia, setRecargaEstadoDia] = useState(0);
   const estadoDia = useEstadoDelDia(recargaEstadoDia);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
@@ -2633,13 +2633,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Un reporte por centro, como Laminado (usuario 2026-10-08): cada uno con su Guardar / Vista previa /
   // Enviar. Hoy se trabaja con el 1000; el 2000 sigue el mismo esquema y se envía cuando esté formal.
   const reporteFlujoEmpaque = { '1000': reporteFlujoEmpaque1000, '2000': reporteFlujoEmpaque2000 } as const;
-  // Flujo en dos etapas (2026-10-12): al abrir ya NO se carga solo el último reporte (dejaba Data
-  // Aprobada de otro ciclo en pantalla); la barra Estado del día dice qué falta y el reporte anterior
-  // se abre a pedido con "Ver último reporte".
-  const handleVerUltimoReporte = async () => {
-    const ok = await cargarUltimoReporte('venta-espuma', ['1000', '2000'], restaurarEstadoPlan);
-    if (!ok) addNotification('info', 'No hay un reporte guardado reciente de Venta Externa.');
-  };
+  // Al abrir ya NO se carga solo el último reporte (2026-10-12: dejaba Data Aprobada de otro ciclo en
+  // pantalla). Un reporte guardado se recupera desde "Enviar Reporte" de cada centro en 4 · Resumen.
 
   const calculateSummary = (data: Record<string, unknown>[], centroId: string) => {
     const lookup = centroId === '1000' ? tiempoLookup1000 : tiempoLookup2000;
@@ -2979,15 +2974,22 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     })();
   }, [reportePorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Totales globales para el dashboard superior
-  const globalStats = useMemo(() => {
-    const all = [...summaryData1000, ...summaryData2000];
-    return {
-      ordenes: all.reduce((sum, r) => sum + r.totalOrdenes, 0),
-      unidades: all.reduce((sum, r) => sum + r.totalCantidad, 0),
-      horasEmpaque: all.reduce((sum, r) => sum + r.totalTiempoEmpaque, 0)
-    };
+  // Totales de la carga operativa POR CENTRO (2026-10-12: antes eran globales y mezclaban 1000 y 2000).
+  const statsPorCentro = useMemo(() => {
+    const totales = (rows: typeof summaryData1000) => ({
+      ordenes: rows.reduce((sum, r) => sum + r.totalOrdenes, 0),
+      unidades: rows.reduce((sum, r) => sum + r.totalCantidad, 0),
+      horasEmpaque: rows.reduce((sum, r) => sum + r.totalTiempoEmpaque, 0),
+    });
+    return { '1000': totales(summaryData1000), '2000': totales(summaryData2000) };
   }, [summaryData1000, summaryData2000]);
+
+  // La fecha de la carga operativa arranca en el PT del ciclo (hoy + 2 hábiles), no en hoy: es el día
+  // que se empaca y el mismo del reporte. Si el PT cambia (al sincronizar con el calendario laboral),
+  // se vuelve a fijar; el usuario puede elegir otras fechas para consultar.
+  useEffect(() => {
+    setSelectedDatesResumen([fechasHorizonte.pt]);
+  }, [fechasHorizonte.pt]);
 
   // Mapa Cod.Buscar → Fecha de Órdenes FERT (mismo cruce que Pendientes, ver buildCodBuscar): usa
   // TODAS las FERT cargadas (sin el filtro de centro/responsable/fecha que aplican fertC1000/
@@ -3154,6 +3156,121 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     </Popover>
   );
 
+  // Carga operativa ejecutada (FERT) de UN centro, dentro del bloque de ese centro en "4 · Resumen y
+  // reporte" (usuario 2026-10-12: antes iba todo mezclado debajo de las capacidades de ambos centros).
+  const renderCargaCentro = (centroId: '1000' | '2000') => {
+    const center = centroId === '1000'
+      ? { t: 'Carga operativa (FERT) · Centro 1000', d: groupedSummary1000, c: 'text-green-700', b: 'bg-green-600', expanded: expandedCategorias1000, setExpanded: setExpandedCategorias1000 }
+      : { t: 'Carga operativa (FERT) · Centro 2000', d: groupedSummary2000, c: 'text-indigo-700', b: 'bg-indigo-600', expanded: expandedCategorias2000, setExpanded: setExpandedCategorias2000 };
+    const idx = centroId === '1000' ? 0 : 1;
+    return (
+        <div key={idx} className="space-y-4">
+          <div className="flex items-center justify-between px-1">
+            <h3 className={cn("text-[11px] font-black uppercase flex items-center gap-2 tracking-widest", center.c)}>
+              <div className={cn("w-2.5 h-2.5 rounded-full", center.b)} /> {center.t}
+            </h3>
+            <div className="flex items-center gap-2 text-[10px] font-bold">
+              <span className="rounded-lg bg-blue-50 text-blue-700 px-2 py-1">{statsPorCentro[centroId].ordenes} órdenes</span>
+              <span className="rounded-lg bg-green-50 text-green-700 px-2 py-1">{statsPorCentro[centroId].unidades.toLocaleString()} unid.</span>
+              <span className="rounded-lg bg-amber-50 text-amber-700 px-2 py-1">{statsPorCentro[centroId].horasEmpaque.toFixed(1)} h empaque</span>
+              <Badge variant="outline" className="text-[10px] font-bold border-gray-200 text-gray-500">{center.d.length} categorías</Badge>
+            </div>
+          </div>
+          <Card className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
+            {center.d.length === 0 ? (
+              <div className="py-16 text-center text-gray-500 font-bold uppercase tracking-widest opacity-30">Sin operaciones programadas</div>
+            ) : (
+              <div className="max-h-[600px] overflow-y-auto px-4">
+                <Accordion type="multiple" value={center.expanded} onValueChange={center.setExpanded} className="divide-y divide-gray-50">
+                  {center.d.map(group => (
+                    <AccordionItem key={group.categoria} value={group.categoria} className="border-b-0">
+                      <AccordionTrigger className="hover:no-underline py-3 px-2">
+                        <div className="flex items-center justify-between w-full pr-4 text-left">
+                          <div className="flex items-center gap-3">
+                            <Badge className="bg-blue-50 text-blue-800 font-bold text-[10px] uppercase border-blue-200">D{group.densidad}</Badge>
+                            <div>
+                              <p className="text-xs font-black text-gray-700 uppercase">{group.categoria}</p>
+                              <p className="text-[10px] font-bold text-gray-500 uppercase">{group.tipo} · {group.rows.length} variante(s)</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-6 text-right">
+                            <div>
+                              <p className="text-[9px] font-black uppercase text-gray-500 tracking-wider">Órdenes</p>
+                              <p className="text-xs font-mono font-bold text-gray-600">{group.totalOrdenes}</p>
+                            </div>
+                            <div>
+                              <p className="text-[9px] font-black uppercase text-gray-500 tracking-wider">Unidades</p>
+                              <p className="text-xs font-mono font-black text-gray-900">{group.totalCantidad.toLocaleString()}</p>
+                            </div>
+                            {/* Paquetes de 60 cm (solo planchas); "enrollar" = C-PLANCHA (ver paquetesPlancha). */}
+                            <div title={`Paquetes de planchas de ${ALTURA_PAQUETE_CM} cm (unidades ÷ ⌊${ALTURA_PAQUETE_CM}/espesor⌋, por material). C-PLANCHA: además se enrolla el paquete.`}>
+                              <p className="text-[9px] font-black uppercase text-teal-700 tracking-wider">Paquetes</p>
+                              <p className="text-xs font-mono font-black text-teal-700">
+                                {group.paquetes > 0 ? group.paquetes : '—'}
+                                {group.paquetesEnrollar > 0 && <span className="ml-1 text-[10px] text-purple-700">({group.paquetesEnrollar} enrollar)</span>}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-[9px] font-black uppercase text-amber-500 tracking-wider">Tiempo Planchas (H)</p>
+                              <p className="text-xs font-mono font-black text-amber-600">{group.totalTiempoEmpaque.toFixed(2)}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </AccordionTrigger>
+                      <AccordionContent>
+                        <table className="w-full border-collapse text-center font-sans bg-gray-50/40 rounded-xl overflow-hidden">
+                          <thead className="bg-gray-50 text-[10px] font-black uppercase text-gray-500 border-b border-gray-100">
+                            <tr>
+                              <th className="px-4 py-2 border-r border-gray-100 text-left">Máquina / Recurso</th>
+                              <th className="px-3 py-2 border-r border-gray-100 text-primary">Tipo</th>
+                              <th className="px-3 py-2 border-r border-gray-100 bg-blue-50/50 text-blue-800">Espesor</th>
+                              <th className="px-3 py-2 border-r border-gray-100">Órdenes</th>
+                              <th className="px-3 py-2 border-r border-gray-100 font-black">Unidades</th>
+                              <th className="px-3 py-2 border-r border-gray-100 text-teal-700">Paquetes ({ALTURA_PAQUETE_CM} cm)</th>
+                              <th className="px-3 py-2 border-r border-gray-100 text-purple-700">Enrollar (C-Plancha)</th>
+                              <th className="px-4 py-2 text-center text-amber-700 bg-amber-50/30">Tiempo Planchas (H)</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-50 text-[11px]">
+                            {group.rows.map((row, i) => (
+                              <tr key={i} className="hover:bg-gray-50/50 transition-colors">
+                                <td className="px-4 py-2 font-black text-gray-700 border-r border-gray-100 uppercase text-left">{row.maquina}</td>
+                                <td className="px-3 py-2 font-black text-primary border-r border-gray-100 uppercase">{row.tipo}</td>
+                                <td className="px-3 py-2 font-black text-blue-700 border-r border-gray-100 bg-blue-50/5">{row.espesor}</td>
+                                <td className="px-3 py-2 font-mono border-r border-gray-100 text-gray-500">{row.totalOrdenes}</td>
+                                <td className="px-3 py-2 font-mono font-black text-gray-900 border-r border-gray-100">{row.totalCantidad.toLocaleString()}</td>
+                                <td className="px-3 py-2 font-mono font-black text-teal-700 border-r border-gray-100">{row.paquetes ? row.paquetes : '—'}</td>
+                                <td className="px-3 py-2 font-mono font-black text-purple-700 border-r border-gray-100">{row.paquetesEnrollar ? row.paquetesEnrollar : '—'}</td>
+                                <td className="px-4 py-2 font-mono font-black text-amber-600 text-center bg-amber-50/5">{row.totalTiempoEmpaque.toFixed(2)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </AccordionContent>
+                    </AccordionItem>
+                  ))}
+                </Accordion>
+              </div>
+            )}
+            {center.d.length > 0 && (
+              <div className="bg-gray-100 text-gray-800 font-black text-[10px] uppercase border-t-2 border-gray-200 px-6 py-3 flex items-center justify-between">
+                <span className="tracking-widest">Total {center.t}</span>
+                <div className="flex items-center gap-8 font-mono">
+                  <span>{center.d.reduce((s, r) => s + r.totalOrdenes, 0)} órdenes</span>
+                  <span className="text-green-600">{center.d.reduce((s, r) => s + r.totalCantidad, 0).toLocaleString()} unid.</span>
+                  <span className="text-teal-700">
+                    {center.d.reduce((s, r) => s + r.paquetes, 0)} paquetes
+                    {center.d.some(r => r.paquetesEnrollar > 0) && ` (${center.d.reduce((s, r) => s + r.paquetesEnrollar, 0)} a enrollar)`}
+                  </span>
+                  <span className="text-amber-600">{center.d.reduce((s, r) => s + r.totalTiempoEmpaque, 0).toFixed(1)}h empaque</span>
+                </div>
+              </div>
+            )}
+          </Card>
+        </div>
+    );
+  };
+
   if (!mounted) return null;
 
   return (
@@ -3235,7 +3352,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid grid-cols-6 h-10 bg-gray-50/80 p-1 rounded-xl border border-gray-100 mb-6">
+        <TabsList className="grid grid-cols-5 h-10 bg-gray-50/80 p-1 rounded-xl border border-gray-100 mb-6">
           {/* Pestañas-paso (usuario 2026-10-12, ver [[flujo-dos-etapas]]): una pestaña por paso del
               día, cada una con su acción principal y ✓ cuando ya se hizo hoy (estado del día en vivo).
               Pendientes queda al final como consulta. Provisionales y FERT siguen OCULTAS (solo
@@ -3245,7 +3362,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             { v: 'dataAprobada', l: '2 · Data Aprobada', i: ClipboardCheck, hecho: !!dataAprobadaFetchedAt },
             { v: 'pfdVenta', l: '3 · PFD-VENTA', i: Package, hecho: estadoDia.hecho('ve-pfd') },
             { v: 'resumen', l: '4 · Resumen y reporte', i: LayoutDashboard, hecho: estadoDia.hecho('ve-rep-1000') },
-            { v: 'cierre', l: '5 · Cierre', i: CheckCircle2, hecho: false },
             { v: 'pendientes', l: 'Pendientes', i: Clock, hecho: false },
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-1.5 text-[9px] font-bold uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-sm">
@@ -3256,6 +3372,27 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         </TabsList>
 
         <TabsContent value="resumen" className="space-y-6 animate-in fade-in duration-300">
+          {/* Fecha de producción (PT = hoy + 2 hábiles, mismo horizonte de todos los módulos; usuario
+              2026-10-12): una sola vez arriba. Capacidad, ventana y reporte de Empaque son del PT; la
+              carga operativa (FERT) de cada centro muestra las fechas elegidas acá (por defecto el PT). */}
+          <div className="flex justify-between items-center bg-gray-50/50 p-4 rounded-2xl border border-gray-100">
+            <div className="flex items-center gap-4 text-left">
+              <div className="p-2 bg-primary/10 rounded-xl"><CalendarIcon className="w-5 h-5 text-primary" /></div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-gray-500 tracking-wider">Fecha de producción (PT)</p>
+                <h3 className="text-sm font-black text-gray-700 uppercase">
+                  {format(parseISO(fechasHorizonte.pt), "EEEE d 'de' MMMM", { locale: es })}
+                </h3>
+                <p className="text-[10px] text-gray-500 mt-0.5">
+                  {selectedDatesResumen.length === 1 && selectedDatesResumen[0] === fechasHorizonte.pt
+                    ? 'Capacidad, carga operativa (FERT) y reporte de cada centro para este día.'
+                    : `Carga operativa (FERT) de: ${selectedDatesResumen.map(d => format(parseISO(d), 'dd/MM')).join(', ')} — la capacidad y el reporte siguen siendo del PT.`}
+                </p>
+              </div>
+            </div>
+            {fechaResumenPopover}
+          </div>
+
           {/* Capacidad Operativa · Empaque: máquina(s) de empaque con turnos/operadores editables (mismo
               patrón que Capacidad Operativa en Corte Espuma), capacidad en horas y % Ocupación contra
               las horas necesarias (Espumas a nivel FERT/PT + Rollos a nivel componente, ver
@@ -3305,7 +3442,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                 empaqueConfig[m.id]?.night === 'EMPTY' ? `${m.id} noche` : null,
               ].filter(Boolean) as string[]);
               return (
-                <div key={centro} className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left font-sans">
+                <div key={centro} className="space-y-4">
+                <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left font-sans">
                   <div className="px-8 py-4 bg-slate-50/70 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-baseline gap-3">
                       <h4 className="text-xl font-black tracking-tighter text-gray-800">CENTRO {centro}</h4>
@@ -3597,163 +3735,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                     </>
                   )}
                 </div>
+                {renderCargaCentro(centro)}
+                </div>
               );
             })}
           </div>
 
-          {/* Carga Operativa ejecutada (FERT) — selector de fechas propio, independiente de la ventana del plan. */}
-          <div className="border-t-2 border-dashed border-gray-100" />
-
-          {/* Selector PROPIO de este tab (selectedDatesResumen/fechaResumenPopover) — deliberadamente
-              separado de `selectedDates` ("Ventana de Producción", usada por Provisionales/generar
-              P2). Antes esta fecha estaba fija a hoy sin poder cambiarla; ahora es multi-select EXACTO
-              (no acumulado "hasta" — una fecha muestra solo ese día, varias suman solo esos días). */}
-          <div className="flex justify-between items-center bg-gray-50/50 p-4 rounded-2xl border border-gray-100">
-            <div className="flex items-center gap-4 text-left">
-              <div className="p-2 bg-primary/10 rounded-xl"><CalendarIcon className="w-5 h-5 text-primary" /></div>
-              <div>
-                <p className="text-[10px] font-bold uppercase text-gray-500 tracking-wider">Carga Operativa</p>
-                <h3 className="text-sm font-black text-gray-700 uppercase">
-                  {selectedDatesResumen.length === 1 && selectedDatesResumen[0] === format(new Date(), 'yyyy-MM-dd')
-                    ? 'Ejecutado hoy (FERT)'
-                    : selectedDatesResumen.length === 1
-                    ? `Ejecutado el ${format(parseISO(selectedDatesResumen[0]), 'd MMM yyyy', { locale: es })} (FERT)`
-                    : `Ejecutado en ${selectedDatesResumen.length} fechas (FERT)`}
-                </h3>
-              </div>
-            </div>
-            {fechaResumenPopover}
-          </div>
-
-          {/* Estadísticas de Carga - Dashboard Superior */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Card className="p-4 border-none shadow-sm bg-blue-50/30 flex items-center gap-4">
-              <div className="p-3 bg-blue-500/10 rounded-2xl text-blue-600"><TrendingUp className="w-5 h-5" /></div>
-              <div>
-                <p className="text-[10px] font-black uppercase text-gray-500 tracking-widest">Total Órdenes</p>
-                <p className="text-xl font-black text-gray-800">{globalStats.ordenes}</p>
-              </div>
-            </Card>
-            <Card className="p-4 border-none shadow-sm bg-green-50/30 flex items-center gap-4">
-              <div className="p-3 bg-green-500/10 rounded-2xl text-green-600"><Package className="w-5 h-5" /></div>
-              <div>
-                <p className="text-[10px] font-black uppercase text-gray-500 tracking-widest">Total Unidades</p>
-                <p className="text-xl font-black text-gray-800">{globalStats.unidades.toLocaleString()}</p>
-              </div>
-            </Card>
-            <Card className="p-4 border-none shadow-sm bg-amber-50/30 flex items-center gap-4">
-              <div className="p-3 bg-amber-500/10 rounded-2xl text-amber-600"><Box className="w-5 h-5" /></div>
-              <div>
-                <p className="text-[10px] font-black uppercase text-gray-500 tracking-widest">Horas Totales Empaque</p>
-                <p className="text-xl font-black text-gray-800">{globalStats.horasEmpaque.toFixed(1)}h</p>
-              </div>
-            </Card>
-          </div>
-
-          {[ 
-            { t: 'Planta 1000 - Quito', d: groupedSummary1000, c: 'text-green-700', b: 'bg-green-600', expanded: expandedCategorias1000, setExpanded: setExpandedCategorias1000 },
-            { t: 'Planta 2000 - Guayaquil', d: groupedSummary2000, c: 'text-indigo-700', b: 'bg-indigo-600', expanded: expandedCategorias2000, setExpanded: setExpandedCategorias2000 }
-          ].map((center, idx) => (
-            <div key={idx} className="space-y-4">
-              <div className="flex items-center justify-between px-1">
-                <h3 className={cn("text-[11px] font-black uppercase flex items-center gap-2 tracking-widest", center.c)}>
-                  <div className={cn("w-2.5 h-2.5 rounded-full", center.b)} /> {center.t}
-                </h3>
-                <Badge variant="outline" className="text-[10px] font-bold border-gray-200 text-gray-500">{center.d.length} Categorías identificadas</Badge>
-              </div>
-              <Card className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
-                {center.d.length === 0 ? (
-                  <div className="py-16 text-center text-gray-500 font-bold uppercase tracking-widest opacity-30">Sin operaciones programadas</div>
-                ) : (
-                  <div className="max-h-[600px] overflow-y-auto px-4">
-                    <Accordion type="multiple" value={center.expanded} onValueChange={center.setExpanded} className="divide-y divide-gray-50">
-                      {center.d.map(group => (
-                        <AccordionItem key={group.categoria} value={group.categoria} className="border-b-0">
-                          <AccordionTrigger className="hover:no-underline py-3 px-2">
-                            <div className="flex items-center justify-between w-full pr-4 text-left">
-                              <div className="flex items-center gap-3">
-                                <Badge className="bg-blue-50 text-blue-800 font-bold text-[10px] uppercase border-blue-200">D{group.densidad}</Badge>
-                                <div>
-                                  <p className="text-xs font-black text-gray-700 uppercase">{group.categoria}</p>
-                                  <p className="text-[10px] font-bold text-gray-500 uppercase">{group.tipo} · {group.rows.length} variante(s)</p>
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-6 text-right">
-                                <div>
-                                  <p className="text-[9px] font-black uppercase text-gray-500 tracking-wider">Órdenes</p>
-                                  <p className="text-xs font-mono font-bold text-gray-600">{group.totalOrdenes}</p>
-                                </div>
-                                <div>
-                                  <p className="text-[9px] font-black uppercase text-gray-500 tracking-wider">Unidades</p>
-                                  <p className="text-xs font-mono font-black text-gray-900">{group.totalCantidad.toLocaleString()}</p>
-                                </div>
-                                {/* Paquetes de 60 cm (solo planchas); "enrollar" = C-PLANCHA (ver paquetesPlancha). */}
-                                <div title={`Paquetes de planchas de ${ALTURA_PAQUETE_CM} cm (unidades ÷ ⌊${ALTURA_PAQUETE_CM}/espesor⌋, por material). C-PLANCHA: además se enrolla el paquete.`}>
-                                  <p className="text-[9px] font-black uppercase text-teal-700 tracking-wider">Paquetes</p>
-                                  <p className="text-xs font-mono font-black text-teal-700">
-                                    {group.paquetes > 0 ? group.paquetes : '—'}
-                                    {group.paquetesEnrollar > 0 && <span className="ml-1 text-[10px] text-purple-700">({group.paquetesEnrollar} enrollar)</span>}
-                                  </p>
-                                </div>
-                                <div>
-                                  <p className="text-[9px] font-black uppercase text-amber-500 tracking-wider">Tiempo Planchas (H)</p>
-                                  <p className="text-xs font-mono font-black text-amber-600">{group.totalTiempoEmpaque.toFixed(2)}</p>
-                                </div>
-                              </div>
-                            </div>
-                          </AccordionTrigger>
-                          <AccordionContent>
-                            <table className="w-full border-collapse text-center font-sans bg-gray-50/40 rounded-xl overflow-hidden">
-                              <thead className="bg-gray-50 text-[10px] font-black uppercase text-gray-500 border-b border-gray-100">
-                                <tr>
-                                  <th className="px-4 py-2 border-r border-gray-100 text-left">Máquina / Recurso</th>
-                                  <th className="px-3 py-2 border-r border-gray-100 text-primary">Tipo</th>
-                                  <th className="px-3 py-2 border-r border-gray-100 bg-blue-50/50 text-blue-800">Espesor</th>
-                                  <th className="px-3 py-2 border-r border-gray-100">Órdenes</th>
-                                  <th className="px-3 py-2 border-r border-gray-100 font-black">Unidades</th>
-                                  <th className="px-3 py-2 border-r border-gray-100 text-teal-700">Paquetes ({ALTURA_PAQUETE_CM} cm)</th>
-                                  <th className="px-3 py-2 border-r border-gray-100 text-purple-700">Enrollar (C-Plancha)</th>
-                                  <th className="px-4 py-2 text-center text-amber-700 bg-amber-50/30">Tiempo Planchas (H)</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-gray-50 text-[11px]">
-                                {group.rows.map((row, i) => (
-                                  <tr key={i} className="hover:bg-gray-50/50 transition-colors">
-                                    <td className="px-4 py-2 font-black text-gray-700 border-r border-gray-100 uppercase text-left">{row.maquina}</td>
-                                    <td className="px-3 py-2 font-black text-primary border-r border-gray-100 uppercase">{row.tipo}</td>
-                                    <td className="px-3 py-2 font-black text-blue-700 border-r border-gray-100 bg-blue-50/5">{row.espesor}</td>
-                                    <td className="px-3 py-2 font-mono border-r border-gray-100 text-gray-500">{row.totalOrdenes}</td>
-                                    <td className="px-3 py-2 font-mono font-black text-gray-900 border-r border-gray-100">{row.totalCantidad.toLocaleString()}</td>
-                                    <td className="px-3 py-2 font-mono font-black text-teal-700 border-r border-gray-100">{row.paquetes ? row.paquetes : '—'}</td>
-                                    <td className="px-3 py-2 font-mono font-black text-purple-700 border-r border-gray-100">{row.paquetesEnrollar ? row.paquetesEnrollar : '—'}</td>
-                                    <td className="px-4 py-2 font-mono font-black text-amber-600 text-center bg-amber-50/5">{row.totalTiempoEmpaque.toFixed(2)}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </AccordionContent>
-                        </AccordionItem>
-                      ))}
-                    </Accordion>
-                  </div>
-                )}
-                {center.d.length > 0 && (
-                  <div className="bg-gray-100 text-gray-800 font-black text-[10px] uppercase border-t-2 border-gray-200 px-6 py-3 flex items-center justify-between">
-                    <span className="tracking-widest">Total {center.t}</span>
-                    <div className="flex items-center gap-8 font-mono">
-                      <span>{center.d.reduce((s, r) => s + r.totalOrdenes, 0)} órdenes</span>
-                      <span className="text-green-600">{center.d.reduce((s, r) => s + r.totalCantidad, 0).toLocaleString()} unid.</span>
-                      <span className="text-teal-700">
-                        {center.d.reduce((s, r) => s + r.paquetes, 0)} paquetes
-                        {center.d.some(r => r.paquetesEnrollar > 0) && ` (${center.d.reduce((s, r) => s + r.paquetesEnrollar, 0)} a enrollar)`}
-                      </span>
-                      <span className="text-amber-600">{center.d.reduce((s, r) => s + r.totalTiempoEmpaque, 0).toFixed(1)}h empaque</span>
-                    </div>
-                  </div>
-                )}
-              </Card>
-            </div>
-          ))}
         </TabsContent>
 
         <TabsContent value="ordenes" className="space-y-8 animate-in fade-in duration-300">
@@ -4380,12 +4367,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               Continuar: 4 · Resumen y reporte <ChevronRight className="w-4 h-4" />
             </Button>
           </div>
-        </TabsContent>
-
-        {/* Paso 5 · Cierre (2026-10-12): estado del día de toda la cadena — qué falta en este módulo y
-            en Laminado/Corte Espuma antes de terminar. El último reporte guardado se abre solo a pedido. */}
-        <TabsContent value="cierre" className="space-y-4 animate-in fade-in duration-300">
-          <EstadoDelDia moduloActual="Venta Externa" estado={estadoDia} onVerUltimoReporte={() => { void handleVerUltimoReporte(); }} />
         </TabsContent>
 
         <TabsContent value="pendientes" className="space-y-6 animate-in fade-in duration-300">
