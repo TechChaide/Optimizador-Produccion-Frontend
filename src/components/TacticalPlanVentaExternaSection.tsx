@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { ShoppingCart, Package, Loader2, LayoutDashboard, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Filter, TrendingUp, Box, X, Layers, Wand2, Save, ClipboardCheck, RefreshCw, Clock, Search, Mail, AlertCircle, FileText, Wrench } from 'lucide-react';
+import { ShoppingCart, Package, Loader2, LayoutDashboard, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Filter, TrendingUp, Box, X, Layers, Wand2, Save, ClipboardCheck, RefreshCw, Clock, Search, Mail, AlertCircle, FileText, Wrench, CheckCircle2 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -21,7 +21,7 @@ import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/inte
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useReportePlanTxt, cargarUltimoReporte, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
-import { EstadoDelDia } from '@/components/EstadoDelDia';
+import { EstadoDelDia, useEstadoDelDia } from '@/components/EstadoDelDia';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
@@ -326,19 +326,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // sigue disponible aparte, a diferencia de Laminado/Espuma — acá el paso intermedio de elegir fecha
   // es obligatorio, no opcional). Mismo patrón general que [[modulos_tacticos_sincronizar_y_generar_combinado]].
   const [autoGenerarPendiente, setAutoGenerarPendiente] = useState(false);
-  // Tercera fase de "Sincronizar" (ver el efecto que dispara handleGenerarTodosPlanesP2, después de
-  // su declaración): antes, un P2 vencido (nadie lo regeneró para hoy) se quedaba en estado "A"
-  // indefinidamente porque desactivarlo dependía 100% de que alguien pulsara "Generar Todos los P2" a
-  // mano — generarPlanP2Core ya sabía desactivar planes viejos/sin necesidad, pero nada lo disparaba
-  // solo. Confirmado con datos reales: el plan grupo 18 (Centro 1000 - P2 - Rollos) siguió "A" desde
-  // el 10/9 porque nadie generó Rollos de nuevo, mientras Espumas sí se regeneró y su plan anterior
-  // se desactivó como corresponde.
-  const [autoGenerarP2Pendiente, setAutoGenerarP2Pendiente] = useState(false);
-  // Etapa 2 · Cerrar: tras traer datos frescos, consulta Data Aprobada en el siguiente render (con
-  // grupos ya actualizados), igual que autoGenerarPendiente en la etapa 1.
-  const [autoDataAprobadaPendiente, setAutoDataAprobadaPendiente] = useState(false);
-  // Cambia tras cada acción que graba (P2, PFD-VENTA) para que la barra Estado del día se actualice.
+  // (Hasta 2026-10-12 Sincronizar generaba además el P2 de forma automática, para que un P2 vencido no
+  // quedara en "A". Con las pestañas-paso el P2 es el paso 1 explícito de cada día — ver
+  // handleGenerarP2ConPanel —, porque generarlo solo al sincronizar en la tarde pisaba el P2 que
+  // Laminado/Corte Espuma ya habían respondido.)
+  // Cambia tras cada acción que graba (P2, PFD-VENTA) para que el estado del día (✓ de las
+  // pestañas-paso y pestaña Cierre) se vuelva a consultar.
   const [recargaEstadoDia, setRecargaEstadoDia] = useState(0);
+  const estadoDia = useEstadoDelDia(recargaEstadoDia);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
   // Panel flotante de progreso de "Sincronizar" (ver handleSincronizarYGenerar y sus fases).
   const panelProgreso = usePanelProgreso();
@@ -720,12 +715,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Antes de tocar SAP, el panel pide la "Ventana de Producción" (desde/hasta) — que acá ya era un
   // paso obligatorio para generar — y muestra para qué fecha se graba cada P2. Luego: Ventana →
   // Datos (x/5) → Necesidad BOM → Generar P2 (x/3); las dos últimas corren en sus efectos.
-  // Flujo en dos etapas (usuario 2026-10-12, ver [[flujo-dos-etapas]]): etapa 1 "Planificar" = datos →
-  // Necesidad BOM → P2; etapa 2 "Cerrar" = datos SAP FRESCOS (FERT/provisionales, nunca la foto de la
-  // mañana) → Data Aprobada (respuestas P3 de Laminado/Espuma) → PFD-VENTA y reporte (decisión del usuario,
-  // botón al cierre del panel).
-  const ejecutarSincronizacion = useCallback(async (desde: string, hasta: string, noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables, etapa: 1 | 2 = 1) => {
-    if (etapa === 2) refrescarDatosSap(['fert', 'provisionales']);
+  // Pestañas-paso (usuario 2026-10-12, ver [[flujo-dos-etapas]]): Sincronizar ya NO graba el P2 —
+  // termina en Necesidad BOM y el panel ofrece "1 · Generar P2" o, si el P2 de hoy ya existe,
+  // continuar en Data Aprobada (antes generaba el P2 solo, y al volver en la tarde a cerrar el ciclo
+  // lo regeneraba encima del que Laminado/Corte Espuma ya habían respondido).
+  const ejecutarSincronizacion = useCallback(async (desde: string, hasta: string, noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
     setIsLoading(true);
     setSyncStep('sincronizando');
     const fechas = eachDayOfInterval({ start: parseISO(desde), end: parseISO(hasta) }).map(d => format(d, 'yyyy-MM-dd'));
@@ -735,19 +729,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     empaqueConfigRestaurada.current = null;
     setViewDate(parseISO(desde));
     const corta = (f: string) => format(parseISO(f), 'EEE dd/MM', { locale: es });
-    const pasoFecha = { id: 'fecha', etiqueta: desde === hasta ? `PT (producción y empaque): ${corta(desde)}` : `PT: ${corta(desde)} → ${corta(hasta)}` };
-    panelProgreso.iniciar(etapa === 1 ? 'Venta Externa — 1 · Planificar (hasta el P2)' : 'Venta Externa — 2 · Cerrar (Data Aprobada → PFD-VENTA → correo)', etapa === 1
-      ? [
-        pasoFecha,
-        { id: 'datos', etiqueta: 'Sincronizando datos' },
-        { id: 'bom', etiqueta: 'Necesidad BOM (FERT)' },
-        { id: 'p2gen', etiqueta: 'Generando P2 (Espumas / Rollos)' },
-      ]
-      : [
-        pasoFecha,
-        { id: 'datos', etiqueta: 'Datos SAP frescos (FERT y provisionales)' },
-        { id: 'aprobada', etiqueta: 'Data Aprobada · respuestas P3 de Laminado y Corte Espuma' },
-      ]);
+    panelProgreso.iniciar('Venta Externa — Sincronizar', [
+      { id: 'fecha', etiqueta: desde === hasta ? `PT (producción y empaque): ${corta(desde)}` : `PT: ${corta(desde)} → ${corta(hasta)}` },
+      { id: 'datos', etiqueta: 'Sincronizando datos' },
+      { id: 'bom', etiqueta: 'Necesidad BOM (FERT)' },
+    ]);
     panelProgreso.actualizar('fecha', { estado: 'ok' });
     const TOTAL_CONSULTAS = 8;
     let hechas = 0;
@@ -817,13 +803,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // fertC2000ParaP2 (useMemo derivados del estado que se acaba de actualizar arriba) por closure
       // vieja. Se dispara desde el efecto de más abajo, que ve la versión fresca una vez que el
       // siguiente render ya ocurrió (mismo criterio que Corte y Laminado/Corte Espuma).
-      if (etapa === 1) setAutoGenerarPendiente(true);
-      else setAutoDataAprobadaPendiente(true);
+      setAutoGenerarPendiente(true);
     } catch (e) {
       panelProgreso.actualizar('datos', { estado: 'error', detalle: (e as Error).message });
       panelProgreso.actualizar('bom', { estado: 'omitido' });
-      panelProgreso.actualizar('p2gen', { estado: 'omitido' });
-      panelProgreso.actualizar('aprobada', { estado: 'omitido' });
       panelProgreso.concluir(`Error al sincronizar: ${(e as Error).message}`);
       setSyncStep('idle');
     } finally {
@@ -862,27 +845,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       return;
     }
     panelProgreso.pedirFecha({
-      titulo: 'Venta Externa — 1 · Planificar (hasta el P2)',
+      titulo: 'Venta Externa — Sincronizar',
       ...preparacionVentana(noLaborables, laborablesExtra),
       onConfirmar: (pt) => {
-        if (pt) void ejecutarSincronizacion(pt, pt, noLaborables, laborablesExtra, 1);
+        if (pt) void ejecutarSincronizacion(pt, pt, noLaborables, laborablesExtra);
       },
     });
   }, [preparacionVentana, panelProgreso, ejecutarSincronizacion, addNotification]);
-
-  // Etapa 2 · Cerrar: mismo PT fijo (hoy+2), sin preguntar — la fecha ya se confirmó en la etapa 1.
-  const handleCerrarEtapa = useCallback(async () => {
-    let noLaborables: DiasNoLaborables;
-    let laborablesExtra: DiasNoLaborables;
-    try {
-      ({ noLaborables, laborablesExtra } = await cargarDiasNoLaborables());
-    } catch (e) {
-      addNotification('error', `No se pudo cargar el calendario laboral: ${(e as Error).message}`);
-      return;
-    }
-    const { pt } = fechasHorizonteDe(noLaborables, laborablesExtra);
-    void ejecutarSincronizacion(pt, pt, noLaborables, laborablesExtra, 2);
-  }, [ejecutarSincronizacion, addNotification]);
 
 
   // Rehidratación: si ya se había sincronizado en esta sesión, se recupera lo trabajado en vez de
@@ -1458,7 +1427,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // P2 acá usaría necesidad vieja (o vacía) para decidir qué desactivar, así que se deja tal como
       // antes: el usuario elige fecha y dispara "Generar Todos los P2" a mano.
       panelProgreso.actualizar('bom', { estado: 'omitido', detalle: 'Sin Ventana de Producción elegida.' });
-      panelProgreso.actualizar('p2gen', { estado: 'omitido' });
       panelProgreso.concluir();
       setSyncStep('idle');
       return;
@@ -1471,14 +1439,21 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       panelProgreso.actualizar('bom', { estado: r.estado, detalle: r.mensaje, ...(r.progreso ? { progreso: r.progreso } : {}) });
       setSyncStep('idle');
       if (r.estado === 'error') {
-        // Sin necesidad fresca no se generan P2: decidirían qué desactivar con datos viejos.
-        panelProgreso.actualizar('p2gen', { estado: 'omitido', detalle: 'No se generaron P2 porque falló el cálculo de necesidad.' });
+        // Sin necesidad fresca no se ofrece generar el P2: decidiría qué desactivar con datos viejos.
         panelProgreso.concluir();
         return;
       }
-      setAutoGenerarP2Pendiente(true);
+      // Pestañas-paso (2026-10-12): el P2 ya no se graba solo. Si el de hoy ya existe, lo natural es
+      // seguir en Data Aprobada; si no, generarlo (decisión del usuario, botón del panel).
+      const p2Hoy = estadoDia.hecho('ve-p2');
+      panelProgreso.concluir(
+        p2Hoy ? 'Datos al día. El P2 de hoy ya está generado: sigue en 2 · Data Aprobada.' : 'Datos al día. Siguiente paso: generar el P2.',
+        p2Hoy
+          ? [{ etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') }, { etiqueta: 'Regenerar P2', onClick: () => { void handleGenerarP2ConPanel(); } }]
+          : [{ etiqueta: '1 · Generar P2', onClick: () => { void handleGenerarP2ConPanel(); } }],
+      );
     });
-  }, [autoGenerarPendiente, handleCalcularNecesidadRollos, selectedDates, panelProgreso]);
+  }, [autoGenerarPendiente, handleCalcularNecesidadRollos, selectedDates, panelProgreso]); // eslint-disable-line react-hooks/exhaustive-deps
 
 
   // Avance de la explosión BOM (materiales explotados / total) reflejado en el panel mientras corre.
@@ -2033,17 +2008,19 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // que alguien pulse el botón manual. Declarado después de handleGenerarTodosPlanesP2 para que la
   // referencia ya sea la versión fresca (sus dependencias, necesidadEspumas/Rollos 1000/2000, ya se
   // recalcularon con handleCalcularNecesidadRollos) — mismo patrón que la fase anterior.
-  useEffect(() => {
-    if (!autoGenerarP2Pendiente) return;
-    setAutoGenerarP2Pendiente(false);
+  // Paso 1 · P2 (pestañas-paso, 2026-10-12): el P2 se genera a pedido — botón de la pestaña 1 o acción
+  // del panel tras Sincronizar —, ya no automáticamente al sincronizar.
+  const handleGenerarP2ConPanel = useCallback(async () => {
+    panelProgreso.iniciar('Venta Externa — 1 · Generar P2', [{ id: 'p2gen', etiqueta: 'Generando P2 (Espumas / Rollos)' }]);
     panelProgreso.actualizar('p2gen', { estado: 'en_curso', progreso: { actual: 0, total: 3 } });
-    handleGenerarTodosPlanesP2(true, (hechos, total) => panelProgreso.actualizar('p2gen', { progreso: { actual: hechos, total } }))
-      .then(r => {
-        panelProgreso.actualizar('p2gen', { estado: r.estado, detalle: r.mensaje });
-        setRecargaEstadoDia(n => n + 1);
-        panelProgreso.concluir();
-      });
-  }, [autoGenerarP2Pendiente, handleGenerarTodosPlanesP2, panelProgreso]);
+    const r = await handleGenerarTodosPlanesP2(true, (hechos, total) => panelProgreso.actualizar('p2gen', { progreso: { actual: hechos, total } }));
+    panelProgreso.actualizar('p2gen', { estado: r.estado, detalle: r.mensaje });
+    setRecargaEstadoDia(n => n + 1);
+    panelProgreso.concluir(
+      r.estado === 'error' ? undefined : 'P2 guardado. Cuando Laminado y Corte Espuma respondan su P3, sigue en 2 · Data Aprobada.',
+      r.estado === 'error' ? undefined : [{ etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') }],
+    );
+  }, [handleGenerarTodosPlanesP2, panelProgreso]);
 
   // "Data Aprobada": por cada P2 propio activo (Espumas/Rollos por centro), recupera qué respondió
   // el plan consumidor "P3" (nunca "PFD" — ver esPlanP3) — un DetalleTactico con
@@ -2052,7 +2029,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // las cantidades y se listan los planes separados por coma. Se recalcula siempre contra la API (no
   // depende de haber corrido "Calcular Necesidad" en la misma sesión), así sigue funcionando después
   // de recargar la página.
-  // silencioso (etapa 2 · Cerrar): sin toast, el resultado va al panel.
+  // silencioso (consulta automática al entrar a la pestaña): sin toast.
   const fetchDataAprobada = useCallback(async (silencioso = false): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string }> => {
     setIsLoadingDataAprobada(true);
     try {
@@ -2186,22 +2163,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     }
   }, [grupos, necesidadEspumas1000, necesidadEspumas2000, necesidadRollos1000, necesidadRollos2000, addNotification]);
 
-  // Etapa 2 · Cerrar (ver ejecutarSincronizacion): Data Aprobada con los grupos ya cargados y cierre
-  // del panel con la decisión del usuario — generar PFD-VENTA y guardar el reporte de Empaque.
+  // Paso 2 · Data Aprobada (2026-10-12): se consulta sola al entrar a la pestaña — no hay fecha que
+  // elegir, son las respuestas al P2 activo de hoy. Se repite si la última consulta tiene más de 5 min
+  // (el usuario vuelve después de que Laminado/Corte Espuma respondieron).
   useEffect(() => {
-    if (!autoDataAprobadaPendiente) return;
-    setAutoDataAprobadaPendiente(false);
-    setSyncStep('idle');
-    setActiveTab('dataAprobada');
-    panelProgreso.actualizar('aprobada', { estado: 'en_curso' });
-    void fetchDataAprobada(true).then(r => {
-      panelProgreso.actualizar('aprobada', { estado: r.estado, detalle: r.mensaje });
-      panelProgreso.concluir(
-        r.estado === 'error' ? undefined : 'Revisa Data Aprobada; luego genera el PFD-VENTA y guarda el reporte de Empaque.',
-        r.estado === 'error' ? undefined : [{ etiqueta: 'Generar PFD-VENTA y reporte', onClick: () => { void handleGenerarYGuardarPfdVenta(); } }],
-      );
-    });
-  }, [autoDataAprobadaPendiente]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (activeTab !== 'dataAprobada' || !datosCargados || resultadoRestaurado || isLoadingDataAprobada) return;
+    if (dataAprobadaFetchedAt && Date.now() - dataAprobadaFetchedAt.getTime() < 5 * 60_000) return;
+    void fetchDataAprobada(true);
+  }, [activeTab, datosCargados]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Capacidad de Empaque en horas, por centro — suma de sus máquinas activas (Día+Noche+Sábado según
   // config, menos % de paro y mantenimiento preventivo real). Operadores por turno son informativos
@@ -3204,22 +3173,24 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             Necesidades"/"Generar Respuestas" (índigo/sólido, ver más abajo en el tab Plan P2). El
             botón "Generar Necesidades · BOM FERT" sigue disponible aparte para recalcular tras
             cambiar la fecha, sin re-sincronizar todo. */}
-        {/* Flujo en dos etapas (usuario 2026-10-12, ver [[flujo-dos-etapas]]): en lugar de un único
-            "Sincronizar", cada etapa corre solo sus pasos. 1 · Planificar = datos → Necesidad BOM → P2
-            (PT fijo hoy+2, se confirma). 2 · Cerrar = datos SAP frescos → Data Aprobada → (botón)
-            PFD-VENTA + reporte de Empaque. */}
+        {/* Pestañas-paso (usuario 2026-10-12, ver [[flujo-dos-etapas]]): un solo Sincronizar (datos +
+            Necesidad BOM, NO graba) y cada pestaña con su acción. Las fechas no se eligen: todo el
+            ciclo cuelga del PT fijo (hoy + 2 hábiles), visible acá. */}
         <div className="flex items-center gap-2">
-          <Button onClick={handleSincronizarYGenerar} disabled={syncStep !== 'idle'} className="rounded-xl h-10 px-5 gap-2 font-bold text-xs uppercase bg-blue-600 text-white hover:bg-blue-700 shadow-lg" title="Etapa 1: sincroniza, calcula la Necesidad BOM y genera el P2 de Espumas/Rollos (PT = hoy + 2 días hábiles).">
-            {syncStep !== 'idle' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} 1 · Planificar
-          </Button>
-          <Button onClick={() => { void handleCerrarEtapa(); }} disabled={syncStep !== 'idle'} variant="outline" className="rounded-xl h-10 px-5 gap-2 font-bold text-xs uppercase border-emerald-300 text-emerald-700 hover:bg-emerald-50" title="Etapa 2: trae FERT/provisionales frescas, consulta las respuestas P3 (Data Aprobada) y deja listo generar el PFD-VENTA y el reporte de Empaque.">
-            <ClipboardCheck className="w-4 h-4" /> 2 · Cerrar
+          {datosCargados && !resultadoRestaurado && (
+            <span className="rounded-xl border border-slate-200 bg-slate-50 px-3 h-10 flex items-center text-[11px] font-bold text-slate-700 whitespace-nowrap" title="Fechas del ciclo de hoy: P2 y Data Aprobada se graban/consultan para este PT; Empaque y el reporte son de este día.">
+              PT {format(parseISO(fechasHorizonte.pt), 'EEE dd/MM', { locale: es })} · Recup. {format(parseISO(recuperacionDePT(fechasHorizonte.pt)), 'EEE dd/MM', { locale: es })}
+            </span>
+          )}
+          <Button onClick={handleSincronizarYGenerar} disabled={syncStep !== 'idle'} variant={datosCargados ? 'outline' : 'default'} className={cn(
+            "rounded-xl h-10 px-6 gap-2 font-bold text-xs uppercase",
+            datosCargados ? "border-blue-200 text-blue-700 hover:bg-blue-50" : "bg-blue-600 text-white hover:bg-blue-700 shadow-lg"
+          )} title="Trae los datos de SAP y calcula la Necesidad BOM. No graba nada: el P2 se genera en la pestaña 1.">
+            {syncStep !== 'idle' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Sincronizar
           </Button>
           <DatosSapEstado onActualizar={() => { void handleSincronizarYGenerar(); }} disabled={syncStep !== 'idle'} />
         </div>
       </div>
-
-      <EstadoDelDia moduloActual="Venta Externa" recarga={recargaEstadoDia} onVerUltimoReporte={() => { void handleVerUltimoReporte(); }} />
 
       {/* Barra de progreso SOLO de la fase "sincronizando" (sin indicador propio). La fase
           "generando" (si ya había fecha elegida) ya tiene su propia barra junto al botón "Generar
@@ -3248,7 +3219,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
             Plan cargado del reporte del <span className="font-black text-emerald-700">{format(parseISO(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
-            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — <span className="font-black text-emerald-700">solo consulta</span>, tal cual se guardó; <span className="font-black text-blue-700">1 · Planificar</span> o <span className="font-black text-emerald-700">2 · Cerrar</span> traen datos vigentes y habilitan generar y enviar.
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — <span className="font-black text-emerald-700">solo consulta</span>, tal cual se guardó; <span className="font-black text-blue-700">Sincronizar</span> trae datos vigentes y habilita generar y enviar.
           </p>
         </div>
       )}
@@ -3259,27 +3230,28 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         >
           <RefreshCw className="w-4 h-4 text-blue-600 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
-            Sin datos cargados — usa <span className="font-black text-blue-700">1 · Planificar</span> (hasta el P2) o <span className="font-black text-emerald-700">2 · Cerrar</span> (Data Aprobada, PFD-VENTA y correo).
+            Sin datos cargados — pulsa <span className="font-black text-blue-700">Sincronizar</span> y sigue las pestañas 1 → 5.
           </p>
         </div>
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid grid-cols-4 h-10 bg-gray-50/80 p-1 rounded-xl border border-gray-100 mb-6">
-          {/* Pestañas en el orden del flujo (mismo criterio que Espuma/Laminado, decisión del usuario
-              2026-10-02): Plan P2 → Data Aprobada → Pendientes → Resumen (capacidad de Empaque + reporte).
-              Provisionales y FERT quedan OCULTAS (opción A, solo consulta): sus TabsContent y datos se
-              conservan porque alimentan cálculos (filterData, fertC*ParaP2, BOM). */}
+        <TabsList className="grid grid-cols-6 h-10 bg-gray-50/80 p-1 rounded-xl border border-gray-100 mb-6">
+          {/* Pestañas-paso (usuario 2026-10-12, ver [[flujo-dos-etapas]]): una pestaña por paso del
+              día, cada una con su acción principal y ✓ cuando ya se hizo hoy (estado del día en vivo).
+              Pendientes queda al final como consulta. Provisionales y FERT siguen OCULTAS (solo
+              consulta): sus TabsContent y datos se conservan porque alimentan cálculos. */}
           {[
-            // 2026-10-08 (usuario): numeradas como en los otros módulos — 1 P2 → 2 respuesta (PFD-VENTA)
-            // → 3 resumen; Pendientes (consulta de pedidos) al final sin número. Se abre en Resumen.
-            { v: 'planP2', l: '1 · Plan P2', i: Layers },
-            { v: 'dataAprobada', l: '2 · Data Aprobada', i: ClipboardCheck },
-            { v: 'resumen', l: '3 · Resumen', i: LayoutDashboard },
-            { v: 'pendientes', l: 'Pendientes', i: Clock }
+            { v: 'planP2', l: '1 · P2', i: Layers, hecho: estadoDia.hecho('ve-p2') },
+            { v: 'dataAprobada', l: '2 · Data Aprobada', i: ClipboardCheck, hecho: !!dataAprobadaFetchedAt },
+            { v: 'pfdVenta', l: '3 · PFD-VENTA', i: Package, hecho: estadoDia.hecho('ve-pfd') },
+            { v: 'resumen', l: '4 · Resumen y reporte', i: LayoutDashboard, hecho: estadoDia.hecho('ve-rep-1000') },
+            { v: 'cierre', l: '5 · Cierre', i: CheckCircle2, hecho: false },
+            { v: 'pendientes', l: 'Pendientes', i: Clock, hecho: false },
           ].map(tab => (
-            <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[9px] font-bold uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-sm">
+            <TabsTrigger key={tab.v} value={tab.v} className="gap-1.5 text-[9px] font-bold uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-sm">
               <tab.i className="w-3.5 h-3.5" /> {tab.l}
+              {tab.hecho && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" aria-label="hecho hoy" />}
             </TabsTrigger>
           ))}
         </TabsList>
@@ -4066,7 +4038,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                   {isExplodingBom ? `Explotando BOM ${bomProgress.current}/${bomProgress.total}` : 'Generar Necesidades · BOM FERT'}
                 </Button>
                 <Button
-                  onClick={() => handleGenerarTodosPlanesP2()}
+                  onClick={() => { void handleGenerarP2ConPanel(); }}
                   disabled={isSavingAllPlanP2 || isExplodingBom || (necesidadEspumas1000.length === 0 && necesidadEspumas2000.length === 0 && necesidadRollos1000.length === 0)}
                   className="h-10 px-6 rounded-2xl gap-2 font-bold text-xs uppercase bg-slate-900 hover:bg-slate-800 text-white"
                 >
@@ -4175,12 +4147,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             <div className="flex items-center gap-2 shrink-0">
               {/* De cuándo es lo que se ve (2026-10-12): antes podía quedar Data Aprobada de un reporte
                   anterior sin ningún aviso. */}
-              <span className={cn("text-[10px] font-bold text-right max-w-[220px]", dataAprobadaFetchedAt ? "text-emerald-700" : "text-amber-700")}>
+              <span className={cn("text-[10px] font-bold text-right max-w-[280px]", dataAprobadaFetchedAt ? "text-emerald-700" : "text-amber-700")}>
                 {dataAprobadaFetchedAt
-                  ? `Respuestas consultadas hoy ${dataAprobadaFetchedAt.toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' })}`
+                  ? `Respuestas${estadoDia.hitos?.find(h => h.id === 've-p2')?.detalle ? ` al P2 ${estadoDia.hitos.find(h => h.id === 've-p2')!.detalle}` : ''} · consultadas ${dataAprobadaFetchedAt.toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' })}`
                   : planCargadoDe
-                    ? `Datos del reporte del ${format(parseISO(planCargadoDe.fechaObjetivo), 'dd/MM')} (no de hoy) — usa 2 · Cerrar`
-                    : 'Sin consultar — usa 2 · Cerrar o Actualizar'}
+                    ? `Datos del reporte del ${format(parseISO(planCargadoDe.fechaObjetivo), 'dd/MM')} (no de hoy) — Sincroniza para ver las de hoy`
+                    : 'Sin consultar — Sincroniza o pulsa Actualizar'}
               </span>
               <Button onClick={() => { void fetchDataAprobada(); }} disabled={isLoadingDataAprobada} variant="outline" className="h-10 px-6 rounded-2xl gap-2 font-bold text-xs uppercase shrink-0 border-indigo-200 text-indigo-700 hover:bg-indigo-50">
                 {isLoadingDataAprobada ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
@@ -4265,13 +4237,22 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             );
           })}
 
-          {/* "PFD - VENTA": sube desde el componente YA RESPONDIDO (estado "completo" arriba) hacia su
-              FERT/PT padre — dirección opuesta a como se explota el BOM para generar la Necesidad P2
-              (ver generarPfdVentaPreview). Solo Espumas: Rollos no tiene Data Aprobada con datos reales hoy. */}
-          <div className="pt-6 mt-6 border-t-2 border-dashed border-gray-100 space-y-6">
+          <div className="flex justify-end">
+            <Button onClick={() => setActiveTab('pfdVenta')} variant="outline" className="h-9 px-5 rounded-xl gap-2 font-bold text-[10px] uppercase border-indigo-200 text-indigo-700 hover:bg-indigo-50">
+              Continuar: 3 · PFD-VENTA <ChevronRight className="w-4 h-4" />
+            </Button>
+          </div>
+        </TabsContent>
+
+        {/* Paso 3 · PFD-VENTA (pestaña propia desde 2026-10-12; antes vivía al pie de Data Aprobada).
+            "PFD - VENTA": sube desde el componente YA RESPONDIDO (estado "completo" en Data Aprobada)
+            hacia su FERT/PT padre — dirección opuesta a como se explota el BOM para generar la Necesidad
+            P2 (ver generarPfdVentaPreview). Solo Espumas: Rollos no tiene Data Aprobada con datos reales hoy. */}
+        <TabsContent value="pfdVenta" className="space-y-6 animate-in fade-in duration-300">
+          <div className="space-y-6">
             <div className="bg-indigo-50/40 p-4 rounded-2xl border border-indigo-100 text-left flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div>
-                <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-wider">Siguiente paso</p>
+                <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-wider">Paso 3</p>
                 <h3 className="text-sm font-black text-gray-700 uppercase">PFD - Venta (FERT/PT listos)</h3>
                 <p className="text-[10px] text-gray-500 mt-1">Por cada componente en estado &quot;completo&quot; arriba, sube al FERT/PT que depende de él (mismo BOM de la Necesidad P2, en sentido inverso) y agrupa por categoría — igual que &quot;Resumen Necesidades&quot;, con el tiempo real de plastificado.</p>
               </div>
@@ -4295,7 +4276,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               <div className="flex items-center gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-left">
                 <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
                 <p className="text-[11px] font-bold text-amber-700">
-                  Todavía no actualizaste Data Aprobada en esta sesión — el PFD-VENTA podría generarse con una respuesta desactualizada. Pulsa &quot;Actualizar&quot; arriba antes de continuar.
+                  Todavía no actualizaste Data Aprobada en esta sesión — el PFD-VENTA podría generarse con una respuesta desactualizada. Abre la pestaña 2 · Data Aprobada (se consulta sola) antes de continuar.
                 </p>
               </div>
             ) : (
@@ -4395,6 +4376,17 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               );
             })}
           </div>
+          <div className="flex justify-end">
+            <Button onClick={() => setActiveTab('resumen')} variant="outline" className="h-9 px-5 rounded-xl gap-2 font-bold text-[10px] uppercase border-indigo-200 text-indigo-700 hover:bg-indigo-50">
+              Continuar: 4 · Resumen y reporte <ChevronRight className="w-4 h-4" />
+            </Button>
+          </div>
+        </TabsContent>
+
+        {/* Paso 5 · Cierre (2026-10-12): estado del día de toda la cadena — qué falta en este módulo y
+            en Laminado/Corte Espuma antes de terminar. El último reporte guardado se abre solo a pedido. */}
+        <TabsContent value="cierre" className="space-y-4 animate-in fade-in duration-300">
+          <EstadoDelDia moduloActual="Venta Externa" estado={estadoDia} onVerUltimoReporte={() => { void handleVerUltimoReporte(); }} />
         </TabsContent>
 
         <TabsContent value="pendientes" className="space-y-6 animate-in fade-in duration-300">

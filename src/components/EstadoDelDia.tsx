@@ -8,18 +8,21 @@ import { cn } from '@/lib/utils';
 import { sapCompartido } from '@/lib/datos-sap-compartidos';
 import { hitosDePlanes, hitosDeReportes, type HitoDia } from '@/lib/estado-dia';
 
+export interface EstadoDelDiaControl {
+  hitos: HitoDia[] | null;
+  cargando: boolean;
+  error: string | null;
+  consultar: () => Promise<void>;
+  /** ¿El hito ya está hecho (o enviado) hoy? */
+  hecho: (id: string) => boolean;
+}
+
 /**
- * Barra "Estado del día" (usuario 2026-10-12, ver [[flujo-dos-etapas]]): la cadena completa de las dos
- * etapas — Etapa 1: P2 VE → P3 Laminado → P3 Corte Espuma; Etapa 2: PFD-VENTA y reportes de cada
- * módulo —, consultada en vivo al abrir el módulo. Reemplaza la carga automática del último reporte:
- * ese reporte se abre solo con "Ver último reporte". `recarga` cambia tras cada acción del módulo
- * (generar, enviar) para volver a consultar.
+ * Estado del día (usuario 2026-10-12, ver [[flujo-dos-etapas]]): planes del ciclo de hoy y reportes de
+ * los 3 módulos, consultado en vivo al abrir. El módulo lo usa para las ✓ de sus pestañas-paso y la
+ * pestaña Cierre lo muestra completo (EstadoDelDia). `recarga` cambia tras cada acción que graba.
  */
-export function EstadoDelDia({ moduloActual, recarga, onVerUltimoReporte }: {
-  moduloActual: HitoDia['modulo'];
-  recarga?: number;
-  onVerUltimoReporte?: () => void;
-}) {
+export function useEstadoDelDia(recarga?: number): EstadoDelDiaControl {
   const [hitos, setHitos] = useState<HitoDia[] | null>(null);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +45,21 @@ export function EstadoDelDia({ moduloActual, recarga, onVerUltimoReporte }: {
   }, []);
 
   useEffect(() => { void consultar(); }, [consultar, recarga]);
+
+  const hecho = useCallback((id: string) => !!hitos?.some(h => h.id === id && h.estado !== 'pendiente'), [hitos]);
+  return { hitos, cargando, error, consultar, hecho };
+}
+
+/**
+ * Pestaña "Cierre": la cadena completa del día — Etapa 1: P2 VE → P3 Laminado → P3 Corte Espuma;
+ * Etapa 2: PFD-VENTA y reportes de cada módulo. El último reporte guardado se abre solo a pedido.
+ */
+export function EstadoDelDia({ moduloActual, estado, onVerUltimoReporte }: {
+  moduloActual: HitoDia['modulo'];
+  estado: EstadoDelDiaControl;
+  onVerUltimoReporte?: () => void;
+}) {
+  const { hitos, cargando, error, consultar } = estado;
 
   const fila = (etapa: 1 | 2, titulo: string) => (
     <div className="flex items-start gap-2 flex-wrap">
