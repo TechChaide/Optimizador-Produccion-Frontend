@@ -184,10 +184,13 @@ const DIAS_HABILES_PT_ENSAMBLADO = 2;
 const LOTE_BOM_PFF = 8;
 
 // Áreas cuya provisional SAP entrega 1 día hábil ANTES de la necesidad (PT−1). Confirmado por el
-// usuario 2026-10-08 para Ensamblado (P1/PFF) y Venta Externa; Muebles/Forros siguen con la fecha
-// exacta (validada con MD04 2026-10-03) hasta que SAP los ajuste. Transición: en esas áreas también
-// se acepta la provisional del mismo día del PT (creada con la regla anterior), con aviso.
-const AREA_PROVISIONAL_PT_MENOS_1 = (area: string): boolean => /^ensamblado|venta\s*externa/i.test(area);
+// usuario 2026-10-08 para Venta Externa; Muebles/Forros siguen con la fecha exacta (validada con MD04
+// 2026-10-03) hasta que SAP los ajuste. Transición: también se acepta la provisional del mismo día del PT.
+const AREA_PROVISIONAL_PT_MENOS_1 = (area: string): boolean => /venta\s*externa/i.test(area);
+// Ensamblado (P1/PFF, N1 y N2): SAP regulariza la provisional a PT−2 hábiles (usuario 2026-10-13, caso
+// 30006523 / OrdPrv 0145431212 fin 13-10 para el PT 15-10 del PFF #1146 N1). Solo esa fecha: PT−1 ya
+// sería el PT−2 del ciclo de mañana (se contaría dos veces) y la del mismo PT llega tarde.
+const AREA_PROVISIONAL_PT_MENOS_2 = (area: string): boolean => /^ensamblado/i.test(area);
 
 // Almacenes de stock disponible por centro para la Respuesta P3 (último fallback de la cascada
 // FERT → Provisional → Stock). Antes solo contaba 1006/2006 — verificado con datos reales (caso
@@ -1189,15 +1192,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   }, [restarDiasHabiles]);
 
   // Fechas en que SAP puede entregar la provisional que responde a una necesidad (ver
-  // provisionalesQueCubrenPorCentro): Ensamblado y Venta Externa a PT−1 hábil (o el mismo PT, en
-  // transición); las demás áreas, el mismo día. N2 del PFF (subproceso vía semielaborado, usuario
-  // 2026-10-08): misma regla un nivel antes — su necesidad es PT−1, así que la provisional llega a PT−2.
-  const fechasProvisionalAceptadas = useCallback((fechaNecesidad: string, area: string, nivel2: boolean = false): string[] => {
-    if (!fechaNecesidad || fechaNecesidad === '—' || !AREA_PROVISIONAL_PT_MENOS_1(area)) return [fechaNecesidad];
+  // provisionalesQueCubrenPorCentro): Ensamblado (N1 y N2) solo a PT−2 hábiles (AREA_PROVISIONAL_PT_MENOS_2);
+  // Venta Externa a PT−1 hábil (o el mismo PT, en transición); las demás áreas, el mismo día.
+  const fechasProvisionalAceptadas = useCallback((fechaNecesidad: string, area: string): string[] => {
+    if (!fechaNecesidad || fechaNecesidad === '—') return [fechaNecesidad];
     const pt = parseFechaLocal(fechaNecesidad);
-    const fechas = [format(restarDiasHabiles(pt, 1), 'yyyy-MM-dd'), fechaNecesidad];
-    if (nivel2) fechas.unshift(format(restarDiasHabiles(pt, 2), 'yyyy-MM-dd'));
-    return fechas;
+    if (AREA_PROVISIONAL_PT_MENOS_2(area)) return [format(restarDiasHabiles(pt, 2), 'yyyy-MM-dd')];
+    if (AREA_PROVISIONAL_PT_MENOS_1(area)) return [format(restarDiasHabiles(pt, 1), 'yyyy-MM-dd'), fechaNecesidad];
+    return [fechaNecesidad];
   }, [restarDiasHabiles]);
 
   // Restricciones crudas del grupo Corte y Laminado de cada centro (se cargan en fetchDataAsync).
@@ -1793,7 +1795,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
       const origen = origenEnRango || origenCandidatos[0];
       const origenAmbiguo = origenCandidatos.length > 0 && !origenEnRango;
-      // Con PT−1 (AREA_PROVISIONAL_PT_MENOS_1) lo normal es llegar un día antes: el día del PT se avisa.
+      // Ensamblado cubre solo con la provisional a PT−2 (AREA_PROVISIONAL_PT_MENOS_2): la del día del PT se avisa.
       const llegaDiaPT = !!origenEnRango && origenEnRango.area.startsWith('Ensamblado')
         && fechaOrdenFin === ventanaLaminaEnsamblado(origenEnRango.fecha_inicio)?.pt;
 
@@ -1976,7 +1978,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // 30008653. Las filas PFF sí traen `fecha_inicio` (la del plan de Ensamblado), así que basta
   // incluirlas para que la tolerancia de fecha pueda evaluarse.
   const fechasP2PorMaterialPorCentro = useMemo(() => {
-    const porCentro: Record<string, Map<string, { fecha: string; area: string; nivel2?: boolean }[]>> = { '1000': new Map(), '2000': new Map() };
+    const porCentro: Record<string, Map<string, { fecha: string; area: string }[]>> = { '1000': new Map(), '2000': new Map() };
     Object.entries(necesidadesPlantaConPFF).forEach(([area, rows]) => {
       rows.forEach(row => {
         const centro = String(row.centro || '');
@@ -1986,8 +1988,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (!map.has(key)) map.set(key, []);
         // Venta Externa: sus FERT van fechadas al PT (fecha_fin_plan); fecha_inicio_plan es la recuperación.
         const fecha = /venta\s*externa/i.test(area) && row.fecha_fin && row.fecha_fin !== '—' ? row.fecha_fin : row.fecha_inicio;
-        // N2 del PFF (vía semielaborado): su necesidad es un día hábil antes del PT (ver fechasProvisionalAceptadas).
-        map.get(key)!.push({ fecha, area, nivel2: Number(row.cantidad_nivel2 || 0) > 0 });
+        map.get(key)!.push({ fecha, area });
       });
     });
     return porCentro;
@@ -2039,10 +2040,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         // 20007201 necesita 360 de 30008909 al 07-oct ↔ OrdPrv 0145201016 del 07-oct por 363 = lote):
         // la provisional responde a la necesidad si su FECHAFIN (disponibilidad en MD04) es el mismo día
         // de la necesidad (PT del P1/PFF, PT del P2 de Venta Externa, fecha del P2 en las demás áreas);
-        // desde 2026-10-08 Ensamblado y Venta Externa a PT−1 (ver fechasProvisionalAceptadas). Reemplaza
+        // Ensamblado a PT−2 y Venta Externa a PT−1 (ver fechasProvisionalAceptadas). Reemplaza
         // la ventana [PT−2, PT] de Ensamblado y la tolerancia ±1/±2 por área que se usaba antes, que
         // podían sumar la provisional de otro ciclo.
-        const coincide = candidatosP2.some(c => fechasProvisionalAceptadas(c.fecha, c.area, c.nivel2).includes(r.fechaFin));
+        const coincide = candidatosP2.some(c => fechasProvisionalAceptadas(c.fecha, c.area).includes(r.fechaFin));
         if (!coincide) return;
         if (!map.has(r.material)) map.set(r.material, []);
         map.get(r.material)!.push(r);
