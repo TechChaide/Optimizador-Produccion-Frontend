@@ -78,6 +78,8 @@ const paquetesPlancha = (unidades: number, espesorCm: string): number => {
 // Discriminador de tipo de componente en la explosión BOM (mismo criterio que usa
 // Corte y Laminado para identificar la "lámina" que consume como materia prima).
 const DESCRIPCION_ROLLO = 'LAMINA CILINDRICA';
+// Variante CONV de un rollo (mismo criterio que isConvDescripcion en Corte y Laminado).
+const esRolloConv = (desc: string): boolean => desc.includes('CONV') || desc.includes('CV');
 
 const TIPO_TAG: Record<'ESPUMAS' | 'ROLLOS', string> = { ESPUMAS: 'Espumas', ROLLOS: 'Rollos' };
 
@@ -1294,6 +1296,27 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         const response = await serviciosService.getMaestroMaterialesExplosion(centro, fullCode, 1, 500);
         const rawData = response?.data?.data || response?.data || [];
         if (Array.isArray(rawData)) {
+          // Relevancia por RESPONSABLE — mismo esquema que usa el PFF de Corte Espuma, sin límite
+          // de nivel: se recorre TODO el árbol y se decide por quién fabrica el componente, no por
+          // dónde aparece. La restricción `Hojas_Rutas_Materiales` del grupo (018/19) es el
+          // criterio autoritativo; el patrón de nombres es solo el respaldo cuando no hay
+          // responsable que consultar (componente sin ninguna orden abierta ahora mismo — caso
+          // real: 30005709/30005761, láminas legítimas sin demanda activa en este momento).
+          const reglaHalb = responsablesHalbPorCentro[centro];
+          const esDeVentaExternaComp = (compCode: string, desc: string): boolean => {
+            const respComp = responsableDeMaterial.get(compCode);
+            return respComp ? (!reglaHalb?.definida || reglaHalb.lista.includes(respComp)) : ES_LAMINA_VENTA_EXTERNA(desc);
+          };
+          // Rollo CONV (responsable 031, HR-CONVT, en Hojas_Rutas_Materiales desde 2026-10-13): es el
+          // subproceso que sale como PT, así que la venta se pide en el CONV y no en la lámina base que
+          // cuelga de él (caso CONV 30006694 ← base 30006693). Laminado baja esa necesidad a la base
+          // para sus corridas. Si el CONV no pasa la restricción, la base se sigue pidiendo como antes.
+          const rollosConv = new Set(rawData
+            .filter((r: Record<string, unknown>) => {
+              const d = String(r.DESCRIPCION_COMPONENTE || '').toUpperCase();
+              return d.includes(DESCRIPCION_ROLLO) && esRolloConv(d) && esDeVentaExternaComp(cleanCode(r.COMPONENTE), d);
+            })
+            .map((r: Record<string, unknown>) => cleanCode(r.COMPONENTE)));
           rawData.forEach((row: Record<string, unknown>) => {
             const desc = String(row.DESCRIPCION_COMPONENTE || '').toUpperCase();
             // Candidato: la descripción tiene que mencionar espuma o rollo en algún punto. Esto NO
@@ -1306,18 +1329,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             const compCode = cleanCode(row.COMPONENTE);
             if (!compCode) return;
 
-            // Relevancia por RESPONSABLE — mismo esquema que usa el PFF de Corte Espuma, sin límite
-            // de nivel: se recorre TODO el árbol y se decide por quién fabrica el componente, no por
-            // dónde aparece. La restricción `Hojas_Rutas_Materiales` del grupo (018/19) es el
-            // criterio autoritativo; el patrón de nombres es solo el respaldo cuando no hay
-            // responsable que consultar (componente sin ninguna orden abierta ahora mismo — caso
-            // real: 30005709/30005761, láminas legítimas sin demanda activa en este momento).
-            const respComp = responsableDeMaterial.get(compCode);
-            const reglaHalb = responsablesHalbPorCentro[centro];
-            const esDeVentaExterna = respComp
-              ? (!reglaHalb?.definida || reglaHalb.lista.includes(respComp))
-              : ES_LAMINA_VENTA_EXTERNA(desc);
-            if (!esDeVentaExterna) return;
+            if (esRollo && !esRolloConv(desc) && rollosConv.has(cleanCode(row.MATERIAL_PADRE))) return;
+            if (!esDeVentaExternaComp(compCode, desc)) return;
 
             encontroMatch = true;
             const cantAcum = Number(row.CANTIDAD_ACUMULADA || row.CANTIDAD_UNITARIA || 0);

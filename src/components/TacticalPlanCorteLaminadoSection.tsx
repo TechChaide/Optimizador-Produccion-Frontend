@@ -306,6 +306,7 @@ interface UnifiedNeedRow {
   runsRecomendado: number; // Corridas que calculó el algoritmo automático de déficit para este bloque, SIN aplicar corridasManualOverrides — referencia para la UI cuando el usuario decide un número distinto
   necVentaExternaKg: number; // Porción de consumoKg cuyo origen (P2) es el grupo "Venta Externa" — prioridad menor a Forros/Muebles, no participa del reparto proporcional del bloque (ver groupMap.forEach en handleProcessResumen)
   necVentaExternaUn: number; // necVentaExternaKg redondeado hacia arriba al rollo completo — igual criterio que deficitRealUN
+  necVentaExternaViaConvUn?: number; // Solo en láminas base: parte de necVentaExternaUn que viene de la venta de su CONV (ver finalArray en handleProcessResumen); en el Destino va como consumo interno
 }
 
 // Déficit real de un material (necesidad − stock ya cubierto), SIEMPRE redondeado hacia ARRIBA al
@@ -2637,6 +2638,25 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       };
     });
     
+    // Venta Externa pide el rollo CONV (el subproceso que sale como PT, usuario 2026-10-13), pero el CONV
+    // no corre corrida propia: su plan sale de la lámina base (×CONV_SPLIT_FACTOR). Su déficit de venta
+    // (necesidad VE − stock del CONV) se baja a la base en UN de base, para que el bloque lo planifique;
+    // necVentaExternaViaConvUn lo separa para que el Destino marque la venta en la fila del CONV.
+    finalArray.forEach(conv => {
+      if (!isConvDescripcion(conv.descripcion) || !conv.bomParentMaterial || conv.necVentaExternaUn <= 0) return;
+      const base = finalArray.find(r => r.material === conv.bomParentMaterial);
+      if (!base) return;
+      const deficitConv = Math.max(0, conv.necVentaExternaUn - conv.totalStockUN);
+      const baseUn = deficitConv > 0.001 ? Math.ceil(deficitConv / CONV_SPLIT_FACTOR - 0.001) : 0;
+      if (baseUn <= 0) return;
+      base.necVentaExternaUn += baseUn;
+      base.necVentaExternaKg += baseUn * base.peso;
+      base.necVentaExternaViaConvUn = (base.necVentaExternaViaConvUn || 0) + baseUn;
+      base.totalNroRollos += baseUn;
+      base.totalConsumoKg += baseUn * base.peso;
+      base.hasDeficit = base.totalNroRollos > base.totalStockUN;
+    });
+
     const groupMap = new Map<string, UnifiedNeedRow[]>();
     finalArray.forEach(row => {
       const k = `${row.apertura}|${row.densidad}`;
@@ -3865,15 +3885,21 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // corrida ya traen su parte de venta (veUn, la que el reparto de corridas dejó junta en una sola
     // corrida); las CONV (sin veUn) se etiquetan consumiendo ese reparto en orden: interno, luego VE.
     const restante = new Map<string, { interno: number; ve: number }>();
+    // Venta de un CONV bajada a su lámina base: la base la consume el CONV (interno); la venta se
+    // etiqueta en la fila del CONV.
+    const viaConv = new Map<string, number>();
     unifiedNeeds.forEach(r => {
       if (!restante.has(r.material)) restante.set(r.material, repartoDestinoUN(r));
+      if (r.necVentaExternaViaConvUn) viaConv.set(r.material, r.necVentaExternaViaConvUn);
     });
     const etiqueta = (interno: number, ve: number) =>
       ve > 0 && interno > 0 ? `Interno ${interno} · VE ${ve}` : ve > 0 ? 'Venta Externa' : 'Consumo interno';
     return outputPlanRows.map(row => {
       if (row.veUn !== undefined) {
         const un = Math.round(row.planUn);
-        const ve = Math.min(un, row.veUn);
+        let ve = Math.min(un, row.veUn);
+        const deConv = Math.min(ve, viaConv.get(row.material) || 0);
+        if (deConv > 0) { viaConv.set(row.material, (viaConv.get(row.material) || 0) - deConv); ve -= deConv; }
         return etiqueta(un - ve, ve);
       }
       const r = restante.get(row.material);
