@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 import { serviciosService } from '@/services/servicios.service';
+import { formatMaterialSap } from '@/lib/sap-material';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { useAppContext } from '@/context/AppProvider';
 import { Loader2, PlayCircle, LayoutGrid, Gauge, Clock, Sun, Moon, RefreshCw, TriangleAlert, Scissors, FileSpreadsheet, Download, BedDouble, Send } from 'lucide-react';
@@ -890,7 +891,7 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                         CodigoOrdenExterna: item.order.id,
                         ClaseOrden: '',
                         Centro: CENTRO_TC,
-                        CodigoMaterial: item.order.material,
+                        CodigoMaterial: formatMaterialSap(item.order.material),
                         CantidadPlanificada: item.order.cantidad,
                         VersionFabricacion: '01',
                         PuestoTrabajo: machine.machineId,
@@ -938,7 +939,8 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
 
         for (const { orderKey, solicitud } of rowsAEnviar) {
             try {
-                await serviciosService.insertarSolicitudProduccionHB(solicitud);
+                // El material siempre viaja con 18 caracteres (ceros a la izquierda), aunque se haya editado a mano
+                await serviciosService.insertarSolicitudProduccionHB({ ...solicitud, CodigoMaterial: formatMaterialSap(solicitud.CodigoMaterial) });
                 results.set(orderKey, { status: 'success', message: 'Enviado correctamente.' });
             } catch (error) {
                 results.set(orderKey, { status: 'error', message: (error as Error).message });

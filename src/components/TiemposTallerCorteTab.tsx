@@ -1,11 +1,13 @@
 'use client';
 
 import React, { useState, useMemo } from 'react';
-import { Loader2, Save, Search, TriangleAlert, FileSpreadsheet, Pencil } from 'lucide-react';
+import { Loader2, Save, Search, TriangleAlert, FileSpreadsheet, Pencil, Download } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import type { TiempoManualDetalle } from './TacticalPlanTallerCorteSection';
 
 interface TiemposTallerCorteTabProps {
     // Materiales de forro detectados en la tabla inicial de "PLAN TÁCTICO" (ProvisionalOrdersTallerCorteTab)
@@ -15,13 +17,17 @@ interface TiemposTallerCorteTabProps {
     tiemposEfectivoMap: Map<string, number>;
     // Códigos con override manual guardado (Restriccion) — para distinguir en pantalla "Excel" de "Manual"
     tiemposOverrideMap: Map<string, number>;
+    // Descripción/fecha/usuario de cada override manual (para la descarga a Excel)
+    overridesDetalleMap: Map<string, TiempoManualDetalle>;
+    // Tiempo base sin corrección manual (minutos), como referencia en la descarga
+    tiemposBaseMap: Map<string, number>;
     // Guarda (crea o actualiza) un override manual — ver TacticalPlanTallerCorteSection, que crea el
     // Grupo/Restriccion la primera vez que se necesita.
     onGuardarTiempo: (codigo: string, descripcion: string, minutos: number) => Promise<void>;
     isLoadingTiempos: boolean;
 }
 
-export const TiemposTallerCorteTab: React.FC<TiemposTallerCorteTabProps> = ({ materiales, tiemposEfectivoMap, tiemposOverrideMap, onGuardarTiempo, isLoadingTiempos }) => {
+export const TiemposTallerCorteTab: React.FC<TiemposTallerCorteTabProps> = ({ materiales, tiemposEfectivoMap, tiemposOverrideMap, overridesDetalleMap, tiemposBaseMap, onGuardarTiempo, isLoadingTiempos }) => {
     const [searchTerm, setSearchTerm] = useState('');
     const [draftValues, setDraftValues] = useState<Record<string, string>>({});
     const [savingCode, setSavingCode] = useState<string | null>(null);
@@ -49,6 +55,34 @@ export const TiemposTallerCorteTab: React.FC<TiemposTallerCorteTabProps> = ({ ma
         }
     };
 
+    // Descarga TODOS los tiempos corregidos manualmente (no solo los materiales detectados hoy en
+    // "PLAN TÁCTICO"), con el tiempo en minutos y en segundos (unidad del KPI de TI).
+    const handleDescargarManuales = () => {
+        const descripcionDetectada = new Map(materiales.map(m => [m.codigo, m.descripcion]));
+        const filas = Array.from(tiemposOverrideMap.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([codigo, minutos]) => {
+                const detalle = overridesDetalleMap.get(codigo);
+                const base = tiemposBaseMap.get(codigo);
+                return {
+                    'Material': codigo,
+                    'Descripción': detalle?.descripcion || descripcionDetectada.get(codigo) || '',
+                    'Tiempo Manual (min)': Number(minutos.toFixed(4)),
+                    'Tiempo Manual (seg)': Number((minutos * 60).toFixed(2)),
+                    'Tiempo Base sin corrección (min)': base !== undefined ? Number(base.toFixed(4)) : '',
+                    'Última Modificación': detalle?.fechaModificacion || '',
+                    'Usuario': detalle?.usuario || '',
+                };
+            });
+        const ws = XLSX.utils.json_to_sheet(filas);
+        ws['!cols'] = [{ wch: 12 }, { wch: 55 }, { wch: 18 }, { wch: 18 }, { wch: 28 }, { wch: 24 }, { wch: 12 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Tiempos Manuales');
+        const hoy = new Date();
+        const fecha = `${hoy.getFullYear()}${String(hoy.getMonth() + 1).padStart(2, '0')}${String(hoy.getDate()).padStart(2, '0')}`;
+        XLSX.writeFile(wb, `TiemposManuales_TallerCorte_${fecha}.xlsx`);
+    };
+
     const materialesSinTiempo = materiales.filter(m => !tiemposEfectivoMap.has(m.codigo)).length;
     const materialesDeExcel = materiales.filter(m => tiemposEfectivoMap.has(m.codigo) && !tiemposOverrideMap.has(m.codigo)).length;
 
@@ -67,6 +101,15 @@ export const TiemposTallerCorteTab: React.FC<TiemposTallerCorteTabProps> = ({ ma
                 <div className="flex flex-wrap items-center gap-4 text-[11px] text-gray-600">
                     <span className="inline-flex items-center gap-1.5"><FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" /> {materialesDeExcel} del Excel</span>
                     <span className="inline-flex items-center gap-1.5"><Pencil className="w-3.5 h-3.5 text-indigo-600" /> {tiemposOverrideMap.size} con corrección manual</span>
+                    <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={handleDescargarManuales}
+                        disabled={tiemposOverrideMap.size === 0}
+                        className="h-7 gap-1.5 text-[11px] ml-auto order-last"
+                    >
+                        <Download className="w-3.5 h-3.5" /> Descargar tiempos manuales (Excel)
+                    </Button>
                     {materialesSinTiempo > 0 && (
                         <span className="inline-flex items-center gap-1.5 text-amber-700 font-semibold">
                             <TriangleAlert className="w-3.5 h-3.5" /> {materialesSinTiempo} sin tiempo (ni Excel ni manual)

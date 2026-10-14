@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef, useImperativeHandle } from 'react';
 import * as XLSX from 'xlsx';
 import { serviciosService } from '@/services/servicios.service';
+import { formatMaterialSap } from '@/lib/sap-material';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
@@ -23,10 +24,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import type { Restriccion, Grupo, PlanGrupo, DetalleTactico, SolicitudProduccionHB } from '@/types/interfaces';
+import type { TiempoManualMueble } from '@/lib/tiempos-manuales-muebles';
+import { MaterialesSinTiempoMueblesPanel, type MaterialSinTiempoBackend } from './MaterialesSinTiempoMueblesPanel';
 
 interface ProvisionalOrdersAlphaTabProps {
   restricciones: Restriccion[];
   tiemposData?: any[];
+  // TEMPORAL — tiempos manuales de materiales sin tiempo en el backend (ver @/lib/tiempos-manuales-muebles)
+  tiemposManualesMap?: Map<string, TiempoManualMueble>;
+  onGuardarTiempoManual?: (material: string, descripcion: string, minutos: number) => Promise<void>;
 }
 
 // Handle imperativo expuesto al padre (TacticalPlanMueblesSection) para que otras pestañas hermanas
@@ -764,7 +770,7 @@ const LOAD_STAGE_DEFS: Array<Pick<LoadStage, 'key' | 'label'>> = [
     { key: 'alpha', label: 'Órdenes Previsionales Alpha' },
 ];
 
-export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlphaTabHandle, ProvisionalOrdersAlphaTabProps>(({ restricciones, tiemposData = [] }, ref) => {
+export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlphaTabHandle, ProvisionalOrdersAlphaTabProps>(({ restricciones, tiemposData = [], tiemposManualesMap, onGuardarTiempoManual }, ref) => {
     const { addNotification } = useAppContext();
     const [allRawData, setAllRawData] = useState<any[]>([]); 
     const [inventoryMap, setInventoryMap] = useState<Map<string, number>>(new Map());
@@ -815,6 +821,16 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // Estado para Órdenes Fert, Tiempos de Ensamblado (global) y Sectores de Inventario, usados en la Ejecución de Planificación
     const [fertRawData, setFertRawData] = useState<any[]>([]);
     const [globalTiemposMap, setGlobalTiemposMap] = useState<Map<string, number>>(new Map());
+    // Tiempos usados para planificar: los del backend (globalTiemposMap) + los manuales TEMPORALES solo
+    // para materiales que el backend no trae (el backend siempre gana; ver @/lib/tiempos-manuales-muebles)
+    const effectiveTiemposMap = useMemo(() => {
+        if (!tiemposManualesMap || tiemposManualesMap.size === 0) return globalTiemposMap;
+        const map = new Map(globalTiemposMap);
+        tiemposManualesMap.forEach((t, material) => {
+            if (!map.has(material)) map.set(material, t.minutos);
+        });
+        return map;
+    }, [globalTiemposMap, tiemposManualesMap]);
     const [materialSectorMap, setMaterialSectorMap] = useState<Map<string, string>>(new Map());
     // Responsable de Control de Producción (RespCtrlProd) por Material, usado para clasificar semielaborados (ej. Forros)
     const [materialRespCtrlProdMap, setMaterialRespCtrlProdMap] = useState<Map<string, string>>(new Map());
@@ -934,7 +950,9 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
 
     // Estado para la Distribución de Mesas (Diagrama de Gantt de capacidad)
     const [mesaDistribution, setMesaDistribution] = useState<Map<number, MesaDistributionEntry> | null>(null);
-    const [unassignedDistributionOrders, setUnassignedDistributionOrders] = useState<UnifiedOrder[]>([]);
+    // Órdenes que la Distribución de Mesas no pudo colocar: 'sin-mesa' = ninguna mesa escogida acepta su
+    // Sector/Tamaño; 'sin-capacidad' = hay mesas compatibles pero en ninguna cabe completa sin pasar del 100%.
+    const [unassignedDistributionOrders, setUnassignedDistributionOrders] = useState<{ order: UnifiedOrder; motivo: 'sin-mesa' | 'sin-capacidad' }[]>([]);
 
     // Estado para la Explosión de Materiales (semielaborados de espuma: Lamina/Espuma)
     const [foamExplosionResults, setFoamExplosionResults] = useState<FoamComponentNeed[]>([]);
@@ -1300,7 +1318,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             const sectorSAP = materialSectorMap.get(material);
             if (esSectorAjenoAMuebles(sectorSAP)) return;
             const sector = sectorSAP ?? resolveSectorReparacion(nombre);
-            const tiempoUnitMin = globalTiemposMap.get(material) ?? 0;
+            const tiempoUnitMin = effectiveTiemposMap.get(material) ?? 0;
 
             // El Centro de ENTREGA (destino Quito/Guayaquil) es el que rige la ventana de prioridad,
             // no el Centro de fabricación (siempre 1000); si no hay pedido (MTS) o no se encuentra en
@@ -1357,7 +1375,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             const sectorSAP = materialSectorMap.get(material);
             if (esSectorAjenoAMuebles(sectorSAP)) return;
             const sector = sectorSAP ?? resolveSectorReparacion(nombre);
-            const tiempoUnitMin = globalTiemposMap.get(material) ?? 0;
+            const tiempoUnitMin = effectiveTiemposMap.get(material) ?? 0;
 
             const posicionFert = String(row.POSICION || '').trim();
             // El Centro de ENTREGA (destino Quito/Guayaquil) es el que rige la ventana de prioridad,
@@ -1413,10 +1431,44 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         });
 
         return { orders: result, sinFechaEntrega };
-    }, [mueblesProvisionalOrders, mueblesFertOrders, materialSectorMap, globalTiemposMap, deliveryDatesMap, deliveryDatesByPositionMap, deliveryCentroMap, deliveryCentroByPositionMap]);
+    }, [mueblesProvisionalOrders, mueblesFertOrders, materialSectorMap, effectiveTiemposMap, deliveryDatesMap, deliveryDatesByPositionMap, deliveryCentroMap, deliveryCentroByPositionMap]);
 
     const unifiedOrders = unifiedOrdersResult.orders;
     const ordersMissingDeliveryDate = unifiedOrdersResult.sinFechaEntrega;
+
+    // TEMPORAL — materiales de las órdenes vigentes SIN tiempo en el backend (con o sin tiempo manual),
+    // para el panel "Materiales sin tiempo en el backend". Solo se evalúa cuando el maestro de tiempos ya
+    // cargó (si no, todos parecerían sin tiempo durante la carga).
+    const materialesSinTiempoBackend = useMemo<MaterialSinTiempoBackend[]>(() => {
+        if (globalTiemposMap.size === 0) return [];
+        const acc = new Map<string, MaterialSinTiempoBackend>();
+        unifiedOrders.forEach(o => {
+            if (globalTiemposMap.has(o.material)) return;
+            const prev = acc.get(o.material);
+            if (!prev) {
+                acc.set(o.material, {
+                    material: o.material,
+                    nombre: o.nombre,
+                    ordenes: 1,
+                    unidades: o.cantidadTotal,
+                    fechaEntregaMasProxima: o.fechaEntrega,
+                    fechaEntregaMasProximaDate: o.fechaEntregaDate,
+                });
+                return;
+            }
+            prev.ordenes += 1;
+            prev.unidades += o.cantidadTotal;
+            if (o.fechaEntregaDate.getTime() < prev.fechaEntregaMasProximaDate.getTime()) {
+                prev.fechaEntregaMasProxima = o.fechaEntrega;
+                prev.fechaEntregaMasProximaDate = o.fechaEntregaDate;
+            }
+        });
+        return Array.from(acc.values());
+    }, [unifiedOrders, globalTiemposMap]);
+    const materialesSinTiempoPendientes = useMemo(
+        () => materialesSinTiempoBackend.filter(m => !tiemposManualesMap?.has(m.material)),
+        [materialesSinTiempoBackend, tiemposManualesMap]
+    );
 
     // 4. Carga de Feriados (Ecuador) para el cálculo de la ventana de días laborables
     useEffect(() => {
@@ -2536,6 +2588,9 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             addNotification('warning', 'No se pudo determinar la fecha de programación de la Ventana de Fabricación.');
             return;
         }
+        if (materialesSinTiempoPendientes.length > 0) {
+            addNotification('warning', `${materialesSinTiempoPendientes.length} material(es) sin tiempo en el backend ni tiempo manual: sus órdenes se calculan con 0 horas y la utilización de capacidad no es real. Ingrese los tiempos en el panel "Materiales sin tiempo en el backend".`);
+        }
 
         // +1 día laborable (Quito/Centro 1000) y +2 días laborables (Guayaquil/Centro 2000), omitiendo
         // fines de semana: si la fecha objetivo cae en viernes, +1 salta al lunes y +2 al martes.
@@ -2761,6 +2816,58 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             }
         }
 
+        // TOPE DE CAPACIDAD (pedido del usuario 2026-10-14): en NINGÚN paso (1, 2 ni 3) lo planificado puede
+        // superar el 100% de la capacidad total disponible. Antes se pasaba del 100% por dos vías: en el Paso
+        // 1, las órdenes con fecha propia = fecha objetivo se incluían "sin excepción"; en los Pasos 2/3 se
+        // tomaba tal cual todo lo que había en SAP (la calibración solo recomendaba). Ahora, si lo incluido
+        // excede la capacidad, se sacan órdenes empezando por la MENOS urgente: primero las no obligatorias
+        // y, solo si aún no alcanza, las de fecha propia = objetivo; dentro de cada grupo, la de fecha de
+        // entrega más lejana primero (y a igual fecha, la de más horas). Luego se reintenta meter las sacadas
+        // más urgentes que todavía quepan, para no dejar huecos. Lo sacado pasa a "Órdenes Diferidas por
+        // Capacidad" (en Pasos 2/3: órdenes que hay que mover en SAP para que el plan cuadre).
+        const capacityTrimmedOrders: UnifiedOrder[] = [];
+        {
+            const horasDe = (list: UnifiedOrder[]) => list.reduce((s, o) => s + o.horas, 0);
+            const CAPACIDAD_EPS = 1e-6;
+            if (horasDe(immediateOrders) > totalCapacityAvailable + CAPACIDAD_EPS) {
+                const ordenDescarte = [...immediateOrders].sort((a, b) => {
+                    const ma = mandatoryIds.has(orderKey(a)) ? 1 : 0;
+                    const mb = mandatoryIds.has(orderKey(b)) ? 1 : 0;
+                    if (ma !== mb) return ma - mb;
+                    const porEntrega = b.fechaEntregaDate.getTime() - a.fechaEntregaDate.getTime();
+                    return porEntrega !== 0 ? porEntrega : b.horas - a.horas;
+                });
+                const sacadas: UnifiedOrder[] = [];
+                let horasIncluidas = horasDe(immediateOrders);
+                for (const o of ordenDescarte) {
+                    if (horasIncluidas <= totalCapacityAvailable + CAPACIDAD_EPS) break;
+                    sacadas.push(o);
+                    horasIncluidas -= o.horas;
+                }
+                // Re-inserta, de la más urgente a la menos urgente, las sacadas que sí quepan en el espacio que quedó
+                const reinsertadas = new Set<string>();
+                for (const o of [...sacadas].reverse()) {
+                    if (horasIncluidas + o.horas <= totalCapacityAvailable + CAPACIDAD_EPS) {
+                        reinsertadas.add(orderKey(o));
+                        horasIncluidas += o.horas;
+                    }
+                }
+                const sacadasFinal = sacadas.filter(o => !reinsertadas.has(orderKey(o)));
+                const sacadasKeys = new Set(sacadasFinal.map(orderKey));
+                immediateOrders = immediateOrders.filter(o => !sacadasKeys.has(orderKey(o)));
+                immediateIds = new Set(immediateOrders.map(orderKey));
+                capacityTrimmedOrders.push(...sacadasFinal);
+                finalDeferredByCapacity = [...finalDeferredByCapacity, ...sacadasFinal];
+                committedHours = horasDe(immediateOrders);
+            }
+            // Con el tope aplicado ya no queda déficit que "calibrar": la recomendación de Calibrar
+            // Capacidad (Pasos 2/3) se reemplaza por la exclusión automática de arriba.
+            if (isRecalcLogic) {
+                calibrationCandidates = [];
+                calibrationRecommendedKeys = [];
+            }
+        }
+
         // Órdenes MTS, ordenadas por antigüedad, solo se incluyen si sobra capacidad (ya excluye las que
         // quedaron como inmediatas por fecha propia, y las creadas hoy que ya se sugieren como movibles)
         const mtsSorted = mtsOrders
@@ -2859,6 +2966,13 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
 
         if (calibrationRecommendedKeys.length > 0) {
             addNotification('warning', `Déficit de capacidad tras la calibración ya aplicada: revise la tabla "Calibrar Capacidad" — se recomienda mover ${calibrationRecommendedKeys.length} orden(es) más para acercarse al 100%.`);
+        }
+
+        if (capacityTrimmedOrders.length > 0) {
+            const horasSacadas = capacityTrimmedOrders.reduce((s, o) => s + o.horas, 0);
+            addNotification('warning', isRecalcLogic
+                ? `Tope de capacidad (100%): ${capacityTrimmedOrders.length} orden(es) (${horasSacadas.toFixed(2)} h) no caben y se excluyeron del plan — muévalas en SAP a otra fecha. Vea "Órdenes Diferidas por Capacidad".`
+                : `Tope de capacidad (100%): las órdenes con fecha propia = fecha objetivo superaban la capacidad; ${capacityTrimmedOrders.length} orden(es) (${horasSacadas.toFixed(2)} h, las de entrega más lejana) se difirieron. Vea "Órdenes Diferidas por Capacidad".`);
         }
 
         if (ptboAlerts.length > 0) {
@@ -3115,16 +3229,17 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             items.set(id, []);
         });
 
-        const unassigned: UnifiedOrder[] = [];
+        const unassigned: { order: UnifiedOrder; motivo: 'sin-mesa' | 'sin-capacidad' }[] = [];
 
-        // Se procesa de "Grande" a "Pequeño" (best-fit-decreasing) para acomodar primero lo más
-        // difícil de ubicar, y usar los materiales pequeños para rellenar los espacios restantes.
+        // Se procesa de "Grande" a "Pequeño" y, dentro de cada tamaño, de más a menos horas
+        // (first-fit-decreasing) para acomodar primero lo más difícil de ubicar y usar lo pequeño para
+        // rellenar los espacios restantes — importante ahora que ninguna mesa puede pasar del 100%.
         const tierRank: Record<MaterialSize, number> = { Grande: 0, Mediano: 1, Pequeño: 2 };
         const allOrders = [...planningResult.immediateOrders, ...planningResult.extraOrders];
         const sortedOrders = [...allOrders].sort((a, b) => {
             const ta = a.tamano ? tierRank[a.tamano] : 99;
             const tb = b.tamano ? tierRank[b.tamano] : 99;
-            return ta - tb;
+            return ta - tb || b.horas - a.horas;
         });
 
         sortedOrders.forEach(order => {
@@ -3143,7 +3258,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             // el botón "Habilitar para Camas" (camasOverflowMesaIds) como mesas adicionales para colocar
             // el excedente de camas.
             if (order.sector === SECTOR_CAMAS) {
-                const sinEspacioEnLinea1 = candidates.every(id => (remaining.get(id) ?? 0) <= 0);
+                const sinEspacioEnLinea1 = candidates.every(id => (remaining.get(id) ?? 0) < order.horas - 1e-6);
                 if (sinEspacioEnLinea1) {
                     camasOverflowMesaIds.forEach(mesaOverflowId => {
                         if (eligibleMesaIds.includes(mesaOverflowId) && !candidates.includes(mesaOverflowId)) {
@@ -3154,19 +3269,24 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             }
 
             if (candidates.length === 0) {
-                unassigned.push(order);
+                unassigned.push({ order, motivo: 'sin-mesa' });
                 return;
             }
 
-            // Se prioriza una mesa candidata donde el material quepa completo; si ninguna tiene
-            // espacio suficiente, se usa la que tenga más capacidad restante (para regular la carga).
-            const fitting = candidates.filter(id => (remaining.get(id) ?? 0) >= order.horas);
-            const pool = fitting.length > 0 ? fitting : candidates;
-            const chosen = pool.reduce((best, id) => ((remaining.get(id) ?? 0) > (remaining.get(best) ?? 0) ? id : best), pool[0]);
+            // TOPE 100% POR MESA (pedido del usuario 2026-10-14): solo se asigna a una mesa donde la orden
+            // quepa COMPLETA; entre esas, la de más capacidad restante (para regular la carga). Antes, si
+            // ninguna tenía espacio, se forzaba en la de más espacio y quedaba marcada "EXCEDE CAPACIDAD"
+            // (mesas al 105–115%); ahora se reporta aparte como "sin capacidad en mesa".
+            const fitting = candidates.filter(id => (remaining.get(id) ?? 0) >= order.horas - 1e-6);
+            if (fitting.length === 0) {
+                unassigned.push({ order, motivo: 'sin-capacidad' });
+                return;
+            }
+            const chosen = fitting.reduce((best, id) => ((remaining.get(id) ?? 0) > (remaining.get(best) ?? 0) ? id : best), fitting[0]);
 
             const mesaItems = items.get(chosen)!;
             const startHour = mesaItems.reduce((sum, it) => sum + (it.endHour - it.startHour), 0);
-            const overflow = order.horas > (remaining.get(chosen) ?? 0);
+            const overflow = false;
 
             mesaItems.push({
                 order,
@@ -3202,8 +3322,13 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         // Guarda el snapshot para "PLAN" (horario/mesas/personal/Gantt de esta fecha objetivo)
         savePlanDiarioSnapshot(distribution);
 
-        if (unassigned.length > 0) {
-            addNotification('warning', `${unassigned.length} material(es) no se pudieron asignar a ninguna mesa (Sector no clasificado o sin mesa disponible para ese Sector/Tamaño).`);
+        const sinMesa = unassigned.filter(u => u.motivo === 'sin-mesa').length;
+        const sinCapacidad = unassigned.filter(u => u.motivo === 'sin-capacidad');
+        if (sinMesa > 0) {
+            addNotification('warning', `${sinMesa} material(es) no se pudieron asignar a ninguna mesa (Sector no clasificado o sin mesa disponible para ese Sector/Tamaño).`);
+        }
+        if (sinCapacidad.length > 0) {
+            addNotification('warning', `Tope de capacidad por mesa (100%): ${sinCapacidad.length} orden(es) (${sinCapacidad.reduce((s, u) => s + u.order.horas, 0).toFixed(2)} h) no caben completas en ninguna mesa compatible y quedaron sin asignar. Revise el detalle bajo el Diagrama de Gantt.`);
         }
         addNotification('success', 'Distribución de mesas ejecutada. Revise el Diagrama de Gantt de capacidad.');
     };
@@ -3957,7 +4082,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             CodigoOrdenExterna: String(codigoDetalleTactico),
             ClaseOrden: '',
             Centro: '1000',
-            CodigoMaterial: item.order.material,
+            CodigoMaterial: formatMaterialSap(item.order.material),
             CantidadPlanificada: item.order.cantidadPlanificada,
             VersionFabricacion: '01',
             PuestoTrabajo: puestoTrabajo,
@@ -4038,7 +4163,8 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
 
         for (const { orderKey, solicitud } of rowsAEnviar) {
             try {
-                await serviciosService.insertarSolicitudProduccionHB(solicitud);
+                // El material siempre viaja con 18 caracteres (ceros a la izquierda), aunque se haya editado a mano
+                await serviciosService.insertarSolicitudProduccionHB({ ...solicitud, CodigoMaterial: formatMaterialSap(solicitud.CodigoMaterial) });
                 results.set(orderKey, { status: 'success', message: 'Enviado correctamente.' });
             } catch (error) {
                 results.set(orderKey, { status: 'error', message: (error as Error).message });
@@ -4314,6 +4440,15 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                         </div>
                     </div>
                 </div>
+
+                {onGuardarTiempoManual && tiemposManualesMap && (
+                    <MaterialesSinTiempoMueblesPanel
+                        materiales={materialesSinTiempoBackend}
+                        tiemposManualesMap={tiemposManualesMap}
+                        onGuardarTiempoManual={onGuardarTiempoManual}
+                        onNotify={addNotification}
+                    />
+                )}
 
                 {chosenTables && chosenTables.length > 0 && (
                     <div className="bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden">
@@ -5227,10 +5362,20 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                 );
                             })()}
 
-                            {unassignedDistributionOrders.length > 0 && (
+                            {unassignedDistributionOrders.some(u => u.motivo === 'sin-capacidad') && (
+                                <div className="bg-red-50 border border-red-300 rounded-lg p-3">
+                                    <p className="text-xs font-bold text-red-800 mb-1">
+                                        {unassignedDistributionOrders.filter(u => u.motivo === 'sin-capacidad').length} orden(es) sin capacidad en mesa (ninguna mesa compatible puede recibirla completa sin pasar del 100%):
+                                    </p>
+                                    <p className="text-[11px] text-red-700">
+                                        {unassignedDistributionOrders.filter(u => u.motivo === 'sin-capacidad').map(u => `${u.order.source} ${u.order.id} — ${u.order.material} (${u.order.nombre}) — ${u.order.horas.toFixed(2)} h`).join(' · ')}
+                                    </p>
+                                </div>
+                            )}
+                            {unassignedDistributionOrders.some(u => u.motivo === 'sin-mesa') && (
                                 <div className="bg-amber-50 border border-amber-300 rounded-lg p-3">
-                                    <p className="text-xs font-bold text-amber-800 mb-1">{unassignedDistributionOrders.length} material(es) sin mesa asignada:</p>
-                                    <p className="text-[11px] text-amber-700">{unassignedDistributionOrders.map(o => `${o.material} (${o.nombre})`).join(', ')}</p>
+                                    <p className="text-xs font-bold text-amber-800 mb-1">{unassignedDistributionOrders.filter(u => u.motivo === 'sin-mesa').length} material(es) sin mesa compatible (Sector/Tamaño):</p>
+                                    <p className="text-[11px] text-amber-700">{unassignedDistributionOrders.filter(u => u.motivo === 'sin-mesa').map(u => `${u.order.material} (${u.order.nombre})`).join(', ')}</p>
                                 </div>
                             )}
                         </div>

@@ -19,6 +19,19 @@ const GRUPO_TIEMPOS_TC_DEPARTAMENTO = 'TALLER DE CORTE FORROS MUEBLES';
 const GRUPO_TIEMPOS_TC_CENTRO = '1000';
 const RESTRICCION_TIEMPO_DESCRIPCION = 'Tiempo unitario de cosido (min) - Taller de Corte';
 
+export interface TiempoManualDetalle {
+    descripcion: string;
+    fechaModificacion: string;
+    usuario: string;
+}
+
+// La descripción del material se guarda como "<RESTRICCION_TIEMPO_DESCRIPCION> — <descripción>"
+const descripcionDesdeRestriccion = (descripcion: string | null | undefined): string => {
+    const texto = String(descripcion || '');
+    const prefijo = `${RESTRICCION_TIEMPO_DESCRIPCION} — `;
+    return texto.startsWith(prefijo) ? texto.slice(prefijo.length).trim() : texto.trim();
+};
+
 const formatDateForSQLServer = (date: Date): string => {
     const pad = (n: number) => n.toString().padStart(2, '0');
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${date.getMilliseconds().toString().padStart(3, '0')}`;
@@ -54,6 +67,8 @@ export const TacticalPlanTallerCorteSection: React.FC = () => {
     // codigo de material -> codigo_restriccion, para saber si hay que actualizar (PUT-like via save con
     // codigo_restriccion) o crear una fila nueva.
     const [restriccionIdMap, setRestriccionIdMap] = useState<Map<string, number>>(new Map());
+    // Descripción y fecha de cada override manual, solo para la descarga a Excel de la pestaña "Tiempos"
+    const [overridesDetalleMap, setOverridesDetalleMap] = useState<Map<string, TiempoManualDetalle>>(new Map());
     const [tallerCorteGrupoId, setTallerCorteGrupoId] = useState<number | null>(null);
     const [isLoadingTiempos, setIsLoadingTiempos] = useState(true);
 
@@ -90,15 +105,22 @@ export const TacticalPlanTallerCorteSection: React.FC = () => {
                 const restriccionesGrupo = (restriccionesRes.data || []).filter(r => r.codigo_grupo === grupo.codigo_grupo);
                 const overrides = new Map<string, number>();
                 const ids = new Map<string, number>();
+                const detalles = new Map<string, TiempoManualDetalle>();
                 restriccionesGrupo.forEach(r => {
                     const minutos = Number(r.valor_restriccion);
                     if (!Number.isNaN(minutos)) {
                         overrides.set(r.nombre_restriccion, minutos);
                         ids.set(r.nombre_restriccion, r.codigo_restriccion);
+                        detalles.set(r.nombre_restriccion, {
+                            descripcion: descripcionDesdeRestriccion(r.descripcion),
+                            fechaModificacion: r.fecha_modificacion ? String(r.fecha_modificacion) : '',
+                            usuario: r.usuario_modificacion || '',
+                        });
                     }
                 });
                 setTiemposOverrideMap(overrides);
                 setRestriccionIdMap(ids);
+                setOverridesDetalleMap(detalles);
             } catch (error) {
                 addNotification('error', `Error al cargar tiempos del Taller de Corte: ${(error as Error).message}`);
             } finally {
@@ -142,6 +164,11 @@ export const TacticalPlanTallerCorteSection: React.FC = () => {
             const codigoRestriccion = saved.data?.codigo_restriccion ?? codigoRestriccionExistente;
 
             setTiemposOverrideMap(prev => new Map(prev).set(codigo, minutos));
+            setOverridesDetalleMap(prev => new Map(prev).set(codigo, {
+                descripcion,
+                fechaModificacion: payload.fecha_modificacion,
+                usuario: payload.usuario_modificacion,
+            }));
             if (codigoRestriccion) {
                 setRestriccionIdMap(prev => new Map(prev).set(codigo, codigoRestriccion));
             }
@@ -188,6 +215,8 @@ export const TacticalPlanTallerCorteSection: React.FC = () => {
                         materiales={materialesDetectados}
                         tiemposEfectivoMap={tiemposEfectivoMap}
                         tiemposOverrideMap={tiemposOverrideMap}
+                        overridesDetalleMap={overridesDetalleMap}
+                        tiemposBaseMap={excelTiemposMap}
                         onGuardarTiempo={handleGuardarTiempo}
                         isLoadingTiempos={isLoadingTiempos}
                     />

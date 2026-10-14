@@ -607,70 +607,168 @@ const buildDesglosePorFechaYMesaHtml = (planSummaryByDate: PlanSummaryDay[]): st
   }).join('');
 };
 
-// Aproximación del Gantt de pantalla (posicionamiento absoluto en %) usando <table> de ancho fijo por
-// mesa: se ordenan los ítems por hora de inicio y se intercalan celdas vacías (huecos) entre ellos —
-// el ancho de cada celda en px es proporcional a su duración en horas. No requiere CSS de layout
-// moderno, por lo que se ve razonablemente bien también en Outlook.
-const GANTT_EMAIL_WIDTH_PX = 640;
+// Gantt del correo, lo más fiel posible al de pantalla (PlanDiarioGanttSection) pero solo con <table> y
+// estilos inline (Outlook no soporta posicionamiento absoluto ni flexbox). La barra de cada mesa se
+// parte en tramos en cada inicio/fin de orden, en la hora de capacidad de la mesa y en la hora de fin de
+// turno; el ancho en px de cada tramo es proporcional a sus horas. Así se pueden dibujar, como bordes de
+// celda: la línea PUNTEADA de límite de capacidad por mesa (borde izquierdo dashed del tramo que empieza
+// en esa hora) y la línea SÓLIDA de fin de turno (mismo truco, repetido en todas las mesas y en el eje de
+// horas, para que se lea como una sola línea vertical). Mismos colores, leyenda y % de utilización por
+// mesa (con el mismo código de color) que la vista previa.
+const GANTT_EMAIL_WIDTH_PX = 600;
+const GANTT_EMAIL_LABEL_PX = 140;
+const GANTT_EMAIL_PCT_PX = 48;
+const GANTT_EMAIL_BAR_HEIGHT_PX = 30;
+const GANTT_EMAIL_CAPACIDAD_BORDER = '3px dashed #475569';
+const GANTT_EMAIL_TURNO_BORDER = '4px solid #0f172a';
+
+const utilizacionColorHex = (pct: number): string => (pct > 100 ? '#dc2626' : pct >= 90 ? '#047857' : '#4b5563');
+
+// Muestra de color/línea de la leyenda (tabla anidada: los <span> con borde no se respetan en Outlook)
+const leyendaMuestraHtml = (estilo: string, ancho = 12, alto = 12): string =>
+  `<table cellpadding="0" cellspacing="0" border="0"><tr><td width="${ancho}" height="${alto}" style="width:${ancho}px;height:${alto}px;font-size:1px;line-height:1px;${estilo}">&nbsp;</td></tr></table>`;
 
 const buildGanttHtml = (planSummaryByDate: PlanSummaryDay[]): string => {
   const diasConSnapshot = planSummaryByDate.filter(d => d.snapshot && d.mesas.length > 0);
   if (diasConSnapshot.length === 0) return '';
   const pxPerHour = GANTT_EMAIL_WIDTH_PX / GANTT_HOURS_SCALE;
+  const xPx = (horas: number) => Math.round(Math.min(Math.max(horas, 0), GANTT_HOURS_SCALE) * pxPerHour);
+  const mismaHora = (a: number, b: number) => Math.abs(a - b) < 0.001;
+  const enEscala = (h: number): boolean => h > 0 && h <= GANTT_HOURS_SCALE;
+  const fuente = 'font-family:Arial,sans-serif;';
+  const mono = "font-family:'Courier New',monospace;";
 
   const dias = diasConSnapshot.map(day => {
     const snapshot = day.snapshot!;
-    const mesasHtml = (['Línea 1 – Línea de Camas', 'Línea 2 – Línea de Muebles'] as const).map(linea => {
+    const finTurnoHoras = (parseHHMM(snapshot.shiftDisplayEndTime) - parseHHMM(snapshot.shiftStartTime)) / 60;
+    const finTurno = enEscala(finTurnoHoras) ? finTurnoHoras : null;
+
+    // Celdas de la barra 0..GANTT_HOURS_SCALE de una mesa, partida en todos los cortes relevantes
+    const construirBarra = (items: PlanDiarioSnapshotItem[], capacidad: number | null): string => {
+      const recortar = (h: number) => Math.max(0, Math.min(h, GANTT_HOURS_SCALE));
+      const cortes = new Set<number>([0, GANTT_HOURS_SCALE]);
+      items.forEach(it => { cortes.add(recortar(it.startHour)); cortes.add(recortar(it.endHour)); });
+      if (capacidad !== null) cortes.add(capacidad);
+      if (finTurno !== null) cortes.add(finTurno);
+      const puntos = Array.from(cortes).sort((a, b) => a - b);
+
+      const lineaEn = (h: number): string | null =>
+        finTurno !== null && mismaHora(h, finTurno) ? GANTT_EMAIL_TURNO_BORDER
+          : capacidad !== null && mismaHora(h, capacidad) ? GANTT_EMAIL_CAPACIDAD_BORDER
+          : null;
+
+      const celdas: string[] = [];
+      let lineaPendiente: string | null = null;
+      let bordeDerAnterior: string | null = null;
+      let pxAcumulado = 0;
+      const grosorBorde = (borde: string | null) => (borde ? parseInt(borde, 10) || 0 : 0);
+      for (let i = 0; i < puntos.length - 1; i++) {
+        const a = puntos[i];
+        const b = puntos[i + 1];
+        const ancho = xPx(b) - xPx(a);
+        let bordeIzq = lineaEn(a);
+        if (ancho <= 0) {
+          // Tramo de 0 px tras el redondeo: su línea (si tiene) pasa al siguiente tramo visible
+          lineaPendiente = bordeIzq ?? lineaPendiente;
+          continue;
+        }
+        bordeIzq = bordeIzq ?? lineaPendiente;
+        lineaPendiente = null;
+
+        const medio = (a + b) / 2;
+        const item = items.find(it => it.startHour <= medio && it.endHour >= medio);
+        const estilos: string[] = [`height:${GANTT_EMAIL_BAR_HEIGHT_PX}px`, 'padding:0', 'overflow:hidden'];
+        let contenido = '<span style="font-size:1px;line-height:1px;">&nbsp;</span>';
+        let bordeDer: string | null = null;
+        let etiqueta: string | null = null;
+        if (item) {
+          const { bg, text, border } = tamanoColorHex(item.tamano);
+          const colorBorde = item.overflow ? '#dc2626' : border;
+          const grosor = item.overflow ? 2 : 1;
+          estilos.push(`background:${bg}`, `border-top:${grosor}px solid ${colorBorde}`, `border-bottom:${grosor}px solid ${colorBorde}`);
+          if (mismaHora(b, recortar(item.endHour)) && !lineaEn(b)) bordeDer = `${grosor}px solid ${colorBorde}`;
+          // Si el tramo anterior ya cerró una orden con borde derecho, no se duplica el borde aquí
+          if (!bordeIzq && !bordeDerAnterior && mismaHora(a, recortar(item.startHour))) bordeIzq = `${grosor}px solid ${colorBorde}`;
+          // Etiqueta solo en el primer tramo de la orden (se decide abajo si cabe en el ancho real)
+          if (mismaHora(a, recortar(item.startHour))) {
+            etiqueta = `<span style="font-size:8px;line-height:10px;font-weight:bold;color:${text};${fuente}white-space:nowrap;">&nbsp;${escapeHtml(item.material)}</span>`;
+          }
+        }
+        // Línea que cae justo al final de la escala: borde derecho del último tramo
+        if (mismaHora(b, GANTT_HOURS_SCALE)) bordeDer = lineaEn(GANTT_HOURS_SCALE) ?? bordeDer;
+        if (bordeIzq) estilos.push(`border-left:${bordeIzq}`);
+        if (bordeDer) estilos.push(`border-right:${bordeDer}`);
+        bordeDerAnterior = bordeDer;
+        // Los bordes suman ancho a la celda: cada tramo se ajusta para TERMINAR exactamente en xPx(b),
+        // descontando sus bordes y cualquier desfase acumulado de tramos anteriores (p. ej. órdenes tan
+        // cortas que sus bordes miden más que ellas), así todas las barras miden GANTT_EMAIL_WIDTH_PX y
+        // la línea de fin de turno cae en el mismo píxel en todas las mesas.
+        const bordesPx = grosorBorde(bordeIzq) + grosorBorde(bordeDer);
+        const anchoContenido = Math.max(xPx(b) - pxAcumulado - bordesPx, 1);
+        pxAcumulado += anchoContenido + bordesPx;
+        // En correo no hay "truncate" confiable: un texto más ancho que la celda la ensancharía y
+        // desalinearía las líneas, así que la etiqueta solo se muestra si cabe con holgura
+        if (etiqueta && anchoContenido >= 52) contenido = etiqueta;
+        estilos.unshift(`width:${anchoContenido}px`);
+        celdas.push(`<td width="${anchoContenido}" style="${estilos.join(';')};">${contenido}</td>`);
+      }
+      return `<table cellpadding="0" cellspacing="0" border="0" width="${GANTT_EMAIL_WIDTH_PX}" style="border-collapse:collapse;table-layout:fixed;width:${GANTT_EMAIL_WIDTH_PX}px;background:#f9fafb;"><tr>${celdas.join('')}</tr></table>`;
+    };
+
+    const lineas = (['Línea 1 – Línea de Camas', 'Línea 2 – Línea de Muebles'] as const).map(linea => {
       const mesasLinea = day.mesas.filter(m => m.linea === linea);
       if (mesasLinea.length === 0) return '';
       const filas = mesasLinea.map(mesa => {
-        const items = [...mesa.items].sort((a, b) => a.startHour - b.startHour);
-        let cursor = 0;
-        const celdas: string[] = [];
-        items.forEach((item, idx) => {
-          const gapHoras = item.startHour - cursor;
-          if (gapHoras > 0.05) {
-            celdas.push(`<td style="width:${Math.round(gapHoras * pxPerHour)}px;padding:0;border:none;"></td>`);
-          }
-          const anchoPx = Math.max(Math.round((item.endHour - item.startHour) * pxPerHour), 6);
-          const { bg, text, border } = tamanoColorHex(item.tamano);
-          celdas.push(`<td style="width:${anchoPx}px;height:26px;background:${bg};border:1px solid ${border};padding:0 2px;overflow:hidden;"><span style="font-size:8px;font-weight:600;color:${text};white-space:nowrap;">${escapeHtml(item.material)}</span></td>`);
-          cursor = item.endHour;
-        });
-        if (cursor < GANTT_HOURS_SCALE) {
-          celdas.push(`<td style="width:${Math.round((GANTT_HOURS_SCALE - cursor) * pxPerHour)}px;padding:0;border:none;"></td>`);
-        }
+        const capacidad = enEscala(mesa.capacityHours) ? mesa.capacityHours : null;
         const utilizacionPct = mesa.capacityHours > 0 ? (mesa.usedHours / mesa.capacityHours) * 100 : 0;
         return `
           <tr>
-            <td style="${CORREO_TD_STYLE}text-align:left;white-space:nowrap;width:130px;">
-              <span style="font-weight:bold;">${escapeHtml(mesa.tableName)}</span><br/>
-              <span style="font-family:monospace;font-size:10px;">${mesa.usedHours.toFixed(2)} / ${mesa.capacityHours.toFixed(2)} h</span>
+            <td width="${GANTT_EMAIL_LABEL_PX}" style="width:${GANTT_EMAIL_LABEL_PX}px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;${fuente}">
+              <span style="font-size:11px;font-weight:bold;color:#1f2937;">${escapeHtml(mesa.tableName)}</span><br/>
+              <span style="font-size:12px;font-weight:bold;color:#111827;${mono}">${mesa.usedHours.toFixed(2)} / ${mesa.capacityHours.toFixed(2)} h</span>
             </td>
-            <td style="padding:2px;border:1px solid #e5e7eb;background:#f9fafb;">
-              <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:${GANTT_EMAIL_WIDTH_PX}px;"><tr>${celdas.join('')}</tr></table>
+            <td width="${GANTT_EMAIL_WIDTH_PX + 2}" style="width:${GANTT_EMAIL_WIDTH_PX + 2}px;padding:3px 0;vertical-align:middle;">
+              <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e5e7eb;"><tr><td style="padding:0;">${construirBarra(mesa.items, capacidad)}</td></tr></table>
             </td>
-            <td style="${CORREO_TD_STYLE}width:50px;font-weight:bold;${utilizacionPct > 100 ? 'color:#dc2626;' : 'color:#374151;'}">${utilizacionPct.toFixed(0)}%</td>
+            <td width="${GANTT_EMAIL_PCT_PX}" style="width:${GANTT_EMAIL_PCT_PX}px;padding:3px 0 3px 8px;vertical-align:middle;text-align:right;${fuente}font-size:12px;font-weight:bold;color:${utilizacionColorHex(utilizacionPct)};">${utilizacionPct.toFixed(0)}%</td>
           </tr>`;
       }).join('');
       return `
-        <p style="margin:10px 0 4px;font-size:11px;font-weight:bold;color:#4b5563;text-transform:uppercase;">${escapeHtml(linea)}</p>
-        <table style="border-collapse:collapse;" cellpadding="0" cellspacing="0">${filas}</table>`;
+        <tr><td colspan="3" style="padding:12px 0 4px;${fuente}font-size:11px;font-weight:bold;color:#4b5563;text-transform:uppercase;">${escapeHtml(linea)}</td></tr>
+        ${filas}`;
     }).join('');
 
-    const horasEje = Array.from({ length: GANTT_HOURS_SCALE + 1 }, (_, h) => h).filter(h => h % 2 === 0)
-      .map(h => `<td style="width:${Math.round(2 * pxPerHour)}px;font-size:9px;color:#9ca3af;font-family:monospace;">${formatShiftClockLabel(snapshot.shiftStartTime, h)}</td>`).join('');
+    // Eje de horas (cada 2 h), alineado con la barra (1 px del borde de la barra a la izquierda)
+    const ejeCeldas = Array.from({ length: GANTT_HOURS_SCALE / 2 }, (_, i) => i * 2).map(h => {
+      const ancho = xPx(h + 2) - xPx(h);
+      return `<td width="${ancho}" style="width:${ancho}px;padding:2px 0 0;font-size:9px;color:#9ca3af;${mono}white-space:nowrap;">${formatShiftClockLabel(snapshot.shiftStartTime, h)}</td>`;
+    }).join('');
+    const ejeHtml = `
+      <tr>
+        <td></td>
+        <td style="padding:0 0 0 1px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="${GANTT_EMAIL_WIDTH_PX}" style="border-collapse:collapse;table-layout:fixed;width:${GANTT_EMAIL_WIDTH_PX}px;"><tr>${ejeCeldas}</tr></table>
+        </td>
+        <td style="padding:2px 0 0 0;font-size:9px;color:#9ca3af;${mono}white-space:nowrap;">${formatShiftClockLabel(snapshot.shiftStartTime, GANTT_HOURS_SCALE)}</td>
+      </tr>`;
+
+    const leyenda = `
+      <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:6px;${fuente}font-size:11px;color:#4b5563;"><tr>
+        <td style="padding-right:4px;">${leyendaMuestraHtml('background:#fecaca;border:1px solid #fca5a5;')}</td><td style="padding-right:14px;">Grande</td>
+        <td style="padding-right:4px;">${leyendaMuestraHtml('background:#a7f3d0;border:1px solid #6ee7b7;')}</td><td style="padding-right:14px;">Mediano</td>
+        <td style="padding-right:4px;">${leyendaMuestraHtml('background:#bfdbfe;border:1px solid #93c5fd;')}</td><td style="padding-right:14px;">Pequeño</td>
+        <td style="padding-right:4px;">${leyendaMuestraHtml(`border-top:${GANTT_EMAIL_CAPACIDAD_BORDER};`, 16, 6)}</td><td style="padding-right:14px;">Límite de capacidad de la mesa</td>
+        <td style="padding-right:4px;">${leyendaMuestraHtml(`border-top:${GANTT_EMAIL_TURNO_BORDER};`, 16, 6)}</td><td>Fin de turno (${escapeHtml(snapshot.shiftDisplayEndTime)})</td>
+      </tr></table>`;
 
     return `
-      <div style="margin-bottom:20px;">
-        <h4 style="font-size:12px;font-weight:bold;color:#374151;border-bottom:1px dashed #d1d5db;padding-bottom:4px;">${escapeHtml(day.date)} — ${escapeHtml(snapshot.shiftLabel)} (fin de turno ${escapeHtml(snapshot.shiftDisplayEndTime)})</h4>
-        <p style="font-size:10px;color:#6b7280;">
-          <span style="background:#fecaca;border:1px solid #fca5a5;padding:1px 5px;">&nbsp;</span> Grande &nbsp;
-          <span style="background:#a7f3d0;border:1px solid #6ee7b7;padding:1px 5px;">&nbsp;</span> Mediano &nbsp;
-          <span style="background:#bfdbfe;border:1px solid #93c5fd;padding:1px 5px;">&nbsp;</span> Pequeño
-        </p>
-        ${mesasHtml}
-        <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-left:130px;"><tr>${horasEje}</tr></table>
+      <div style="margin-bottom:22px;">
+        <h4 style="font-size:12px;font-weight:bold;color:#374151;border-bottom:1px dashed #d1d5db;padding-bottom:4px;margin:0 0 8px;${fuente}text-transform:uppercase;">${escapeHtml(day.date)} — ${escapeHtml(snapshot.shiftLabel)}</h4>
+        ${leyenda}
+        <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+          ${lineas}
+          ${ejeHtml}
+        </table>
       </div>`;
   }).join('');
 
