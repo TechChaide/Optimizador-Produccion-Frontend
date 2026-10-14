@@ -2167,7 +2167,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // (caso real GYE P2 #1008: 30024818 necesidad 30, FERT 30 al 06-oct salía "Sin cobertura" y
   // Exportar a SAP la habría duplicado). Cubre solo si su rango [FECHAINICIO, FECHAFIN] contiene el PT
   // del P2 (fecha_fin_plan) — exacto, sin tolerancia de días, que alcanzaría
-  // la FERT del PT de ayer (ciclo anterior). Las demás áreas siguen con FERT solo informativa.
+  // la FERT del PT de ayer (ciclo anterior).
+  //
+  // 2026-10-14 (usuario): la provisional que cubre se ejecuta el mismo día de la revisión y pasa a FERT,
+  // así que ya no existe como provisional y el material salía "Sin cobertura" (caso P3 UIO: 30002069,
+  // 30025223, 30005324 del PFF #1182, PT 16-10, FERT al 15-10). Ahora la FERT también cubre por FECHAFIN
+  // exacta: Ensamblado (PFF N1/N2) = PT−1 hábil (la provisional a PT−2 se libera con fin PT−1; mañana
+  // esa FERT sería PT−2 del nuevo PT y ya no cuenta, sin doble conteo) y demás áreas (Muebles) = fecha
+  // del P2, igual que su provisional. Las provisionales ya transformadas no se suman (ver
+  // provisionalesQueCubrenPorCentro), así que FERT y provisional no se cuentan dos veces.
   const fertQueCubreUnPorMaterialPorCentro = useMemo(() => {
     const porCentro: Record<string, Map<string, number>> = { '1000': new Map(), '2000': new Map() };
     const procesar = (centro: '1000' | '2000', rows: UnifiedRow[]) => {
@@ -2177,15 +2185,20 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (!allowed.includes(r.responsable)) return;
         const candidatos = fechasPorMaterial?.get(r.material);
         if (!candidatos) return;
-        const cubrePT = candidatos.some(c => /venta\s*externa/i.test(c.area) && r.fecha <= c.fecha && c.fecha <= (r.fechaFin || r.fecha));
-        if (!cubrePT) return;
+        const fin = r.fechaFin || r.fecha;
+        const cubre = candidatos.some(c => {
+          if (/venta\s*externa/i.test(c.area)) return r.fecha <= c.fecha && c.fecha <= fin;
+          if (AREA_PROVISIONAL_PT_MENOS_2(c.area)) return fin === format(restarDiasHabiles(parseFechaLocal(c.fecha), 1), 'yyyy-MM-dd');
+          return fin === c.fecha;
+        });
+        if (!cubre) return;
         porCentro[centro].set(r.material, (porCentro[centro].get(r.material) || 0) + r.cantUnidadReal);
       });
     };
     procesar('1000', fertAuditAllUIO);
     procesar('2000', fertAuditAllGYE);
     return porCentro;
-  }, [fertAuditAllUIO, fertAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro]);
+  }, [fertAuditAllUIO, fertAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro, restarDiasHabiles]);
 
   // Respuesta P3: stock disponible por material y centro, en UNIDADES (tal cual viene
   // LIBREUTILIZACION) — último fallback de la cascada (FERT emparejado → Provisional → Stock), solo
@@ -3529,8 +3542,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // las órdenes liberadas se generaron para cubrir el plan ANTERIOR; sumarlas al plan nuevo
       // duplicaba cobertura y le restaba necesidad al ciclo siguiente. Aplica a todas las áreas.
       // Cobertura del plan nuevo = provisionales (ventana de fecha de su área) + stock (por lote puede
-      // cubrir la necesidad anterior y también la siguiente). Excepción: Venta Externa con FERT al PT
-      // de su P2 (fertCubre, ver fertQueCubreUnPorMaterialPorCentro).
+      // cubrir la necesidad anterior y también la siguiente). Excepción: la FERT del ciclo (provisional
+      // ya ejecutada) sí cubre por fecha exacta según el área (fertCubre, ver
+      // fertQueCubreUnPorMaterialPorCentro: VE al PT, Ensamblado PT−1, Muebles fecha del P2).
       const fertVigente = fertMapVigente.get(material) || 0;
       const fertCubre = fertCubreMap.get(material) || 0;
       const fertAnterior = fertMapAnterior.get(material) || 0;
@@ -7130,7 +7144,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           <th className="px-4 py-3 border-r border-gray-100">Necesidad P2 (UN)</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-amber-50/40 text-amber-700">Stock</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-sky-50/40 text-sky-700">Provisional</th>
-                          <th className="px-4 py-3 border-r border-gray-100 bg-indigo-50/40 text-indigo-700" title="Órdenes FERT programadas de hoy en adelante. Informativo: no cuentan como cobertura (se liberaron para el plan anterior), salvo Venta Externa con la FERT liberada al PT de su P2 — ahí se indica cuánto cubre.">FERT vigente</th>
+                          <th className="px-4 py-3 border-r border-gray-100 bg-indigo-50/40 text-indigo-700" title="Órdenes FERT programadas de hoy en adelante. Cubren solo las del ciclo (fecha fin = PT−1 en Ensamblado, = fecha del P2 en Muebles, rango que contiene el PT en Venta Externa) — ahí se indica cuánto cubre; el resto es informativo (plan anterior).">FERT vigente</th>
                           <th className="px-4 py-3 border-r border-gray-100 font-black bg-yellow-50/50 text-yellow-700">Cubierto (UN)</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-orange-50/40 text-orange-700">Faltante (UN)</th>
                           <th className="px-4 py-3 border-r border-gray-100 font-black bg-orange-50/60 text-orange-800" title="Lo que se graba en el P3 y sale a SAP: faltante + provisional del material (la provisional se convierte en orden).">Respuesta P3 (UN)</th>
@@ -7152,7 +7166,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                             <td className="px-4 py-3 border-r border-slate-50 text-sky-700 bg-sky-50/20">{formatNum(row.provisional, 0)}</td>
                             <td className="px-4 py-3 border-r border-slate-50 text-indigo-700 bg-indigo-50/20">
                               {formatNum(row.fertVigente, 0)}
-                              {row.fertCubre > 0 && <div className="text-[9px] font-black uppercase text-indigo-500" title="FERT liberada al PT del P2 de Venta Externa: cuenta como cobertura">cubre {formatNum(row.fertCubre, 0)}</div>}
+                              {row.fertCubre > 0 && <div className="text-[9px] font-black uppercase text-indigo-500" title="FERT del ciclo (provisional ya ejecutada): cuenta como cobertura">cubre {formatNum(row.fertCubre, 0)}</div>}
                             </td>
                             <td className="px-4 py-3 border-r border-slate-50 text-slate-900 font-black bg-yellow-50">{formatNum(row.cubierto, 0)}</td>
                             <td className={cn("px-4 py-3 border-r border-slate-50 font-black bg-orange-50/20", row.faltante > 0 ? "text-orange-700" : "text-slate-400")}>{formatNum(row.faltante, 0)}</td>
