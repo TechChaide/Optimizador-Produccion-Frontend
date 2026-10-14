@@ -3303,9 +3303,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         </tr>
         <tr style="background:#111827;">
           <td style="padding:8px 12px;"></td>
-          <td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctCarruseles > 100 ? '#f87171' : '#5eead4'};">${pctCarruseles.toFixed(0)}% ocupado</td>
-          ${tieneCnc ? `<td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctCnc > 100 ? '#f87171' : '#5eead4'};">${cncCedeRemanente ? `${r.cnc.ocupacion.toFixed(1)} de ${r.cnc.capacidad.toFixed(1)} h<br/><span style="font-size:10px;font-weight:600;color:#fcd34d;">${r.cncRemanente.toFixed(1)} h → Carruseles</span>` : `${pctCnc.toFixed(0)}% ocupado`}</td>` : ''}
-          <td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctVerticales > 100 ? '#f87171' : '#5eead4'};">${pctVerticales.toFixed(0)}% ocupado</td>
+          <td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctCarruseles > 100 ? '#f87171' : '#5eead4'};">${pctCarruseles.toFixed(1)}% ocupado</td>
+          ${tieneCnc ? `<td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctCnc > 100 ? '#f87171' : '#5eead4'};">${cncCedeRemanente ? `${r.cnc.ocupacion.toFixed(1)} de ${r.cnc.capacidad.toFixed(1)} h<br/><span style="font-size:10px;font-weight:600;color:#fcd34d;">${r.cncRemanente.toFixed(1)} h → Carruseles</span>` : `${pctCnc.toFixed(1)}% ocupado`}</td>` : ''}
+          <td align="right" style="padding:8px 12px;font-size:11px;font-weight:800;color:${pctVerticales > 100 ? '#f87171' : '#5eead4'};">${pctVerticales.toFixed(1)}% ocupado</td>
         </tr>
       </table>
       ${r.cncRemanente > 0.05 ? `<p style="margin:8px 0 0;font-size:10px;color:#b45309;">Capacidad de Carruseles incluye +${r.cncRemanente.toFixed(1)}h remanente de CNC (capacidad libre de CNC ese día, que un carrusel puede aprovechar). Por eso la columna CNC muestra solo su tiempo utilizado, para no contar esas horas dos veces; el detalle por máquina CNC arriba conserva su tiempo máquina completo.</p>` : ''}
