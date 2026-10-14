@@ -26,7 +26,10 @@ import {
   Trash2,
   CheckCircle2,
   Mail,
-  Send
+  Send,
+  ArrowUp,
+  ArrowDown,
+  RotateCcw
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -391,6 +394,11 @@ interface InventarioSapRow {
 
 interface CorridaOutputRow {
   corridaId: string;
+  // Bloque de la corrida (para agregar/quitar corridas desde el Plan de Salida, ver
+  // handleUpdateCorridasBloque) y total de corridas del bloque.
+  apertura: string;
+  densidad: string;
+  totalRuns: number;
   fecha: string;
   corrida: string;
   material: string;
@@ -905,6 +913,7 @@ interface EstadoPlanLaminado {
   corridasManualOverrides: Record<string, number>;
   approvedDeficitRows: string[];
   corridaFechas: Record<string, string>;
+  ordenCorridas?: string[]; // Opcional: los respaldos anteriores al 2026-10-14 no lo traen
   necesidadesPlantaData: Record<string, NecesidadPlantaRow[]>;
   mantenimientosLooper: RawApiRow[];
 }
@@ -1027,6 +1036,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   } | null>(null);
 
   const [corridaFechas, setCorridaFechas] = useState<Record<string, string>>({});
+  // Orden manual de las corridas del Plan de Salida (corridaIds en el orden que fijó el usuario).
+  // Vacío = orden automático por prioridad. Las corridas que no están en la lista (nuevas tras
+  // agregar una corrida o recalcular) van al final en su orden automático.
+  const [ordenCorridas, setOrdenCorridas] = useState<string[]>([]);
 
   // Texto en edición de los inputs "Corridas" (por bloque) y "PLAN (UN)" (por material): mientras el
   // usuario escribe, solo se guarda aquí el texto crudo — el recálculo real (handleUpdateCorridasBloque
@@ -4188,6 +4201,19 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       }
     }
 
+    // Orden manual (Plan de Salida, flechas ↑/↓): por necesidad de utilización el planificador puede
+    // reordenar las corridas; la prioridad y el reloj de horarios (que va a SAP) siguen ese orden.
+    if (ordenCorridas.length > 0) {
+      const idDe = (c: typeof corridaSequence[0]) => `${c.group.apertura}|${c.group.densidad}|r${c.runIndex}`;
+      const pos = new Map(ordenCorridas.map((id, i) => [id, i]));
+      const automatico = new Map(corridaSequence.map((c, i) => [idDe(c), i]));
+      corridaSequence.sort((a, b) => {
+        const pa = pos.get(idDe(a)) ?? Number.MAX_SAFE_INTEGER;
+        const pb = pos.get(idDe(b)) ?? Number.MAX_SAFE_INTEGER;
+        return pa !== pb ? pa - pb : automatico.get(idDe(a))! - automatico.get(idDe(b))!;
+      });
+    }
+
     const rows: CorridaOutputRow[] = [];
     corridaSequence.forEach((c, seqIdx) => {
       const prioridad = seqIdx + 1;
@@ -4204,6 +4230,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         if (!item || alloc.planUn <= 0) return;
         rows.push({
           corridaId,
+          apertura: c.group.apertura,
+          densidad: c.group.densidad,
+          totalRuns: c.totalRuns,
           fecha,
           corrida: corridaLabel,
           material: item.material,
@@ -4229,6 +4258,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           if (convPlanUn <= 0) return;
           rows.push({
             corridaId,
+            apertura: c.group.apertura,
+            densidad: c.group.densidad,
+            totalRuns: c.totalRuns,
             fecha,
             corrida: corridaLabel,
             material: conv.material,
@@ -4286,7 +4318,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     });
 
     return rows;
-  }, [groupedNeeds, corridaFechas, siguienteDiaHabil]);
+  }, [groupedNeeds, corridaFechas, ordenCorridas, siguienteDiaHabil]);
 
   // Mismas columnas en la tabla de pantalla del Plan de Salida: la orden sale de las FERT ya cargadas
   // al sincronizar (aparece al volver a sincronizar después de que SAP la cree).
@@ -4298,6 +4330,30 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
 
   useEffect(() => { outputPlanRowsRef.current = outputPlanRows; }, [outputPlanRows]);
+
+  // Sube/baja una corrida en el Plan de Salida. Se parte del orden que se ve en pantalla (incluye el
+  // automático de las corridas que aún no se movieron) y se fija completo como orden manual.
+  const handleMoverCorrida = (corridaId: string, delta: -1 | 1) => {
+    const ids = Array.from(new Set(outputPlanRows.map(r => r.corridaId)));
+    const i = ids.indexOf(corridaId);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    setOrdenCorridas(ids);
+  };
+
+  // Agregar/quitar una corrida del bloque desde el Plan de Salida: reusa el control "Corridas" del
+  // Resumen Necesidades (handleUpdateCorridasBloque), que redistribuye las cantidades del bloque, así
+  // que el P3 y el Resumen quedan alineados. Quitar siempre saca la última corrida del bloque.
+  const handleAgregarQuitarCorrida = (row: CorridaOutputRow, delta: -1 | 1) => {
+    const nuevas = row.totalRuns + delta;
+    if (nuevas < 0) return;
+    if (delta < 0) {
+      const idQuitado = `${row.apertura}|${row.densidad}|r${row.totalRuns}`;
+      setOrdenCorridas(prev => prev.filter(id => id !== idQuitado));
+    }
+    handleUpdateCorridasBloque(row.apertura, row.densidad, nuevas);
+  };
 
   const handleUpdateCorridaFecha = (corridaId: string, fecha: string) => {
     setCorridaFechas(prev => ({ ...prev, [corridaId]: fecha }));
@@ -5030,6 +5086,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       corridasManualOverrides,
       approvedDeficitRows: Array.from(approvedDeficitRows),
       corridaFechas,
+      ordenCorridas,
       necesidadesPlantaData,
       // Solo el MTTO del Looper (lo único que usa este cálculo), no toda la maestra de SAP.
       mantenimientosLooper,
@@ -5062,6 +5119,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     setCorridasOverrides(e.corridasManualOverrides ?? {});
     setApprovedDeficitRows(new Set(e.approvedDeficitRows ?? []));
     setCorridaFechas(e.corridaFechas ?? {});
+    setOrdenCorridas(e.ordenCorridas ?? []);
     if (e.necesidadesPlantaData) setNecesidadesPlantaData(e.necesidadesPlantaData);
     if (e.mantenimientosLooper) setMantenimientosSAP(e.mantenimientosLooper);
     // Si la fecha no cambió, el efecto de reinicio no corre: se aplica directo.
@@ -5972,6 +6030,16 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               </div>
             </div>
             <div className="flex items-center gap-3">
+              {ordenCorridas.length > 0 && (
+                <Button
+                  variant="outline"
+                  onClick={() => setOrdenCorridas([])}
+                  title="Vuelve al orden automático por prioridad (déficit → % déficit → consumo)"
+                  className="h-9 rounded-xl text-[10px] font-black uppercase tracking-widest gap-2"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" /> Restablecer orden
+                </Button>
+              )}
               {/* Desde 2026-10-12 vive acá (antes en Resumen Necesidades): el P3 sale igual
                   (respuestaSalidaRows con las aprobaciones/ajustes de Resumen Necesidades); el orden
                   queda 1) Generar P3 → 2) Enviar a SAP. */}
@@ -6002,13 +6070,14 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                     <th className="px-4 py-4 border-r border-gray-100">Plan (Un)</th>
                     <th className="px-4 py-4 border-r border-gray-100">Plan (Kg)</th>
                     <th className="px-4 py-4 bg-red-50 text-red-700 border-r border-gray-100">Prioridad</th>
+                    <th className="px-4 py-4 border-r border-gray-100" title="Mover la corrida en la secuencia · agregar o quitar una corrida del bloque">Orden / Corridas</th>
                     <th className="px-4 py-4 border-r border-gray-100">Orden SAP</th>
                     <th className="px-4 py-4 text-left">Destino</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50 font-bold text-slate-700">
                   {outputPlanRows.length === 0 ? (
-                    <tr><td colSpan={9} className="py-24 text-slate-400 font-black uppercase tracking-widest italic text-center">No hay corridas calculadas para los criterios actuales</td></tr>
+                    <tr><td colSpan={10} className="py-24 text-slate-400 font-black uppercase tracking-widest italic text-center">No hay corridas calculadas para los criterios actuales</td></tr>
                   ) : (
                     outputPlanRows.map((row, i) => {
                       const isFirstOfCorrida = i === 0 || outputPlanRows[i - 1].corridaId !== row.corridaId;
@@ -6038,6 +6107,17 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                           <td className="px-4 py-3 border-r border-gray-100 font-mono text-red-900 bg-[#fee2e2]/30">{Math.round(row.planUn).toLocaleString()}</td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono text-red-900 bg-[#fee2e2]/30">{formatNum(row.planKg, 1)}</td>
                           <td className="px-4 py-3 bg-amber-50 text-amber-700 font-black border-r border-gray-100">{row.isConvNested ? '—' : row.prioridad}</td>
+                          <td className="px-2 py-3 border-r border-gray-100 whitespace-nowrap">
+                            {isFirstOfCorrida && (
+                              <div className="inline-flex items-center gap-1">
+                                <button type="button" title="Subir corrida" disabled={i === 0} onClick={() => handleMoverCorrida(row.corridaId, -1)} className="p-1 rounded-md border border-gray-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30"><ArrowUp className="w-3 h-3" /></button>
+                                <button type="button" title="Bajar corrida" disabled={row.prioridad === outputPlanRows[outputPlanRows.length - 1].prioridad} onClick={() => handleMoverCorrida(row.corridaId, 1)} className="p-1 rounded-md border border-gray-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30"><ArrowDown className="w-3 h-3" /></button>
+                                <span className="w-px h-4 bg-gray-200 mx-1" />
+                                <button type="button" title={`Agregar una corrida al bloque D${row.densidad}-${row.apertura}`} onClick={() => handleAgregarQuitarCorrida(row, 1)} className="p-1 rounded-md border border-emerald-200 text-emerald-700 hover:bg-emerald-50"><Plus className="w-3 h-3" /></button>
+                                <button type="button" title={`Quitar una corrida del bloque D${row.densidad}-${row.apertura} (sale la última; las cantidades se redistribuyen)`} onClick={() => handleAgregarQuitarCorrida(row, -1)} className="p-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50"><Minus className="w-3 h-3" /></button>
+                              </div>
+                            )}
+                          </td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono text-[10px] whitespace-nowrap">
                             {ordenesSapPantalla[i] ?? <span className="text-slate-400 font-sans italic">pendiente SAP</span>}
                           </td>
