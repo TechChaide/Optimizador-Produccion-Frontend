@@ -5636,62 +5636,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             </div>
           )}
 
-          <Dialog open={planPreviewP3PFD !== null} onOpenChange={(open) => { if (!open && !isSavingPlanP3PFD) setPlanPreviewP3PFD(null); }}>
-            <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle>Confirmar Respuesta P3 — Corte y Laminado</DialogTitle>
-                <DialogDescription>
-                  Revisa los datos que se van a grabar antes de continuar — se crea UN registro: la Respuesta P3 (stock + corridas planificadas), que reemplaza al P3/PFD anterior. Al confirmar, el panel guarda el P3 y el reporte. Esta acción crea registros nuevos en producción.
-                </DialogDescription>
-              </DialogHeader>
-              {planPreviewP3PFD && (
-                <div className="space-y-8 text-left text-sm">
-                  <div>
-                    <span className="inline-block text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 rounded-full px-3 py-1 mb-3">P3 — Plan real</span>
-                    <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
-                      <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{planPreviewP3PFD.p3.valor}</div>
-                      <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Respuesta</span>{planPreviewP3PFD.p3.fechaInicio}</div>
-                    </div>
-                    <div className="mt-3">
-                      <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales a guardar ({planPreviewP3PFD.p3.rows.length})</span>
-                      <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
-                        <table className="w-full text-[11px] border-collapse">
-                          <thead className="bg-gray-50 text-gray-500 uppercase font-bold sticky top-0">
-                            <tr>
-                              <th className="px-3 py-2 text-left">Material</th>
-                              <th className="px-3 py-2 text-left">Descripción</th>
-                              <th className="px-3 py-2 text-center">¿Corrida?</th>
-                              <th className="px-3 py-2 text-right">Cantidad Un</th>
-                              <th className="px-3 py-2 text-right">Cantidad Kg</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-gray-50">
-                            {planPreviewP3PFD.p3.rows.map(row => (
-                              <tr key={row.material}>
-                                <td className="px-3 py-2 font-mono">{row.material}</td>
-                                <td className="px-3 py-2 truncate max-w-[220px]">{row.descripcion}</td>
-                                <td className="px-3 py-2 text-center">{row.tieneCorrida ? 'Sí' : 'Stock'}</td>
-                                <td className="px-3 py-2 text-right font-mono">{Math.round(row.cantidadUn)}</td>
-                                <td className="px-3 py-2 text-right font-mono">{row.cantidadKg.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setPlanPreviewP3PFD(null)} disabled={isSavingPlanP3PFD}>Cancelar</Button>
-                <Button onClick={handleConfirmarRespuestaP3PFD} disabled={isSavingPlanP3PFD} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-                  {isSavingPlanP3PFD ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-                  {isSavingPlanP3PFD ? 'Guardando...' : 'Confirmar y Guardar'}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-
           <Dialog open={planesGrupoDisponibles !== null} onOpenChange={(open) => { if (!open && !isLoadingEditPlan) { setPlanesGrupoDisponibles(null); setPlanGrupoSeleccionado(null); } }}>
             <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
               <DialogHeader>
@@ -6215,6 +6159,64 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* Fuera de los <TabsContent>: el botón "Generar Respuesta · P3" vive en Salida de Datos (desde
+          2026-10-12) y el diálogo estaba dentro del tab Resumen — no se veía hasta cambiar de tab. */}
+      <Dialog open={planPreviewP3PFD !== null} onOpenChange={(open) => { if (!open && !isSavingPlanP3PFD) setPlanPreviewP3PFD(null); }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Confirmar Respuesta P3 — Corte y Laminado</DialogTitle>
+            <DialogDescription>
+              Revisa los datos que se van a grabar antes de continuar — se crea UN registro: la Respuesta P3 (stock + corridas planificadas), que reemplaza al P3/PFD anterior. Al confirmar, el panel guarda el P3 y el reporte. Esta acción crea registros nuevos en producción.
+            </DialogDescription>
+          </DialogHeader>
+          {planPreviewP3PFD && (
+            <div className="space-y-8 text-left text-sm">
+              <div>
+                <span className="inline-block text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 rounded-full px-3 py-1 mb-3">P3 — Plan real</span>
+                <div className="grid grid-cols-2 gap-3 bg-slate-50 rounded-xl p-4 border border-slate-100">
+                  <div><span className="font-black text-slate-500 text-[10px] uppercase block">Valor Plan</span>{planPreviewP3PFD.p3.valor}</div>
+                  <div><span className="font-black text-slate-500 text-[10px] uppercase block">Fecha Respuesta</span>{planPreviewP3PFD.p3.fechaInicio}</div>
+                </div>
+                <div className="mt-3">
+                  <span className="font-black text-slate-500 text-[10px] uppercase block mb-2">Materiales a guardar ({planPreviewP3PFD.p3.rows.length})</span>
+                  <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
+                    <table className="w-full text-[11px] border-collapse">
+                      <thead className="bg-gray-50 text-gray-500 uppercase font-bold sticky top-0">
+                        <tr>
+                          <th className="px-3 py-2 text-left">Material</th>
+                          <th className="px-3 py-2 text-left">Descripción</th>
+                          <th className="px-3 py-2 text-center">¿Corrida?</th>
+                          <th className="px-3 py-2 text-right">Cantidad Un</th>
+                          <th className="px-3 py-2 text-right">Cantidad Kg</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {planPreviewP3PFD.p3.rows.map(row => (
+                          <tr key={row.material}>
+                            <td className="px-3 py-2 font-mono">{row.material}</td>
+                            <td className="px-3 py-2 truncate max-w-[220px]">{row.descripcion}</td>
+                            <td className="px-3 py-2 text-center">{row.tieneCorrida ? 'Sí' : 'Stock'}</td>
+                            <td className="px-3 py-2 text-right font-mono">{Math.round(row.cantidadUn)}</td>
+                            <td className="px-3 py-2 text-right font-mono">{row.cantidadKg.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPlanPreviewP3PFD(null)} disabled={isSavingPlanP3PFD}>Cancelar</Button>
+            <Button onClick={handleConfirmarRespuestaP3PFD} disabled={isSavingPlanP3PFD} className="bg-emerald-600 hover:bg-emerald-700 text-white">
+              {isSavingPlanP3PFD ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+              {isSavingPlanP3PFD ? 'Guardando...' : 'Confirmar y Guardar'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Fuera de los <TabsContent>, a propósito: Radix desmonta el contenido de un tab inactivo por
           defecto — si el usuario cambia de tab con el diálogo abierto, este debe seguir existiendo. */}
