@@ -394,11 +394,6 @@ interface InventarioSapRow {
 
 interface CorridaOutputRow {
   corridaId: string;
-  // Bloque de la corrida (para agregar/quitar corridas desde el Plan de Salida, ver
-  // handleUpdateCorridasBloque) y total de corridas del bloque.
-  apertura: string;
-  densidad: string;
-  totalRuns: number;
   fecha: string;
   corrida: string;
   material: string;
@@ -4230,9 +4225,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         if (!item || alloc.planUn <= 0) return;
         rows.push({
           corridaId,
-          apertura: c.group.apertura,
-          densidad: c.group.densidad,
-          totalRuns: c.totalRuns,
           fecha,
           corrida: corridaLabel,
           material: item.material,
@@ -4258,9 +4250,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           if (convPlanUn <= 0) return;
           rows.push({
             corridaId,
-            apertura: c.group.apertura,
-            densidad: c.group.densidad,
-            totalRuns: c.totalRuns,
             fecha,
             corrida: corridaLabel,
             material: conv.material,
@@ -4340,19 +4329,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     if (i < 0 || j < 0 || j >= ids.length) return;
     [ids[i], ids[j]] = [ids[j], ids[i]];
     setOrdenCorridas(ids);
-  };
-
-  // Agregar/quitar una corrida del bloque desde el Plan de Salida: reusa el control "Corridas" del
-  // Resumen Necesidades (handleUpdateCorridasBloque), que redistribuye las cantidades del bloque, así
-  // que el P3 y el Resumen quedan alineados. Quitar siempre saca la última corrida del bloque.
-  const handleAgregarQuitarCorrida = (row: CorridaOutputRow, delta: -1 | 1) => {
-    const nuevas = row.totalRuns + delta;
-    if (nuevas < 0) return;
-    if (delta < 0) {
-      const idQuitado = `${row.apertura}|${row.densidad}|r${row.totalRuns}`;
-      setOrdenCorridas(prev => prev.filter(id => id !== idQuitado));
-    }
-    handleUpdateCorridasBloque(row.apertura, row.densidad, nuevas);
   };
 
   const handleUpdateCorridaFecha = (corridaId: string, fecha: string) => {
@@ -6070,7 +6046,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                     <th className="px-4 py-4 border-r border-gray-100">Plan (Un)</th>
                     <th className="px-4 py-4 border-r border-gray-100">Plan (Kg)</th>
                     <th className="px-4 py-4 bg-red-50 text-red-700 border-r border-gray-100">Prioridad</th>
-                    <th className="px-4 py-4 border-r border-gray-100" title="Mover la corrida en la secuencia · agregar o quitar una corrida del bloque">Orden / Corridas</th>
+                    <th className="px-4 py-4 border-r border-gray-100" title="Mover la corrida en la secuencia (la prioridad y los horarios siguen este orden)">Orden</th>
                     <th className="px-4 py-4 border-r border-gray-100">Orden SAP</th>
                     <th className="px-4 py-4 text-left">Destino</th>
                   </tr>
@@ -6112,9 +6088,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                               <div className="inline-flex items-center gap-1">
                                 <button type="button" title="Subir corrida" disabled={i === 0} onClick={() => handleMoverCorrida(row.corridaId, -1)} className="p-1 rounded-md border border-gray-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30"><ArrowUp className="w-3 h-3" /></button>
                                 <button type="button" title="Bajar corrida" disabled={row.prioridad === outputPlanRows[outputPlanRows.length - 1].prioridad} onClick={() => handleMoverCorrida(row.corridaId, 1)} className="p-1 rounded-md border border-gray-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30"><ArrowDown className="w-3 h-3" /></button>
-                                <span className="w-px h-4 bg-gray-200 mx-1" />
-                                <button type="button" title={`Agregar una corrida al bloque D${row.densidad}-${row.apertura}`} onClick={() => handleAgregarQuitarCorrida(row, 1)} className="p-1 rounded-md border border-emerald-200 text-emerald-700 hover:bg-emerald-50"><Plus className="w-3 h-3" /></button>
-                                <button type="button" title={`Quitar una corrida del bloque D${row.densidad}-${row.apertura} (sale la última; las cantidades se redistribuyen)`} onClick={() => handleAgregarQuitarCorrida(row, -1)} className="p-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50"><Minus className="w-3 h-3" /></button>
                               </div>
                             )}
                           </td>
