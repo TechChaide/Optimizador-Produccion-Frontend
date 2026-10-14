@@ -424,6 +424,9 @@ interface RespuestaSalidaRow {
   material: string;
   descripcion: string;
   tieneCorrida: boolean;
+  stockLibreKg: number; // Stock disponible − producción HALB lanzada (OF_HALB), nunca negativo
+  stockLibreUn: number;
+  halbKg: number; // OF_HALB [Kg]: lo que ya consumen las órdenes HALB/FERT lanzadas
   cantidadKg: number;
   cantidadUn: number;
   origenes: string;
@@ -604,17 +607,24 @@ const computeRespuestaSalidaRows = (
     .filter(u => necesidadesPlantaMap.has(String(Number(u.material))) || u.planUn > 0)
     .map((u): RespuestaSalidaRow => {
       const tieneCorrida = u.planUn > 0;
+      const stockLibreKg = Math.max(0, u.totalStockKg - u.consumoKgHalb);
+      const stockLibreUn = Math.max(0, u.totalStockUN - u.nroRollosHalb);
       const origenesMap = origenesPlantaMap.get(String(Number(u.material)));
       const origenes = origenesMap && origenesMap.size > 0 ? Array.from(origenesMap.keys()).join(', ') : '—';
       return {
         material: u.material,
         descripcion: u.descripcion,
         tieneCorrida,
-        // Con corrida: la corrida planificada NO reemplaza el stock ya disponible, se suma — lo que
-        // realmente va a estar disponible es planKg (lo que se va a cortar) + totalStockKg (lo que ya
-        // hay). Sin corrida, la respuesta sigue siendo solo el stock (no hay nada más que ofrecer).
-        cantidadKg: u.totalStockKg + (tieneCorrida ? u.planKg : 0),
-        cantidadUn: u.totalStockUN + (tieneCorrida ? u.planUn : 0),
+        // 2026-10-14 (decisión del usuario): respuesta = STOCK LIBRE + corrida planificada. Stock
+        // libre = stock disponible (bodegas + Producción Diaria) − producción HALB lanzada (OF_HALB,
+        // consumoKgHalb/nroRollosHalb): ese stock ya está comprometido con órdenes en curso, así que
+        // responderlo a las necesidades del día siguiente inflaba el P3. Sin corrida, la respuesta
+        // es solo el stock libre (si queda en 0 la línea no entra al P3).
+        stockLibreKg,
+        stockLibreUn,
+        halbKg: u.consumoKgHalb,
+        cantidadKg: stockLibreKg + (tieneCorrida ? u.planKg : 0),
+        cantidadUn: stockLibreUn + (tieneCorrida ? u.planUn : 0),
         origenes,
       };
     })
@@ -3096,28 +3106,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // los materiales que "Necesidades Planta" referencia (match por código contra Resumen Necesidades
   // — materialNecesidadesPlantaMap) O QUE YA TIENEN corrida propia (planUn > 0, ver
   // computeRespuestaSalidaRows para el porqué de este OR), y responde por cada uno con lo que YA está
-  // planificado en corrida (planKg/planUn) MÁS el stock disponible (totalStockKg/totalStockUN, que ya
-  // incluye bodegas + Producción Diaria) — la corrida no reemplaza el stock ya existente, se suma a
-  // él, porque ambos van a estar físicamente disponibles. Sin corrida prevista, la respuesta es solo
-  // el stock (mismo criterio de computeRespuestaSalidaRows, la versión en función pura de este cálculo).
-  const respuestaSalidaRows = useMemo((): RespuestaSalidaRow[] => {
-    return unifiedNeeds
-      .filter(u => materialNecesidadesPlantaMap.has(String(Number(u.material))) || u.planUn > 0)
-      .map((u): RespuestaSalidaRow => {
-        const tieneCorrida = u.planUn > 0;
-        const origenesMap = materialOrigenesPlantaMap.get(String(Number(u.material)));
-        const origenes = origenesMap && origenesMap.size > 0 ? Array.from(origenesMap.keys()).join(', ') : '—';
-        return {
-          material: u.material,
-          descripcion: u.descripcion,
-          tieneCorrida,
-          cantidadKg: u.totalStockKg + (tieneCorrida ? u.planKg : 0),
-          cantidadUn: u.totalStockUN + (tieneCorrida ? u.planUn : 0),
-          origenes,
-        };
-      })
-      .sort((a, b) => Number(a.tieneCorrida) - Number(b.tieneCorrida));
-  }, [unifiedNeeds, materialNecesidadesPlantaMap, materialOrigenesPlantaMap]);
+  // planificado en corrida (planKg/planUn) MÁS el stock LIBRE (stock disponible − producción HALB
+  // lanzada, desde 2026-10-14). Sin corrida prevista, la respuesta es solo el stock libre. El cálculo
+  // vive en computeRespuestaSalidaRows (función pura, también la usa la modificación automática).
+  const respuestaSalidaRows = useMemo(
+    (): RespuestaSalidaRow[] => computeRespuestaSalidaRows(unifiedNeeds, materialNecesidadesPlantaMap, materialOrigenesPlantaMap),
+    [unifiedNeeds, materialNecesidadesPlantaMap, materialOrigenesPlantaMap]
+  );
 
   // Paso 1 combinado (P3 + PFD en un solo clic, decisión de negocio 2026-09-22, mismo cambio que
   // Corte Espuma): arma la vista previa de AMBOS a la vez y abre un solo diálogo de confirmación. No
@@ -6064,7 +6059,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               <div>
                 <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Simulación — Salida de Datos por Respuesta (Paso 3)</h3>
                 <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                  Materiales referenciados en &quot;Necesidades Planta&quot; · con corrida = cantidad planificada · sin corrida = stock disponible (bodegas + Producción Diaria) · aún no se graba en base de datos
+                  Materiales referenciados en &quot;Necesidades Planta&quot; · respuesta = stock libre (stock disponible − HALB lanzada) + corrida planificada · aún no se graba en base de datos
                 </p>
               </div>
             </div>
@@ -6079,13 +6074,15 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                     <th className="px-6 py-4 border-r border-gray-100 text-left min-w-[220px]">Descripción</th>
                     <th className="px-4 py-4 border-r border-gray-100 text-left">Origen (Plan Grupo)</th>
                     <th className="px-4 py-4 border-r border-gray-100">¿Corrida?</th>
+                    <th className="px-4 py-4 border-r border-gray-100" title="OF_HALB: stock comprometido con producción HALB lanzada">HALB lanzada (Kg)</th>
+                    <th className="px-4 py-4 border-r border-gray-100" title="Stock disponible − producción HALB lanzada">Stock libre (Kg)</th>
                     <th className="px-4 py-4 border-r border-gray-100">Cantidad (Un)</th>
                     <th className="px-4 py-4">Cantidad (Kg)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50 font-bold text-slate-700">
                   {respuestaSalidaRows.length === 0 ? (
-                    <tr><td colSpan={6} className="py-24 text-slate-400 font-black uppercase tracking-widest italic text-center">No hay materiales de &quot;Necesidades Planta&quot; para simular</td></tr>
+                    <tr><td colSpan={8} className="py-24 text-slate-400 font-black uppercase tracking-widest italic text-center">No hay materiales de &quot;Necesidades Planta&quot; para simular</td></tr>
                   ) : (
                     respuestaSalidaRows.map((row) => (
                       <tr key={row.material} className="hover:bg-amber-50/20 transition-colors">
@@ -6097,6 +6094,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                             {row.tieneCorrida ? 'Sí — plan' : 'No — stock'}
                           </span>
                         </td>
+                        <td className="px-4 py-3 border-r border-gray-100 font-mono text-slate-500">{formatNum(row.halbKg, 1)}</td>
+                        <td className="px-4 py-3 border-r border-gray-100 font-mono text-slate-700">{formatNum(row.stockLibreKg, 1)}</td>
                         <td className="px-4 py-3 border-r border-gray-100 font-mono text-slate-900">{Math.round(row.cantidadUn).toLocaleString()}</td>
                         <td className="px-4 py-3 font-mono text-slate-900">{formatNum(row.cantidadKg, 1)}</td>
                       </tr>
