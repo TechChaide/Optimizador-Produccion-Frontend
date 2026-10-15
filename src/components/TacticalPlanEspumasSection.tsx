@@ -2007,64 +2007,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     [auditMapper, ordenesProvisionales, resultadoRestaurado]
   );
 
-  // Respuesta P3: cantidad "ya planificada" por material vía Órdenes Provisionales, en UNIDADES (no
-  // Kg — comparar contra la Necesidad P2, que también está en UN, evita el redondeo/estimado de
-  // pesoUN) — mismo criterio que fertUnPorMaterialPorCentro (responsable permitido +
-  // fechaOrdenCoincideConP2 contra la ventana real del P2). Antes solo exigía "fecha ≥ hoy" sin techo
-  // ni relación con la fecha del P2: verificado con datos reales, de 75 provisionales que calzaban
-  // por material+responsable, solo 7 caían dentro de la ventana del P2 que decían responder — las
-  // otras 68 contaban igual aunque estuvieran a semanas/meses de distancia (ej. material 30000160: P2
-  // pide 04-ago, se le acreditaba una provisional del 08-sep). Al exigir la misma ventana que FERT, un
-  // material sin provisional real que lo cubra cae a Stock o queda en 0 (ver
-  // respuestaSalidaRowsPorCentro).
-  // Lista de las provisionales que cubren cada material (la cobertura de abajo es su suma) — la usa
-  // también "Exportar a SAP" para mostrar qué provisional ya existe para cada orden a crear, base del
-  // flujo de vincular/ajustar la provisional en vez de crear una orden nueva.
-  const provisionalesQueCubrenPorCentro = useMemo(() => {
-    const porCentro: Record<string, Map<string, UnifiedRow[]>> = { '1000': new Map(), '2000': new Map() };
-
-    const procesar = (centro: '1000' | '2000', rows: UnifiedRow[]) => {
-      const allowed = allowedRespPorCentro(centro);
-      const fechasPorMaterial = fechasP2PorMaterialPorCentro[centro];
-      const map = porCentro[centro];
-      // Se descartan las provisionales que ya existen como FERT (misma orden en dos estados, ver
-      // clavesProvisionalesTransformadas): esa provisional ya es en realidad una orden liberada, y las
-      // liberadas no cubren el plan nuevo (ver respuestaSalidaRowsPorCentro).
-      const transformadas = clavesProvisionalesTransformadas[centro];
-      rows.forEach(r => {
-        if (!allowed.includes(r.responsable)) return;
-        if (transformadas?.has(`${r.material}|${r.fecha}|${r.cant}`)) return;
-        const candidatosP2 = fechasPorMaterial?.get(r.material);
-        if (!candidatosP2 || candidatosP2.length === 0) return;
-        // Emparejamiento POR FECHA EXACTA (regla del usuario 2026-10-03, validada con MD04: FERT
-        // 20007201 necesita 360 de 30008909 al 07-oct ↔ OrdPrv 0145201016 del 07-oct por 363 = lote):
-        // la provisional responde a la necesidad si su FECHAFIN (disponibilidad en MD04) es el mismo día
-        // de la necesidad (PT del P1/PFF, PT del P2 de Venta Externa, fecha del P2 en las demás áreas);
-        // Ensamblado a PT−2 y Venta Externa a PT−1 (ver fechasProvisionalAceptadas). Reemplaza
-        // la ventana [PT−2, PT] de Ensamblado y la tolerancia ±1/±2 por área que se usaba antes, que
-        // podían sumar la provisional de otro ciclo.
-        const coincide = candidatosP2.some(c => fechasProvisionalAceptadas(c.fecha, c.area).includes(r.fechaFin));
-        if (!coincide) return;
-        if (!map.has(r.material)) map.set(r.material, []);
-        map.get(r.material)!.push(r);
-      });
-    };
-
-    procesar('1000', provAuditAllUIO);
-    procesar('2000', provAuditAllGYE);
-    return porCentro;
-  }, [provAuditAllUIO, provAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro, clavesProvisionalesTransformadas, fechasProvisionalAceptadas]);
-
-  const provisionalUnPorMaterialPorCentro = useMemo(() => {
-    const porCentro: Record<string, Map<string, number>> = { '1000': new Map(), '2000': new Map() };
-    (['1000', '2000'] as const).forEach(centro => {
-      provisionalesQueCubrenPorCentro[centro].forEach((ordenes, material) => {
-        porCentro[centro].set(material, ordenes.reduce((s, o) => s + o.cantUnidadReal, 0));
-      });
-    });
-    return porCentro;
-  }, [provisionalesQueCubrenPorCentro]);
-
   // Respuesta P3: cantidad "ya planificada" por material vía Órdenes FERT, emparejadas contra la
   // fecha del P2 que responden (fechasP2PorMaterialPorCentro) dentro de la tolerancia de SU área
   // (fechaOrdenCoincideConP2) — caso real que motivó esto: Venta Externa #78 (material 30005466,
@@ -2129,8 +2071,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // ciclo de P2 (regla del usuario: "las FERT con fecha de hoy hacia atrás son las de los P2 [ya
   // ejecutados]; las que van hacia adelante son las del P2 con fecha del día siguiente"):
   //
-  //   FECHA <  hoy  → 'anterior': ciclo ya ejecutado. NO cubre el P2 vigente; es carga en curso.
-  //   FECHA >= hoy  → 'vigente' : responde al P2 que se está planificando. SÍ cuenta como cobertura.
+  //   FECHA <= hoy  → 'anterior': ciclo ya ejecutado. NO cubre el P2 vigente; es carga en curso.
+  //   FECHA >  hoy  → 'vigente' : responde al P2 que se está planificando. SÍ cuenta como cobertura.
   //
   // HOY exacto cuenta como 'vigente' (corregido 2026-08-14, antes el corte era estricto '>' y
   // dejaba fuera lo fechado hoy). Caso real que lo destapó: material 30005606, FERT #62767142
@@ -2152,7 +2094,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const allowed = allowedRespPorCentro(centro);
       rows.forEach(r => {
         if (!allowed.includes(r.responsable)) return;
-        const destino = r.fecha >= todayStr ? vigente[centro] : anterior[centro];
+        // 2026-10-15 (usuario): la FERT fechada HOY es la producción del ciclo anterior en curso — va a
+        // "ciclo anterior". Solo informativo: lo que cubre lo decide fertQueCubreUnPorMaterialPorCentro.
+        const destino = r.fecha > todayStr ? vigente[centro] : anterior[centro];
         destino.set(r.material, (destino.get(r.material) || 0) + r.cantUnidadReal);
       });
     };
@@ -2199,6 +2143,69 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     procesar('2000', fertAuditAllGYE);
     return porCentro;
   }, [fertAuditAllUIO, fertAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro, restarDiasHabiles]);
+
+  // Respuesta P3: cantidad "ya planificada" por material vía Órdenes Provisionales, en UNIDADES (no
+  // Kg — comparar contra la Necesidad P2, que también está en UN, evita el redondeo/estimado de
+  // pesoUN) — mismo criterio que fertUnPorMaterialPorCentro (responsable permitido +
+  // fechaOrdenCoincideConP2 contra la ventana real del P2). Antes solo exigía "fecha ≥ hoy" sin techo
+  // ni relación con la fecha del P2: verificado con datos reales, de 75 provisionales que calzaban
+  // por material+responsable, solo 7 caían dentro de la ventana del P2 que decían responder — las
+  // otras 68 contaban igual aunque estuvieran a semanas/meses de distancia (ej. material 30000160: P2
+  // pide 04-ago, se le acreditaba una provisional del 08-sep). Al exigir la misma ventana que FERT, un
+  // material sin provisional real que lo cubra cae a Stock o queda en 0 (ver
+  // respuestaSalidaRowsPorCentro).
+  // Lista de las provisionales que cubren cada material (la cobertura de abajo es su suma) — la usa
+  // también "Exportar a SAP" para mostrar qué provisional ya existe para cada orden a crear, base del
+  // flujo de vincular/ajustar la provisional en vez de crear una orden nueva.
+  const provisionalesQueCubrenPorCentro = useMemo(() => {
+    const porCentro: Record<string, Map<string, UnifiedRow[]>> = { '1000': new Map(), '2000': new Map() };
+
+    const procesar = (centro: '1000' | '2000', rows: UnifiedRow[]) => {
+      const allowed = allowedRespPorCentro(centro);
+      const fechasPorMaterial = fechasP2PorMaterialPorCentro[centro];
+      const map = porCentro[centro];
+      // Se descartan las provisionales que ya existen como FERT (misma orden en dos estados, ver
+      // clavesProvisionalesTransformadas): esa provisional ya es en realidad una orden liberada, y las
+      // liberadas no cubren el plan nuevo (ver respuestaSalidaRowsPorCentro).
+      // 2026-10-15 (usuario, 30009853/54/55 PFF #1202): con demanda repetida, la FERT de HOY (ciclo
+      // anterior) y la provisional nueva tienen el mismo material + FECHAINICIO + cantidad, y la clave
+      // descartaba una provisional real (OrdPrv 0145486238, 36 UN). Solo se descarta si una FERT ya
+      // cubre ESTE ciclo para el material (fertQueCubre): ahí sí habría doble conteo.
+      const transformadas = clavesProvisionalesTransformadas[centro];
+      const fertCubre = fertQueCubreUnPorMaterialPorCentro[centro];
+      rows.forEach(r => {
+        if (!allowed.includes(r.responsable)) return;
+        if (transformadas?.has(`${r.material}|${r.fecha}|${r.cant}`) && (fertCubre.get(r.material) || 0) > 0) return;
+        const candidatosP2 = fechasPorMaterial?.get(r.material);
+        if (!candidatosP2 || candidatosP2.length === 0) return;
+        // Emparejamiento POR FECHA EXACTA (regla del usuario 2026-10-03, validada con MD04: FERT
+        // 20007201 necesita 360 de 30008909 al 07-oct ↔ OrdPrv 0145201016 del 07-oct por 363 = lote):
+        // la provisional responde a la necesidad si su FECHAFIN (disponibilidad en MD04) es el mismo día
+        // de la necesidad (PT del P1/PFF, PT del P2 de Venta Externa, fecha del P2 en las demás áreas);
+        // Ensamblado a PT−2 y Venta Externa a PT−1 (ver fechasProvisionalAceptadas). Reemplaza
+        // la ventana [PT−2, PT] de Ensamblado y la tolerancia ±1/±2 por área que se usaba antes, que
+        // podían sumar la provisional de otro ciclo.
+        const coincide = candidatosP2.some(c => fechasProvisionalAceptadas(c.fecha, c.area).includes(r.fechaFin));
+        if (!coincide) return;
+        if (!map.has(r.material)) map.set(r.material, []);
+        map.get(r.material)!.push(r);
+      });
+    };
+
+    procesar('1000', provAuditAllUIO);
+    procesar('2000', provAuditAllGYE);
+    return porCentro;
+  }, [provAuditAllUIO, provAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro, clavesProvisionalesTransformadas, fechasProvisionalAceptadas, fertQueCubreUnPorMaterialPorCentro]);
+
+  const provisionalUnPorMaterialPorCentro = useMemo(() => {
+    const porCentro: Record<string, Map<string, number>> = { '1000': new Map(), '2000': new Map() };
+    (['1000', '2000'] as const).forEach(centro => {
+      provisionalesQueCubrenPorCentro[centro].forEach((ordenes, material) => {
+        porCentro[centro].set(material, ordenes.reduce((s, o) => s + o.cantUnidadReal, 0));
+      });
+    });
+    return porCentro;
+  }, [provisionalesQueCubrenPorCentro]);
 
   // Respuesta P3: stock disponible por material y centro, en UNIDADES (tal cual viene
   // LIBREUTILIZACION) — último fallback de la cascada (FERT emparejado → Provisional → Stock), solo
@@ -7144,7 +7151,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           <th className="px-4 py-3 border-r border-gray-100">Necesidad P2 (UN)</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-amber-50/40 text-amber-700">Stock</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-sky-50/40 text-sky-700">Provisional</th>
-                          <th className="px-4 py-3 border-r border-gray-100 bg-indigo-50/40 text-indigo-700" title="Órdenes FERT programadas de hoy en adelante. Cubren solo las del ciclo (fecha fin = PT−1 en Ensamblado, = fecha del P2 en Muebles, rango que contiene el PT en Venta Externa) — ahí se indica cuánto cubre; el resto es informativo (plan anterior).">FERT vigente</th>
+                          <th className="px-4 py-3 border-r border-gray-100 bg-indigo-50/40 text-indigo-700" title="Órdenes FERT programadas desde mañana (las de hoy son del ciclo anterior). Cubren solo las del ciclo (fecha fin = PT−1 en Ensamblado, = fecha del P2 en Muebles, rango que contiene el PT en Venta Externa) — ahí se indica cuánto cubre; el resto es informativo (plan anterior).">FERT vigente</th>
                           <th className="px-4 py-3 border-r border-gray-100 font-black bg-yellow-50/50 text-yellow-700">Cubierto (UN)</th>
                           <th className="px-4 py-3 border-r border-gray-100 bg-orange-50/40 text-orange-700">Faltante (UN)</th>
                           <th className="px-4 py-3 border-r border-gray-100 font-black bg-orange-50/60 text-orange-800" title="Lo que se graba en el P3 y sale a SAP: faltante + provisional del material (la provisional se convierte en orden).">Respuesta P3 (UN)</th>
