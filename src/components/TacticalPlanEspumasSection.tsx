@@ -1168,6 +1168,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Fecha de PAREO de Capacidad Planificada (Nivel 1/2): la producción del PT en fecha X requiere que
   // su componente (lámina) esté firme un día hábil ANTES — restarDiasHabiles(X, 1).
   const restarDiasHabiles = useCallback((d: Date, n: number) => addBusinessDaysCal(d, -n, diasNoLaborables, diasLaborablesExtra), [diasNoLaborables, diasLaborablesExtra]);
+  // Igual, pero con el calendario del horizonte (sin Jornadas de sábado, ver laborablesHorizonte): para
+  // emparejar fechas de órdenes SAP (L-V) contra el PT, que se calcula con ese mismo calendario. Con
+  // restarDiasHabiles, un sábado Jornada corría PT−2 un día (lunes 19-10 → 16-10 en vez de 15-10).
+  const restarDiasHabilesHorizonte = useCallback((d: Date, n: number) => addBusinessDaysCal(d, -n, diasNoLaborables, laborablesHorizonte(diasLaborablesExtra)), [diasNoLaborables, diasLaborablesExtra]);
   // Ventana de disponibilidad de lámina para un PT de Ensamblado (P1/PFF) — regla del usuario
   // (2026-09-23, caso real material 30007175 / provisional 0144951612 / Plan #868 PT lunes 28-sep):
   // los materiales deben estar disponibles 1 día hábil ANTES del PT, y las provisionales que responden
@@ -1185,11 +1189,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     if (isNaN(pt.getTime())) return null;
     const ptStr = format(pt, 'yyyy-MM-dd');
     return {
-      desde: format(restarDiasHabiles(pt, 2), 'yyyy-MM-dd'),
+      desde: format(restarDiasHabilesHorizonte(pt, 2), 'yyyy-MM-dd'),
       hasta: ptStr,
       pt: ptStr,
     };
-  }, [restarDiasHabiles]);
+  }, [restarDiasHabilesHorizonte]);
 
   // Fechas en que SAP puede entregar la provisional que responde a una necesidad (ver
   // provisionalesQueCubrenPorCentro): Ensamblado (N1 y N2) solo a PT−2 hábiles (AREA_PROVISIONAL_PT_MENOS_2);
@@ -1197,10 +1201,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const fechasProvisionalAceptadas = useCallback((fechaNecesidad: string, area: string): string[] => {
     if (!fechaNecesidad || fechaNecesidad === '—') return [fechaNecesidad];
     const pt = parseFechaLocal(fechaNecesidad);
-    if (AREA_PROVISIONAL_PT_MENOS_2(area)) return [format(restarDiasHabiles(pt, 2), 'yyyy-MM-dd')];
-    if (AREA_PROVISIONAL_PT_MENOS_1(area)) return [format(restarDiasHabiles(pt, 1), 'yyyy-MM-dd'), fechaNecesidad];
+    if (AREA_PROVISIONAL_PT_MENOS_2(area)) return [format(restarDiasHabilesHorizonte(pt, 2), 'yyyy-MM-dd')];
+    if (AREA_PROVISIONAL_PT_MENOS_1(area)) return [format(restarDiasHabilesHorizonte(pt, 1), 'yyyy-MM-dd'), fechaNecesidad];
     return [fechaNecesidad];
-  }, [restarDiasHabiles]);
+  }, [restarDiasHabilesHorizonte]);
 
   // Restricciones crudas del grupo Corte y Laminado de cada centro (se cargan en fetchDataAsync).
   const [restriccionesCorte, setRestriccionesCorte] = useState<Restriccion[]>([]);
@@ -2132,7 +2136,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const fin = r.fechaFin || r.fecha;
         const cubre = candidatos.some(c => {
           if (/venta\s*externa/i.test(c.area)) return r.fecha <= c.fecha && c.fecha <= fin;
-          if (AREA_PROVISIONAL_PT_MENOS_2(c.area)) return fin === format(restarDiasHabiles(parseFechaLocal(c.fecha), 1), 'yyyy-MM-dd');
+          if (AREA_PROVISIONAL_PT_MENOS_2(c.area)) return fin === format(restarDiasHabilesHorizonte(parseFechaLocal(c.fecha), 1), 'yyyy-MM-dd');
           return fin === c.fecha;
         });
         if (!cubre) return;
@@ -2142,7 +2146,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     procesar('1000', fertAuditAllUIO);
     procesar('2000', fertAuditAllGYE);
     return porCentro;
-  }, [fertAuditAllUIO, fertAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro, restarDiasHabiles]);
+  }, [fertAuditAllUIO, fertAuditAllGYE, fechasP2PorMaterialPorCentro, allowedRespPorCentro, restarDiasHabilesHorizonte]);
 
   // Respuesta P3: cantidad "ya planificada" por material vía Órdenes Provisionales, en UNIDADES (no
   // Kg — comparar contra la Necesidad P2, que también está en UN, evita el redondeo/estimado de
