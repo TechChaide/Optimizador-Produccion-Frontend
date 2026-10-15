@@ -55,3 +55,6 @@ package-lock.json
 package-lock.json
 .gitignore
 tsconfig.tsbuildinfo
+
+# graphify (grafo de conocimiento local, se regenera con `graphify update .`)
+graphify-out/
