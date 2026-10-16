@@ -39,14 +39,27 @@ const hitoPlanes = (id: string, etapa: EtapaFlujo, modulo: HitoDia['modulo'], et
   detalle: encontrados.map(p => `#${p.codigo_plan_grupo}${hora(p.fecha_creacion) ? ` ${hora(p.fecha_creacion)}` : ''}`).join(' · '),
 });
 
-/** Hitos de planes (etapa 1 y PFD-VENTA de la etapa 2) a partir de Plan Grupo. */
-export const hitosDePlanes = (planes: PlanGrupo[], hoy: string): HitoDia[] => [
-  hitoPlanes('ve-p2', 1, 'Venta Externa', 'P2 Espumas/Rollos', creadosHoy(planes, hoy, /p2\s*-\s*venta/i, /diferido/i)),
-  hitoPlanes('lam-p3', 1, 'Laminado', 'P3 Rollos', creadosHoy(planes, hoy, /\bp3\b.*rollo/i)),
-  hitoPlanes('ce-p3-1000', 1, 'Corte Espuma', 'P3 Quito', creadosHoy(planes, hoy, /centro\s*1000.*\bp3\b.*espuma/i)),
-  hitoPlanes('ce-p3-2000', 1, 'Corte Espuma', 'P3 Guayaquil', creadosHoy(planes, hoy, /centro\s*2000.*\bp3\b.*espuma/i)),
-  hitoPlanes('ve-pfd', 2, 'Venta Externa', 'PFD-VENTA', creadosHoy(planes, hoy, /pfd-venta/i)),
+// Planes de cada hito, por el texto de su valor en Plan Grupo. Única definición: la usan las ✓ de las
+// pestañas-paso (hitosDePlanes) y el aviso de respuestas del encabezado (respuestasDelDia).
+const DEF_HITOS_PLANES: { id: string; etapa: EtapaFlujo; modulo: HitoDia['modulo']; etiqueta: string; re: RegExp; excluir?: RegExp }[] = [
+  { id: 've-p2', etapa: 1, modulo: 'Venta Externa', etiqueta: 'P2 Espumas/Rollos', re: /p2\s*-\s*venta/i, excluir: /diferido/i },
+  { id: 'lam-p3', etapa: 1, modulo: 'Laminado', etiqueta: 'P3 Rollos', re: /\bp3\b.*rollo/i },
+  { id: 'ce-p3-1000', etapa: 1, modulo: 'Corte Espuma', etiqueta: 'P3 Quito', re: /centro\s*1000.*\bp3\b.*espuma/i },
+  { id: 'ce-p3-2000', etapa: 1, modulo: 'Corte Espuma', etiqueta: 'P3 Guayaquil', re: /centro\s*2000.*\bp3\b.*espuma/i },
+  { id: 've-pfd', etapa: 2, modulo: 'Venta Externa', etiqueta: 'PFD-VENTA', re: /pfd-venta/i },
 ];
+
+/** Hitos de planes (etapa 1 y PFD-VENTA de la etapa 2) a partir de Plan Grupo. */
+export const hitosDePlanes = (planes: PlanGrupo[], hoy: string): HitoDia[] =>
+  DEF_HITOS_PLANES.map(d => hitoPlanes(d.id, d.etapa, d.modulo, d.etiqueta, creadosHoy(planes, hoy, d.re, d.excluir)));
+
+/** Respuesta del día que habilita al siguiente proceso: P2-VENTA, P3 Rollos y P3 Corte Espuma (no PFD). */
+export interface RespuestaDia { id: string; modulo: HitoDia['modulo']; etiqueta: string; plan: PlanGrupo; hora: string }
+
+/** Planes de respuesta creados hoy (activos), uno por plan, del más antiguo al más reciente. */
+export const respuestasDelDia = (planes: PlanGrupo[], hoy: string): RespuestaDia[] =>
+  DEF_HITOS_PLANES.filter(d => d.etapa === 1).flatMap(d =>
+    creadosHoy(planes, hoy, d.re, d.excluir).map(p => ({ id: d.id, modulo: d.modulo, etiqueta: d.etiqueta, plan: p, hora: hora(p.fecha_creacion) })));
 
 const REPORTES: { id: string; modulo: HitoDia['modulo']; etiqueta: string; carpeta: ModuloPlanTxt; centro: CentroPlanTxt }[] = [
   { id: 'lam-rep', modulo: 'Laminado', etiqueta: 'Reporte', carpeta: 'laminado', centro: '1000' },
