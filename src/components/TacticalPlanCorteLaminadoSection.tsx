@@ -542,12 +542,29 @@ const formatNum = (val: unknown, decimals: number = 2): string => {
   });
 };
 
-// Materiales que un P3 grabó contra un P2 de origen (ver guardarPlanGrupoLaminado → avisarRespuestaP3Areas).
-interface RespuestaPorOrigen { materiales: Map<string, { descripcion: string; kg: number }> }
-
-// Restricción con los correos que reciben el aviso "Laminado respondió P3 Rollos". Se crea en el GRUPO
-// de cada área (Forros, Venta Externa, Muebles…): cada área administra su propia lista.
-const RESTRICCION_AVISO_RESPUESTA_P3 = 'GRUPO_CORREOS_RESPUESTA_P3';
+// Aviso automático al guardar el P3 (usuario 2026-10-16): correo simple — asunto y una línea — a los
+// correos de la restricción GRUPO_RESPUESTA_P3_ROLLOS (separados por "&"), por el mismo /enviarCorreo
+// del reporte. Un fallo acá no afecta al P3 ya guardado.
+const RESTRICCION_RESPUESTA_P3_ROLLOS = 'GRUPO_RESPUESTA_P3_ROLLOS';
+const enviarAvisoRespuestaP3 = async (codigoP3: number): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string }> => {
+  const correos = Array.from(new Set(((await restriccionService.getAll()).data || [])
+    .filter(r => r.estado === 'A' && String(r.nombre_restriccion || '').trim().toUpperCase() === RESTRICCION_RESPUESTA_P3_ROLLOS)
+    .flatMap(r => String(r.valor_restriccion || '').split(/[,;&]/).map(v => v.trim()))
+    .filter(Boolean)));
+  if (correos.length === 0) return { estado: 'aviso', mensaje: `Sin destinatarios: falta la restricción ${RESTRICCION_RESPUESTA_P3_ROLLOS}.` };
+  const texto = `Laminado respondió P3 Rollos Codigo_Grupo #${codigoP3}`;
+  try {
+    await serviciosService.enviarCorreo({
+      destino: correos.join(', '),
+      asunto: 'RESPUESTA AUTOMATICA P3 Rollos',
+      cuerpo: `<p style="font-family:Arial,sans-serif;font-size:14px;color:#111827;">${texto}</p>`,
+      nota: 'Este correo fue generado automáticamente, favor no responder.',
+    });
+    return { estado: 'ok', mensaje: `Correo enviado a ${correos.join(', ')}` };
+  } catch (e) {
+    return { estado: 'error', mensaje: `No se pudo enviar el aviso: ${(e as Error).message}` };
+  }
+};
 
 interface PlanGrupoPreview {
   codigo_grupo: number;
@@ -3207,7 +3224,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     preview: PlanGrupoPreview,
     usuario: string,
     esPFD: boolean
-  ): Promise<{ mensaje: string; huboError: boolean; codigoPlanGrupo?: number; respuestaPorPadre?: Map<number, RespuestaPorOrigen> }> => {
+  ): Promise<{ mensaje: string; huboError: boolean; codigoPlanGrupo?: number }> => {
     const etiqueta = esPFD ? 'PFD' : 'P3';
     try {
       const planPayload = {
@@ -3240,9 +3257,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
       let exitosos = 0;
       let fallidos = 0;
-      // Lo que quedó grabado por P2 de origen (codigo_plan_grupo_padre): alimenta el aviso a cada
-      // área (ver avisarRespuestaP3Areas). Solo lo efectivamente guardado.
-      const respuestaPorPadre = new Map<number, RespuestaPorOrigen>();
 
       faltanteInternoRef.current = [];
 
@@ -3285,13 +3299,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               };
               await detalleTacticoService.save(detallePayload as unknown as DetalleTactico);
               exitosos++;
-              if (split.cantidadKg > 0) {
-                const r = respuestaPorPadre.get(split.codigoPadre) ?? { materiales: new Map<string, { descripcion: string; kg: number }>() };
-                const m = r.materiales.get(row.material) ?? { descripcion: row.descripcion, kg: 0 };
-                m.kg += split.cantidadKg;
-                r.materiales.set(row.material, m);
-                respuestaPorPadre.set(split.codigoPadre, r);
-              }
             } catch (e) {
               console.warn(`[Guardar Plan ${etiqueta}] Falló material ${row.material} (padre ${split.codigoPadre}):`, (e as Error).message);
               fallidos++;
@@ -3305,9 +3312,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const sufijoSuperados = superados > 0 ? ` ${superados} Plan Grupo previo(s) del mismo día o anterior fueron desactivados.` : '';
 
       if (fallidos === 0) {
-        return { mensaje: `${etiqueta}: ${exitosos} materiales en Plan Grupo #${nuevoCodigoPlanGrupo}.${sufijoSuperados}`, huboError: false, codigoPlanGrupo: nuevoCodigoPlanGrupo, respuestaPorPadre };
+        return { mensaje: `${etiqueta}: ${exitosos} materiales en Plan Grupo #${nuevoCodigoPlanGrupo}.${sufijoSuperados}`, huboError: false, codigoPlanGrupo: exitosos > 0 ? nuevoCodigoPlanGrupo : undefined };
       }
-      return { mensaje: `${etiqueta}: ${exitosos} guardados, ${fallidos} fallaron (Plan Grupo #${nuevoCodigoPlanGrupo}).${sufijoSuperados}`, huboError: true, codigoPlanGrupo: nuevoCodigoPlanGrupo, respuestaPorPadre };
+      return { mensaje: `${etiqueta}: ${exitosos} guardados, ${fallidos} fallaron (Plan Grupo #${nuevoCodigoPlanGrupo}).${sufijoSuperados}`, huboError: true, codigoPlanGrupo: exitosos > 0 ? nuevoCodigoPlanGrupo : undefined };
     } catch (e) {
       return { mensaje: `${etiqueta}: error al crear el Plan Grupo — ${(e as Error).message}`, huboError: true };
     }
@@ -3318,77 +3325,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // efecto junto a reporteFlujo (reportePorGuardar) y el panel cierra con "Ver reporte y enviar". El
   // envío sigue manual desde la vista previa.
   const [reportePorGuardar, setReportePorGuardar] = useState(false);
-
-  // Aviso a cada área cuyo P2 respondió este P3 (usuario 2026-10-16): un correo corto por área con
-  // /enviarCorreo (el mismo backend del reporte), para que el proceso sepa que ya puede avanzar.
-  // Destinatarios: restricción GRUPO_CORREOS_RESPUESTA_P3 del grupo del área; sin ella no se avisa a
-  // esa área (queda dicho en el panel). Un fallo acá no afecta al P3 ya guardado.
-  const avisarRespuestaP3Areas = useCallback(async (codigoP3: number, respuestaPorPadre: Map<number, RespuestaPorOrigen>): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string }> => {
-    const [planesRes, gruposRes, restrsRes] = await Promise.all([sapCompartido.planGrupos(), grupoService.getAll(), restriccionService.getAll()]);
-    const planPorCodigo = new Map((planesRes.data || []).map(p => [p.codigo_plan_grupo, p]));
-    const nombreGrupo = new Map((gruposRes.data || []).map(g => [g.codigo_grupo, String(g.nombre_grupo || '').trim()]));
-    // Agrupar por área (codigo_grupo del P2 padre). El propio P3 como padre (material sin origen) no es de ningún área.
-    const porArea = new Map<number, { p2: Set<number>; materiales: Map<string, { descripcion: string; kg: number }> }>();
-    respuestaPorPadre.forEach((r, padre) => {
-      const plan = planPorCodigo.get(padre);
-      if (padre === codigoP3 || !plan) return;
-      // Venta Externa no se avisa: es parte del mismo flujo de los módulos (usuario 2026-10-16).
-      if (/venta\s*externa/i.test(nombreGrupo.get(plan.codigo_grupo) || '')) return;
-      const a = porArea.get(plan.codigo_grupo) ?? { p2: new Set<number>(), materiales: new Map() };
-      a.p2.add(padre);
-      r.materiales.forEach((m, mat) => {
-        const prev = a.materiales.get(mat) ?? { descripcion: m.descripcion, kg: 0 };
-        prev.kg += m.kg;
-        a.materiales.set(mat, prev);
-      });
-      porArea.set(plan.codigo_grupo, a);
-    });
-    if (porArea.size === 0) return { estado: 'aviso', mensaje: 'El P3 no respondió a ningún P2 de otra área: no hay a quién avisar.' };
-
-    const hora = format(new Date(), 'HH:mm');
-    const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
-    const avisadas: string[] = [];
-    const sinDestinatarios: string[] = [];
-    const fallidas: string[] = [];
-    for (const [codigoGrupo, a] of Array.from(porArea.entries())) {
-      const area = nombreGrupo.get(codigoGrupo) || `Grupo ${codigoGrupo}`;
-      const correos = Array.from(new Set((restrsRes.data || [])
-        .filter(r => r.estado === 'A' && r.codigo_grupo === codigoGrupo && String(r.nombre_restriccion || '').trim().toUpperCase() === RESTRICCION_AVISO_RESPUESTA_P3)
-        .flatMap(r => String(r.valor_restriccion || '').split(/[,;&]/).map(v => v.trim()))
-        .filter(Boolean)));
-      if (correos.length === 0) { sinDestinatarios.push(area); continue; }
-      const n = a.materiales.size;
-      const asunto = `Laminado respondió P3 Rollos #${codigoP3} a las ${hora} · ${n} material${n === 1 ? '' : 'es'} para ${area}`;
-      const totalKg = Array.from(a.materiales.values()).reduce((s, m) => s + m.kg, 0);
-      const filas = Array.from(a.materiales.entries())
-        .sort((x, y) => y[1].kg - x[1].kg)
-        .map(([mat, m]) => `<tr><td style="padding:4px 10px;border-bottom:1px solid #e5e7eb;font-family:monospace;">${esc(mat)}</td><td style="padding:4px 10px;border-bottom:1px solid #e5e7eb;">${esc(m.descripcion || '')}</td><td align="right" style="padding:4px 10px;border-bottom:1px solid #e5e7eb;font-variant-numeric:tabular-nums;">${Math.round(m.kg).toLocaleString('es-EC')}</td></tr>`)
-        .join('');
-      const cuerpo = `
-        <div style="font-family:Arial,sans-serif;font-size:13px;color:#111827;">
-          <p style="margin:0 0 8px;font-size:15px;font-weight:700;">${esc(asunto)}</p>
-          <p style="margin:0 0 12px;">Corte y Laminado ya generó su respuesta P3 al P2 ${Array.from(a.p2).map(c => `#${c}`).join(', ')} de ${esc(area)}: ${n} material${n === 1 ? '' : 'es'}, ${Math.round(totalKg).toLocaleString('es-EC')} kg. El proceso ya puede avanzar.</p>
-          <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;border:1px solid #e5e7eb;">
-            <tr style="background:#f3f4f6;font-size:11px;text-transform:uppercase;"><th align="left" style="padding:6px 10px;">Material</th><th align="left" style="padding:6px 10px;">Descripción</th><th align="right" style="padding:6px 10px;">Kg</th></tr>
-            ${filas}
-          </table>
-        </div>`;
-      try {
-        await serviciosService.enviarCorreo({ destino: correos.join(', '), asunto, cuerpo, nota: 'Este correo fue generado automáticamente, favor no responder.' });
-        avisadas.push(`${area} (${n})`);
-      } catch (e) {
-        console.warn(`[Aviso P3] No se pudo avisar a ${area}:`, (e as Error).message);
-        fallidas.push(area);
-      }
-    }
-    const partes = [
-      avisadas.length ? `Avisado: ${avisadas.join(', ')}` : '',
-      sinDestinatarios.length ? `Sin ${RESTRICCION_AVISO_RESPUESTA_P3}: ${sinDestinatarios.join(', ')}` : '',
-      fallidas.length ? `Falló el envío: ${fallidas.join(', ')}` : '',
-    ].filter(Boolean);
-    return { estado: fallidas.length ? 'error' : sinDestinatarios.length ? 'aviso' : 'ok', mensaje: partes.join(' · ') };
-  }, []);
-
   const handleConfirmarRespuestaP3PFD = useCallback(async () => {
     if (!planPreviewP3PFD) return;
     const { p3 } = planPreviewP3PFD;
@@ -3396,7 +3332,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     setPlanPreviewP3PFD(null);
     panelProgreso.iniciar('Corte y Laminado — Respuesta P3 y reporte', [
       { id: 'p3', etiqueta: 'Guardando P3 · Rollos' },
-      { id: 'aviso', etiqueta: 'Avisando a las áreas' },
+      { id: 'aviso', etiqueta: 'Correo de respuesta automática' },
       { id: 'nec', etiqueta: 'Actualizando necesidades' },
       { id: 'rep', etiqueta: 'Guardando reporte' },
     ]);
@@ -3406,17 +3342,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       panelProgreso.actualizar('p3', { estado: 'en_curso' });
       const resP3 = await guardarPlanGrupoLaminado(p3, usuario, false);
       panelProgreso.actualizar('p3', { estado: resP3.huboError ? 'error' : 'ok', detalle: resP3.mensaje });
-      // Aviso a las áreas: solo si el P3 quedó creado con algo grabado; su fallo no corta el flujo.
-      if (resP3.codigoPlanGrupo && resP3.respuestaPorPadre && resP3.respuestaPorPadre.size > 0) {
+      // Apenas se guarda el P3, sale el correo de respuesta automática (ver enviarAvisoRespuestaP3).
+      if (resP3.codigoPlanGrupo) {
         panelProgreso.actualizar('aviso', { estado: 'en_curso' });
-        try {
-          const av = await avisarRespuestaP3Areas(resP3.codigoPlanGrupo, resP3.respuestaPorPadre);
-          panelProgreso.actualizar('aviso', { estado: av.estado, detalle: av.mensaje });
-        } catch (e) {
-          panelProgreso.actualizar('aviso', { estado: 'error', detalle: (e as Error).message });
-        }
+        const av = await enviarAvisoRespuestaP3(resP3.codigoPlanGrupo).catch(e => ({ estado: 'error' as const, mensaje: (e as Error).message }));
+        panelProgreso.actualizar('aviso', { estado: av.estado, detalle: av.mensaje });
       } else {
-        panelProgreso.actualizar('aviso', { estado: 'omitido', detalle: 'El P3 no grabó materiales.' });
+        panelProgreso.actualizar('aviso', { estado: 'omitido', detalle: 'El P3 no se guardó.' });
       }
       panelProgreso.actualizar('nec', { estado: 'en_curso' });
       await fetchNecesidadesPlanta();
@@ -3430,7 +3362,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     } finally {
       setIsSavingPlanP3PFD(false);
     }
-  }, [planPreviewP3PFD, fetchNecesidadesPlanta, guardarPlanGrupoLaminado, avisarRespuestaP3Areas, panelProgreso]);
+  }, [planPreviewP3PFD, fetchNecesidadesPlanta, guardarPlanGrupoLaminado, panelProgreso]);
 
   // Paso 1 de edición: busca los PlanGrupo activos de Corte y Laminado directo por codigo_grupo
   // (CODIGO_GRUPO_LAMINADO) en planGrupoService.getAll() (vía sapCompartido.planGrupos), NO a través de "Necesidades Planta"

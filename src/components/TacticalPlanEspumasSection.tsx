@@ -483,6 +483,30 @@ interface RespuestaP3Row {
   fuente: FuenteRespuestaP3;
 }
 
+// Aviso automático al guardar el P3 de cada centro (usuario 2026-10-16): correo simple — asunto y una
+// línea — a los correos de la restricción GRUPO_RESPUESTA_P3_ESPUMA (separados por "&"), por el mismo
+// /enviarCorreo del reporte. Un fallo acá no afecta al P3 ya guardado.
+const RESTRICCION_RESPUESTA_P3_ESPUMA = 'GRUPO_RESPUESTA_P3_ESPUMA';
+const enviarAvisoRespuestaP3 = async (planta: string, codigoP3: number): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string }> => {
+  const correos = Array.from(new Set(((await restriccionService.getAll()).data || [])
+    .filter(r => r.estado === 'A' && String(r.nombre_restriccion || '').trim().toUpperCase() === RESTRICCION_RESPUESTA_P3_ESPUMA)
+    .flatMap(r => String(r.valor_restriccion || '').split(/[,;&]/).map(v => v.trim()))
+    .filter(Boolean)));
+  if (correos.length === 0) return { estado: 'aviso', mensaje: `Sin destinatarios: falta la restricción ${RESTRICCION_RESPUESTA_P3_ESPUMA}.` };
+  const texto = `Corte Espuma respondió P3 ${planta} Codigo_Grupo #${codigoP3}`;
+  try {
+    await serviciosService.enviarCorreo({
+      destino: correos.join(', '),
+      asunto: 'RESPUESTA AUTOMATICA P3 Espuma',
+      cuerpo: `<p style="font-family:Arial,sans-serif;font-size:14px;color:#111827;">${texto}</p>`,
+      nota: 'Este correo fue generado automáticamente, favor no responder.',
+    });
+    return { estado: 'ok', mensaje: `Correo enviado a ${correos.join(', ')}` };
+  } catch (e) {
+    return { estado: 'error', mensaje: `No se pudo enviar el aviso: ${(e as Error).message}` };
+  }
+};
+
 interface PlanGrupoPreviewEspuma {
   centro: '1000' | '2000';
   codigo_grupo: number;
@@ -4783,7 +4807,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     preview: PlanGrupoPreviewEspuma,
     usuario: string,
     esPFD: boolean
-  ): Promise<{ mensaje: string; huboError: boolean }> => {
+  ): Promise<{ mensaje: string; huboError: boolean; codigoPlanGrupo?: number }> => {
     const etiqueta = esPFD ? 'PFD' : 'P3';
     try {
       const planPayload = {
@@ -4842,9 +4866,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const sufijoSuperados = superados > 0 ? ` ${superados} Plan Grupo previo(s) del mismo centro desactivado(s).` : '';
 
       if (fallidos === 0) {
-        return { mensaje: `${etiqueta} Centro ${preview.centro}: ${exitosos} materiales en Plan Grupo #${nuevoCodigoPlanGrupo}.${sufijoSuperados}`, huboError: false };
+        return { mensaje: `${etiqueta} Centro ${preview.centro}: ${exitosos} materiales en Plan Grupo #${nuevoCodigoPlanGrupo}.${sufijoSuperados}`, huboError: false, codigoPlanGrupo: exitosos > 0 ? nuevoCodigoPlanGrupo : undefined };
       }
-      return { mensaje: `${etiqueta} Centro ${preview.centro}: ${exitosos} guardados, ${fallidos} fallaron (Plan Grupo #${nuevoCodigoPlanGrupo}).${sufijoSuperados}`, huboError: true };
+      return { mensaje: `${etiqueta} Centro ${preview.centro}: ${exitosos} guardados, ${fallidos} fallaron (Plan Grupo #${nuevoCodigoPlanGrupo}).${sufijoSuperados}`, huboError: true, codigoPlanGrupo: exitosos > 0 ? nuevoCodigoPlanGrupo : undefined };
     } catch (e) {
       return { mensaje: `${etiqueta} Centro ${preview.centro}: error al crear el Plan Grupo — ${(e as Error).message}`, huboError: true };
     }
@@ -4862,7 +4886,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     setIsSavingPlanP3PFD(true);
     setPlanPreviewP3PFD(null);
     panelProgreso.iniciar('Corte Espuma — Respuesta P3 y reporte', [
-      ...previews.map(({ centro }) => ({ id: `p3-${centro}`, etiqueta: `Guardando P3 · ${nombrePlanta(centro)}` })),
+      ...previews.flatMap(({ centro }) => [
+        { id: `p3-${centro}`, etiqueta: `Guardando P3 · ${nombrePlanta(centro)}` },
+        { id: `aviso-${centro}`, etiqueta: `Correo de respuesta automática · ${nombrePlanta(centro)}` },
+      ]),
       { id: 'nec', etiqueta: 'Actualizando necesidades' },
       ...previews.map(({ centro }) => ({ id: `rep-${centro}`, etiqueta: `Guardando reporte · ${nombrePlanta(centro)}` })),
     ]);
@@ -4873,6 +4900,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         panelProgreso.actualizar(`p3-${centro}`, { estado: 'en_curso' });
         const resP3 = await guardarPlanGrupoEspuma(p3, usuario, false);
         panelProgreso.actualizar(`p3-${centro}`, { estado: resP3.huboError ? 'error' : 'ok', detalle: resP3.mensaje });
+        // Apenas se guarda el P3 del centro, sale su correo de respuesta automática.
+        if (resP3.codigoPlanGrupo) {
+          panelProgreso.actualizar(`aviso-${centro}`, { estado: 'en_curso' });
+          const av = await enviarAvisoRespuestaP3(nombrePlanta(centro), resP3.codigoPlanGrupo).catch(e => ({ estado: 'error' as const, mensaje: (e as Error).message }));
+          panelProgreso.actualizar(`aviso-${centro}`, { estado: av.estado, detalle: av.mensaje });
+        } else {
+          panelProgreso.actualizar(`aviso-${centro}`, { estado: 'omitido', detalle: 'El P3 no se guardó.' });
+        }
       }
       panelProgreso.actualizar('nec', { estado: 'en_curso' });
       await fetchNecesidadesPlanta();
