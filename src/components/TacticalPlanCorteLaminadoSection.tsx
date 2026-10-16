@@ -1596,7 +1596,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // planta (P2) → Generando necesidades. La última fase corre en el efecto autoGenerarPendiente,
   // que es quien cierra el panel (mismo flujo que Corte Espuma).
   const panelProgreso = usePanelProgreso();
+  // Se sincronizó en esta sesión: la auto-carga del plan anterior ya no debe restaurarse (ver autoCargaIntentada).
+  const sincronizoRef = useRef(false);
   const ejecutarSincronizacion = useCallback(async (fecha: string | null, noLaborables: DiasNoLaborables, laborablesExtra: DiasNoLaborables) => {
+    sincronizoRef.current = true;
     refrescarAlSincronizar(); // FERT y provisionales siempre frescas; cubo (día) y MTTO (semana) se reusan
     setIsLoading(true);
     setSyncStep('sincronizando');
@@ -5139,7 +5142,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // Sin cleanup a propósito: con la guarda del ref, el doble montaje de Strict Mode cancelaría la
     // única carga. Si mientras tanto se sincronizó (hay caché), no se pisa lo nuevo con el respaldo.
     void buscarUltimoPlanTxt({ modulo: 'laminado', centro: '1000', fechas }).then(plan => {
-      if (!plan?.estado || leerDeCache<SnapshotCorteLaminado>(CACHE_CORTE_LAMINADO)) return;
+      // sincronizoRef: la caché recién se escribe al terminar Sincronizar; si el respaldo llega con la
+      // sincronización en curso, restaurarlo traería de vuelta los overrides del plan anterior.
+      if (!plan?.estado || sincronizoRef.current || leerDeCache<SnapshotCorteLaminado>(CACHE_CORTE_LAMINADO)) return;
       restaurarEstadoPlan(plan.estado, { fechaObjetivo: plan.fechaObjetivo, guardadoEn: plan.modificado });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- una sola vez al montar, tras rehidratar
