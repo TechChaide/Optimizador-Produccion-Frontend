@@ -2,9 +2,8 @@
 
 /**
  * Aviso de respuestas del día (usuario 2026-10-16): campana fija en el dashboard que avisa cuando ya
- * existe la respuesta que habilita al siguiente proceso: P3 Rollos de Laminado y P3 de Corte Espuma,
- * con el desglose por área cuyo P2 respondieron (Forros, Muebles, Ensamblado…). P2-VENTA y el área
- * Venta Externa no se muestran: son parte del mismo flujo de los módulos.
+ * existe la respuesta que habilita al siguiente proceso — P2-VENTA (para Laminado / Corte Espuma),
+ * P3 Rollos de Laminado y P3 de Corte Espuma (para el área cuyo P2 respondieron: Forros, Muebles, VE…).
  * Ej.: "Laminado respondió P3 Rollos #1234 a las 10:15 · 18 materiales para Forros".
  *
  * Va en el layout del dashboard (no dentro de un módulo), así lo ve también un proceso cuyo módulo no
@@ -49,8 +48,14 @@ export function AvisoRespuestasDia() {
   const textoDe = useCallback(async (r: ReturnType<typeof respuestasDelDia>[number], planes: Map<number, PlanGrupo>): Promise<string> => {
     const { plan } = r;
     const detalles = (await detallesDePlanes([plan.codigo_plan_grupo])).filter(d => d.estado === 'A' && d.codigo_plan_grupo === plan.codigo_plan_grupo);
-    // P3: un aviso con el desglose por área del P2 padre (el propio P3 como padre = sin área). Venta
-    // Externa no se lista: es parte del mismo flujo de los módulos (usuario 2026-10-16).
+    if (r.id === 've-p2') {
+      // P2 de Venta Externa: lo consume Laminado (Rollos) o Corte Espuma (Espumas).
+      const destino = /rollo/i.test(String(plan.valor || '')) ? 'Laminado' : 'Corte Espuma';
+      const tipo = /rollo/i.test(String(plan.valor || '')) ? 'Rollos' : 'Espumas';
+      const n = new Set(detalles.map(d => d.codigo_material)).size;
+      return `Venta Externa generó P2 ${tipo} #${plan.codigo_plan_grupo} a las ${r.hora} · ${plural(n)} para ${destino}`;
+    }
+    // P3: un aviso con el desglose por área del P2 padre (el propio P3 como padre = sin área).
     if (!nombreGrupo.current) {
       const g = await grupoService.getAll();
       nombreGrupo.current = new Map((g.data || []).map(x => [x.codigo_grupo, String(x.nombre_grupo || '').trim()]));
@@ -60,7 +65,6 @@ export function AvisoRespuestasDia() {
       const padre = d.codigo_plan_grupo_padre ? planes.get(d.codigo_plan_grupo_padre) : undefined;
       if (!padre || padre.codigo_plan_grupo === plan.codigo_plan_grupo) return;
       const area = nombreGrupo.current!.get(padre.codigo_grupo) || `Grupo ${padre.codigo_grupo}`;
-      if (/venta\s*externa/i.test(area)) return;
       if (!porArea.has(area)) porArea.set(area, new Set());
       porArea.get(area)!.add(d.codigo_material);
     });
@@ -73,8 +77,7 @@ export function AvisoRespuestasDia() {
     try {
       const planesLista = (await planGrupoService.getAll()).data || [];
       const planes = new Map(planesLista.map(p => [p.codigo_plan_grupo, p]));
-      // Sin P2-VENTA: lo consumen Laminado / Corte Espuma, dentro del mismo flujo (usuario 2026-10-16).
-      const respuestas = respuestasDelDia(planesLista, hoy).filter(r => r.id !== 've-p2');
+      const respuestas = respuestasDelDia(planesLista, hoy);
       const nuevos: Aviso[] = [];
       for (const r of respuestas) {
         const codigo = r.plan.codigo_plan_grupo;
@@ -127,7 +130,7 @@ export function AvisoRespuestasDia() {
       <PopoverContent align="end" className="w-[380px] max-w-[calc(100vw-2rem)] p-0">
         <div className="px-3 py-2 border-b text-[11px] font-black uppercase tracking-wide text-slate-600">Respuestas del día</div>
         {avisos.length === 0 ? (
-          <p className="px-3 py-4 text-xs text-slate-500">Todavía no hay respuestas P3 de hoy.</p>
+          <p className="px-3 py-4 text-xs text-slate-500">Todavía no hay P2-VENTA ni respuestas P3 de hoy.</p>
         ) : (
           <ul className="max-h-[60vh] overflow-y-auto divide-y">
             {avisos.map(a => (
