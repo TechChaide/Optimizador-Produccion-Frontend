@@ -1603,6 +1603,15 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // La fecha escogida ES el filtro del resumen (FERT de ese día); sin fecha = Plan Maestro.
     setFechaEvaluada(fecha);
     setPlanCargadoDe(null);
+    // Sincronizar recalcula desde cero: los ajustes manuales (corridas / PLAN UN / aprobaciones) del
+    // reporte que se auto-cargó al abrir NO se arrastran. 16-10: el plan de ayer (D-19 AF PL 1 corrida
+    // = 31 UN) ya estaba en SAP como FERT 014 → Producción Diaria 31 UN sumada al stock (recomendado 0),
+    // y el override restaurado lo volvía a planificar: 31 UN / 1333 Kg contados dos veces.
+    setPlanOverrides({});
+    setCorridasOverrides({});
+    setApprovedDeficitRows(new Set());
+    setPlanUnDraft({});
+    setCorridasDraft({});
     setSelectedDates(fecha ? new Set([fecha]) : new Set());
     if (fecha) setViewDate(parseISO(fecha));
     const fechaP2 = format(nextBusinessDayCal(fecha ? parseISO(fecha) : new Date(), noLaborables, laborablesHorizonte(laborablesExtra)), 'dd/MM/yyyy');
