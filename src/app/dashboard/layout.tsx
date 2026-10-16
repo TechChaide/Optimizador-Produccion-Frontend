@@ -29,7 +29,6 @@ import { useToast } from '@/hooks/use-toast';
 import { environment } from '@/environments/environments.prod';
 import { User } from '@/types/interfaces';
 import { TacticalPlanMueblesSection, TacticalPlanTallerCorteSection, TacticalPlanPlanchasMixtasSection } from '@/components';
-import { AvisoRespuestasDia } from '@/components/AvisoRespuestasDia';
 // (LogoutButton preserved in repo but not used here; we implement custom panel UI)
 
 
@@ -713,7 +712,6 @@ export default function DashboardLayout({
                     </Sidebar>
                     <div className="flex flex-col flex-1 relative h-full overflow-y-auto">
                         <MobileMenuButton />
-                        <AvisoRespuestasDia />
                         {visitedMuebles && (
                             <div className={isMueblesActive ? '' : 'hidden'}>
                                 <TacticalPlanMueblesSection />
