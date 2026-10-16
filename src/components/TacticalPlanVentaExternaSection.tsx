@@ -22,6 +22,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { useEstadoDelDia } from '@/components/EstadoDelDia';
+import { hitosDePlanes } from '@/lib/estado-dia';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
@@ -328,10 +329,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // sigue disponible aparte, a diferencia de Laminado/Espuma — acá el paso intermedio de elegir fecha
   // es obligatorio, no opcional). Mismo patrón general que [[modulos_tacticos_sincronizar_y_generar_combinado]].
   const [autoGenerarPendiente, setAutoGenerarPendiente] = useState(false);
-  // (Hasta 2026-10-12 Sincronizar generaba además el P2 de forma automática, para que un P2 vencido no
-  // quedara en "A". Con las pestañas-paso el P2 es el paso 1 explícito de cada día — ver
-  // handleGenerarP2ConPanel —, porque generarlo solo al sincronizar en la tarde pisaba el P2 que
-  // Laminado/Corte Espuma ya habían respondido.)
+  // Tercera fase de Sincronizar: generar el P2 cuando aún no hay P2 de hoy (2026-10-16). Entre 12-10 y
+  // 16-10 era solo manual, porque generarlo en cada sincronización de la tarde pisaba el P2 que
+  // Laminado/Corte Espuma ya habían respondido; ahora se genera solo la primera vez del día.
+  const [autoGenerarP2Pendiente, setAutoGenerarP2Pendiente] = useState(false);
   // Cambia tras cada acción que graba (P2, PFD-VENTA) para que el estado del día (✓ de las
   // pestañas-paso) se vuelva a consultar.
   const [recargaEstadoDia, setRecargaEstadoDia] = useState(0);
@@ -736,6 +737,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       { id: 'fecha', etiqueta: desde === hasta ? `PT (producción y empaque): ${corta(desde)}` : `PT: ${corta(desde)} → ${corta(hasta)}` },
       { id: 'datos', etiqueta: 'Sincronizando datos' },
       { id: 'bom', etiqueta: 'Necesidad BOM (FERT)' },
+      { id: 'p2', etiqueta: 'P2 Espumas / Rollos' },
     ]);
     panelProgreso.actualizar('fecha', { estado: 'ok' });
     const TOTAL_CONSULTAS = 8;
@@ -810,6 +812,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     } catch (e) {
       panelProgreso.actualizar('datos', { estado: 'error', detalle: (e as Error).message });
       panelProgreso.actualizar('bom', { estado: 'omitido' });
+      panelProgreso.actualizar('p2', { estado: 'omitido' });
       panelProgreso.concluir(`Error al sincronizar: ${(e as Error).message}`);
       setSyncStep('idle');
     } finally {
@@ -1441,6 +1444,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // P2 acá usaría necesidad vieja (o vacía) para decidir qué desactivar, así que se deja tal como
       // antes: el usuario elige fecha y dispara "Generar Todos los P2" a mano.
       panelProgreso.actualizar('bom', { estado: 'omitido', detalle: 'Sin Ventana de Producción elegida.' });
+      panelProgreso.actualizar('p2', { estado: 'omitido' });
       panelProgreso.concluir();
       setSyncStep('idle');
       return;
@@ -1451,21 +1455,39 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // Conteo final en r.progreso: el último setBomProgress cae en el mismo render que syncStep
       // vuelve a 'idle' y el efecto de avance no lo alcanza (quedaba 76/77).
       panelProgreso.actualizar('bom', { estado: r.estado, detalle: r.mensaje, ...(r.progreso ? { progreso: r.progreso } : {}) });
-      setSyncStep('idle');
       if (r.estado === 'error') {
-        // Sin necesidad fresca no se ofrece generar el P2: decidiría qué desactivar con datos viejos.
+        // Sin necesidad fresca no se genera el P2: decidiría qué desactivar con datos viejos.
+        panelProgreso.actualizar('p2', { estado: 'omitido' });
         panelProgreso.concluir();
+        setSyncStep('idle');
         return;
       }
-      // Pestañas-paso (2026-10-12): el P2 ya no se graba solo. Si el de hoy ya existe, lo natural es
-      // seguir en Data Aprobada; si no, generarlo (decisión del usuario, botón del panel).
-      const p2Hoy = estadoDia.hecho('ve-p2');
-      panelProgreso.concluir(
-        p2Hoy ? 'Datos al día. El P2 de hoy ya está generado: sigue en 2 · Data Aprobada.' : 'Datos al día. Siguiente paso: generar el P2.',
-        p2Hoy
-          ? [{ etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') }, { etiqueta: 'Regenerar P2', onClick: () => { void handleGenerarP2ConPanel(); } }]
-          : [{ etiqueta: '1 · Generar P2', onClick: () => { void handleGenerarP2ConPanel(); } }],
-      );
+      // 2026-10-16: el P2 vuelve a generarse solo al sincronizar, pero SOLO si todavía no hay P2 de
+      // hoy (consultado en vivo, no del estado del día de la apertura). Si ya existe, no se pisa: Laminado /
+      // Corte Espuma pueden haberlo respondido ya (el motivo por el que se quitó el 12-10); queda
+      // "Regenerar P2" como acción manual. Se genera desde autoGenerarP2Pendiente (efecto declarado
+      // después de handleGenerarTodosPlanesP2), no acá: leería necesidadEspumas/Rollos por closure vieja.
+      void sapCompartido.planGrupos()
+        .then(res => hitosDePlanes(res.data || [], format(new Date(), 'yyyy-MM-dd')).find(h => h.id === 've-p2'))
+        .then(hito => {
+          if (hito && hito.estado === 'pendiente') {
+            setAutoGenerarP2Pendiente(true);
+            return;
+          }
+          panelProgreso.actualizar('p2', { estado: 'omitido', detalle: `Ya existe el P2 de hoy${hito?.detalle ? ` (${hito.detalle})` : ''}; no se regenera.` });
+          setSyncStep('idle');
+          panelProgreso.concluir('Datos al día. El P2 de hoy ya está generado: sigue en 2 · Data Aprobada.', [
+            { etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') },
+            { etiqueta: 'Regenerar P2', onClick: () => { void handleGenerarP2ConPanel(); } },
+          ]);
+        }, e => {
+          // Sin poder confirmar si ya hay P2 de hoy, no se genera solo (podría pisar uno respondido).
+          panelProgreso.actualizar('p2', { estado: 'omitido', detalle: `No se pudo consultar Plan Grupo: ${(e as Error).message}` });
+          setSyncStep('idle');
+          panelProgreso.concluir('Datos al día. Genera el P2 a mano si aún no existe.', [
+            { etiqueta: '1 · Generar P2', onClick: () => { void handleGenerarP2ConPanel(); } },
+          ]);
+        });
     });
   }, [autoGenerarPendiente, handleCalcularNecesidadRollos, selectedDates, panelProgreso]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2043,6 +2065,32 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       r.estado === 'error' ? undefined : [{ etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') }],
     );
   }, [handleGenerarTodosPlanesP2, panelProgreso]);
+
+  // Fase P2 de Sincronizar (ver autoGenerarP2Pendiente): acá handleGenerarTodosPlanesP2 ya ve la
+  // necesidad recién calculada. Corre en el mismo panel de la sincronización.
+  useEffect(() => {
+    if (!autoGenerarP2Pendiente) return;
+    setAutoGenerarP2Pendiente(false);
+    panelProgreso.actualizar('p2', { estado: 'en_curso', progreso: { actual: 0, total: 3 } });
+    handleGenerarTodosPlanesP2(true, (hechos, total) => panelProgreso.actualizar('p2', { progreso: { actual: hechos, total } }))
+      .then(
+        r => {
+          panelProgreso.actualizar('p2', { estado: r.estado, detalle: r.mensaje });
+          panelProgreso.concluir(
+            r.estado === 'error' ? undefined : 'P2 guardado. Cuando Laminado y Corte Espuma respondan su P3, sigue en 2 · Data Aprobada.',
+            r.estado === 'error' ? undefined : [{ etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') }],
+          );
+        },
+        e => {
+          panelProgreso.actualizar('p2', { estado: 'error', detalle: (e as Error).message });
+          panelProgreso.concluir();
+        },
+      )
+      .finally(() => {
+        setRecargaEstadoDia(n => n + 1);
+        setSyncStep('idle');
+      });
+  }, [autoGenerarP2Pendiente, handleGenerarTodosPlanesP2, panelProgreso]);
 
   // "Data Aprobada": por cada P2 propio activo (Espumas/Rollos por centro), recupera qué respondió
   // el plan consumidor "P3" (nunca "PFD" — ver esPlanP3) — un DetalleTactico con
@@ -3306,7 +3354,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           </div>
         </div>
         {/* "Sincronizar": trae datos crudos de SAP y, si ya hay una Ventana de Producción elegida,
-            calcula la Necesidad BOM automáticamente al terminar (ver handleSincronizarYGenerar) —
+            calcula la Necesidad BOM automáticamente al terminar y, si aún no hay P2 de hoy, lo genera
+            (ver handleSincronizarYGenerar y autoGenerarP2Pendiente) —
             mismo color/forma en los 4 módulos tácticos (azul), distinto de la familia "Generar
             Necesidades"/"Generar Respuestas" (índigo/sólido, ver más abajo en el tab Plan P2). El
             botón "Generar Necesidades · BOM FERT" sigue disponible aparte para recalcular tras
