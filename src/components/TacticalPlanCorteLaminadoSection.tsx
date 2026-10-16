@@ -3332,6 +3332,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     respuestaPorPadre.forEach((r, padre) => {
       const plan = planPorCodigo.get(padre);
       if (padre === codigoP3 || !plan) return;
+      // Venta Externa no se avisa: es parte del mismo flujo de los módulos (usuario 2026-10-16).
+      if (/venta\s*externa/i.test(nombreGrupo.get(plan.codigo_grupo) || '')) return;
       const a = porArea.get(plan.codigo_grupo) ?? { p2: new Set<number>(), materiales: new Map() };
       a.p2.add(padre);
       r.materiales.forEach((m, mat) => {
