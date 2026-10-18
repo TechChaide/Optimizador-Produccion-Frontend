@@ -2624,17 +2624,23 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const aperturaCategoriaPorCentro = useMemo(() => {
     const porCentro: Record<string, Map<string, string>> = { '1000': new Map(), '2000': new Map() };
     const cualquierCentro = new Map<string, string>();
-    ordenesFert.forEach(o => {
+    // Fuente: las filas FERT ya mapeadas (fertAuditAll, categoria = CATEGORIA de la orden) y no la lista
+    // cruda ordenesFert — al abrir el módulo se restaura el plan guardado (resultadoRestaurado) y
+    // ordenesFert sigue vacía hasta sincronizar con SAP, así que con ella todo salía "Sin apertura".
+    // fertAuditAll viene del plan restaurado o de la sincronización, según el caso.
+    const registrar = (material: string, categoria: string, centro: string) => {
       // Segmento numérico de 3 cifras de la categoría: "CM-LAM-D12SL-194.5" → 194.5, "…-206" → 206.
-      const ap = getProp(o, ['CATEGORIA', 'Categoria', 'CATEGORIA_DESC']).split(/[-_\s]/).reverse().find(s => /^\d{3}(\.\d+)?$/.test(s));
-      const code = ap ? extractMaterialInfo(o).code : '';
+      const ap = String(categoria || '').split(/[-_\s]/).reverse().find(s => /^\d{3}(\.\d+)?$/.test(s));
+      const code = cleanCode(material);
       if (!ap || !code) return;
       if (!cualquierCentro.has(code)) cualquierCentro.set(code, ap);
-      const map = porCentro[String(getProp(o, ['CENTRO', 'Centro', 'centro'])).trim()];
+      const map = porCentro[centro];
       if (map && !map.has(code)) map.set(code, ap);
-    });
+    };
+    fertAuditAllUIO.forEach(r => registrar(r.material, r.categoria, '1000'));
+    fertAuditAllGYE.forEach(r => registrar(r.material, r.categoria, '2000'));
     return { porCentro, cualquierCentro };
-  }, [ordenesFert, extractMaterialInfo]);
+  }, [fertAuditAllUIO, fertAuditAllGYE]);
 
   const subBloquesT8PorCentro = useMemo(() => {
     const calcular = (rows: UnifiedRow[], centro: string) => {
