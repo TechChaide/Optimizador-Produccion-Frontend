@@ -804,6 +804,19 @@ const SUBBLOQUES_SOBRANTE_MAX_CNC = 1;
 // Largo del bloque madre (m) para convertir metros de sub-bloque en bloques necesarios — mismo valor
 // que Formulación (BLOCK_LENGTH_METERS).
 const LARGO_BLOQUE_M = 20;
+// Modelo de bloque del tab T8 (usuario 2026-10-17, valores por verificar en planta): bloque real de
+// ~108 cm; la cúpula se despeja con ~4 cm de corte y nunca más de 5 cm → altura útil 108 − 5 = 103.
+// Antes la cúpula eran 4 ciclos fijos al espesor de la lámina: con 20 cm eran 80 cm "de cúpula", irreal.
+const ALTURA_BLOQUE_CM = 108;
+const CUPULA_CM = 4;
+const CUPULA_MAX_CM = 5;
+const ALTURA_UTIL_CM = ALTURA_BLOQUE_CM - CUPULA_MAX_CM;
+// Ciclos de cúpula por carga: los necesarios para cubrir CUPULA_CM al espesor de la lámina, sin pasar de
+// CUPULA_MAX_CM; mínimo 1 (con espesores > 5 cm la cúpula sale en una sola pasada de ~4 cm).
+// 0.8 → 5 (4 cm) · 1 → 4 · 2 → 2 · 2.5 → 2 (5 cm) · 3 → 1 · 20 → 1.
+const ciclosCupula = (esp: number): number =>
+  esp > 0 ? Math.max(1, Math.min(Math.ceil(CUPULA_CM / esp - 1e-9), Math.floor(CUPULA_MAX_CM / esp + 1e-9))) : 0;
+const alturaCupulaCm = (esp: number): number => (esp > CUPULA_MAX_CM ? CUPULA_CM : ciclosCupula(esp) * esp);
 
 // Física de corte en carrusel (altura útil por densidad, subbloques, capacidad de giro, cargas y
 // tiempo total) — extraída de auditMapper para poder reutilizarla también con filas de "Necesidades
@@ -2596,8 +2609,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   //  - Sub-bloques = ⌈cantidad / ⌊altura útil / espesor⌋⌉ (misma regla que calcularMetricasCapacidad).
   //  - Cargas carrusel (CR-01/03/04) = giros completos + 1 por el sobrante, salvo que el sobrante sea
   //    ≤ SUBBLOQUES_SOBRANTE_MAX_CNC: esos sub-bloques van a la CNC y no pagan otro giro.
-  //  - T. corte = T. Indiv × (unidades + 4 ciclos de cúpula × carga); carga/descarga por sub-bloque
-  //    del carrusel (TIEMPO_CARGA/DESCARGA_CICLO_SEG).
+  //  - T. corte = T. Indiv × (unidades + ciclosCupula(espesor) × carga) — cúpula por cm, no 4 vueltas
+  //    fijas (ver ALTURA_BLOQUE_CM); carga/descarga por sub-bloque del carrusel (TIEMPO_CARGA/DESCARGA_CICLO_SEG).
+  //    Solo en este tab mientras se validan las alturas; calcularMetricasCapacidad sigue con 4 ciclos.
   //  - Ocupación = sub-bloques en carrusel ÷ (cargas × capacidad por giro): una carga medio vacía paga
   //    los mismos ciclos de cúpula y por eso el tiempo no refleja la cantidad cortada.
   //  - Longitud (m) = sub-bloques × ancho; bloques = Σ m de la densidad ÷ LARGO_BLOQUE_M.
@@ -2612,7 +2626,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
       const filas = Array.from(porMaterial.values()).map(r => {
         const densVal = safeNum(r.dens);
-        const unidadesPorSub = Math.max(1, Math.floor((densVal >= 28 ? 85 : 103) / r.esp));
+        const unidadesPorSub = Math.max(1, Math.floor((densVal >= 28 ? 85 : ALTURA_UTIL_CM) / r.esp));
         const subB = Math.ceil(r.cantTotal / unidadesPorSub - 1e-9);
         const capGiro = capacidadGiroCarrusel(r.ancho);
         const completas = capGiro > 0 ? Math.floor(subB / capGiro) : 0;
@@ -2620,12 +2634,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const subCNC = completas > 0 && sobrante > 0 && sobrante <= SUBBLOQUES_SOBRANTE_MAX_CNC ? sobrante : 0;
         const cargas = completas + (sobrante > 0 && subCNC === 0 ? 1 : 0);
         const subCarrusel = subB - subCNC;
-        const tCorteH = (r.tIndiv * (r.cantTotal + 4 * cargas)) / 60;
+        const ciclosCup = ciclosCupula(r.esp);
+        const tCupulaH = (r.tIndiv * ciclosCup * cargas) / 60;
+        const tCorteH = (r.tIndiv * r.cantTotal) / 60 + tCupulaH;
         const tCargaDescargaH = (subCarrusel * ((TIEMPO_CARGA_CICLO_SEG[centro] || 0) + (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0))) / 3600;
         return {
           material: r.material, descripcion: r.descripcion, dens: r.dens, densVal,
           tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, alturaTotal: r.esp * r.cantTotal,
-          unidadesPorSub, subB, capGiro, cargas, subCNC,
+          unidadesPorSub, subB, capGiro, cargas, subCNC, ciclosCup, cupulaCm: alturaCupulaCm(r.esp), tCupulaH,
           ocupacion: cargas > 0 && capGiro > 0 ? subCarrusel / (cargas * capGiro) : 0,
           tCorteH, tCargaDescargaH, tTotalH: tCorteH + tCargaDescargaH,
           longitudM: (subB * r.ancho) / 100,
@@ -2646,6 +2662,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
             cargas: items.reduce((s, f) => s + f.cargas, 0),
             subCNC: items.reduce((s, f) => s + f.subCNC, 0),
             tCorteH: items.reduce((s, f) => s + f.tCorteH, 0),
+            tCupulaH: items.reduce((s, f) => s + f.tCupulaH, 0),
             tCargaDescargaH: items.reduce((s, f) => s + f.tCargaDescargaH, 0),
             tTotalH: items.reduce((s, f) => s + f.tTotalH, 0),
             metros,
@@ -7021,11 +7038,21 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
         <div className="mt-6">
           <TabsContent value="resumen" className="animate-in fade-in duration-300">{renderDashboard('UIO')}{renderDashboard('GYE')}</TabsContent>
           <TabsContent value="subBloquesT8" className="animate-in fade-in duration-300 space-y-8 text-left">
-            <p className="text-[11px] text-slate-500">
-              Parte de la necesidad de <b>1 · Necesidades Planta</b> (solo carrusel). T. corte = corte (T. Indiv KPI + 4 ciclos de cúpula por carga) + carga/descarga de sub-bloques.
-              {' '}Capacidad por giro según el ancho; sobrante de ≤ {SUBBLOQUES_SOBRANTE_MAX_CNC} sub-bloque(s) va a CNC. Bloque madre = {LARGO_BLOQUE_M} m.
-              {' '}Ocupación baja (&lt; 60%) = la carga paga los 4 ciclos de cúpula con poco material.
-            </p>
+            {/* Modelo del bloque: de dónde sale la altura útil y la cúpula (valores por verificar en planta). */}
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 flex flex-wrap items-center gap-3 text-xs">
+              <span className="font-black uppercase text-slate-500 text-[10px]">Modelo de bloque</span>
+              <span className="px-3 py-1.5 rounded-xl bg-slate-100 font-black">Altura bloque {ALTURA_BLOQUE_CM} cm</span>
+              <span className="text-slate-400">−</span>
+              <span className="px-3 py-1.5 rounded-xl bg-amber-100 text-amber-900 font-black">Cúpula ≈ {CUPULA_CM} cm (máx. {CUPULA_MAX_CM})</span>
+              <span className="text-slate-400">=</span>
+              <span className="px-3 py-1.5 rounded-xl bg-emerald-100 text-emerald-900 font-black">Altura útil {ALTURA_UTIL_CM} cm</span>
+              <span className="text-slate-400">·</span>
+              <span className="text-slate-500">D ≥ 28: útil 85 cm · Bloque madre {LARGO_BLOQUE_M} m · Sobrante ≤ {SUBBLOQUES_SOBRANTE_MAX_CNC} sub-bloque → CNC</span>
+              <p className="w-full text-[11px] text-slate-500">
+                Parte de la necesidad de <b>1 · Necesidades Planta</b> (solo carrusel). Cúpula por carga = ciclos al espesor de la lámina hasta cubrir ~{CUPULA_CM} cm sin pasar de {CUPULA_MAX_CM} cm
+                (0.8 → 5 ciclos · 1 → 4 · 2 → 2 · ≥ 3 → 1). T. corte = láminas + cúpula (T. Indiv KPI) + carga/descarga. Ocupación &lt; 60% = carga con poco material para los ciclos que paga.
+              </p>
+            </div>
             {(['1000', '2000'] as const).map(centro => {
               const grupos = subBloquesT8PorCentro[centro];
               const th = 'px-2 py-2 border-r border-slate-200 text-[10px] uppercase font-black';
@@ -7033,6 +7060,22 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               return (
                 <div key={centro} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-x-auto">
                   <div className="px-4 py-3 font-black text-indigo-900 uppercase text-sm border-b">Sub-bloques — {centro === '1000' ? 'Quito' : 'Guayaquil'}</div>
+                  {grupos.length > 0 && (
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3 p-4 border-b border-gray-100">
+                      {[
+                        { l: 'Horas carrusel', v: grupos.reduce((s, g) => s + g.tTotalH, 0).toFixed(1), c: 'text-emerald-700' },
+                        { l: 'de ellas cúpula', v: grupos.reduce((s, g) => s + g.tCupulaH, 0).toFixed(1) + ' h', c: 'text-amber-700' },
+                        { l: 'Sub-bloques', v: String(grupos.reduce((s, g) => s + g.subB, 0)), c: 'text-indigo-900' },
+                        { l: 'Cargas CR · CNC', v: `${grupos.reduce((s, g) => s + g.cargas, 0)} · ${grupos.reduce((s, g) => s + g.subCNC, 0)}`, c: 'text-indigo-900' },
+                        { l: 'Bloques necesarios', v: String(grupos.reduce((s, g) => s + Math.ceil(g.bloques - 1e-9), 0)), c: 'text-pink-700' },
+                      ].map(k => (
+                        <div key={k.l} className="rounded-xl bg-slate-50 px-3 py-2">
+                          <div className="text-[10px] uppercase font-black text-slate-400">{k.l}</div>
+                          <div className={`text-lg font-black ${k.c}`}>{k.v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {grupos.length === 0 ? (
                     <div className="p-4 text-xs text-slate-400">Sin necesidades de carrusel. Genera primero las Necesidades Planta.</div>
                   ) : (
@@ -7048,6 +7091,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           <th className={`${th} bg-emerald-50`}>T. corte (h)</th><th className={`${th} bg-emerald-100`}>Horas / densidad</th>
                           <th className={`${th} bg-white`}>Longitud (m)</th><th className={`${th} bg-slate-100`}>m por densidad</th><th className={`${th} bg-pink-50`}>N° bloques / densidad</th>
                           <th className={`${th} bg-slate-50 text-slate-400`}>Und / sub-bloque</th><th className={`${th} bg-slate-50 text-slate-400`}>Cap. giro</th><th className={`${th} bg-slate-50 text-slate-400`}>Ocupación</th>
+                          <th className={`${th} bg-amber-50 text-amber-700`}>Cúpula ciclos · cm</th><th className={`${th} bg-amber-50 text-amber-700`}>Cúpula (h)</th>
                           <th className={`${th} bg-slate-50 text-slate-400`}>Corte (h)</th><th className={`${th} bg-slate-50 text-slate-400`}>Carga / desc. (h)</th>
                         </tr>
                       </thead>
@@ -7069,6 +7113,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                               {i === 0 && <td rowSpan={n} className={`${grupoCell} bg-pink-50 text-pink-900 text-sm`}>{g.bloques.toFixed(1)}<div className="text-[9px] font-bold opacity-60">{Math.ceil(g.bloques - 1e-9)} enteros</div></td>}
                               <td className={`${td} text-slate-400`}>{f.unidadesPorSub}</td><td className={`${td} text-slate-400`}>{f.capGiro}</td>
                               <td className={`${td} ${f.ocupacion < 0.6 ? 'text-orange-600 font-black' : 'text-slate-400'}`}>{(f.ocupacion * 100).toFixed(0)}%</td>
+                              <td className={`${td} text-amber-700`}>{f.ciclosCup} · {f.cupulaCm.toFixed(1)}</td><td className={`${td} text-amber-700`}>{f.sinTiempo ? '—' : f.tCupulaH.toFixed(2)}</td>
                               <td className={`${td} text-slate-400`}>{f.sinTiempo ? '—' : f.tCorteH.toFixed(2)}</td><td className={`${td} text-slate-400`}>{f.tCargaDescargaH.toFixed(2)}</td>
                             </tr>
                           );
@@ -7080,7 +7125,9 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           <td className={td}></td><td className={`${td} text-center`}>{grupos.reduce((s, g) => s + g.tTotalH, 0).toFixed(1)}</td>
                           <td className={td}></td><td className={`${td} text-center`}>{grupos.reduce((s, g) => s + g.metros, 0).toFixed(0)}</td>
                           <td className={`${td} text-center`}>{grupos.reduce((s, g) => s + Math.ceil(g.bloques - 1e-9), 0)} enteros</td>
-                          <td className={td} colSpan={5}></td>
+                          <td className={td} colSpan={4}></td>
+                          <td className={`${td} text-amber-700`}>{grupos.reduce((s, g) => s + g.tCupulaH, 0).toFixed(2)}</td>
+                          <td className={td} colSpan={2}></td>
                         </tr>
                       </tbody>
                     </table>
