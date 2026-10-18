@@ -7022,7 +7022,8 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
           <TabsContent value="resumen" className="animate-in fade-in duration-300">{renderDashboard('UIO')}{renderDashboard('GYE')}</TabsContent>
           <TabsContent value="subBloquesT8" className="animate-in fade-in duration-300 space-y-8 text-left">
             <p className="text-[11px] text-slate-500">
-              Parte de la necesidad de <b>1 · Necesidades Planta</b> (solo carrusel). Capacidad por giro según el ancho; sobrante de ≤ {SUBBLOQUES_SOBRANTE_MAX_CNC} sub-bloque(s) va a CNC. Bloque madre = {LARGO_BLOQUE_M} m.
+              Parte de la necesidad de <b>1 · Necesidades Planta</b> (solo carrusel). T. corte = corte (T. Indiv KPI + 4 ciclos de cúpula por carga) + carga/descarga de sub-bloques.
+              {' '}Capacidad por giro según el ancho; sobrante de ≤ {SUBBLOQUES_SOBRANTE_MAX_CNC} sub-bloque(s) va a CNC. Bloque madre = {LARGO_BLOQUE_M} m.
               {' '}Ocupación baja (&lt; 60%) = la carga paga los 4 ciclos de cúpula con poco material.
             </p>
             {(['1000', '2000'] as const).map(centro => {
@@ -7035,37 +7036,52 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                   {grupos.length === 0 ? (
                     <div className="p-4 text-xs text-slate-400">Sin necesidades de carrusel. Genera primero las Necesidades Planta.</div>
                   ) : (
-                    <table className="w-full text-[11px]">
-                      <thead className="bg-slate-50 text-slate-600">
+                    // Mismo orden que el Excel del usuario (IMG B): Tamaño · Espesor · Cantidad · Sub-bloques ·
+                    // Cargas CR · Cargas CNC · T. corte · Horas/densidad · Longitud · m/densidad ·
+                    // Bloques/densidad (estas 3 por densidad, celda combinada). Detalle del cálculo al final.
+                    <table className="w-full text-[11px] border-collapse">
+                      <thead className="text-slate-600">
                         <tr>
-                          <th className={th}>Material</th><th className={th}>Tamaño</th><th className={th}>Espesor</th><th className={th}>Cant. láminas UN</th>
-                          <th className={th}>Altura total</th><th className={th}>Und/Sub-bloque</th><th className={th}>N° Sub-bloques</th><th className={th}>Cap. giro</th>
-                          <th className={th}>N° Cargas CR-01/03/04</th><th className={th}>Sub-bloques CNC</th><th className={th}>Ocupación</th>
-                          <th className={th}>T. corte (h)</th><th className={th}>T. carga/desc. (h)</th><th className={th}>T. total (h)</th><th className={th}>Longitud (m)</th>
+                          <th className={`${th} bg-slate-50`}>Densidad</th><th className={`${th} bg-slate-50`}>Material</th><th className={`${th} bg-slate-50`}>Tamaño</th><th className={`${th} bg-slate-50`}>Espesor</th>
+                          <th className={`${th} bg-slate-100`}>Cantidad láminas UN</th><th className={`${th} bg-indigo-50`}>N° Sub-bloques</th>
+                          <th className={`${th} bg-indigo-50`}>N° Carga CR-01/03/04</th><th className={`${th} bg-indigo-50`}>N° Carga sub-bloques CNC</th>
+                          <th className={`${th} bg-emerald-50`}>T. corte (h)</th><th className={`${th} bg-emerald-100`}>Horas / densidad</th>
+                          <th className={`${th} bg-white`}>Longitud (m)</th><th className={`${th} bg-slate-100`}>m por densidad</th><th className={`${th} bg-pink-50`}>N° bloques / densidad</th>
+                          <th className={`${th} bg-slate-50 text-slate-400`}>Und / sub-bloque</th><th className={`${th} bg-slate-50 text-slate-400`}>Cap. giro</th><th className={`${th} bg-slate-50 text-slate-400`}>Ocupación</th>
+                          <th className={`${th} bg-slate-50 text-slate-400`}>Corte (h)</th><th className={`${th} bg-slate-50 text-slate-400`}>Carga / desc. (h)</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {grupos.map(g => (
-                          <React.Fragment key={g.dens}>
-                            {g.items.map(f => (
-                              <tr key={f.material} className="border-t border-slate-100">
-                                <td className="px-2 py-1.5 border-r border-slate-100" title={f.descripcion}>{f.material}<div className="text-[9px] text-slate-400 truncate max-w-[220px]">{f.descripcion}</div></td>
-                                <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td><td className={td}>{formatNum(f.cant, 0)}</td>
-                                <td className={td}>{formatNum(f.alturaTotal, 0)}</td><td className={td}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td><td className={td}>{f.capGiro}</td>
-                                <td className={`${td} font-black`}>{f.cargas}</td><td className={td}>{f.subCNC || '—'}</td>
-                                <td className={`${td} ${f.ocupacion < 0.6 ? 'text-orange-600 font-black' : ''}`}>{(f.ocupacion * 100).toFixed(0)}%</td>
-                                <td className={td} title={f.sinTiempo ? 'Sin T. Indiv (KPI) para este material' : undefined}>{f.sinTiempo ? '—' : f.tCorteH.toFixed(2)}</td>
-                                <td className={td}>{f.tCargaDescargaH.toFixed(2)}</td><td className={`${td} font-black`}>{f.tTotalH.toFixed(2)}</td><td className={td}>{f.longitudM.toFixed(1)}</td>
-                              </tr>
-                            ))}
-                            <tr className="bg-indigo-50 font-black text-indigo-900 border-t border-indigo-200">
-                              <td className="px-2 py-2" colSpan={3}>Densidad D{g.dens} — {g.bloques.toFixed(1)} bloques ({Math.ceil(g.bloques - 1e-9)} enteros)</td>
-                              <td className={td}>{formatNum(g.cant, 0)}</td><td className={td}></td><td className={td}></td><td className={td}>{g.subB}</td><td className={td}></td>
-                              <td className={td}>{g.cargas}</td><td className={td}>{g.subCNC || '—'}</td><td className={td}></td>
-                              <td className={td}>{g.tCorteH.toFixed(2)}</td><td className={td}>{g.tCargaDescargaH.toFixed(2)}</td><td className={td}>{g.tTotalH.toFixed(2)}</td><td className={td}>{g.metros.toFixed(1)}</td>
+                        {grupos.map(g => g.items.map((f, i) => {
+                          const n = g.items.length;
+                          const grupoCell = 'px-2 py-1.5 border-r border-slate-200 text-center font-black align-middle';
+                          return (
+                            <tr key={f.material} className={i === 0 ? 'border-t-2 border-indigo-200' : 'border-t border-slate-100'}>
+                              {i === 0 && <td rowSpan={n} className={`${grupoCell} bg-slate-50 text-indigo-900`}>D{g.dens}</td>}
+                              <td className="px-2 py-1.5 border-r border-slate-100" title={f.descripcion}>{f.material}<div className="text-[9px] text-slate-400 truncate max-w-[200px]">{f.descripcion}</div></td>
+                              <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td>
+                              <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}</td>
+                              <td className={`${td} font-black`}>{f.subB}</td><td className={`${td} font-black`}>{f.cargas}</td><td className={td}>{f.subCNC}</td>
+                              <td className={`${td} bg-emerald-50/50`} title={f.sinTiempo ? 'Sin T. Indiv (KPI) para este material' : undefined}>{f.sinTiempo ? '—' : f.tTotalH.toFixed(2)}</td>
+                              {i === 0 && <td rowSpan={n} className={`${grupoCell} bg-emerald-100/60 text-emerald-900 text-sm`}>{g.tTotalH.toFixed(1)}</td>}
+                              <td className={td}>{f.longitudM.toFixed(0)}</td>
+                              {i === 0 && <td rowSpan={n} className={`${grupoCell} bg-slate-100 text-sm`}>{g.metros.toFixed(0)}</td>}
+                              {i === 0 && <td rowSpan={n} className={`${grupoCell} bg-pink-50 text-pink-900 text-sm`}>{g.bloques.toFixed(1)}<div className="text-[9px] font-bold opacity-60">{Math.ceil(g.bloques - 1e-9)} enteros</div></td>}
+                              <td className={`${td} text-slate-400`}>{f.unidadesPorSub}</td><td className={`${td} text-slate-400`}>{f.capGiro}</td>
+                              <td className={`${td} ${f.ocupacion < 0.6 ? 'text-orange-600 font-black' : 'text-slate-400'}`}>{(f.ocupacion * 100).toFixed(0)}%</td>
+                              <td className={`${td} text-slate-400`}>{f.sinTiempo ? '—' : f.tCorteH.toFixed(2)}</td><td className={`${td} text-slate-400`}>{f.tCargaDescargaH.toFixed(2)}</td>
                             </tr>
-                          </React.Fragment>
-                        ))}
+                          );
+                        }))}
+                        <tr className="border-t-2 border-indigo-300 bg-indigo-50 font-black text-indigo-900">
+                          <td className="px-2 py-2" colSpan={4}>Total {centro === '1000' ? 'Quito' : 'Guayaquil'}</td>
+                          <td className={td}>{formatNum(grupos.reduce((s, g) => s + g.cant, 0), 0)}</td>
+                          <td className={td}>{grupos.reduce((s, g) => s + g.subB, 0)}</td><td className={td}>{grupos.reduce((s, g) => s + g.cargas, 0)}</td><td className={td}>{grupos.reduce((s, g) => s + g.subCNC, 0)}</td>
+                          <td className={td}></td><td className={`${td} text-center`}>{grupos.reduce((s, g) => s + g.tTotalH, 0).toFixed(1)}</td>
+                          <td className={td}></td><td className={`${td} text-center`}>{grupos.reduce((s, g) => s + g.metros, 0).toFixed(0)}</td>
+                          <td className={`${td} text-center`}>{grupos.reduce((s, g) => s + Math.ceil(g.bloques - 1e-9), 0)} enteros</td>
+                          <td className={td} colSpan={5}></td>
+                        </tr>
                       </tbody>
                     </table>
                   )}
