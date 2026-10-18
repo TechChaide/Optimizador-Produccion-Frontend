@@ -787,6 +787,24 @@ interface MetricasCapacidad {
   sinGeometria: boolean;
 }
 
+// Sub-bloques que caben en una carga (giro) del carrusel: cuerdas de un polígono inscrito en la
+// circunferencia del carrusel (ancho del sub-bloque + 10 cm de separación), no división lineal.
+const capacidadGiroCarrusel = (ancho: number): number => {
+  const gap = 10;
+  const radioCarrusel = CAROUSEL_DIAMETER_CM / 2;
+  const cuerdaReq = ancho + gap;
+  return cuerdaReq > 0 && cuerdaReq < 2 * radioCarrusel
+    ? Math.floor(Math.PI / Math.asin(cuerdaReq / (2 * radioCarrusel)))
+    : (cuerdaReq > 0 ? 1 : 0);
+};
+
+// Tab "SUB-BLOQUES-T8" (usuario 2026-10-17): sobrante de la última carga que NO justifica otro giro
+// del carrusel y se manda a la CNC (Excel del usuario: 36 sub-bloques = 5 cargas + 1 a CNC). Ajustable.
+const SUBBLOQUES_SOBRANTE_MAX_CNC = 1;
+// Largo del bloque madre (m) para convertir metros de sub-bloque en bloques necesarios — mismo valor
+// que Formulación (BLOCK_LENGTH_METERS).
+const LARGO_BLOQUE_M = 20;
+
 // Física de corte en carrusel (altura útil por densidad, subbloques, capacidad de giro, cargas y
 // tiempo total) — extraída de auditMapper para poder reutilizarla también con filas de "Necesidades
 // Planta" (ver necesidadCapacidadMapper), que no vienen de una orden real sino de un PlanGrupo P2/PFF.
@@ -823,12 +841,7 @@ const calcularMetricasCapacidad = (
   // Sin medición de carga en el centro (Guayaquil todavía), la carga no suma tiempo propio.
   const tiempoCargaH = (subB * (TIEMPO_CARGA_CICLO_SEG[centro] || 0)) / 3600;
 
-  const gap = 10;
-  const radioCarrusel = CAROUSEL_DIAMETER_CM / 2;
-  const cuerdaReq = info.ancho + gap;
-  const capGiro = cuerdaReq > 0 && cuerdaReq < 2 * radioCarrusel
-    ? Math.floor(Math.PI / Math.asin(cuerdaReq / (2 * radioCarrusel)))
-    : (cuerdaReq > 0 ? 1 : 0);
+  const capGiro = capacidadGiroCarrusel(info.ancho);
 
   const undBatch = unidadesPorSubBloque * Math.min(subB, capGiro);
   const nLoads = capGiro > 0 ? Math.ceil(subB / capGiro) : 0;
@@ -2576,6 +2589,72 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // de tabla que FERT/Provisionales (ver renderAuditTable), un bloque por centro.
   const necesidadCapacidadUIO = useMemo(() => resultadoRestaurado?.necesidadCapacidad['1000'] ?? necesidadCapacidadMapper(necesidadesPlantaConsolidada, '1000'), [necesidadCapacidadMapper, necesidadesPlantaConsolidada, resultadoRestaurado]);
   const necesidadCapacidadGYE = useMemo(() => resultadoRestaurado?.necesidadCapacidad['2000'] ?? necesidadCapacidadMapper(necesidadesPlantaConsolidada, '2000'), [necesidadCapacidadMapper, necesidadesPlantaConsolidada, resultadoRestaurado]);
+
+  // Tab "SUB-BLOQUES-T8" (usuario 2026-10-17, Excel "IMG B"): segunda etapa de la capacidad de
+  // Necesidades Planta (etapa 1 = necesidadCapacidadUIO/GYE). Solo carrusel (sin verticales). Por
+  // material (consolidando las áreas que piden lo mismo) y agrupado por densidad:
+  //  - Sub-bloques = ⌈cantidad / ⌊altura útil / espesor⌋⌉ (misma regla que calcularMetricasCapacidad).
+  //  - Cargas carrusel (CR-01/03/04) = giros completos + 1 por el sobrante, salvo que el sobrante sea
+  //    ≤ SUBBLOQUES_SOBRANTE_MAX_CNC: esos sub-bloques van a la CNC y no pagan otro giro.
+  //  - T. corte = T. Indiv × (unidades + 4 ciclos de cúpula × carga); carga/descarga por sub-bloque
+  //    del carrusel (TIEMPO_CARGA/DESCARGA_CICLO_SEG).
+  //  - Ocupación = sub-bloques en carrusel ÷ (cargas × capacidad por giro): una carga medio vacía paga
+  //    los mismos ciclos de cúpula y por eso el tiempo no refleja la cantidad cortada.
+  //  - Longitud (m) = sub-bloques × ancho; bloques = Σ m de la densidad ÷ LARGO_BLOQUE_M.
+  const subBloquesT8PorCentro = useMemo(() => {
+    const calcular = (rows: UnifiedRow[], centro: string) => {
+      const porMaterial = new Map<string, UnifiedRow & { cantTotal: number }>();
+      rows.forEach(r => {
+        if (r.isAlterna || r.esp <= 0 || r.cantUnidadReal <= 0) return;
+        const prev = porMaterial.get(r.material);
+        if (prev) prev.cantTotal += r.cantUnidadReal;
+        else porMaterial.set(r.material, { ...r, cantTotal: r.cantUnidadReal });
+      });
+      const filas = Array.from(porMaterial.values()).map(r => {
+        const densVal = safeNum(r.dens);
+        const unidadesPorSub = Math.max(1, Math.floor((densVal >= 28 ? 85 : 103) / r.esp));
+        const subB = Math.ceil(r.cantTotal / unidadesPorSub - 1e-9);
+        const capGiro = capacidadGiroCarrusel(r.ancho);
+        const completas = capGiro > 0 ? Math.floor(subB / capGiro) : 0;
+        const sobrante = capGiro > 0 ? subB % capGiro : subB;
+        const subCNC = completas > 0 && sobrante > 0 && sobrante <= SUBBLOQUES_SOBRANTE_MAX_CNC ? sobrante : 0;
+        const cargas = completas + (sobrante > 0 && subCNC === 0 ? 1 : 0);
+        const subCarrusel = subB - subCNC;
+        const tCorteH = (r.tIndiv * (r.cantTotal + 4 * cargas)) / 60;
+        const tCargaDescargaH = (subCarrusel * ((TIEMPO_CARGA_CICLO_SEG[centro] || 0) + (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0))) / 3600;
+        return {
+          material: r.material, descripcion: r.descripcion, dens: r.dens, densVal,
+          tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, alturaTotal: r.esp * r.cantTotal,
+          unidadesPorSub, subB, capGiro, cargas, subCNC,
+          ocupacion: cargas > 0 && capGiro > 0 ? subCarrusel / (cargas * capGiro) : 0,
+          tCorteH, tCargaDescargaH, tTotalH: tCorteH + tCargaDescargaH,
+          longitudM: (subB * r.ancho) / 100,
+          sinTiempo: r.tIndiv <= 0,
+        };
+      });
+      const porDensidad = new Map<string, typeof filas>();
+      filas.forEach(f => porDensidad.set(f.dens, [...(porDensidad.get(f.dens) || []), f]));
+      return Array.from(porDensidad.entries())
+        .sort((a, b) => safeNum(a[0]) - safeNum(b[0]))
+        .map(([dens, items]) => {
+          const metros = items.reduce((s, f) => s + f.longitudM, 0);
+          return {
+            dens,
+            items: items.sort((a, b) => a.tamano.localeCompare(b.tamano) || a.esp - b.esp),
+            cant: items.reduce((s, f) => s + f.cant, 0),
+            subB: items.reduce((s, f) => s + f.subB, 0),
+            cargas: items.reduce((s, f) => s + f.cargas, 0),
+            subCNC: items.reduce((s, f) => s + f.subCNC, 0),
+            tCorteH: items.reduce((s, f) => s + f.tCorteH, 0),
+            tCargaDescargaH: items.reduce((s, f) => s + f.tCargaDescargaH, 0),
+            tTotalH: items.reduce((s, f) => s + f.tTotalH, 0),
+            metros,
+            bloques: metros / LARGO_BLOQUE_M,
+          };
+        });
+    };
+    return { '1000': calcular(necesidadCapacidadUIO, '1000'), '2000': calcular(necesidadCapacidadGYE, '2000') };
+  }, [necesidadCapacidadUIO, necesidadCapacidadGYE]);
 
   // Capacidad Operativa Nivel 2 (red de seguridad, ciclo atrasado un día — ver renderDashboard): SOLO
   // P1/PFF (necesidadPFFNivel2Data, hoy+1 día hábil). Venta Externa-Espumas NO tiene Nivel 2 propio
@@ -6933,14 +7012,67 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             Orden del flujo, igual en los 4 módulos (usuario 2026-10-08): 1 necesidades / P2 → 2 respuesta
             (P3 y salida a SAP) → 3 resumen (capacidad, reporte y planes guardados); consultas al final sin
             número. Se abre en el resumen (paso 3), donde se carga el último plan guardado. */}
-        <TabsList className="grid grid-cols-4 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
-          {[ { v: 'necesidadesPlanta', l: '1 · Necesidades Planta', i: Database }, { v: 'respuestaP3', l: '2 · Respuesta P3', i: Save }, { v: 'resumen', l: '3 · Capacidad Operativa', i: LayoutDashboard }, { v: 'mantenimiento', l: 'Mantenimiento SAP', i: Wrench },
+        <TabsList className="grid grid-cols-5 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
+          {[ { v: 'necesidadesPlanta', l: '1 · Necesidades Planta', i: Database }, { v: 'respuestaP3', l: '2 · Respuesta P3', i: Save }, { v: 'resumen', l: '3 · Capacidad Operativa', i: LayoutDashboard }, { v: 'subBloquesT8', l: 'Sub-Bloques-T8', i: Scissors }, { v: 'mantenimiento', l: 'Mantenimiento SAP', i: Wrench },
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[10px] font-black uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-lg data-[state=active]:text-red-600 rounded-xl"><tab.i className="w-4 h-4" /> {tab.l}</TabsTrigger>
           ))}
         </TabsList>
         <div className="mt-6">
           <TabsContent value="resumen" className="animate-in fade-in duration-300">{renderDashboard('UIO')}{renderDashboard('GYE')}</TabsContent>
+          <TabsContent value="subBloquesT8" className="animate-in fade-in duration-300 space-y-8 text-left">
+            <p className="text-[11px] text-slate-500">
+              Parte de la necesidad de <b>1 · Necesidades Planta</b> (solo carrusel). Capacidad por giro según el ancho; sobrante de ≤ {SUBBLOQUES_SOBRANTE_MAX_CNC} sub-bloque(s) va a CNC. Bloque madre = {LARGO_BLOQUE_M} m.
+              {' '}Ocupación baja (&lt; 60%) = la carga paga los 4 ciclos de cúpula con poco material.
+            </p>
+            {(['1000', '2000'] as const).map(centro => {
+              const grupos = subBloquesT8PorCentro[centro];
+              const th = 'px-2 py-2 border-r border-slate-200 text-[10px] uppercase font-black';
+              const td = 'px-2 py-1.5 border-r border-slate-100 text-right font-mono';
+              return (
+                <div key={centro} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-x-auto">
+                  <div className="px-4 py-3 font-black text-indigo-900 uppercase text-sm border-b">Sub-bloques — {centro === '1000' ? 'Quito' : 'Guayaquil'}</div>
+                  {grupos.length === 0 ? (
+                    <div className="p-4 text-xs text-slate-400">Sin necesidades de carrusel. Genera primero las Necesidades Planta.</div>
+                  ) : (
+                    <table className="w-full text-[11px]">
+                      <thead className="bg-slate-50 text-slate-600">
+                        <tr>
+                          <th className={th}>Material</th><th className={th}>Tamaño</th><th className={th}>Espesor</th><th className={th}>Cant. láminas UN</th>
+                          <th className={th}>Altura total</th><th className={th}>Und/Sub-bloque</th><th className={th}>N° Sub-bloques</th><th className={th}>Cap. giro</th>
+                          <th className={th}>N° Cargas CR-01/03/04</th><th className={th}>Sub-bloques CNC</th><th className={th}>Ocupación</th>
+                          <th className={th}>T. corte (h)</th><th className={th}>T. carga/desc. (h)</th><th className={th}>T. total (h)</th><th className={th}>Longitud (m)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {grupos.map(g => (
+                          <React.Fragment key={g.dens}>
+                            {g.items.map(f => (
+                              <tr key={f.material} className="border-t border-slate-100">
+                                <td className="px-2 py-1.5 border-r border-slate-100" title={f.descripcion}>{f.material}<div className="text-[9px] text-slate-400 truncate max-w-[220px]">{f.descripcion}</div></td>
+                                <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td><td className={td}>{formatNum(f.cant, 0)}</td>
+                                <td className={td}>{formatNum(f.alturaTotal, 0)}</td><td className={td}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td><td className={td}>{f.capGiro}</td>
+                                <td className={`${td} font-black`}>{f.cargas}</td><td className={td}>{f.subCNC || '—'}</td>
+                                <td className={`${td} ${f.ocupacion < 0.6 ? 'text-orange-600 font-black' : ''}`}>{(f.ocupacion * 100).toFixed(0)}%</td>
+                                <td className={td} title={f.sinTiempo ? 'Sin T. Indiv (KPI) para este material' : undefined}>{f.sinTiempo ? '—' : f.tCorteH.toFixed(2)}</td>
+                                <td className={td}>{f.tCargaDescargaH.toFixed(2)}</td><td className={`${td} font-black`}>{f.tTotalH.toFixed(2)}</td><td className={td}>{f.longitudM.toFixed(1)}</td>
+                              </tr>
+                            ))}
+                            <tr className="bg-indigo-50 font-black text-indigo-900 border-t border-indigo-200">
+                              <td className="px-2 py-2" colSpan={3}>Densidad D{g.dens} — {g.bloques.toFixed(1)} bloques ({Math.ceil(g.bloques - 1e-9)} enteros)</td>
+                              <td className={td}>{formatNum(g.cant, 0)}</td><td className={td}></td><td className={td}></td><td className={td}>{g.subB}</td><td className={td}></td>
+                              <td className={td}>{g.cargas}</td><td className={td}>{g.subCNC || '—'}</td><td className={td}></td>
+                              <td className={td}>{g.tCorteH.toFixed(2)}</td><td className={td}>{g.tCargaDescargaH.toFixed(2)}</td><td className={td}>{g.tTotalH.toFixed(2)}</td><td className={td}>{g.metros.toFixed(1)}</td>
+                            </tr>
+                          </React.Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              );
+            })}
+          </TabsContent>
           <TabsContent value="necesidadesPlanta" className="animate-in fade-in duration-300 space-y-6 text-left">
             <div className="flex items-center justify-end gap-2 flex-wrap">
               {/* "Generar Necesidades · P1/PFF" ya no es un botón aparte — se combinó en "Sincronizar y
