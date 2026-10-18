@@ -817,14 +817,6 @@ const ALTURA_UTIL_CM = ALTURA_BLOQUE_CM - CUPULA_MAX_CM;
 const ciclosCupula = (esp: number): number =>
   esp > 0 ? Math.max(1, Math.min(Math.ceil(CUPULA_CM / esp - 1e-9), Math.floor(CUPULA_MAX_CM / esp + 1e-9))) : 0;
 const alturaCupulaCm = (esp: number): number => (esp > CUPULA_MAX_CM ? CUPULA_CM : ciclosCupula(esp) * esp);
-// Apertura del bloque madre por medida de la lámina (usuario 2026-10-17): la menor apertura en la que cabe
-// la medida mayor (100X200 → 206, 103X188 → 194.5). Más grande que todas → "Sin apertura".
-const APERTURAS_BLOQUE = [194.5, 206, 219, 228];
-const aperturaPorMedida = (ancho: number, largo: number): string => {
-  const medida = Math.max(ancho, largo);
-  const ap = medida > 0 ? APERTURAS_BLOQUE.find(a => medida <= a) : undefined;
-  return ap ? String(ap) : 'Sin apertura';
-};
 
 // Física de corte en carrusel (altura útil por densidad, subbloques, capacidad de giro, cargas y
 // tiempo total) — extraída de auditMapper para poder reutilizarla también con filas de "Necesidades
@@ -2624,24 +2616,25 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   //    los mismos ciclos de cúpula y por eso el tiempo no refleja la cantidad cortada.
   //  - Longitud (m) = sub-bloques × ancho; bloques = Σ m de la densidad+apertura ÷ LARGO_BLOQUE_M (cada
   //    apertura es un bloque madre distinto, así que los bloques se cuentan por apertura y se suman).
-  //  - Apertura (194.5/206/219/228): de la CATEGORÍA SAP del material (CuboInventarios, ej.
-  //    "…_206_…", pedido del usuario 2026-10-17), del mismo centro y si no de cualquier centro. Solo
-  //    si la categoría no la trae se estima POR MEDIDA (menor apertura donde cabe la medida mayor) y
-  //    la fila queda marcada para revisar la categoría en SAP.
+  //  - Apertura: de la CATEGORÍA de las órdenes FERT del material (getOrdenesFert, ej. 30021799
+  //    "CM-LAM-D12SL-194.5", 30009873 "CM-LAM-D12SL-206" — usuario 2026-10-17), del mismo centro y si
+  //    no de cualquier centro. Sin categoría → "Sin apertura" (NO se aproxima por medida: el usuario
+  //    confirmó que la medida no determina la apertura).
   //  - Tiempo total = láminas (T. Indiv × UN) + cúpula (T. Indiv × ciclos × cargas) + carga/descarga.
   const aperturaCategoriaPorCentro = useMemo(() => {
     const porCentro: Record<string, Map<string, string>> = { '1000': new Map(), '2000': new Map() };
     const cualquierCentro = new Map<string, string>();
-    cuboInventarios.forEach(inv => {
-      const ap = getProp(inv, ['Categoria', 'CATEGORIA']).match(/194\.5|206|219|228/);
-      const code = ap ? extractMaterialInfo(inv).code : '';
+    ordenesFert.forEach(o => {
+      // Segmento numérico de 3 cifras de la categoría: "CM-LAM-D12SL-194.5" → 194.5, "…-206" → 206.
+      const ap = getProp(o, ['CATEGORIA', 'Categoria', 'CATEGORIA_DESC']).split(/[-_\s]/).reverse().find(s => /^\d{3}(\.\d+)?$/.test(s));
+      const code = ap ? extractMaterialInfo(o).code : '';
       if (!ap || !code) return;
-      if (!cualquierCentro.has(code)) cualquierCentro.set(code, ap[0]);
-      const map = porCentro[String(getProp(inv, ['Centro', 'CENTRO', 'centro'])).trim()];
-      if (map && !map.has(code)) map.set(code, ap[0]);
+      if (!cualquierCentro.has(code)) cualquierCentro.set(code, ap);
+      const map = porCentro[String(getProp(o, ['CENTRO', 'Centro', 'centro'])).trim()];
+      if (map && !map.has(code)) map.set(code, ap);
     });
     return { porCentro, cualquierCentro };
-  }, [cuboInventarios, extractMaterialInfo]);
+  }, [ordenesFert, extractMaterialInfo]);
 
   const subBloquesT8PorCentro = useMemo(() => {
     const calcular = (rows: UnifiedRow[], centro: string) => {
@@ -2670,8 +2663,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const tCargaDescargaH = (subCarrusel * ((TIEMPO_CARGA_CICLO_SEG[centro] || 0) + (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0))) / 3600;
         return {
           material: r.material, descripcion: r.descripcion, dens: r.dens, densVal,
-          apertura: aperturaCat || (r.apertura !== '—' ? r.apertura : aperturaPorMedida(r.ancho, r.largo)),
-          aperturaPorMedida: !aperturaCat && r.apertura === '—', tLaminasH,
+          apertura: aperturaCat || (r.apertura !== '—' ? r.apertura : 'Sin apertura'), tLaminasH,
           tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, alturaTotal: r.esp * r.cantTotal,
           unidadesPorSub, subB, capGiro, cargas, subCNC, ciclosCup, cupulaCm: alturaCupulaCm(r.esp), tCupulaH,
           ocupacion: cargas > 0 && capGiro > 0 ? subCarrusel / (cargas * capGiro) : 0,
@@ -7182,14 +7174,13 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                       <td className="pl-7 pr-2 py-1.5 border-r border-slate-200" colSpan={3}>
                                         <span className="inline-flex items-center gap-2">{apAbierta ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
                                           {a.apertura === 'Sin apertura' ? <span className="text-orange-600">Sin apertura</span> : `Apertura ${a.apertura}`}
-                                          <span className="text-[9px] font-bold text-slate-600">{a.items.length} mat.</span>
-                                          {a.items.some(f => f.aperturaPorMedida) && <span className="text-[9px] font-bold text-orange-700" title="Sin apertura en la Categoría SAP: estimada por medida. Revisar la categoría del material.">{a.items.filter(f => f.aperturaPorMedida).length} sin categoría</span>}</span>
+                                          <span className="text-[9px] font-bold text-slate-600">{a.items.length} mat.</span></span>
                                       </td>
                                       {filaTotales(a, a.bloques)}
                                     </tr>
                                     {apAbierta && a.items.map(f => (
                                       <tr key={f.material} className="border-t border-slate-100">
-                                        <td className="pl-12 pr-2 py-1.5 border-r border-slate-100" title={f.descripcion}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div>{f.aperturaPorMedida && <div className="text-[9px] font-bold text-orange-700">apertura por medida (sin categoría SAP)</div>}</td>
+                                        <td className="pl-12 pr-2 py-1.5 border-r border-slate-100" title={f.descripcion}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div></td>
                                         <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td>
                                         <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}</td>
                                         <td className={`${td} text-slate-700`}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td>
