@@ -55,6 +55,33 @@ interface Acolchadora {
   maquinas: Maquina[];
 }
 
+// Fila de la vista: una lámina en una máquina, con las referencias de acolchado que la consumen.
+interface FilaLamina {
+  key: string;
+  maquina: string;
+  codigo: string;
+  descripcion: string;
+  pesoUN: number;
+  cantidad: number; // Un/Mtrs planificados de las referencias que usan esta lámina
+  kg: number;
+  rollos: number; // exactos; en pantalla se redondean al entero superior (rollosEnteros)
+  referencias: { material: string; nombre: string; unidad: string; cantidad: number; ordenes: string[]; kgPorUnidad: number; kg: number }[];
+}
+
+interface BloqueAcolchadora {
+  nombre: string;
+  maquinas: string[];
+  cantidad: number;
+  kg: number;
+  rollosUn: number;
+  filas: FilaLamina[];
+  sinLamina: Referencia[];
+}
+
+// Rollos completos que se entregan a la máquina: 11.4 -> 12. El epsilon evita que 12.0000001 por
+// redondeo de punto flotante suba a 13.
+const rollosEnteros = (f: { rollos: number; pesoUN: number }) => (f.pesoUN > 0 ? Math.ceil(f.rollos - 1e-6) : 0);
+
 const safeNum = (val: unknown): number => {
   const n = Number(val);
   return isNaN(n) ? 0 : n;
@@ -222,18 +249,56 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
     });
   }, [ordenes, bom, pesoUN]);
 
-  // Resumen para Laminado: rollos por referencia de lámina, todas las acolchadoras.
+  // Vista única (usuario 2026-10-19): una fila por máquina + lámina dentro de cada acolchadora, en el
+  // orden Máquina · Actividad · Lámina · Kg/Und · Prod Planif · Kg · Rollos [un]. Los rollos se
+  // redondean al entero superior por fila (la máquina recibe rollos completos); el detalle de qué
+  // referencias de acolchado consumen esa lámina queda plegable debajo de la fila.
+  const bloques = useMemo<BloqueAcolchadora[]>(() => acolchadoras.map(a => {
+    const filas = new Map<string, FilaLamina>();
+    const sinLamina: Referencia[] = [];
+    a.maquinas.forEach(m => m.referencias.forEach(r => {
+      if (r.laminas.length === 0) { sinLamina.push(r); return; }
+      r.laminas.forEach(l => {
+        const key = `${m.maquina}|${l.codigo}`;
+        const f = filas.get(key) || { key, maquina: m.maquina, codigo: l.codigo, descripcion: l.descripcion, pesoUN: l.pesoUN, cantidad: 0, kg: 0, rollos: 0, referencias: [] };
+        f.cantidad += r.cantidad;
+        f.kg += l.kg;
+        f.rollos += l.rollos;
+        f.referencias.push({ material: r.material, nombre: r.nombre, unidad: r.unidad, cantidad: r.cantidad, ordenes: r.ordenes, kgPorUnidad: l.kgPorUnidad, kg: l.kg });
+        filas.set(key, f);
+      });
+    }));
+    const lista = Array.from(filas.values()).sort((x, y) => x.maquina.localeCompare(y.maquina) || y.kg - x.kg);
+    return {
+      nombre: a.nombre,
+      maquinas: a.maquinas.map(m => m.maquina),
+      cantidad: a.cantidad,
+      kg: lista.reduce((s, f) => s + f.kg, 0),
+      rollosUn: lista.reduce((s, f) => s + rollosEnteros(f), 0),
+      filas: lista,
+      sinLamina,
+    };
+  }), [acolchadoras]);
+
+  // Resumen para Laminado: qué lámina producir y cuántos rollos entregar a cada acolchadora. Los
+  // rollos por acolchadora son enteros (suma de sus filas máquina+lámina al entero superior) y el total
+  // de la lámina es la suma de esos enteros — lo que realmente sale hacia las máquinas.
   const resumenLaminas = useMemo(() => {
-    const m = new Map<string, { codigo: string; descripcion: string; kg: number; rollos: number; pesoUN: number; acolchadoras: Set<string> }>();
-    acolchadoras.forEach(a => a.maquinas.forEach(maq => maq.referencias.forEach(r => r.laminas.forEach(l => {
-      const e = m.get(l.codigo) || { codigo: l.codigo, descripcion: l.descripcion, kg: 0, rollos: 0, pesoUN: l.pesoUN, acolchadoras: new Set<string>() };
-      e.kg += l.kg;
-      e.rollos += l.rollos;
-      e.acolchadoras.add(a.nombre.replace('ACOLCHADORA ', 'ACH'));
-      m.set(l.codigo, e);
-    }))));
-    return Array.from(m.values()).sort((a, b) => b.kg - a.kg);
-  }, [acolchadoras]);
+    const m = new Map<string, { codigo: string; descripcion: string; kg: number; pesoUN: number; porAcolchadora: Map<string, number> }>();
+    bloques.forEach(b => b.filas.forEach(f => {
+      const e = m.get(f.codigo) || { codigo: f.codigo, descripcion: f.descripcion, kg: 0, pesoUN: f.pesoUN, porAcolchadora: new Map<string, number>() };
+      e.kg += f.kg;
+      const ach = b.nombre.replace('ACOLCHADORA ', 'ACH');
+      e.porAcolchadora.set(ach, (e.porAcolchadora.get(ach) || 0) + rollosEnteros(f));
+      m.set(f.codigo, e);
+    }));
+    return Array.from(m.values())
+      .map(e => ({ ...e, rollosUn: Array.from(e.porAcolchadora.values()).reduce((s, n) => s + n, 0) }))
+      .sort((a, b) => b.kg - a.kg);
+  }, [bloques]);
+
+  const totalKg = bloques.reduce((s, b) => s + b.kg, 0);
+  const totalRollos = bloques.reduce((s, b) => s + b.rollosUn, 0);
 
   const [abiertos, setAbiertos] = useState<Set<string>>(new Set());
   const toggle = (k: string) => setAbiertos(prev => {
@@ -241,20 +306,11 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
     if (n.has(k)) n.delete(k); else n.add(k);
     return n;
   });
-  const expandirTodo = () => {
-    const n = new Set<string>();
-    acolchadoras.forEach(a => {
-      n.add(a.nombre);
-      a.maquinas.forEach(m => {
-        n.add(`${a.nombre}|${m.maquina}`);
-        m.referencias.forEach(r => n.add(`${a.nombre}|${m.maquina}|${r.material}`));
-      });
-    });
-    setAbiertos(n);
-  };
+  const expandirTodo = () => setAbiertos(new Set(bloques.map(b => b.nombre)));
+  const expandirConReferencias = () => setAbiertos(new Set(bloques.flatMap(b => [b.nombre, ...b.filas.map(f => `${b.nombre}|${f.key}`)])));
 
   const Toggle = ({ k }: { k: string }) => (
-    <button onClick={() => toggle(k)} className="inline-flex items-center justify-center w-4 h-4 mr-2 rounded border border-current/30 align-middle">
+    <button onClick={() => toggle(k)} className="inline-flex items-center justify-center w-4 h-4 mr-2 rounded border border-current/30 align-middle shrink-0">
       {abiertos.has(k) ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
     </button>
   );
@@ -269,7 +325,7 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
           <div>
             <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Consumo de Laminado por Acolchadora</h3>
             <p className="text-[10px] font-bold text-slate-500">
-              Órdenes FERT de acolchadoras {fechas.length > 0 ? `del ${fechas.join(', ')}` : '(todas las fechas — selecciona la fecha del plan)'} · BOM hasta la lámina · rollos = Kg ÷ PesoUN Looper. Solo consulta, no afecta el plan.
+              Órdenes FERT de acolchadoras {fechas.length > 0 ? `del ${fechas.join(', ')}` : '(todas las fechas — selecciona la fecha del plan)'} · BOM hasta la lámina · Rollos [un] = Kg ÷ PesoUN Looper, al entero superior. Solo consulta, no afecta el plan.
             </p>
           </div>
         </div>
@@ -280,6 +336,7 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
             </span>
           )}
           <button onClick={expandirTodo} className="text-[10px] font-black uppercase px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50">Expandir todo</button>
+          <button onClick={expandirConReferencias} className="text-[10px] font-black uppercase px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50">+ Referencias</button>
           <button onClick={() => setAbiertos(new Set())} className="text-[10px] font-black uppercase px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50">Colapsar todo</button>
         </div>
       </div>
@@ -293,10 +350,10 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                 <tr>
                   <th className="px-3 py-2 text-left">Lámina</th>
                   <th className="px-3 py-2 text-left">Descripción</th>
+                  <th className="px-3 py-2 text-left">Rollos por acolchadora [un]</th>
                   <th className="px-3 py-2 text-right">Kg</th>
                   <th className="px-3 py-2 text-right">Peso UN</th>
-                  <th className="px-3 py-2 text-right">Rollos</th>
-                  <th className="px-3 py-2 text-left">Acolchadoras</th>
+                  <th className="px-3 py-2 text-right">Rollos [un]</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -304,10 +361,18 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                   <tr key={l.codigo}>
                     <td className="px-3 py-1.5 font-mono text-slate-900">{l.codigo}</td>
                     <td className="px-3 py-1.5">{l.descripcion}</td>
+                    <td className="px-3 py-1.5">
+                      <div className="flex flex-wrap gap-1">
+                        {Array.from(l.porAcolchadora.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([ach, n]) => (
+                          <span key={ach} className="px-1.5 py-0.5 rounded bg-violet-50 border border-violet-100 text-[10px] text-violet-800 whitespace-nowrap">
+                            {ach} · <span className="font-mono font-black">{l.pesoUN > 0 ? n : '—'}</span> un
+                          </span>
+                        ))}
+                      </div>
+                    </td>
                     <td className="px-3 py-1.5 text-right font-mono">{fmt(l.kg, 1)}</td>
                     <td className="px-3 py-1.5 text-right font-mono">{l.pesoUN > 0 ? fmt(l.pesoUN, 2) : <span className="text-amber-600">sin Looper</span>}</td>
-                    <td className="px-3 py-1.5 text-right font-mono font-black text-violet-700">{l.pesoUN > 0 ? fmt(l.rollos, 1) : '—'}</td>
-                    <td className="px-3 py-1.5 text-slate-500">{Array.from(l.acolchadoras).sort().join(', ')}</td>
+                    <td className="px-3 py-1.5 text-right font-mono font-black text-violet-700">{l.pesoUN > 0 ? fmt(l.rollosUn) : '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -321,100 +386,114 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
           <table className="min-w-full border-collapse text-[11px]">
             <thead className="text-[10px] uppercase font-black">
               <tr>
-                <th colSpan={2} className="bg-slate-800" />
+                <th colSpan={3} className="bg-slate-800" />
                 <th colSpan={2} className="px-3 py-1.5 bg-sky-200 text-sky-900 text-center">Histórico</th>
+                <th className="bg-slate-800" />
                 <th colSpan={2} className="px-3 py-1.5 bg-orange-200 text-orange-900 text-center">Diario</th>
                 <th className="bg-slate-800" />
-                <th colSpan={3} className="px-3 py-1.5 bg-violet-200 text-violet-900 text-center">Consumo Laminado</th>
+                <th colSpan={2} className="px-3 py-1.5 bg-violet-200 text-violet-900 text-center">Consumo Laminado</th>
               </tr>
               <tr className="bg-slate-800 text-white">
-                <th className="px-3 py-2 text-left">Actividad / Referencia</th>
                 <th className="px-3 py-2 text-left">Máquina</th>
+                <th className="px-3 py-2 text-left">Actividad / Referencia</th>
+                <th className="px-3 py-2 text-left">Lámina</th>
                 <th className="px-3 py-2 text-right">Prom Prod Turno (H)</th>
                 <th className="px-3 py-2 text-right">Prom Prod Turno (Un/Mtrs)</th>
+                <th className="px-3 py-2 text-right">Kg/Und</th>
                 <th className="px-3 py-2 text-right">Prod Planif (H)</th>
                 <th className="px-3 py-2 text-right">Prod Planif (Un/Mtrs)</th>
                 <th className="px-3 py-2 text-right">Nivel Prod.</th>
-                <th className="px-3 py-2 text-right">Kg/Und</th>
                 <th className="px-3 py-2 text-right">Kg</th>
-                <th className="px-3 py-2 text-right">Rollos</th>
+                <th className="px-3 py-2 text-right">Rollos [un]</th>
               </tr>
             </thead>
             <tbody className="font-bold text-slate-700">
-              {acolchadoras.length === 0 ? (
-                <tr><td colSpan={10} className="py-20 text-center text-slate-400 font-black uppercase tracking-widest italic">
+              {bloques.length === 0 ? (
+                <tr><td colSpan={11} className="py-20 text-center text-slate-400 font-black uppercase tracking-widest italic">
                   {ordenesFert.length === 0 ? 'Sin órdenes FERT cargadas — pulsa Sincronizar' : 'No hay órdenes FERT de acolchadoras para la fecha seleccionada'}
                 </td></tr>
-              ) : acolchadoras.map(a => (
-                <React.Fragment key={a.nombre}>
+              ) : bloques.map(b => (
+                <React.Fragment key={b.nombre}>
                   <tr className="bg-emerald-500 text-white border-t-2 border-white">
-                    <td className="px-3 py-2 font-black"><Toggle k={a.nombre} />{a.nombre}</td>
-                    <td className="px-3 py-2 text-[10px]">{a.maquinas.length} máq.</td>
+                    <td className="px-3 py-2 font-mono text-[10px]">{b.maquinas.join(', ')}</td>
+                    <td className="px-3 py-2 font-black whitespace-nowrap"><Toggle k={b.nombre} />{b.nombre}</td>
+                    <td className="px-3 py-2 text-[10px]">{b.filas.length} lámina(s)</td>
                     <td className="px-3 py-2 text-right">{pendiente}</td>
-                    <td className="px-3 py-2 text-right">{pendiente}</td>
-                    <td className="px-3 py-2 text-right">{pendiente}</td>
-                    <td className="px-3 py-2 text-right font-mono font-black">{fmt(a.cantidad)}</td>
                     <td className="px-3 py-2 text-right">{pendiente}</td>
                     <td />
-                    <td className="px-3 py-2 text-right font-mono">{fmt(a.kg, 1)}</td>
-                    <td className="px-3 py-2 text-right font-mono font-black">{fmt(a.rollos, 1)}</td>
+                    <td className="px-3 py-2 text-right">{pendiente}</td>
+                    <td className="px-3 py-2 text-right font-mono font-black">{fmt(b.cantidad)}</td>
+                    <td className="px-3 py-2 text-right">{pendiente}</td>
+                    <td className="px-3 py-2 text-right font-mono">{fmt(b.kg, 1)}</td>
+                    <td className="px-3 py-2 text-right font-mono font-black text-base">{fmt(b.rollosUn)}</td>
                   </tr>
-                  {abiertos.has(a.nombre) && a.maquinas.map(m => {
-                    const km = `${a.nombre}|${m.maquina}`;
-                    return (
-                      <React.Fragment key={km}>
-                        <tr className="bg-emerald-50 border-t border-emerald-100">
-                          <td className="px-3 py-1.5 pl-8"><Toggle k={km} />{m.referencias.length} referencia(s)</td>
-                          <td className="px-3 py-1.5 font-mono">{m.maquina}</td>
-                          <td className="px-3 py-1.5 text-right bg-yellow-100/60">{pendiente}</td>
-                          <td className="px-3 py-1.5 text-right bg-yellow-100/60">{pendiente}</td>
-                          <td className="px-3 py-1.5 text-right">{pendiente}</td>
-                          <td className="px-3 py-1.5 text-right font-mono">{fmt(m.cantidad)}</td>
-                          <td colSpan={4} />
-                        </tr>
-                        {abiertos.has(km) && m.referencias.map(r => {
-                          const kr = `${km}|${r.material}`;
-                          const kg = r.laminas.reduce((s, l) => s + l.kg, 0);
-                          const rollos = r.laminas.reduce((s, l) => s + l.rollos, 0);
-                          return (
-                            <React.Fragment key={kr}>
-                              <tr className="border-t border-slate-100 hover:bg-slate-50">
-                                <td className="px-3 py-1.5 pl-14" title={`Órdenes: ${r.ordenes.join(', ')}`}>
-                                  <Toggle k={kr} />
-                                  <span className="font-mono text-slate-900 mr-2">{r.material}</span>
-                                  <span className="uppercase">{r.nombre}</span>
+                  {abiertos.has(b.nombre) && (
+                    <>
+                      {b.filas.map(f => {
+                        const kf = `${b.nombre}|${f.key}`;
+                        return (
+                          <React.Fragment key={kf}>
+                            <tr className="border-t border-slate-100 hover:bg-slate-50">
+                              <td className="px-3 py-1.5 font-mono text-slate-600">{f.maquina}</td>
+                              <td className="px-3 py-1.5 text-slate-500 whitespace-nowrap"><Toggle k={kf} />{b.nombre}</td>
+                              <td className="px-3 py-1.5">
+                                <span className="font-mono text-slate-900 mr-2">{f.codigo}</span>
+                                <span className="uppercase">{f.descripcion}</span>
+                                {f.pesoUN <= 0 && <span className="ml-2 text-amber-600 text-[9px] font-black uppercase">sin PesoUN Looper</span>}
+                              </td>
+                              <td className="bg-yellow-50" />
+                              <td className="bg-yellow-50" />
+                              <td className="px-3 py-1.5 text-right font-mono">{f.cantidad > 0 ? fmt(f.kg / f.cantidad, 3) : '—'}</td>
+                              <td className="px-3 py-1.5 text-right">{pendiente}</td>
+                              <td className="px-3 py-1.5 text-right font-mono">{fmt(f.cantidad)}</td>
+                              <td />
+                              <td className="px-3 py-1.5 text-right font-mono">{fmt(f.kg, 1)}</td>
+                              <td className="px-3 py-1.5 text-right font-mono font-black text-violet-700" title={f.pesoUN > 0 ? `${fmt(f.rollos, 2)} rollos exactos` : undefined}>
+                                {f.pesoUN > 0 ? fmt(rollosEnteros(f)) : '—'}
+                              </td>
+                            </tr>
+                            {abiertos.has(kf) && f.referencias.map(r => (
+                              <tr key={`${kf}|${r.material}`} className="text-slate-500 text-[10px]">
+                                <td />
+                                <td colSpan={2} className="px-3 py-1 pl-10" title={`Órdenes: ${r.ordenes.join(', ')}`}>
+                                  └ <span className="font-mono text-slate-700 mr-2">{r.material}</span>{r.nombre}
+                                  <span className="ml-2 text-slate-400">({r.ordenes.length} OF)</span>
                                 </td>
-                                <td className="px-3 py-1.5 text-[10px] text-slate-500">{r.ordenes.length} OF</td>
-                                <td colSpan={3} />
-                                <td className="px-3 py-1.5 text-right font-mono">{fmt(r.cantidad)} <span className="text-[9px] text-slate-400">{r.unidad}</span></td>
+                                <td colSpan={2} />
+                                <td className="px-3 py-1 text-right font-mono">{fmt(r.kgPorUnidad, 3)}</td>
                                 <td />
+                                <td className="px-3 py-1 text-right font-mono">{fmt(r.cantidad)} <span className="text-[9px] text-slate-400">{r.unidad}</span></td>
                                 <td />
-                                <td className="px-3 py-1.5 text-right font-mono">{fmt(kg, 1)}</td>
-                                <td className="px-3 py-1.5 text-right font-mono text-violet-700">{fmt(rollos, 1)}</td>
+                                <td className="px-3 py-1 text-right font-mono">{fmt(r.kg, 1)}</td>
+                                <td className="px-3 py-1 text-right font-mono">{f.pesoUN > 0 ? fmt(r.kg / f.pesoUN, 1) : '—'}</td>
                               </tr>
-                              {abiertos.has(kr) && (r.laminas.length === 0 ? (
-                                <tr><td colSpan={10} className="px-3 py-1.5 pl-24 text-[10px] text-amber-600 italic">
-                                  {progreso ? 'Explotando BOM…' : 'Sin LAMINA CILINDRICA en el BOM de esta referencia'}
-                                </td></tr>
-                              ) : r.laminas.map(l => (
-                                <tr key={`${kr}|${l.codigo}`} className="text-slate-500">
-                                  <td className="px-3 py-1 pl-24" colSpan={7}>
-                                    └ <span className="font-mono text-slate-700 mr-2">{l.codigo}</span>{l.descripcion}
-                                    {l.pesoUN <= 0 && <span className="ml-2 text-amber-600 text-[9px] font-black uppercase">sin PesoUN Looper</span>}
-                                  </td>
-                                  <td className="px-3 py-1 text-right font-mono">{fmt(l.kgPorUnidad, 3)}</td>
-                                  <td className="px-3 py-1 text-right font-mono">{fmt(l.kg, 1)}</td>
-                                  <td className="px-3 py-1 text-right font-mono text-violet-700">{l.pesoUN > 0 ? fmt(l.rollos, 1) : '—'}</td>
-                                </tr>
-                              )))}
-                            </React.Fragment>
-                          );
-                        })}
-                      </React.Fragment>
-                    );
-                  })}
+                            ))}
+                          </React.Fragment>
+                        );
+                      })}
+                      {b.sinLamina.map(r => (
+                        <tr key={`${b.nombre}|sin|${r.material}`} className="border-t border-slate-100 text-[10px]">
+                          <td className="px-3 py-1.5 font-mono text-slate-500">{b.maquinas.join(', ')}</td>
+                          <td colSpan={2} className="px-3 py-1.5" title={`Órdenes: ${r.ordenes.join(', ')}`}>
+                            <span className="font-mono text-slate-700 mr-2">{r.material}</span>{r.nombre}
+                            <span className="ml-2 text-amber-600 italic">{progreso ? 'explotando BOM…' : 'sin LAMINA CILINDRICA en el BOM'}</span>
+                          </td>
+                          <td colSpan={4} />
+                          <td className="px-3 py-1.5 text-right font-mono">{fmt(r.cantidad)} <span className="text-[9px] text-slate-400">{r.unidad}</span></td>
+                          <td colSpan={3} />
+                        </tr>
+                      ))}
+                    </>
+                  )}
                 </React.Fragment>
               ))}
+              {bloques.length > 0 && (
+                <tr className="bg-slate-800 text-white font-black">
+                  <td colSpan={9} className="px-3 py-2 text-right uppercase text-[10px] tracking-widest">Total acolchadoras</td>
+                  <td className="px-3 py-2 text-right font-mono">{fmt(totalKg, 1)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-base">{fmt(totalRollos)}</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
