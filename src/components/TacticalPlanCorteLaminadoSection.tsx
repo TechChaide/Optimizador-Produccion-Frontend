@@ -29,9 +29,11 @@ import {
   Send,
   ArrowUp,
   ArrowDown,
-  RotateCcw
+  RotateCcw,
+  Layers
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
+import { ConsumoAcolchadorasTab } from '@/components/ConsumoAcolchadorasTab';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -5305,7 +5307,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid grid-cols-6 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
+        <TabsList className="grid grid-cols-7 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
           {/* Orden del flujo, igual en los 4 módulos (usuario 2026-10-08): 1 necesidades / P2 → 2
               respuesta P3 (en Laminado vive en Resumen Necesidades, junto a la capacidad y el reporte) →
               3 salida a SAP; consultas al final sin número. Se abre en Resumen Necesidades. */}
@@ -5319,6 +5321,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             // filteredOrders sigue siendo necesario para datesWithOrders (calendario) y el guard de
             // handleProcessResumen.
             { v: 'ordenesFert', l: 'Órdenes FERT', i: ShoppingCart },
+            // Consulta (usuario 2026-10-19): FERT de acolchadoras → BOM → rollos de lámina. No afecta el plan.
+            { v: 'acolchadoras', l: 'Consumo Acolchadoras', i: Layers },
             { v: 'inventario', l: 'Inventarios SAP', i: Database },
             // Tab de solo validación/auditoría — no participa del cálculo del plan. Muestra la data
             // cruda tal cual la devuelve tiemposEnsambladoByGrupoYCentroPR2, sin pasar por
@@ -5934,6 +5938,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               </table>
             </div>
           </div>
+        </TabsContent>
+
+        <TabsContent value="acolchadoras" className="animate-in fade-in duration-300 text-left">
+          <ConsumoAcolchadorasTab ordenesFert={ordenesFert} selectedDates={selectedDates} kpiLooperData={kpiLooperData} />
         </TabsContent>
 
         <TabsContent value="inventario" className="animate-in fade-in duration-300 space-y-4 text-left">
