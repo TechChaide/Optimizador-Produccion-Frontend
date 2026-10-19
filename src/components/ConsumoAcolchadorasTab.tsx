@@ -167,9 +167,12 @@ interface Props {
   selectedDates: Set<string>;
   kpiLooperData: RawApiRow[];
   inventarioSAP: InventarioRow[];
+  // Corridas del plan de Laminado del siguiente día hábil, por material. SOLO INFORMATIVO: no entra
+  // al stock, saldo ni "¿Cubre?".
+  corridasSiguienteDia: { fecha: string; porMaterial: Map<string, { un: number; kg: number; corridas: number }> };
 }
 
-export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData, inventarioSAP }) => {
+export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData, inventarioSAP, corridasSiguienteDia }) => {
   // Órdenes FERT de acolchadoras en la fecha del plan (centro 2000 fuera, igual que Órdenes FERT).
   const ordenes = useMemo(() => ordenesFert.filter(o => {
     if (getProp(o, ['CENTRO']) === '2000') return false;
@@ -400,6 +403,9 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Stock final [un]</th>
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Saldo [un]</th>
                   <th className="px-3 py-2 text-center bg-teal-50 text-teal-800">¿Cubre?</th>
+                  <th className="px-3 py-2 text-right bg-slate-100 text-slate-600 whitespace-nowrap" title="Solo informativo: no se suma al stock ni al saldo">
+                    Corrida {corridasSiguienteDia.fecha.slice(8, 10)}/{corridasSiguienteDia.fecha.slice(5, 7)} [un] <span className="normal-case font-bold">(info)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -434,6 +440,15 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                           ? <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-black uppercase">Cubre</span>
                           : <span className="px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-black uppercase">Falta {fmt(-l.saldoUn)}</span>}
                     </td>
+                    {(() => {
+                      const c = corridasSiguienteDia.porMaterial.get(l.codigo);
+                      return (
+                        <td className="px-3 py-1.5 text-right font-mono bg-slate-50 text-slate-600"
+                          title={c ? `${c.corridas} corrida(s) · ${fmt(c.kg, 1)} Kg — solo informativo` : 'Sin corrida en el plan del siguiente día'}>
+                          {c ? fmt(c.un) : <span className="text-slate-300">—</span>}
+                        </td>
+                      );
+                    })()}
                   </tr>
                 ))}
               </tbody>

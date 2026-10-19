@@ -4356,6 +4356,22 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return rows;
   }, [groupedNeeds, corridaFechas, ordenCorridas, siguienteDiaHabil]);
 
+  // Solo informativo para el tab Consumo Acolchadoras (usuario 2026-10-19): corridas del plan en
+  // pantalla con fecha = siguiente día hábil (hoy+1), en rollos por material. No entra a ningún cálculo.
+  const corridasSiguienteDia = useMemo(() => {
+    const fecha = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
+    const porMaterial = new Map<string, { un: number; kg: number; corridas: number }>();
+    outputPlanRows.filter(r => r.fecha === fecha).forEach(r => {
+      const key = cleanCode(r.material);
+      const e = porMaterial.get(key) || { un: 0, kg: 0, corridas: 0 };
+      e.un += r.planUn;
+      e.kg += r.planKg;
+      e.corridas += 1;
+      porMaterial.set(key, e);
+    });
+    return { fecha, porMaterial };
+  }, [outputPlanRows, siguienteDiaHabil]);
+
   // Mismas columnas en la tabla de pantalla del Plan de Salida: la orden sale de las FERT ya cargadas
   // al sincronizar (aparece al volver a sincronizar después de que SAP la cree).
   const ordenesSapPantalla = useMemo(
@@ -5941,7 +5957,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         </TabsContent>
 
         <TabsContent value="acolchadoras" className="animate-in fade-in duration-300 text-left">
-          <ConsumoAcolchadorasTab ordenesFert={ordenesFert} selectedDates={selectedDates} kpiLooperData={kpiLooperData} inventarioSAP={inventarioSAP} />
+          <ConsumoAcolchadorasTab ordenesFert={ordenesFert} selectedDates={selectedDates} kpiLooperData={kpiLooperData} inventarioSAP={inventarioSAP} corridasSiguienteDia={corridasSiguienteDia} />
         </TabsContent>
 
         <TabsContent value="inventario" className="animate-in fade-in duration-300 space-y-4 text-left">
