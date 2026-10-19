@@ -10,13 +10,15 @@ import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { useAppContext } from '@/context/AppProvider';
 import { TALLER_CORTE_TIEMPOS_EXCEL } from '@/data/tallerCorteTiemposExcel';
+import { GRUPO_TALLER_CORTE_NOMBRE, GRUPO_TALLER_CORTE_DEPARTAMENTO, GRUPO_TALLER_CORTE_CENTRO } from '@/lib/taller-corte-grupo';
 
 // Nombre del Grupo dedicado a persistir los tiempos unitarios manuales de este módulo. Deliberadamente
 // distinto al Grupo SAP "Taller de Corte" (codigo_grupo=7) que ya existe para Colchones/Bases
 // (RespCtrlProd 003&004) — es un área distinta a los forros de Muebles (026) que planifica este módulo.
-const GRUPO_TIEMPOS_TC_NOMBRE = 'Taller de Corte - Forros Muebles';
-const GRUPO_TIEMPOS_TC_DEPARTAMENTO = 'TALLER DE CORTE FORROS MUEBLES';
-const GRUPO_TIEMPOS_TC_CENTRO = '1000';
+// (definidos en @/lib/taller-corte-grupo, compartidos con el Plan Grupo PFTC de "PLAN TÁCTICO")
+const GRUPO_TIEMPOS_TC_NOMBRE = GRUPO_TALLER_CORTE_NOMBRE;
+const GRUPO_TIEMPOS_TC_DEPARTAMENTO = GRUPO_TALLER_CORTE_DEPARTAMENTO;
+const GRUPO_TIEMPOS_TC_CENTRO = GRUPO_TALLER_CORTE_CENTRO;
 const RESTRICCION_TIEMPO_DESCRIPCION = 'Tiempo unitario de cosido (min) - Taller de Corte';
 
 export interface TiempoManualDetalle {

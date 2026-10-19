@@ -3,10 +3,10 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 import { serviciosService } from '@/services/servicios.service';
-import { formatMaterialSap } from '@/lib/sap-material';
+import { formatMaterialSap, SAP_ESTATUS_REG_ORD_CARGADO, usuarioProcesoSap } from '@/lib/sap-material';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { useAppContext } from '@/context/AppProvider';
-import { Loader2, PlayCircle, LayoutGrid, Gauge, Clock, Sun, Moon, RefreshCw, TriangleAlert, Scissors, FileSpreadsheet, Download, BedDouble, Send } from 'lucide-react';
+import { Loader2, PlayCircle, LayoutGrid, Gauge, Clock, Sun, Moon, RefreshCw, TriangleAlert, Scissors, FileSpreadsheet, Download, BedDouble, Send, Save, CheckCircle2 } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,7 +15,10 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import type { SolicitudProduccionHB } from '@/types/interfaces';
+import type { SolicitudProduccionHB, PlanGrupo, DetalleTactico } from '@/types/interfaces';
+import { planGrupoService } from '@/services/plangrupo.service';
+import { detalleTacticoService } from '@/services/detalletactico.service';
+import { obtenerOCrearGrupoTallerCorte } from '@/lib/taller-corte-grupo';
 import { cn } from '@/lib/utils';
 
 const normalizeMaterialCode = (code: string | number): string => String(code).trim().slice(-8);
@@ -246,6 +249,10 @@ const formatHoraToSap = (hora: string): string => `${hora.replace(':', '')}00`;
 // Columnas editables de la pantalla de revisión de "ENVIAR A SAP" — mismo patrón que Planificación
 // Táctica Muebles (ProvisionalOrdersAlphaTab.tsx, SAP_PREVIEW_COLUMNS), duplicado aquí a propósito
 // (archivos independientes).
+// La clave interna de cada fila de "ENVIAR A SAP" es "<origen>-<orden>-<material>[-<posición>]"; en
+// pantalla solo se muestra el número de la orden (p. ej. 0145560978), pedido del usuario 2026-10-19.
+const numeroOrdenDeClave = (orderKey: string): string => orderKey.split('-')[1] || orderKey;
+
 const SAP_PREVIEW_COLUMNS: { field: keyof SolicitudProduccionHB; label: string; type?: 'number'; width: string }[] = [
     { field: 'Mandante', label: 'Mandante', width: 'w-16' },
     { field: 'CodigoOrdenExterna', label: 'Cód. Orden Externa', width: 'w-28' },
@@ -280,6 +287,28 @@ const formatShiftClockLabel = (shiftStartTime: string, offsetHours: number): str
     const hh = Math.floor(totalMinutes / 60) % 24;
     const mm = totalMinutes % 60;
     return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+};
+
+// Sufijo del Plan Grupo "Plan Final Taller de Corte" — equivalente al PFSM de Planificación Táctica Muebles
+const PFTC_SUFIJO = 'PFTC';
+const PFTC_SUFIJO_REGEX = /PFTC\s*$/i;
+
+// Clave de una orden dentro del PFTC (misma forma que la de Muebles: source-id-material). Cada orden
+// Previsional aparece una sola vez en la distribución, así que es única y no cambia al "Modular".
+const pftcOrderKey = (order: { source: string; id: string; material: string }) => `${order.source}-${order.id}-${order.material}`;
+
+const fechaKeyToLocalDate = (fechaKey: string): Date => {
+    const [y, m, d] = fechaKey.split('-').map(Number);
+    return new Date(y, m - 1, d);
+};
+
+// fecha_inicio_plan del backend puede venir como "YYYY-MM-DD" o ISO completo; se compara por día local
+const planDateKey = (valor: unknown): string => {
+    const texto = String(valor ?? '');
+    if (/^\d{4}-\d{2}-\d{2}$/.test(texto)) return texto;
+    const fecha = new Date(texto);
+    if (Number.isNaN(fecha.getTime())) return '';
+    return `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, '0')}-${String(fecha.getDate()).padStart(2, '0')}`;
 };
 
 interface TCOrder {
@@ -363,17 +392,26 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
     const [forrosCamaCabeceroSet, setForrosCamaCabeceroSet] = useState<Set<string>>(new Set());
 
     // "ENVIAR A SAP" (InsertarSolicitudProduccionHB) — mismo patrón de pantalla editable que
-    // Planificación Táctica Muebles (ver ProvisionalOrdersAlphaTab.tsx). CodigoOrdenExterna = el propio
-    // ID de la orden Previsional (TCOrder.id) — a diferencia de Muebles, aquí no existe un guardado de
-    // Plan Táctico Final (PFSM) del que sacar un codigo_detalle_tactico, y el usuario confirmó
-    // (2026-09-21) usar directamente el ID de la orden. ClaseOrden queda editable sin valor fijo, mismo
-    // criterio que Muebles.
+    // Planificación Táctica Muebles (ver ProvisionalOrdersAlphaTab.tsx). CodigoOrdenExterna = el
+    // codigo_detalle_tactico de cada orden en el PFTC guardado (ver pftcDetalleTacticoMap más abajo),
+    // igual que el PFSM de Muebles — antes (2026-09-21) era el ID de la orden Previsional, reemplazado a
+    // pedido del usuario 2026-10-19. ClaseOrden queda editable sin valor fijo, mismo criterio que Muebles.
     const [enviarSapDialogOpen, setEnviarSapDialogOpen] = useState(false);
     const [sapPreviewRows, setSapPreviewRows] = useState<{ orderKey: string; solicitud: SolicitudProduccionHB }[]>([]);
     const [sapSendState, setSapSendState] = useState<{
         sending: boolean;
         results: Map<string, { status: 'success' | 'error'; message: string }>;
     }>({ sending: false, results: new Map() });
+
+    // PFTC (Plan Final Taller de Corte) — equivalente al PFSM de Planificación Táctica Muebles: un Plan
+    // Grupo con un Detalle Táctico por orden de la Distribución de Máquinas. El codigo_detalle_tactico que
+    // genera el backend para cada orden es el CodigoOrdenExterna de "ENVIAR A SAP" (pedido del usuario
+    // 2026-10-19, reemplaza al ID de la orden Previsional que se usaba antes). Clave: pftcOrderKey.
+    const [pftcDetalleTacticoMap, setPftcDetalleTacticoMap] = useState<Map<string, number>>(new Map());
+    const [pftcGuardado, setPftcGuardado] = useState<{ codigoPlanGrupo: number; ordenes: number } | null>(null);
+    const [isSavingPftc, setIsSavingPftc] = useState(false);
+    // PFTC ya existente para la misma fecha: se pide confirmación antes de guardar otro (evita duplicados)
+    const [pftcDuplicado, setPftcDuplicado] = useState<PlanGrupo | null>(null);
 
     const toggleCamasMachine = (machineId: MachineId) => {
         if (machineId === MACHINE_CAMAS_DEFAULT) return;
@@ -662,6 +700,13 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
         });
 
         setMachineDistribution(distribution);
+        // Una distribución nueva invalida el PFTC guardado (las órdenes pueden ser otras): hay que volver a
+        // guardarlo antes de ENVIAR A SAP. "Modular" no lo invalida — solo cambia de máquina las mismas órdenes.
+        if (pftcDetalleTacticoMap.size > 0) {
+            setPftcDetalleTacticoMap(new Map());
+            setPftcGuardado(null);
+            addNotification('info', 'Nueva distribución de máquinas: vuelva a guardar el Plan Final (PFTC) antes de enviar a SAP.');
+        }
         const sinTiempo = tcOrders.filter(o => o.horas === null || o.horas <= 0);
         setUnassignedOrders([...unassigned, ...sinTiempo]);
     };
@@ -860,22 +905,127 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
         URL.revokeObjectURL(url);
     };
 
+    // Órdenes que forman el PFTC = exactamente las que se envían a SAP (misma exclusión que el Gantt
+    // exportado), con la fecha fija de su puesto de trabajo (TC-USN01 +1 día hábil, cosedoras +2).
+    const getOrdenesPftc = () => {
+        const ordenes: { order: TCOrder; fechaKey: string }[] = [];
+        if (!machineDistribution) return ordenes;
+        Array.from(machineDistribution.values()).forEach(machine => {
+            const fechaKey = getFixedExportDateKey(machine.machineId, holidaysSet);
+            machine.items.forEach(item => {
+                if (MATERIALES_EXCLUIDOS_EXPORT_GANTT.has(normalizeMaterialCode(item.order.material))) return;
+                ordenes.push({ order: item.order, fechaKey });
+            });
+        });
+        return ordenes;
+    };
+
+    // "GUARDAR PLAN FINAL (PFTC)" — mismo formato que el PFSM de Planificación Táctica Muebles
+    // (ProvisionalOrdersAlphaTab.handleSavePlanAndDetails, bloque PFSM): un Plan Grupo
+    // "Plan Táctico - Centro 1000 - PFTC" + un Detalle Táctico por orden, guardando el
+    // codigo_detalle_tactico de cada una para "ENVIAR A SAP". `forzar`: guarda aunque ya exista un PFTC
+    // para la misma fecha (el usuario lo confirmó en el diálogo de duplicado).
+    const handleGuardarPftc = async (forzar = false) => {
+        const ordenes = getOrdenesPftc();
+        if (ordenes.length === 0) {
+            addNotification('warning', 'Debe ejecutar la Distribución de Máquinas de Coser antes de guardar el Plan Final (PFTC).');
+            return;
+        }
+        const fechas = ordenes.map(o => o.fechaKey).sort();
+        const fechaInicioKey = fechas[0];
+        const fechaFinKey = fechas[fechas.length - 1];
+
+        setIsSavingPftc(true);
+        try {
+            const grupo = await obtenerOCrearGrupoTallerCorte();
+
+            if (!forzar) {
+                const planesRes = await planGrupoService.getAll();
+                const existente = (planesRes.data || []).find(p =>
+                    p.codigo_grupo === grupo.codigo_grupo
+                    && PFTC_SUFIJO_REGEX.test(String(p.valor || '').trim())
+                    && String(p.estado || 'A') === 'A'
+                    && planDateKey(p.fecha_inicio_plan) === fechaInicioKey
+                );
+                if (existente) {
+                    setPftcDuplicado(existente);
+                    return;
+                }
+            }
+
+            // codigo_plan y codigo_familia_grupo van como null (no 0), igual que en Muebles, para no
+            // chocar con la integridad referencial del backend.
+            const planPayload = {
+                codigo_plan_grupo: 0,
+                codigo_plan: null,
+                codigo_grupo: grupo.codigo_grupo,
+                codigo_familia_grupo: null,
+                valor: `Plan Táctico - Centro ${grupo.centro} - ${PFTC_SUFIJO}`,
+                fecha_inicio_plan: fechaKeyToLocalDate(fechaInicioKey),
+                fecha_fin_plan: fechaKeyToLocalDate(fechaFinKey),
+                estado: 'A',
+                fecha_creacion: new Date(),
+                usuario_creacion: 'Admin',
+            } as unknown as PlanGrupo;
+            const savedPlan = await planGrupoService.save(planPayload);
+            const codigoPlanGrupo = savedPlan?.data?.codigo_plan_grupo;
+            if (!codigoPlanGrupo) throw new Error('El backend no devolvió un código de Plan de Grupo válido para el PFTC.');
+
+            const nuevoMapa = new Map<string, number>();
+            let sinCodigo = 0;
+            for (const { order } of ordenes) {
+                const detallePayload: DetalleTactico = {
+                    codigo_detalle_tactico: 0,
+                    codigo_plan_grupo: codigoPlanGrupo,
+                    codigo_material: Number(order.material) || 0,
+                    linea_produccion: '',
+                    cantidad_produccion_neta: order.cantidad.toFixed(2),
+                    resp_ctrl_prod: '',
+                    clase_aprovisionamiento: 'E',
+                    cantidad_aprovisionamiento: 0,
+                    estado: 'A',
+                    fecha_modificacion: new Date(),
+                    usuario_modificacion: 'Admin',
+                };
+                const savedDetalle = await detalleTacticoService.save(detallePayload);
+                const codigoDetalleTactico = savedDetalle?.data?.codigo_detalle_tactico;
+                if (codigoDetalleTactico) nuevoMapa.set(pftcOrderKey(order), codigoDetalleTactico);
+                else sinCodigo++;
+            }
+
+            setPftcDetalleTacticoMap(nuevoMapa);
+            setPftcGuardado({ codigoPlanGrupo, ordenes: nuevoMapa.size });
+            setPftcDuplicado(null);
+            addNotification(sinCodigo > 0 ? 'warning' : 'success', sinCodigo > 0
+                ? `Plan Final (PFTC #${codigoPlanGrupo}) guardado, pero ${sinCodigo} orden(es) no recibieron código de detalle táctico del backend y no se podrán enviar a SAP.`
+                : `Plan Final (PFTC #${codigoPlanGrupo}) guardado: ${nuevoMapa.size} orden(es). Ya puede ENVIAR A SAP.`);
+        } catch (error) {
+            console.error('Error al guardar el Plan Final (PFTC):', error);
+            addNotification('error', `Error al guardar el Plan Final (PFTC): ${(error as Error).message}`);
+        } finally {
+            setIsSavingPftc(false);
+        }
+    };
+
     // "ENVIAR A SAP" — Paso 1: arma la pantalla editable con lo que se enviará a SAP
     // (InsertarSolicitudProduccionHB) por cada orden de la Distribución de Máquinas de Coser, mismos
     // valores fuente que exportGanttToTxt (fecha/hora fijas por puesto de trabajo, no la fecha propia de
-    // la orden), para que el usuario la revise/corrija ANTES de enviar nada. CodigoOrdenExterna = el ID
-    // de la orden Previsional tal cual (no hay codigo_detalle_tactico aquí, a diferencia de Muebles — ver
-    // comentario del estado sapPreviewRows más arriba).
+    // la orden), para que el usuario la revise/corrija ANTES de enviar nada. CodigoOrdenExterna = el
+    // codigo_detalle_tactico de la orden en el PFTC guardado (ver handleGuardarPftc).
     const handleOpenSapPreview = () => {
         if (!machineDistribution || machineDistribution.size === 0) {
             addNotification('warning', 'Debe ejecutar la Distribución de Máquinas de Coser antes de enviar a SAP.');
             return;
         }
+        if (pftcDetalleTacticoMap.size === 0) {
+            addNotification('warning', 'Debe guardar el "Plan Final" (PFTC) en esta sesión antes de enviar a SAP — se necesita el código de detalle táctico generado para cada orden.');
+            return;
+        }
 
-        const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
-        const usuarioProceso = user?.usuario || user?.id_usuario || 'admin';
+        const usuarioProceso = usuarioProcesoSap(); // USUARIO es CHAR(08) en SAP
 
         const rows: { orderKey: string; solicitud: SolicitudProduccionHB }[] = [];
+        let ordenesSinCodigo = 0;
         Array.from(machineDistribution.values()).forEach(machine => {
             const effectiveStartTime = getEffectiveStartTimeParaTurno(machine.turno);
             const fechaBase = getFixedExportDateKey(machine.machineId, holidaysSet);
@@ -884,11 +1034,17 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                 const inicio = addHoursWithDate(fechaBase, effectiveStartTime, item.startHour);
                 const fin = addHoursWithDate(fechaBase, effectiveStartTime, item.endHour);
                 const orderKey = `${item.order.source}-${item.order.id}-${item.order.material}-${idx}`;
+                // CodigoOrdenExterna = codigo_detalle_tactico del PFTC (igual que el PFSM de Muebles)
+                const codigoDetalleTactico = pftcDetalleTacticoMap.get(pftcOrderKey(item.order));
+                if (!codigoDetalleTactico) {
+                    ordenesSinCodigo++;
+                    return;
+                }
                 rows.push({
                     orderKey,
                     solicitud: {
                         Mandante: '300',
-                        CodigoOrdenExterna: item.order.id,
+                        CodigoOrdenExterna: String(codigoDetalleTactico),
                         ClaseOrden: '',
                         Centro: CENTRO_TC,
                         CodigoMaterial: formatMaterialSap(item.order.material),
@@ -901,7 +1057,7 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                         HoraInicioProgramada: formatHoraToSap(inicio.hora),
                         PedidoComercial: '',
                         PosicionPedido: '',
-                        EstadoRegistro: 'A',
+                        EstadoRegistro: SAP_ESTATUS_REG_ORD_CARGADO,
                         Observaciones: '',
                         UsuarioProceso: usuarioProceso,
                     },
@@ -909,6 +1065,9 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
             });
         });
 
+        if (ordenesSinCodigo > 0) {
+            addNotification('warning', `${ordenesSinCodigo} orden(es) de la distribución no están en el PFTC guardado y se omitieron. Vuelva a guardar el Plan Final (PFTC) si deben enviarse.`);
+        }
         setSapPreviewRows(rows);
         setSapSendState({ sending: false, results: new Map() });
         setEnviarSapDialogOpen(true);
@@ -940,7 +1099,11 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
         for (const { orderKey, solicitud } of rowsAEnviar) {
             try {
                 // El material siempre viaja con 18 caracteres (ceros a la izquierda), aunque se haya editado a mano
-                await serviciosService.insertarSolicitudProduccionHB({ ...solicitud, CodigoMaterial: formatMaterialSap(solicitud.CodigoMaterial) });
+                const respuesta = await serviciosService.insertarSolicitudProduccionHB({ ...solicitud, CodigoMaterial: formatMaterialSap(solicitud.CodigoMaterial) });
+                // Un HTTP 200 con success=false también es un rechazo (mismo criterio que el envío de Ensamblado)
+                if (respuesta?.data && respuesta.data.success === false) {
+                    throw new Error(respuesta.data.message || 'SAP no confirmó la creación de la solicitud.');
+                }
                 results.set(orderKey, { status: 'success', message: 'Enviado correctamente.' });
             } catch (error) {
                 results.set(orderKey, { status: 'error', message: (error as Error).message });
@@ -1257,9 +1420,21 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                                 Descargar Excel
                             </Button>
                             <Button
+                                onClick={() => handleGuardarPftc()}
+                                size="sm"
+                                disabled={isSavingPftc}
+                                className="h-8 bg-indigo-600 hover:bg-indigo-700 text-white gap-1.5 text-xs"
+                                title="Guarda el Plan Grupo PFTC (Plan Final Taller de Corte) con un detalle por orden — necesario antes de ENVIAR A SAP"
+                            >
+                                {isSavingPftc ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : pftcGuardado ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
+                                {pftcGuardado ? `PFTC #${pftcGuardado.codigoPlanGrupo} GUARDADO` : 'GUARDAR PLAN FINAL (PFTC)'}
+                            </Button>
+                            <Button
                                 onClick={handleOpenSapPreview}
                                 size="sm"
+                                disabled={!pftcGuardado}
                                 className="h-8 bg-sky-600 hover:bg-sky-700 text-white gap-1.5 text-xs"
+                                title={pftcGuardado ? 'Enviar a SAP las órdenes del PFTC guardado' : 'Primero guarde el Plan Final (PFTC)'}
                             >
                                 <Send className="w-3.5 h-3.5" />
                                 ENVIAR A SAP
@@ -1412,7 +1587,7 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                                             const resultado = sapSendState.results.get(row.orderKey);
                                             return (
                                                 <tr key={row.orderKey} className={resultado?.status === 'error' ? 'bg-red-50/40' : resultado?.status === 'success' ? 'bg-emerald-50/40' : undefined}>
-                                                    <td className="px-2 py-1 font-mono text-gray-500 whitespace-nowrap">{row.orderKey}</td>
+                                                    <td className="px-2 py-1 font-mono text-gray-500 whitespace-nowrap" title={row.orderKey}>{numeroOrdenDeClave(row.orderKey)}</td>
                                                     {SAP_PREVIEW_COLUMNS.map(col => (
                                                         <td key={col.field} className="px-1 py-1">
                                                             <Input
@@ -1445,7 +1620,7 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                                 <p className="text-xs font-bold text-red-800 mb-1">Errores al enviar:</p>
                                 <ul className="text-[11px] text-red-700 space-y-0.5">
                                     {Array.from(sapSendState.results.entries()).filter(([, r]) => r.status === 'error').map(([key, r]) => (
-                                        <li key={key}><span className="font-mono">{key}</span>: {r.message}</li>
+                                        <li key={key}><span className="font-mono">{numeroOrdenDeClave(key)}</span>: {r.message}</li>
                                     ))}
                                 </ul>
                             </div>
@@ -1476,6 +1651,34 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                         >
                             {sapSendState.sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                             {sapSendState.sending ? 'Enviando...' : 'CONFIRMAR Y ENVIAR A SAP'}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* PFTC ya guardado para la misma fecha: confirmar antes de crear otro (evita duplicados) */}
+            <Dialog open={!!pftcDuplicado} onOpenChange={(open) => { if (!open) setPftcDuplicado(null); }}>
+                <DialogContent className="max-w-md">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2 text-amber-700">
+                            <TriangleAlert className="w-5 h-5" /> Ya existe un Plan Final (PFTC) para esta fecha
+                        </DialogTitle>
+                        <DialogDescription>
+                            El Plan Grupo <strong>#{pftcDuplicado?.codigo_plan_grupo}</strong> ({pftcDuplicado?.valor}) ya está guardado
+                            con fecha {pftcDuplicado ? planDateKey(pftcDuplicado.fecha_inicio_plan) : ''}. Si guarda de nuevo se creará
+                            otro PFTC con nuevos códigos de detalle táctico — use los del nuevo plan para ENVIAR A SAP y no
+                            reenvíe órdenes que ya se enviaron con el plan anterior.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setPftcDuplicado(null)}>Cancelar</Button>
+                        <Button
+                            onClick={() => handleGuardarPftc(true)}
+                            disabled={isSavingPftc}
+                            className="bg-amber-600 hover:bg-amber-700 text-white gap-2"
+                        >
+                            {isSavingPftc ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                            Guardar otro PFTC
                         </Button>
                     </DialogFooter>
                 </DialogContent>

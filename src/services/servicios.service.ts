@@ -16,6 +16,10 @@ const API_URL = `${environment.apiURL}/api/servicios`;
 // que ya importan este nombre.
 export type SolicitudProduccionHBPayload = SolicitudProduccionHB;
 
+// Caché de la descarga compartida del maestro completo de TiemposEnsamblado (ver getTiemposEnsambladoCompleto)
+const TIEMPOS_COMPLETO_TTL_MS = 2 * 60 * 1000;
+let tiemposCompletoCache: { promesa: Promise<any[]>; terminadoEn: number | null } | null = null;
+
 export const serviciosService = {
   async getCuboHabilidadesOP(): Promise<BodyResponse<any>> {
     const response = await fetchWithAuth(API_URL + "/CuboHabilidadesOp", {
@@ -78,9 +82,29 @@ export const serviciosService = {
     }
     return response.json();
   },
-  // Maestro completo de TiemposEnsamblado (todas las páginas, ver fetchAllPages)
+  // Maestro completo de TiemposEnsamblado (todas las páginas, ver fetchAllPages). Una sola descarga
+  // compartida: varias pantallas montadas a la vez (p. ej. Programación Táctica Muebles: la sección, Plan
+  // Táctico Alpha y Resumen de Previsionales) pedían el maestro completo (~21k filas, ~10 s) en paralelo,
+  // cargando de más al backend justo al abrir la página. Si ya hay una descarga en curso, o terminó hace
+  // menos de TIEMPOS_COMPLETO_TTL_MS, se reutiliza; si falla, se descarta para que el próximo intento reintente.
   async getTiemposEnsambladoCompleto(onProgress?: (loaded: number, total: number) => void): Promise<any[]> {
-    return fetchAllPages<any>((page, rows) => this.getTiemposEnsamblado(page, rows), { onProgress });
+    const vigente = tiemposCompletoCache && (tiemposCompletoCache.terminadoEn === null || Date.now() - tiemposCompletoCache.terminadoEn < TIEMPOS_COMPLETO_TTL_MS);
+    if (tiemposCompletoCache && vigente) {
+      if (onProgress) tiemposCompletoCache.promesa.then(rows => onProgress(rows.length, rows.length)).catch(() => {});
+      return tiemposCompletoCache.promesa;
+    }
+    const entrada: { promesa: Promise<any[]>; terminadoEn: number | null } = { promesa: Promise.resolve([]), terminadoEn: null };
+    entrada.promesa = fetchAllPages<any>((page, rows) => this.getTiemposEnsamblado(page, rows), { onProgress })
+      .then(rows => {
+        entrada.terminadoEn = Date.now();
+        return rows;
+      })
+      .catch(error => {
+        if (tiemposCompletoCache === entrada) tiemposCompletoCache = null;
+        throw error;
+      });
+    tiemposCompletoCache = entrada;
+    return entrada.promesa;
   },
 
   async getDiccionarioDeDatos(): Promise<BodyResponse<any>> {
@@ -666,7 +690,14 @@ export const serviciosService = {
       // se mostraba el genérico "Failed to insert..." (confirmado 2026-09-17).
       const errorBody = await response.json().catch(() => ({ message: "Error desconocido" }));
       const mensaje = errorBody?.data?.message || errorBody?.data?.error || errorBody?.message || errorBody?.error;
-      throw new Error(mensaje || `Failed to insert Solicitud de Producción (HTTP ${response.status})`);
+      // El backend puede responder solo un mensaje genérico ("La API de HANA rechazó la solicitud") y dejar
+      // el motivo real en otros campos (detalle, errores, respuesta de HANA...). Se agrega el resto del
+      // cuerpo de la respuesta (recortado) para poder ver la causa exacta en pantalla, y se registra completo
+      // en consola junto con la solicitud enviada.
+      const { message: _m, ...resto } = (errorBody && typeof errorBody === 'object') ? errorBody : {} as Record<string, unknown>;
+      const detalle = Object.keys(resto).length > 0 ? JSON.stringify(resto).slice(0, 400) : '';
+      console.error('InsertarSolicitudProduccionHB rechazada', { status: response.status, respuesta: errorBody, solicitud });
+      throw new Error(`${mensaje || `Failed to insert Solicitud de Producción (HTTP ${response.status})`}${detalle && detalle !== '{}' ? ` — ${detalle}` : ''}`);
     }
     return response.json();
   },

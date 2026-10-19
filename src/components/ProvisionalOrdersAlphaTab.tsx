@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef, useImperativeHandle } from 'react';
 import * as XLSX from 'xlsx';
 import { serviciosService } from '@/services/servicios.service';
-import { formatMaterialSap } from '@/lib/sap-material';
+import { formatMaterialSap, SAP_ESTATUS_REG_ORD_CARGADO, usuarioProcesoSap } from '@/lib/sap-material';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
@@ -211,6 +211,10 @@ const formatSapTime = (date: Date): string => {
 
 // Columnas editables de la pantalla de revisión de "ENVIAR A SAP" (ver handleOpenSapPreview) — una
 // entrada por campo de SolicitudProduccionHB que tiene sentido revisar/corregir antes de enviar.
+// La clave interna de cada fila de "ENVIAR A SAP" es "<origen>-<orden>-<material>[-<posición>]"; en
+// pantalla solo se muestra el número de la orden (p. ej. 0145560978), pedido del usuario 2026-10-19.
+const numeroOrdenDeClave = (orderKey: string): string => orderKey.split('-')[1] || orderKey;
+
 const SAP_PREVIEW_COLUMNS: { field: keyof SolicitudProduccionHB; label: string; type?: 'number'; width: string }[] = [
     { field: 'Mandante', label: 'Mandante', width: 'w-16' },
     { field: 'CodigoOrdenExterna', label: 'Cód. Orden Externa', width: 'w-28' },
@@ -4092,7 +4096,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             HoraInicioProgramada: formatSapTime(horaInicio),
             PedidoComercial: pedido || '',
             PosicionPedido: pedido ? posicion : '',
-            EstadoRegistro: 'A',
+            EstadoRegistro: SAP_ESTATUS_REG_ORD_CARGADO,
             Observaciones: '',
             UsuarioProceso: usuarioProceso,
         };
@@ -4115,8 +4119,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         const fechaPlanificacion = addBusinessDays(planningResult.targetDate, 3);
         const fechaSap = formatSapDate(fechaPlanificacion);
         const shiftStartUTC = shiftTimeToUTC(planningTargetDate, selectedShiftConfig.startTime);
-        const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
-        const usuarioProceso = user?.usuario || user?.id_usuario || 'admin';
+        const usuarioProceso = usuarioProcesoSap(); // USUARIO es CHAR(08) en SAP
 
         const rows: { orderKey: string; solicitud: SolicitudProduccionHB }[] = [];
         Array.from(mesaDistribution.values())
@@ -4164,7 +4167,11 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         for (const { orderKey, solicitud } of rowsAEnviar) {
             try {
                 // El material siempre viaja con 18 caracteres (ceros a la izquierda), aunque se haya editado a mano
-                await serviciosService.insertarSolicitudProduccionHB({ ...solicitud, CodigoMaterial: formatMaterialSap(solicitud.CodigoMaterial) });
+                const respuesta = await serviciosService.insertarSolicitudProduccionHB({ ...solicitud, CodigoMaterial: formatMaterialSap(solicitud.CodigoMaterial) });
+                // Un HTTP 200 con success=false también es un rechazo (mismo criterio que el envío de Ensamblado)
+                if (respuesta?.data && respuesta.data.success === false) {
+                    throw new Error(respuesta.data.message || 'SAP no confirmó la creación de la solicitud.');
+                }
                 results.set(orderKey, { status: 'success', message: 'Enviado correctamente.' });
             } catch (error) {
                 results.set(orderKey, { status: 'error', message: (error as Error).message });
@@ -6363,7 +6370,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                             const resultado = sapSendState.results.get(row.orderKey);
                                             return (
                                                 <tr key={row.orderKey} className={resultado?.status === 'error' ? 'bg-red-50/40' : resultado?.status === 'success' ? 'bg-emerald-50/40' : undefined}>
-                                                    <td className="px-2 py-1 font-mono text-gray-500 whitespace-nowrap">{row.orderKey}</td>
+                                                    <td className="px-2 py-1 font-mono text-gray-500 whitespace-nowrap" title={row.orderKey}>{numeroOrdenDeClave(row.orderKey)}</td>
                                                     {SAP_PREVIEW_COLUMNS.map(col => (
                                                         <td key={col.field} className="px-1 py-1">
                                                             <Input
@@ -6396,7 +6403,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                 <p className="text-xs font-bold text-red-800 mb-1">Errores al enviar:</p>
                                 <ul className="text-[11px] text-red-700 space-y-0.5">
                                     {Array.from(sapSendState.results.entries()).filter(([, r]) => r.status === 'error').map(([key, r]) => (
-                                        <li key={key}><span className="font-mono">{key}</span>: {r.message}</li>
+                                        <li key={key}><span className="font-mono">{numeroOrdenDeClave(key)}</span>: {r.message}</li>
                                     ))}
                                 </ul>
                             </div>
