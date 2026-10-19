@@ -5941,7 +5941,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         </TabsContent>
 
         <TabsContent value="acolchadoras" className="animate-in fade-in duration-300 text-left">
-          <ConsumoAcolchadorasTab ordenesFert={ordenesFert} selectedDates={selectedDates} kpiLooperData={kpiLooperData} />
+          <ConsumoAcolchadorasTab ordenesFert={ordenesFert} selectedDates={selectedDates} kpiLooperData={kpiLooperData} inventarioSAP={inventarioSAP} />
         </TabsContent>
 
         <TabsContent value="inventario" className="animate-in fade-in duration-300 space-y-4 text-left">

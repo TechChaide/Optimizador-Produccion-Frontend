@@ -153,13 +153,23 @@ const laminasPorUnidad = async (code: string, nivel = 0): Promise<Map<string, { 
   return out;
 };
 
+interface InventarioRow {
+  MATERIAL?: unknown;
+  ALMACEN?: unknown;
+  LIBREUTILIZACION?: unknown;
+}
+
+// Mismas bodegas que Resumen Necesidades de Laminado (getStockKg: 1006/1008/1015, LIBREUTILIZACION en Kg).
+const BODEGAS_STOCK = ['1006', '1008', '1015'] as const;
+
 interface Props {
   ordenesFert: RawApiRow[];
   selectedDates: Set<string>;
   kpiLooperData: RawApiRow[];
+  inventarioSAP: InventarioRow[];
 }
 
-export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData }) => {
+export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData, inventarioSAP }) => {
   // Órdenes FERT de acolchadoras en la fecha del plan (centro 2000 fuera, igual que Órdenes FERT).
   const ordenes = useMemo(() => ordenesFert.filter(o => {
     if (getProp(o, ['CENTRO']) === '2000') return false;
@@ -280,6 +290,19 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
     };
   }), [acolchadoras]);
 
+  const stockKgPorMaterial = useMemo(() => {
+    const m = new Map<string, Record<string, number>>();
+    inventarioSAP.forEach(inv => {
+      const alm = String(inv.ALMACEN ?? '').trim();
+      if (!(BODEGAS_STOCK as readonly string[]).includes(alm)) return;
+      const mat = cleanCode(inv.MATERIAL);
+      const e = m.get(mat) || {};
+      e[alm] = (e[alm] || 0) + safeNum(inv.LIBREUTILIZACION);
+      m.set(mat, e);
+    });
+    return m;
+  }, [inventarioSAP]);
+
   // Resumen para Laminado: qué lámina producir y cuántos rollos entregar a cada acolchadora. Los
   // rollos por acolchadora son enteros (suma de sus filas máquina+lámina al entero superior) y el total
   // de la lámina es la suma de esos enteros — lo que realmente sale hacia las máquinas.
@@ -293,9 +316,18 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
       m.set(f.codigo, e);
     }));
     return Array.from(m.values())
-      .map(e => ({ ...e, rollosUn: Array.from(e.porAcolchadora.values()).reduce((s, n) => s + n, 0) }))
+      .map(e => {
+        const rollosUn = Array.from(e.porAcolchadora.values()).reduce((s, n) => s + n, 0);
+        // Stock en rollos COMPLETOS por bodega (Kg libre ÷ PesoUN, al entero inferior: un rollo
+        // a medias no se entrega). Saldo = stock − rollos requeridos; negativo = no cubre.
+        const stockKg = stockKgPorMaterial.get(e.codigo) || {};
+        const stockUn = Object.fromEntries(BODEGAS_STOCK.map(b => [b, e.pesoUN > 0 ? Math.floor((stockKg[b] || 0) / e.pesoUN + 1e-6) : 0])) as Record<string, number>;
+        const stockTotalUn = BODEGAS_STOCK.reduce((s, b) => s + stockUn[b], 0);
+        const stockTotalKg = BODEGAS_STOCK.reduce((s, b) => s + (stockKg[b] || 0), 0);
+        return { ...e, rollosUn, stockUn, stockTotalUn, stockTotalKg, saldoUn: stockTotalUn - rollosUn };
+      })
       .sort((a, b) => b.kg - a.kg);
-  }, [bloques]);
+  }, [bloques, stockKgPorMaterial]);
 
   const totalKg = bloques.reduce((s, b) => s + b.kg, 0);
   const totalRollos = bloques.reduce((s, b) => s + b.rollosUn, 0);
@@ -343,7 +375,15 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
 
       {resumenLaminas.length > 0 && (
         <div className="rounded-2xl border border-violet-100 bg-white shadow-sm overflow-hidden">
-          <div className="px-4 py-2 bg-violet-50 text-[10px] font-black uppercase tracking-widest text-violet-800">Rollos requeridos por referencia de lámina</div>
+          <div className="px-4 py-2 bg-violet-50 text-[10px] font-black uppercase tracking-widest text-violet-800 flex items-center justify-between gap-4">
+            <span>Rollos requeridos por referencia de lámina</span>
+            {(() => {
+              const faltan = resumenLaminas.filter(l => l.pesoUN > 0 && l.saldoUn < 0).length;
+              return faltan > 0
+                ? <span className="text-red-600">{faltan} de {resumenLaminas.length} láminas sin stock suficiente</span>
+                : <span className="text-emerald-700">El stock cubre todas las láminas</span>;
+            })()}
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-[11px] font-bold text-slate-700">
               <thead className="text-[10px] uppercase text-slate-500 bg-slate-50">
@@ -354,6 +394,12 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                   <th className="px-3 py-2 text-right">Kg</th>
                   <th className="px-3 py-2 text-right">Peso UN</th>
                   <th className="px-3 py-2 text-right">Rollos [un]</th>
+                  {BODEGAS_STOCK.map(b => (
+                    <th key={b} className="px-3 py-2 text-right bg-teal-50 text-teal-800">Stock {b} [un]</th>
+                  ))}
+                  <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Stock final [un]</th>
+                  <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Saldo [un]</th>
+                  <th className="px-3 py-2 text-center bg-teal-50 text-teal-800">¿Cubre?</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -373,6 +419,21 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                     <td className="px-3 py-1.5 text-right font-mono">{fmt(l.kg, 1)}</td>
                     <td className="px-3 py-1.5 text-right font-mono">{l.pesoUN > 0 ? fmt(l.pesoUN, 2) : <span className="text-amber-600">sin Looper</span>}</td>
                     <td className="px-3 py-1.5 text-right font-mono font-black text-violet-700">{l.pesoUN > 0 ? fmt(l.rollosUn) : '—'}</td>
+                    {BODEGAS_STOCK.map(b => (
+                      <td key={b} className="px-3 py-1.5 text-right font-mono bg-teal-50/40 text-slate-600">{l.pesoUN > 0 ? fmt(l.stockUn[b]) : '—'}</td>
+                    ))}
+                    <td className="px-3 py-1.5 text-right font-mono font-black bg-teal-50/40" title={`${fmt(l.stockTotalKg, 1)} Kg libres`}>
+                      {l.pesoUN > 0 ? fmt(l.stockTotalUn) : '—'}
+                    </td>
+                    <td className={`px-3 py-1.5 text-right font-mono font-black bg-teal-50/40 ${l.saldoUn < 0 ? 'text-red-600' : 'text-emerald-700'}`}>
+                      {l.pesoUN > 0 ? (l.saldoUn > 0 ? `+${fmt(l.saldoUn)}` : fmt(l.saldoUn)) : '—'}
+                    </td>
+                    <td className="px-3 py-1.5 text-center bg-teal-50/40">
+                      {l.pesoUN <= 0 ? <span className="text-amber-600 text-[10px]">sin PesoUN</span>
+                        : l.saldoUn >= 0
+                          ? <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-black uppercase">Cubre</span>
+                          : <span className="px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-black uppercase">Falta {fmt(-l.saldoUn)}</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
