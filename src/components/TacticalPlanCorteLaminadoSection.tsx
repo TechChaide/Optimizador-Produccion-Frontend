@@ -4356,21 +4356,34 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return rows;
   }, [groupedNeeds, corridaFechas, ordenCorridas, siguienteDiaHabil]);
 
-  // Solo informativo para el tab Consumo Acolchadoras (usuario 2026-10-19): corridas del plan en
-  // pantalla con fecha = siguiente día hábil (hoy+1), en rollos por material. No entra a ningún cálculo.
+  // Solo informativo para el tab Consumo Acolchadoras (usuario 2026-10-19): corridas YA EN SAP para el
+  // siguiente día hábil (hoy+1) — órdenes FERT de Laminado (responsables 014/031, centro ≠ 2000, mismo
+  // criterio que emparejarOrdenesSap), en rollos por material. Se toma SAP y no el plan en pantalla
+  // para reflejar cambios hechos en SAP después de enviar el P3. No entra a ningún cálculo.
   const corridasSiguienteDia = useMemo(() => {
     const fecha = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
-    const porMaterial = new Map<string, { un: number; kg: number; corridas: number }>();
-    outputPlanRows.filter(r => r.fecha === fecha).forEach(r => {
-      const key = cleanCode(r.material);
-      const e = porMaterial.get(key) || { un: 0, kg: 0, corridas: 0 };
-      e.un += r.planUn;
-      e.kg += r.planKg;
+    const porMaterial = new Map<string, { un: number; kg: number; corridas: number; ordenes: string[] }>();
+    ordenesFert.forEach(o => {
+      if (getProp(o, ['CENTRO', 'Centro', 'centro']) === '2000') return;
+      const responsable = getProp(o, ['RESPCTRLPROD', 'RESP_CONTROL_PROD', 'RESPCONTROLPROD', 'RespControlProd', 'RESPONSABLE']);
+      if (!RESP_PRODUCCION_DIARIA.includes(responsable)) return;
+      const fechaRaw = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']);
+      if ((fechaRaw.includes('T') ? fechaRaw.split('T')[0] : fechaRaw) !== fecha) return;
+      const key = cleanCode(getProp(o, ['MATERIAL', 'CodMaterial']));
+      const cantidad = safeNum(getProp(o, ['CANTPROGRAMADA', 'CANTIDAD', 'CANTPENDIENTE']));
+      const enKg = getProp(o, ['UNIDAD', 'Unidad', 'UNIDAD_MEDIDA']).toUpperCase() === 'KG';
+      const looper = kpiLooperData.find(k => cleanCode(k.Material) === key);
+      const pesoUN = looper ? safeNum(looper.PesoUN) : 0;
+      const e = porMaterial.get(key) || { un: 0, kg: 0, corridas: 0, ordenes: [] };
+      e.un += enKg ? (pesoUN > 0 ? cantidad / pesoUN : 0) : cantidad;
+      e.kg += enKg ? cantidad : cantidad * pesoUN;
       e.corridas += 1;
+      const orden = getProp(o, ['ORDEN', 'ORDEN_PROCESO', 'ORDEN_FERT']);
+      if (orden) e.ordenes.push(orden);
       porMaterial.set(key, e);
     });
     return { fecha, porMaterial };
-  }, [outputPlanRows, siguienteDiaHabil]);
+  }, [ordenesFert, kpiLooperData, siguienteDiaHabil]);
 
   // Mismas columnas en la tabla de pantalla del Plan de Salida: la orden sale de las FERT ya cargadas
   // al sincronizar (aparece al volver a sincronizar después de que SAP la cree).

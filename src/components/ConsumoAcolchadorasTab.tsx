@@ -167,9 +167,9 @@ interface Props {
   selectedDates: Set<string>;
   kpiLooperData: RawApiRow[];
   inventarioSAP: InventarioRow[];
-  // Corridas del plan de Laminado del siguiente día hábil, por material. SOLO INFORMATIVO: no entra
-  // al stock, saldo ni "¿Cubre?".
-  corridasSiguienteDia: { fecha: string; porMaterial: Map<string, { un: number; kg: number; corridas: number }> };
+  // Órdenes FERT de Laminado ya en SAP (014/031) del siguiente día hábil, por material. SOLO
+  // INFORMATIVO: no entra al stock, saldo ni "¿Cubre?".
+  corridasSiguienteDia: { fecha: string; porMaterial: Map<string, { un: number; kg: number; corridas: number; ordenes: string[] }> };
 }
 
 export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData, inventarioSAP, corridasSiguienteDia }) => {
@@ -403,7 +403,7 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Stock final [un]</th>
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Saldo [un]</th>
                   <th className="px-3 py-2 text-center bg-teal-50 text-teal-800">¿Cubre?</th>
-                  <th className="px-3 py-2 text-right bg-slate-100 text-slate-600 whitespace-nowrap" title="Solo informativo: no se suma al stock ni al saldo">
+                  <th className="px-3 py-2 text-right bg-slate-100 text-slate-600 whitespace-nowrap" title="Órdenes FERT de Laminado ya en SAP (014/031) del siguiente día hábil. Solo informativo: no se suma al stock ni al saldo">
                     Corrida {corridasSiguienteDia.fecha.slice(8, 10)}/{corridasSiguienteDia.fecha.slice(5, 7)} [un] <span className="normal-case font-bold">(info)</span>
                   </th>
                 </tr>
@@ -444,8 +444,8 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                       const c = corridasSiguienteDia.porMaterial.get(l.codigo);
                       return (
                         <td className="px-3 py-1.5 text-right font-mono bg-slate-50 text-slate-600"
-                          title={c ? `${c.corridas} corrida(s) · ${fmt(c.kg, 1)} Kg — solo informativo` : 'Sin corrida en el plan del siguiente día'}>
-                          {c ? fmt(c.un) : <span className="text-slate-300">—</span>}
+                          title={c ? `${c.corridas} orden(es) SAP: ${c.ordenes.join(', ')} · ${fmt(c.kg, 1)} Kg — solo informativo` : 'Sin orden SAP de Laminado para el siguiente día'}>
+                          {c ? fmt(Math.round(c.un)) : <span className="text-slate-300">—</span>}
                         </td>
                       );
                     })()}
