@@ -3994,7 +3994,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
       // El grupo 3 (origen de los P2 "- ESPUMA"/"- LAMINA") entra siempre, esté o no
       // en ALMACEN_CONSUMO — aquí solo se toma su variante "- ESPUMA" (ver esP2ParaModulo).
-      const gruposFiltrados = (gruposRes.data || []).filter((g) => g.estado === 'A' && (almacenConsumoNames.includes(normalizeName(g.nombre_grupo)) || g.codigo_grupo === CODIGO_GRUPO_P2_MUEBLES));
+      // Venta Externa también entra siempre (usuario 2026-10-20: Corte Espuma no tiene fila
+      // ALMACEN_CONSUMO y el P2 de VE no se leía): su P2 ya indica destino ("- Espumas").
+      const gruposFiltrados = (gruposRes.data || []).filter((g) => g.estado === 'A' && (almacenConsumoNames.includes(normalizeName(g.nombre_grupo)) || g.codigo_grupo === CODIGO_GRUPO_P2_MUEBLES || /venta\s*externa/i.test(g.nombre_grupo || '')));
       const gruposCodigos = gruposFiltrados.map((g) => g.codigo_grupo);
       const grupoPorCodigo = new Map(gruposFiltrados.map((g) => [g.codigo_grupo, g]));
 
@@ -4057,12 +4059,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // distinguir "no hay P2" de "hay P2 pero vencido".
       const vencidos = candidatosBase.filter((pg) => !planesActivos.includes(pg));
       const describirP2 = (pg: PlanGrupo) => `#${pg.codigo_plan_grupo} ${String(pg.valor || '').replace(/^plan\s*t[aá]ctico\s*-\s*/i, '')} (${fechaLocalPlana(pg.fecha_inicio_plan)} → ${fechaLocalPlana(pg.fecha_fin_plan)})`;
-      // Venta Externa solo entra si su grupo está en ALMACEN_CONSUMO de Corte Espuma: si falta, el P2
-      // existe pero no se lee y el bloque desaparece sin aviso (usuario 2026-10-20).
-      const avisosP2 = (gruposRes.data || [])
-        .filter(g => g.estado === 'A' && /venta\s*externa/i.test(g.nombre_grupo || '') && !gruposCodigos.includes(g.codigo_grupo))
-        .map(g => `Grupo "${g.nombre_grupo}" (#${g.codigo_grupo}, centro ${g.centro}) no está en ALMACEN_CONSUMO de Corte Espuma: su P2 no se toma.`);
-      diagnosticoP2Ref.current = { recuperacion: fechaObjetivoP2, pt: fechaPTCiclo, usados: planesActivos.map(describirP2), fuera: vencidos.map(pg => ({ texto: describirP2(pg), fin: fechaLocalPlana(pg.fecha_fin_plan) })), avisos: avisosP2 };
+      diagnosticoP2Ref.current = { recuperacion: fechaObjetivoP2, pt: fechaPTCiclo, usados: planesActivos.map(describirP2), fuera: vencidos.map(pg => ({ texto: describirP2(pg), fin: fechaLocalPlana(pg.fecha_fin_plan) })), avisos: [] };
       if (vencidos.length > 0) {
         console.warn(`[Necesidades Planta] P2 activos fuera del ciclo (recuperación ${fechaObjetivoP2} / PT ${fechaPTCiclo}):`,
           vencidos.map((pg) => `#${pg.codigo_plan_grupo} ${pg.valor} (${fechaLocalPlana(pg.fecha_inicio_plan)} → ${fechaLocalPlana(pg.fecha_fin_plan)})`));

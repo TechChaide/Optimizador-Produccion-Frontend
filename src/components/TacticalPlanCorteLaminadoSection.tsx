@@ -1496,8 +1496,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         .filter((v: string) => v !== '');
 
       // El grupo 3 (origen de los P2 "- ESPUMA"/"- LAMINA") entra siempre, esté o no
-      // en ALMACEN_CONSUMO — aquí solo se toma su variante "- LAMINA" (ver esP2ParaModulo).
-      const gruposFiltrados = (gruposRes.data || []).filter((g) => g.estado === 'A' && (almacenConsumoNames.includes(normalizeName(g.nombre_grupo)) || g.codigo_grupo === CODIGO_GRUPO_P2_MUEBLES));
+      // en ALMACEN_CONSUMO — aquí solo se toma su variante "- LAMINA" (ver esP2ParaModulo). Venta
+      // Externa también entra siempre (usuario 2026-10-20): su P2 ya indica destino ("- Rollos").
+      const gruposFiltrados = (gruposRes.data || []).filter((g) => g.estado === 'A' && (almacenConsumoNames.includes(normalizeName(g.nombre_grupo)) || g.codigo_grupo === CODIGO_GRUPO_P2_MUEBLES || /venta\s*externa/i.test(g.nombre_grupo || '')));
       const gruposCodigos = gruposFiltrados.map((g) => g.codigo_grupo);
       const grupoPorCodigo = new Map(gruposFiltrados.map((g) => [g.codigo_grupo, g]));
 

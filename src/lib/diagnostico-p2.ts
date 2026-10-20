@@ -9,8 +9,7 @@ export interface DiagnosticoP2 {
   // verdad chocan con el ciclo (vigentes o futuros con otra fecha).
   usados: string[];
   fuera: { texto: string; fin: string }[];
-  // Causas de "el P2 existe pero no aparece" que no son de fecha (grupo fuera de ALMACEN_CONSUMO,
-  // P2 del ciclo sin líneas). Siempre levantan aviso.
+  // Causas de "el P2 existe pero no aparece" que no son de fecha (ej. P2 del ciclo sin líneas).
   avisos?: string[];
 }
 
