@@ -1,13 +1,16 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Scissors, Loader2 } from 'lucide-react';
+import { Scissors, Loader2, ListChecks } from 'lucide-react';
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
+import type { Restriccion } from '@/types/interfaces';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ProvisionalOrdersTallerCorteTab } from './ProvisionalOrdersTallerCorteTab';
 import { TiemposTallerCorteTab } from './TiemposTallerCorteTab';
 import { PlanTallerCorteTab } from './PlanTallerCorteTab';
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
+import { serviciosService } from '@/services/servicios.service';
 import { useAppContext } from '@/context/AppProvider';
 import { TALLER_CORTE_TIEMPOS_EXCEL } from '@/data/tallerCorteTiemposExcel';
 import { GRUPO_TALLER_CORTE_NOMBRE, GRUPO_TALLER_CORTE_DEPARTAMENTO, GRUPO_TALLER_CORTE_CENTRO } from '@/lib/taller-corte-grupo';
@@ -21,6 +24,17 @@ const GRUPO_TIEMPOS_TC_DEPARTAMENTO = GRUPO_TALLER_CORTE_DEPARTAMENTO;
 const GRUPO_TIEMPOS_TC_CENTRO = GRUPO_TALLER_CORTE_CENTRO;
 const RESTRICCION_TIEMPO_DESCRIPCION = 'Tiempo unitario de cosido (min) - Taller de Corte';
 
+// Líneas del maestro TiemposEnsamblado (backend) que corresponden a Taller de Corte, centro 1000 —
+// publicadas por TI en 2026-10 (confirmado por el usuario 2026-10-20: el taller usa las tres según el
+// material). Sus tiempos ya incluyen un +13% respecto al Excel KPI-TC-Temp.xlsx, confirmado como correcto.
+const LINEAS_BACKEND_TALLER_CORTE = ['Taller Costura', 'Taller Corte FK', 'Taller Corte EK'];
+const CENTRO_BACKEND_TALLER_CORTE = '1000';
+
+export interface TiempoBackendTC {
+    minutos: number;
+    linea: string;
+}
+
 export interface TiempoManualDetalle {
     descripcion: string;
     fechaModificacion: string;
@@ -33,6 +47,68 @@ const descripcionDesdeRestriccion = (descripcion: string | null | undefined): st
     const prefijo = `${RESTRICCION_TIEMPO_DESCRIPCION} — `;
     return texto.startsWith(prefijo) ? texto.slice(prefijo.length).trim() : texto.trim();
 };
+
+// Las correcciones manuales de tiempo se guardan como Restriccion con nombre_restriccion = código de
+// material (solo dígitos). Así se distinguen de las restricciones "generales" del grupo (configuración),
+// que van a la pestaña "Restricciones" y no deben leerse como tiempos.
+const esRestriccionTiempoManual = (r: Pick<Restriccion, 'nombre_restriccion'>): boolean =>
+    /^\d{6,}$/.test(String(r.nombre_restriccion || '').trim());
+
+// Pestaña "Restricciones" — mismo formato que la de Planificación Táctica Muebles (solo lectura): las
+// restricciones del Grupo de este módulo, SIN las correcciones manuales de tiempo (esas están en "Tiempos").
+const RestriccionesTallerCorteTab: React.FC<{ restricciones: Restriccion[]; isLoading: boolean; tieneGrupo: boolean }> = ({ restricciones, isLoading, tieneGrupo }) => (
+    <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="px-6 py-4 bg-gradient-to-r from-slate-900 to-indigo-900">
+            <h3 className="text-sm font-bold text-white uppercase tracking-wide flex items-center gap-2">
+                <ListChecks className="w-4 h-4" /> Listado de Restricciones para Taller de Corte
+            </h3>
+            <p className="text-[11px] text-indigo-200 mt-0.5">
+                Restricciones de producción del grupo &quot;{GRUPO_TIEMPOS_TC_NOMBRE}&quot; (centro {GRUPO_TIEMPOS_TC_CENTRO}). Se
+                administran en Parámetros → Grupos → {GRUPO_TIEMPOS_TC_NOMBRE} → Restricciones. Las correcciones manuales
+                de tiempo por material no se listan aquí: están en la pestaña &quot;Tiempos&quot;.
+            </p>
+        </div>
+        <div className="p-4">
+            {isLoading ? (
+                <div className="flex justify-center items-center p-8"><Loader2 className="w-8 h-8 animate-spin text-gray-400" /></div>
+            ) : (
+                <div className="border rounded-lg overflow-auto max-h-[60vh]">
+                    <Table>
+                        <TableHeader>
+                            <TableRow>
+                                <TableHead className="text-center border-r border-dashed border-gray-300">Grupo</TableHead>
+                                <TableHead className="text-center border-r border-dashed border-gray-300">Nombre Restricción</TableHead>
+                                <TableHead className="text-center border-r border-dashed border-gray-300">Valor</TableHead>
+                                <TableHead className="text-center border-r border-dashed border-gray-300">Descripción</TableHead>
+                                <TableHead className="text-center">Estado</TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            {restricciones.map(r => (
+                                <TableRow key={r.codigo_restriccion}>
+                                    <TableCell className="text-center border-r border-dashed border-gray-300">{r.grupo?.nombre_grupo || GRUPO_TIEMPOS_TC_NOMBRE}</TableCell>
+                                    <TableCell className="text-center border-r border-dashed border-gray-300">{r.nombre_restriccion}</TableCell>
+                                    <TableCell className="text-center border-r border-dashed border-gray-300 break-all">{r.valor_restriccion}</TableCell>
+                                    <TableCell className="text-center border-r border-dashed border-gray-300">{r.descripcion}</TableCell>
+                                    <TableCell className="text-center">{r.estado === 'A' ? 'Activa' : r.estado || '—'}</TableCell>
+                                </TableRow>
+                            ))}
+                            {restricciones.length === 0 && (
+                                <TableRow>
+                                    <TableCell colSpan={5} className="text-center py-6 text-gray-400 text-xs">
+                                        {tieneGrupo
+                                            ? 'Este grupo todavía no tiene restricciones configuradas.'
+                                            : `El grupo "${GRUPO_TIEMPOS_TC_NOMBRE}" todavía no existe; se crea al guardar el primer tiempo manual o el primer Plan Final (PFTC).`}
+                                    </TableCell>
+                                </TableRow>
+                            )}
+                        </TableBody>
+                    </Table>
+                </div>
+            )}
+        </div>
+    </div>
+);
 
 const formatDateForSQLServer = (date: Date): string => {
     const pad = (n: number) => n.toString().padStart(2, '0');
@@ -72,19 +148,69 @@ export const TacticalPlanTallerCorteSection: React.FC = () => {
     // Descripción y fecha de cada override manual, solo para la descarga a Excel de la pestaña "Tiempos"
     const [overridesDetalleMap, setOverridesDetalleMap] = useState<Map<string, TiempoManualDetalle>>(new Map());
     const [tallerCorteGrupoId, setTallerCorteGrupoId] = useState<number | null>(null);
+    // Restricciones "generales" del grupo (sin las correcciones manuales de tiempo) — pestaña "Restricciones"
+    const [restriccionesGenerales, setRestriccionesGenerales] = useState<Restriccion[]>([]);
     const [isLoadingTiempos, setIsLoadingTiempos] = useState(true);
 
-    // Mapa EFECTIVO (el que realmente alimenta la tabla inicial/capacidad/clasificación de "grande"):
-    // Excel como base, sobrescrito por cualquier override manual guardado.
+    // Tiempos del BACKEND (maestro TiemposEnsamblado, líneas de Taller de Corte) — material -> minutos.
+    // Si un material aparece en varias filas (casi siempre la misma línea con dos hojas de ruta, o en
+    // Costura + Corte FK), se toma el MAYOR tiempo: sumarlos duplicaría el tiempo (verificado 2026-10-20
+    // contra el Excel: el mayor da el +13% esperado, la suma daba +126%).
+    const [backendTiemposMap, setBackendTiemposMap] = useState<Map<string, TiempoBackendTC>>(new Map());
+    const [isLoadingBackendTiempos, setIsLoadingBackendTiempos] = useState(true);
+
+    // Mapa EFECTIVO (el que realmente alimenta la tabla inicial/capacidad/clasificación de "grande" de
+    // "PLAN TÁCTICO" y "PLAN"). Prioridad acordada con el usuario (2026-10-19/20):
+    //   1) corrección manual guardada  2) tiempo del backend  3) Excel KPI-TC-Temp.xlsx (respaldo)
+    // El ingreso manual se mantiene a propósito, por si al backend le falta algún código.
     const tiemposEfectivoMap = useMemo(() => {
         const merged = new Map(excelTiemposMap);
+        backendTiemposMap.forEach((t, codigo) => merged.set(codigo, t.minutos));
         tiemposOverrideMap.forEach((minutos, codigo) => merged.set(codigo, minutos));
         return merged;
-    }, [excelTiemposMap, tiemposOverrideMap]);
+    }, [excelTiemposMap, backendTiemposMap, tiemposOverrideMap]);
+
+    // Tiempo "base" de cada material sin la corrección manual (backend, o Excel si el backend no lo tiene)
+    const tiemposBaseMap = useMemo(() => {
+        const merged = new Map(excelTiemposMap);
+        backendTiemposMap.forEach((t, codigo) => merged.set(codigo, t.minutos));
+        return merged;
+    }, [excelTiemposMap, backendTiemposMap]);
 
     useEffect(() => {
         setMounted(true);
     }, []);
+
+    // Carga los tiempos de Taller de Corte del backend (descarga compartida del maestro TiemposEnsamblado,
+    // ver serviciosService.getTiemposEnsambladoCompleto). Si falla, el módulo sigue funcionando con el
+    // Excel + correcciones manuales, y se avisa al usuario.
+    useEffect(() => {
+        if (!mounted) return;
+        let cancelado = false;
+        setIsLoadingBackendTiempos(true);
+        serviciosService.getTiemposEnsambladoCompleto()
+            .then(rows => {
+                if (cancelado) return;
+                const map = new Map<string, TiempoBackendTC>();
+                rows.forEach((row: any) => {
+                    const linea = String(row.Linea ?? '').trim();
+                    if (String(row.Centro ?? '').trim() !== CENTRO_BACKEND_TALLER_CORTE || !LINEAS_BACKEND_TALLER_CORTE.includes(linea)) return;
+                    const codigo = String(row.CodMaterial ?? '').trim().slice(-8);
+                    const minutos = Number(row.Tiempo_Min ?? 0);
+                    if (!codigo || !(minutos > 0)) return;
+                    const previo = map.get(codigo);
+                    if (!previo || minutos > previo.minutos) map.set(codigo, { minutos, linea });
+                });
+                setBackendTiemposMap(map);
+            })
+            .catch(error => {
+                if (cancelado) return;
+                console.error('Error al cargar los tiempos de Taller de Corte del backend:', error);
+                addNotification('warning', `No se pudieron cargar los tiempos de Taller de Corte del backend; se usan el Excel y las correcciones manuales. (${(error as Error).message})`);
+            })
+            .finally(() => { if (!cancelado) setIsLoadingBackendTiempos(false); });
+        return () => { cancelado = true; };
+    }, [mounted, addNotification]);
 
     // Busca el Grupo dedicado a este módulo y, si existe, carga los overrides manuales ya guardados
     // (una Restriccion por material: nombre_restriccion = código, valor_restriccion = minutos). Si el
@@ -108,9 +234,10 @@ export const TacticalPlanTallerCorteSection: React.FC = () => {
                 const overrides = new Map<string, number>();
                 const ids = new Map<string, number>();
                 const detalles = new Map<string, TiempoManualDetalle>();
+                setRestriccionesGenerales(restriccionesGrupo.filter(r => !esRestriccionTiempoManual(r)));
                 restriccionesGrupo.forEach(r => {
                     const minutos = Number(r.valor_restriccion);
-                    if (!Number.isNaN(minutos)) {
+                    if (esRestriccionTiempoManual(r) && !Number.isNaN(minutos)) {
                         overrides.set(r.nombre_restriccion, minutos);
                         ids.set(r.nombre_restriccion, r.codigo_restriccion);
                         detalles.set(r.nombre_restriccion, {
@@ -200,7 +327,10 @@ export const TacticalPlanTallerCorteSection: React.FC = () => {
             </div>
 
             <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                <TabsList className="grid w-full grid-cols-3 gap-1 h-auto p-1 bg-muted border border-dashed border-gray-300 rounded-lg">
+                <TabsList className="grid w-full grid-cols-4 gap-1 h-auto p-1 bg-muted border border-dashed border-gray-300 rounded-lg">
+                    <TabsTrigger value="restricciones" className="font-bold text-blue-700 data-[state=active]:text-blue-700">
+                        Restricciones
+                    </TabsTrigger>
                     <TabsTrigger value="tiempos" className="font-bold text-blue-700 data-[state=active]:text-blue-700">
                         Tiempos
                     </TabsTrigger>
@@ -212,15 +342,26 @@ export const TacticalPlanTallerCorteSection: React.FC = () => {
                     </TabsTrigger>
                 </TabsList>
 
+                <TabsContent value="restricciones" className="mt-4">
+                    <RestriccionesTallerCorteTab
+                        restricciones={restriccionesGenerales}
+                        isLoading={isLoadingTiempos}
+                        tieneGrupo={tallerCorteGrupoId !== null}
+                    />
+                </TabsContent>
+
                 <TabsContent value="tiempos" className="mt-4">
                     <TiemposTallerCorteTab
                         materiales={materialesDetectados}
                         tiemposEfectivoMap={tiemposEfectivoMap}
                         tiemposOverrideMap={tiemposOverrideMap}
                         overridesDetalleMap={overridesDetalleMap}
-                        tiemposBaseMap={excelTiemposMap}
+                        tiemposBaseMap={tiemposBaseMap}
+                        backendTiemposMap={backendTiemposMap}
+                        excelTiemposMap={excelTiemposMap}
                         onGuardarTiempo={handleGuardarTiempo}
                         isLoadingTiempos={isLoadingTiempos}
+                        isLoadingBackendTiempos={isLoadingBackendTiempos}
                     />
                 </TabsContent>
 
