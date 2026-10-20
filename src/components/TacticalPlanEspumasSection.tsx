@@ -2603,8 +2603,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const necesidadCapacidadUIO = useMemo(() => resultadoRestaurado?.necesidadCapacidad['1000'] ?? necesidadCapacidadMapper(necesidadesPlantaConsolidada, '1000'), [necesidadCapacidadMapper, necesidadesPlantaConsolidada, resultadoRestaurado]);
   const necesidadCapacidadGYE = useMemo(() => resultadoRestaurado?.necesidadCapacidad['2000'] ?? necesidadCapacidadMapper(necesidadesPlantaConsolidada, '2000'), [necesidadCapacidadMapper, necesidadesPlantaConsolidada, resultadoRestaurado]);
 
-  // Tab "SUB-BLOQUES-T8" (usuario 2026-10-17, Excel "IMG B"): segunda etapa de la capacidad de
-  // Necesidades Planta (etapa 1 = necesidadCapacidadUIO/GYE). Solo carrusel (sin verticales). Por
+  // Tab "SUB-BLOQUES-T8" (usuario 2026-10-17, Excel "IMG B"): bloques del día de corte con las FERT en
+  // firme (desde 2026-10-20, ver fertT8PorCentro; antes partía de la necesidad). Solo carrusel (sin verticales). Por
   // material (consolidando las áreas que piden lo mismo) y agrupado por densidad:
   //  - Sub-bloques = ⌈cantidad / ⌊altura útil / espesor⌋⌉ (misma regla que calcularMetricasCapacidad).
   //  - Cargas carrusel (CR-01/03/04) = giros completos + 1 por el sobrante, salvo que el sobrante sea
@@ -2641,6 +2641,32 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     fertAuditAllGYE.forEach(r => registrar(r.material, r.categoria, '2000'));
     return { porCentro, cualquierCentro };
   }, [fertAuditAllUIO, fertAuditAllGYE]);
+
+  // T8 = bloques a consumir en el día de corte D (usuario 2026-10-20): ya no parte de la necesidad
+  // (eso es capacidad, otro tab) sino de las órdenes FERT en firme (liberadas) de láminas de corte,
+  // por FECHAFIN: Colchones/Muebles con FECHAFIN = D (PT−1) y Venta Externa con FECHAFIN = D+1 hábil
+  // (su HALB va fechada al PT), así en D se cuentan las dos para el mismo PT. Provisionales no entran.
+  // D por defecto = hoy+1 hábil, con selector. Venta se reconoce por origenArea (cruce con el P2): sin
+  // Necesidades Planta cargadas, una FERT de Venta se trataría como colchones.
+  const [t8FechaCorte, setT8FechaCorte] = useState('');
+  const t8Fechas = useMemo(() => {
+    const d = t8FechaCorte || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
+    return { d, venta: format(siguienteDiaHabil(new Date(`${d}T12:00:00`)), 'yyyy-MM-dd') };
+  }, [t8FechaCorte, siguienteDiaHabil]);
+  const fertT8PorCentro = useMemo(() => {
+    // Mismos descartes que getFilteredData (responsables de corte, prensado, forro, aprovechamiento,
+    // excepción 015), aplicados sobre fertAuditAll para que funcione también con el plan restaurado.
+    const filtrar = (rows: UnifiedRow[], centro: string) => {
+      const allowed = allowedRespPorCentro(centro);
+      return rows.filter(r => {
+        if (!allowed.includes(r.responsable)) return false;
+        if (/PRENSAD|APROVECHAMIENTO/i.test(r.descripcion) || ES_FORRO(r.descripcion)) return false;
+        if (respExcepcionExcluye(centro, r.responsable, r.material)) return false;
+        return r.fechaFin === (/venta\s*externa/i.test(r.origenArea || '') ? t8Fechas.venta : t8Fechas.d);
+      });
+    };
+    return { '1000': filtrar(fertAuditAllUIO, '1000'), '2000': filtrar(fertAuditAllGYE, '2000') };
+  }, [fertAuditAllUIO, fertAuditAllGYE, allowedRespPorCentro, t8Fechas]);
 
   const subBloquesT8PorCentro = useMemo(() => {
     const calcular = (rows: UnifiedRow[], centro: string) => {
@@ -2715,8 +2741,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           return { dens, aperturas, ...totales(aperturas), bloques: aperturas.reduce((s, a) => s + a.bloques, 0) };
         });
     };
-    return { '1000': calcular(necesidadCapacidadUIO, '1000'), '2000': calcular(necesidadCapacidadGYE, '2000') };
-  }, [necesidadCapacidadUIO, necesidadCapacidadGYE, aperturaCategoriaPorCentro]);
+    return { '1000': calcular(fertT8PorCentro['1000'], '1000'), '2000': calcular(fertT8PorCentro['2000'], '2000') };
+  }, [fertT8PorCentro, aperturaCategoriaPorCentro]);
   // Grupos plegados del tab T8 (claves centro|densidad y centro|densidad|apertura); por defecto todo abierto.
   const [t8Plegados, setT8Plegados] = useState<Set<string>>(new Set());
   const toggleT8 = (clave: string) => setT8Plegados(prev => { const n = new Set(prev); if (n.has(clave)) n.delete(clave); else n.add(clave); return n; });
@@ -7098,6 +7124,12 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
           <TabsContent value="subBloquesT8" className="animate-in fade-in duration-300 space-y-8 text-left">
             {/* Modelo del bloque: de dónde sale la altura útil y la cúpula (valores por verificar en planta). */}
             <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 flex flex-wrap items-center gap-3 text-xs">
+              <label className="flex items-center gap-2 font-black uppercase text-slate-700 text-[10px]">
+                Día de corte
+                <input type="date" value={t8Fechas.d} onChange={e => setT8FechaCorte(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-mono text-slate-900" />
+                <span className="normal-case font-semibold text-slate-600">Venta Externa: fecha fin {t8Fechas.venta.split('-').reverse().join('/')}</span>
+              </label>
+              <span className="text-slate-300">|</span>
               <span className="font-black uppercase text-slate-700 text-[10px]">Modelo de bloque</span>
               <span className="px-3 py-1.5 rounded-xl bg-slate-100 font-black">Altura bloque {ALTURA_BLOQUE_CM} cm</span>
               <span className="text-slate-600">−</span>
@@ -7107,7 +7139,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               <span className="text-slate-600">·</span>
               <span className="text-slate-700">D ≥ 28: útil 85 cm · Bloque madre {LARGO_BLOQUE_M} m · Sobrante ≤ {SUBBLOQUES_SOBRANTE_MAX_CNC} sub-bloque → CNC</span>
               <p className="w-full text-[11px] text-slate-700">
-                Parte de la necesidad de <b>1 · Necesidades Planta</b> (solo carrusel). Cúpula por carga = ciclos al espesor de la lámina hasta cubrir ~{CUPULA_CM} cm sin pasar de {CUPULA_MAX_CM} cm
+                Bloques a consumir el día de corte con las <b>órdenes FERT en firme</b> (solo carrusel, sin provisionales): Colchones/Muebles con fecha fin = día de corte y Venta Externa con fecha fin = siguiente día hábil (su PT). Cúpula por carga = ciclos al espesor de la lámina hasta cubrir ~{CUPULA_CM} cm sin pasar de {CUPULA_MAX_CM} cm
                 (0.8 → 5 ciclos · 1 → 4 · 2 → 2 · ≥ 3 → 1). T. corte = láminas + cúpula (T. Indiv KPI) + carga/descarga. Ocupación &lt; 60% = carga con poco material para los ciclos que paga.
               </p>
             </div>
@@ -7135,7 +7167,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                     </div>
                   )}
                   {grupos.length === 0 ? (
-                    <div className="p-4 text-xs text-slate-600">Sin necesidades de carrusel. Genera primero las Necesidades Planta.</div>
+                    <div className="p-4 text-xs text-slate-600">Sin órdenes FERT de carrusel para el día de corte {t8Fechas.d.split('-').reverse().join('/')} (Venta Externa: {t8Fechas.venta.split('-').reverse().join('/')}). Sincroniza para traer las FERT liberadas.</div>
                   ) : (
                     // Árbol Densidad → Apertura → material, cada nivel plegable (+/−) con sus totales en la
                     // misma fila. Columnas en el orden del Excel del usuario (IMG B); detalle del cálculo al final.
