@@ -15,7 +15,6 @@ import {
   Plus,
   Minus,
   Info,
-  ShoppingCart,
   ChevronsLeft,
   ChevronsRight,
   Filter,
@@ -5350,15 +5349,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             // El TabsContent y filteredOrders se conservan en el código (no se eliminan) porque
             // filteredOrders sigue siendo necesario para datesWithOrders (calendario) y el guard de
             // handleProcessResumen.
-            { v: 'ordenesFert', l: 'Órdenes FERT', i: ShoppingCart },
+            // Tabs ocultos (usuario 2026-10-20, menos vistas): 'ordenesFert' (Órdenes FERT), 'inventario'
+            // (Inventarios SAP) y 'debugPR2' (Validar PR2). Son solo consulta — no consultan nada propio
+            // ni fijan filtros del cálculo (la fecha FERT sale del panel de Sincronizar) — así que sus
+            // TabsContent se conservan; para volver a mostrarlos basta reponer aquí su entrada.
             // Consulta (usuario 2026-10-19): FERT de acolchadoras → BOM → rollos de lámina. No afecta el plan.
             { v: 'acolchadoras', l: 'Consumo Acolchadoras', i: Layers },
-            { v: 'inventario', l: 'Inventarios SAP', i: Database },
-            // Tab de solo validación/auditoría — no participa del cálculo del plan. Muestra la data
-            // cruda tal cual la devuelve tiemposEnsambladoByGrupoYCentroPR2, sin pasar por
-            // resolvePuestoTrabajo, para poder confirmar contra el origen casos como PuestoTrabajo
-            // "Looper" en materiales CONV (30004576/30006695, ver buildSolicitudProduccion).
-            { v: 'debugPR2', l: 'Validar PR2', i: Info }
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[10px] font-black uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-lg data-[state=active]:text-red-600 rounded-xl">
               <tab.i className="w-4 h-4" /> {tab.l}
