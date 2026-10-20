@@ -497,7 +497,7 @@ const enviarAvisoRespuestaP3 = async (planta: string, codigoP3: number): Promise
   try {
     await serviciosService.enviarCorreo({
       destino: correos.join(', '),
-      asunto: 'RESPUESTA AUTOMATICA P3 Espuma',
+      asunto: 'RESPUESTA AUTOMATICA P3 Corte y Laminado [Lamina CHN / Muebles]',
       cuerpo: `<p style="font-family:Arial,sans-serif;font-size:14px;color:#111827;">${texto}</p>`,
       nota: 'Este correo fue generado automáticamente, favor no responder.',
     });
