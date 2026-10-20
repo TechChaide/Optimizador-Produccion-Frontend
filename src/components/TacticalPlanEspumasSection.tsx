@@ -4057,7 +4057,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // distinguir "no hay P2" de "hay P2 pero vencido".
       const vencidos = candidatosBase.filter((pg) => !planesActivos.includes(pg));
       const describirP2 = (pg: PlanGrupo) => `#${pg.codigo_plan_grupo} ${String(pg.valor || '').replace(/^plan\s*t[aá]ctico\s*-\s*/i, '')} (${fechaLocalPlana(pg.fecha_inicio_plan)} → ${fechaLocalPlana(pg.fecha_fin_plan)})`;
-      diagnosticoP2Ref.current = { recuperacion: fechaObjetivoP2, pt: fechaPTCiclo, usados: planesActivos.map(describirP2), fuera: vencidos.map(pg => ({ texto: describirP2(pg), fin: fechaLocalPlana(pg.fecha_fin_plan) })) };
+      // Venta Externa solo entra si su grupo está en ALMACEN_CONSUMO de Corte Espuma: si falta, el P2
+      // existe pero no se lee y el bloque desaparece sin aviso (usuario 2026-10-20).
+      const avisosP2 = (gruposRes.data || [])
+        .filter(g => g.estado === 'A' && /venta\s*externa/i.test(g.nombre_grupo || '') && !gruposCodigos.includes(g.codigo_grupo))
+        .map(g => `Grupo "${g.nombre_grupo}" (#${g.codigo_grupo}, centro ${g.centro}) no está en ALMACEN_CONSUMO de Corte Espuma: su P2 no se toma.`);
+      diagnosticoP2Ref.current = { recuperacion: fechaObjetivoP2, pt: fechaPTCiclo, usados: planesActivos.map(describirP2), fuera: vencidos.map(pg => ({ texto: describirP2(pg), fin: fechaLocalPlana(pg.fecha_fin_plan) })), avisos: avisosP2 };
       if (vencidos.length > 0) {
         console.warn(`[Necesidades Planta] P2 activos fuera del ciclo (recuperación ${fechaObjetivoP2} / PT ${fechaPTCiclo}):`,
           vencidos.map((pg) => `#${pg.codigo_plan_grupo} ${pg.valor} (${fechaLocalPlana(pg.fecha_inicio_plan)} → ${fechaLocalPlana(pg.fecha_fin_plan)})`));
@@ -4075,6 +4080,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // 3. DetalleTactico asociado a los PlanGrupo encontrados (solo esos planes, endpoint por plan_grupo
       //    2026-10-12; antes se bajaba la tabla completa).
       const detalles = (await detallesDePlanes(planGrupoCodigos)).filter((d) => planGrupoCodigos.includes(d.codigo_plan_grupo));
+      // Líneas por P2 en el panel: un P2 del ciclo sin detalle tampoco pinta su bloque.
+      const lineasPorPlan = new Map<number, number>();
+      detalles.forEach(d => lineasPorPlan.set(d.codigo_plan_grupo, (lineasPorPlan.get(d.codigo_plan_grupo) ?? 0) + 1));
+      if (diagnosticoP2Ref.current) {
+        diagnosticoP2Ref.current.usados = planesActivos.map(pg => `${describirP2(pg)} ${lineasPorPlan.get(pg.codigo_plan_grupo) ?? 0} líneas`);
+        planesActivos.filter(pg => !lineasPorPlan.has(pg.codigo_plan_grupo))
+          .forEach(pg => diagnosticoP2Ref.current!.avisos!.push(`#${pg.codigo_plan_grupo} no tiene líneas de detalle.`));
+      }
 
       const grouped: Record<string, NecesidadPlantaRow[]> = {};
       const ferts: NecesidadPlantaRow[] = [];

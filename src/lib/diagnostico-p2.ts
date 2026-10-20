@@ -9,6 +9,9 @@ export interface DiagnosticoP2 {
   // verdad chocan con el ciclo (vigentes o futuros con otra fecha).
   usados: string[];
   fuera: { texto: string; fin: string }[];
+  // Causas de "el P2 existe pero no aparece" que no son de fecha (grupo fuera de ALMACEN_CONSUMO,
+  // P2 del ciclo sin líneas). Siempre levantan aviso.
+  avisos?: string[];
 }
 
 const ddmm = (fecha: string) => (/^\d{4}-\d{2}-\d{2}$/.test(fecha) ? `${fecha.slice(8, 10)}/${fecha.slice(5, 7)}` : fecha);
@@ -22,13 +25,14 @@ export const pasoPanelDiagnosticoP2 = (d: DiagnosticoP2 | null): { estado: 'ok' 
   const vencidos = d.fuera.length - enConflicto.length;
   const fuera = (enConflicto.length > 0 ? ` Activos con otra fecha (no se toman): ${enConflicto.map(f => f.texto).join(' · ')}.` : '')
     + (vencidos > 0 ? ` ${vencidos} P2 de ciclos anteriores siguen activos (A) en BD; no se toman.` : '');
+  const avisos = (d.avisos ?? []).map(a => ` ${a}`).join('');
   if (d.usados.length === 0) {
     return {
       estado: 'aviso',
-      detalle: enConflicto.length > 0 || vencidos > 0
+      detalle: (enConflicto.length > 0 || vencidos > 0
         ? `Ningún P2 del ciclo (${ciclo}).${fuera}`
-        : `Ningún P2 activo para este módulo (${ciclo}): el área de origen aún no lo genera.`,
+        : `Ningún P2 activo para este módulo (${ciclo}): el área de origen aún no lo genera.`) + avisos,
     };
   }
-  return { estado: enConflicto.length > 0 ? 'aviso' : 'ok', detalle: `P2 del ciclo (${ciclo}): ${d.usados.join(' · ')}.${fuera}` };
+  return { estado: enConflicto.length > 0 || avisos ? 'aviso' : 'ok', detalle: `P2 del ciclo (${ciclo}): ${d.usados.join(' · ')}.${fuera}${avisos}` };
 };
