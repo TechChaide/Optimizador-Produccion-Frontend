@@ -175,6 +175,30 @@ const clasificarTipoMueble = (nombreRaw: string, tiempoUnitMin: number): TipoMue
 // ampliar el valor fijo, no la variante dinámica.
 const INSUMO_VENTANA_DIAS = 14;
 
+// Quita los ceros a la izquierda de un código (orden/material) para mostrarlo; si todo son ceros, deja "0"
+const sinCerosIzquierda = (valor: unknown): string => {
+  const texto = String(valor ?? '').trim();
+  return texto ? (texto.replace(/^0+/, '') || '0') : texto;
+};
+
+// Fecha "YYYY-MM-DD" en hora LOCAL (no toISOString: en Ecuador, después de las 19:00 la fecha UTC ya es
+// el día siguiente y "hoy" se corría un día).
+const fechaLocalKey = (d: Date): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Fecha límite por defecto del Riesgo de Stock de Insumos = hoy + 13 días (ventana histórica de 14 días)
+const fechaLimiteRiesgoPorDefecto = (): string => {
+  const d = new Date();
+  d.setDate(d.getDate() + INSUMO_VENTANA_DIAS - 1);
+  return fechaLocalKey(d);
+};
+
+// "YYYY-MM-DD" -> "DD-MM-YYYY" para mostrar
+const fechaKeyLegible = (key: string): string => {
+  const [y, m, d] = key.split('-');
+  return y && m && d ? `${d}-${m}-${y}` : key;
+};
+
 // Prefijos de DESCRIPCION_COMPONENTE que identifican insumos comprados (no fabricados en planta) más
 // allá de Telas/Cascos — pedido explícito del usuario (2026-09-08) para ampliar la Alerta de Riesgo de
 // Stock a cartón, herrajes, plásticos, etc. Cada prefijo se usa tal cual como etiqueta de "tipo" en la
@@ -1519,7 +1543,12 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   // costo que "Calcular Explosión" de más abajo). Cachea el Stock Actual (Cubo de Inventarios) tras la
   // primera vez que se calcula.
   const [materialStockActualMap, setMaterialStockActualMap] = useState<Map<string, number> | null>(null);
-  const [insumoStockState, setInsumoStockState] = useState<{ items: InsumoRiesgoItem[]; detalleMap: Map<string, InsumoOrdenDetalle[]>; loading: boolean; calculatedAt: string | null }>({ items: [], detalleMap: new Map(), loading: false, calculatedAt: null });
+  const [insumoStockState, setInsumoStockState] = useState<{ items: InsumoRiesgoItem[]; detalleMap: Map<string, InsumoOrdenDetalle[]>; loading: boolean; calculatedAt: string | null; fechaLimite: string | null }>({ items: [], detalleMap: new Map(), loading: false, calculatedAt: null, fechaLimite: null });
+  // Fecha límite elegida para el Riesgo de Stock de Insumos (pedido del usuario 2026-10-21): se calcula con
+  // TODAS las órdenes pendientes con FECHA hasta esta fecha inclusive — misma mecánica de siempre: las de
+  // antes de hoy son "consumo pasado" (se restan del Stock Actual) y las de hoy hasta la fecha elegida son
+  // la demanda. Por defecto hoy + 13 días (la ventana fija de 14 días que existía antes).
+  const [fechaLimiteRiesgo, setFechaLimiteRiesgo] = useState<string>(() => fechaLimiteRiesgoPorDefecto());
   // "GENERAR INFORME DE RIESGO": un solo botón/modal que detalla TODOS los insumos en riesgo calculados y,
   // para cada uno, las órdenes afectadas — no uno por insumo (a pedido explícito del usuario, 2026-09-08).
   const [informeRiesgoOpen, setInformeRiesgoOpen] = useState(false);
@@ -1555,22 +1584,28 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
     return stockActualMap;
   };
 
+  // Fechas disponibles para el Riesgo de Stock de Insumos: las FECHA de las órdenes con cantidad pendiente,
+  // más la fecha por defecto (hoy + 13 días), de la más próxima a la más lejana.
+  const opcionesFechaRiesgo = useMemo(() => {
+    const fechas = new Set<string>([fechaLimiteRiesgoPorDefecto()]);
+    structuralFilteredOrders.forEach(o => {
+      const fecha = String(o.FECHA || '').trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(fecha) && (Number(o.CANTPENDIENTE) || 0) > 0) fechas.add(fecha);
+    });
+    return Array.from(fechas).sort();
+  }, [structuralFilteredOrders]);
+
   // Kardex: Disponible Real = Stock Actual - Consumo de Órdenes Pasadas Pendientes (sin Producción
   // Propia Pendiente — Telas/Cascos son insumos comprados, no se fabrican en Muebles, mismo criterio ya
-  // establecido en "Plan Táctico (Alpha)"). Riesgo cuando Cantidad Neta Requerida (Necesario de la
-  // ventana de INSUMO_VENTANA_DIAS días - Disponible Real) > 0.
+  // establecido en "Plan Táctico (Alpha)"). Riesgo cuando Cantidad Neta Requerida (Necesario de hoy hasta
+  // la fecha elegida en "Calcular hasta" - Disponible Real) > 0.
   const handleCalcularRiesgoInsumos = async () => {
     setInsumoStockState(prev => ({ ...prev, loading: true }));
     try {
       const stockMap = await ensureStockMap();
 
-      const todayKey = new Date().toISOString().split('T')[0];
-      const ventanaKeys = new Set<string>();
-      for (let i = 0; i < INSUMO_VENTANA_DIAS; i++) {
-        const d = new Date();
-        d.setDate(d.getDate() + i);
-        ventanaKeys.add(d.toISOString().split('T')[0]);
-      }
+      const todayKey = fechaLocalKey(new Date());
+      const fechaLimite = fechaLimiteRiesgo;
 
       const demandMap = new Map<string, number>();
       const pastDemandMap = new Map<string, number>();
@@ -1586,7 +1621,8 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
         const pendiente = Number(o.CANTPENDIENTE) || 0;
         if (pendiente <= 0) return;
         const material = normalizeMaterialCode(o.MATERIAL);
-        if (ventanaKeys.has(fecha)) {
+        if (fecha > fechaLimite) return; // solo órdenes hasta la fecha elegida (inclusive)
+        if (fecha >= todayKey) {
           demandMap.set(material, (demandMap.get(material) || 0) + pendiente);
           if (!ordersByMaterialFuturo.has(material)) ordersByMaterialFuturo.set(material, []);
           ordersByMaterialFuturo.get(material)!.push(o);
@@ -1599,8 +1635,8 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
 
       const uniqueMaterials = Array.from(new Set([...demandMap.keys(), ...pastDemandMap.keys()]));
       if (uniqueMaterials.length === 0) {
-        setInsumoStockState({ items: [], detalleMap: new Map(), loading: false, calculatedAt: new Date().toLocaleString('es-EC') });
-        addNotification('info', `No hay órdenes pendientes en la ventana de ${INSUMO_VENTANA_DIAS} días ni en el histórico pasado.`);
+        setInsumoStockState({ items: [], detalleMap: new Map(), loading: false, calculatedAt: new Date().toLocaleString('es-EC'), fechaLimite });
+        addNotification('info', `No hay órdenes pendientes hasta el ${fechaKeyLegible(fechaLimite)}.`);
         return;
       }
 
@@ -1651,10 +1687,11 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
               const pedido = String(o.PEDIDO || '').trim();
               detalleList.push({
                 source: o._isPrevisional ? 'Previsional' : 'Fert',
-                id: String(o._displayId || ''),
+                // Orden y Material sin ceros a la izquierda en ambos informes (pedido del usuario 2026-10-21)
+                id: sinCerosIzquierda(o._displayId),
                 pedido,
                 posicion: String(o.POSICION || '').trim(),
-                material: String(o.MATERIAL || '').trim(),
+                material: sinCerosIzquierda(o.MATERIAL),
                 nombre: String(o.NOMBRE || '').trim(),
                 cliente: clienteMap.get(pedido) || clienteMap.get(pedido.replace(/^0+/, '')) || (pedido ? 'Cliente no identificado' : 'Sin Pedido (MTS)'),
                 fecha: String(o.FECHA || '').trim(),
@@ -1680,9 +1717,9 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
         detalleMap.get(item.componente)?.sort((a, b) => a.fecha.localeCompare(b.fecha));
       });
 
-      setInsumoStockState({ items: results, detalleMap, loading: false, calculatedAt: new Date().toLocaleString('es-EC') });
+      setInsumoStockState({ items: results, detalleMap, loading: false, calculatedAt: new Date().toLocaleString('es-EC'), fechaLimite });
       if (results.length === 0) {
-        addNotification('success', `Sin riesgo de faltante de insumos detectado para hoy y los próximos ${INSUMO_VENTANA_DIAS} días.`);
+        addNotification('success', `Sin riesgo de faltante de insumos detectado hasta el ${fechaKeyLegible(fechaLimite)}.`);
       } else {
         addNotification('warning', `${results.length} insumo(s) con riesgo de faltante detectado(s).`);
       }
@@ -2169,6 +2206,22 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
               <div className="border-t border-indigo-200 pt-3 space-y-2">
                 <div className="flex items-center justify-between gap-3 flex-wrap">
                   <p className="text-xs font-bold text-gray-700 uppercase tracking-tight">Riesgo de Stock — Insumos (Telas, Cascos, Cartón, Herrajes, etc.)</p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                  <label className="text-[11px] font-semibold text-gray-600">Calcular hasta:</label>
+                  <Select value={fechaLimiteRiesgo} onValueChange={setFechaLimiteRiesgo}>
+                    <SelectTrigger className="h-7 w-[230px] text-xs bg-white">
+                      <SelectValue placeholder="Seleccione una fecha" />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72">
+                      {opcionesFechaRiesgo.map(fecha => {
+                        const hoyKey = fechaLocalKey(new Date());
+                        const etiqueta = fecha === fechaLimiteRiesgoPorDefecto()
+                          ? `${fechaKeyLegible(fecha)} (predeterminado, 14 días)`
+                          : fecha === hoyKey ? `${fechaKeyLegible(fecha)} (hoy)` : fecha < hoyKey ? `${fechaKeyLegible(fecha)} (pasada)` : fechaKeyLegible(fecha);
+                        return <SelectItem key={fecha} value={fecha} className="text-xs">{etiqueta}</SelectItem>;
+                      })}
+                    </SelectContent>
+                  </Select>
                   <Button
                     onClick={handleCalcularRiesgoInsumos}
                     disabled={insumoStockState.loading}
@@ -2178,16 +2231,17 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
                     {insumoStockState.loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PackageSearch className="w-3.5 h-3.5" />}
                     {insumoStockState.calculatedAt ? 'Recalcular' : 'Calcular Riesgo de Insumos'}
                   </Button>
+                  </div>
                 </div>
                 {insumoStockState.calculatedAt === null ? (
                   <p className="text-[11px] text-gray-500">
-                    Calcula el riesgo de faltante de insumos comprados (Telas, Cascos, Cartón, Certificados, Etiquetas, Fundas, Garruchas, Herrajes, Niveladores, Padding, Patas, Placas, Plástico, Resbalones, Rodelas, Stickers, Tacos, Tornillos) para hoy y los próximos {INSUMO_VENTANA_DIAS} días, tomando el Stock Actual menos el consumo de todas las órdenes pasadas pendientes (explota materiales de las órdenes con demanda — puede tardar unos segundos).
+                    Calcula el riesgo de faltante de insumos comprados (Telas, Cascos, Cartón, Certificados, Etiquetas, Fundas, Garruchas, Herrajes, Niveladores, Padding, Patas, Placas, Plástico, Resbalones, Rodelas, Stickers, Tacos, Tornillos) de todas las órdenes pendientes hasta la fecha elegida en "Calcular hasta" (por defecto hoy + 13 días), tomando el Stock Actual menos el consumo de todas las órdenes pasadas pendientes (explota materiales de las órdenes con demanda — puede tardar unos segundos).
                   </p>
                 ) : insumoStockState.items.length === 0 ? (
                   <div className="flex items-center gap-2 text-emerald-700 bg-white/60 rounded-lg px-3 py-2">
                     <CheckCircle2 className="w-4 h-4 shrink-0" />
                     <p className="text-xs font-semibold">
-                      Sin riesgo de faltante de insumos para hoy y los próximos {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
+                      Sin riesgo de faltante de insumos hasta el {fechaKeyLegible(insumoStockState.fechaLimite ?? '')}. (calculado {insumoStockState.calculatedAt})
                     </p>
                   </div>
                 ) : (
@@ -2196,7 +2250,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
                       <div className="flex items-start gap-2">
                         <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                         <p className="text-xs font-semibold text-red-800">
-                          Hay {insumoStockState.items.length} insumo(s) con riesgo de faltante hoy o dentro de la ventana de {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
+                          Hay {insumoStockState.items.length} insumo(s) con riesgo de faltante hasta el {fechaKeyLegible(insumoStockState.fechaLimite ?? '')}. (calculado {insumoStockState.calculatedAt})
                         </p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
@@ -2607,7 +2661,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
               Informe de Riesgo de Insumos — {insumoStockState.items.length} insumo(s) en riesgo
             </DialogTitle>
             <DialogDescription>
-              Detalle, por cada insumo con riesgo de faltante, de las órdenes (Previsionales y Fert) que lo consumen — hoy o dentro de la ventana de {INSUMO_VENTANA_DIAS} días (demanda futura) o con consumo pasado pendiente. (calculado {insumoStockState.calculatedAt})
+              Detalle, por cada insumo con riesgo de faltante, de las órdenes (Previsionales y Fert) que lo consumen — de hoy hasta el {fechaKeyLegible(insumoStockState.fechaLimite ?? '')} (demanda) o con consumo pasado pendiente. (calculado {insumoStockState.calculatedAt})
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-6 overflow-y-auto flex-1 pr-1">
@@ -2626,7 +2680,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
                         <p className="text-sm font-bold text-gray-800">{item.stockActual !== null ? item.stockActual.toFixed(2) : '—'} {item.unidad}</p>
                       </div>
                       <div className="bg-white border border-gray-200 rounded-lg p-2 text-center">
-                        <p className="text-[10px] font-semibold text-gray-500 uppercase">Necesario ({INSUMO_VENTANA_DIAS} días)</p>
+                        <p className="text-[10px] font-semibold text-gray-500 uppercase">Necesario (hasta {fechaKeyLegible(insumoStockState.fechaLimite ?? '')})</p>
                         <p className="text-sm font-bold text-gray-800">{item.necesario.toFixed(2)} {item.unidad}</p>
                       </div>
                       <div className="bg-white border border-gray-200 rounded-lg p-2 text-center">
@@ -2712,7 +2766,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
             </DialogTitle>
             <DialogDescription>
               Pedidos con riesgo de retraso por falta de un insumo (Tela, Casco u otro comprado) para hoy o
-              dentro de los próximos {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
+              hasta el {fechaKeyLegible(insumoStockState.fechaLimite ?? '')}. (calculado {insumoStockState.calculatedAt})
             </DialogDescription>
           </DialogHeader>
           <div className="overflow-auto flex-1 pr-1">
