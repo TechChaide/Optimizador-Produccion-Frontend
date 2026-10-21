@@ -10,7 +10,7 @@ import { detalleTacticoService } from '@/services/detalletactico.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { planesArchivosService, getNombreGrupoPlanes } from '@/services/planesArchivos.service';
 import { useAppContext } from '@/context/AppProvider';
-import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble, Send, SlidersHorizontal } from 'lucide-react';
+import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble, Send, SlidersHorizontal, Sofa } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -406,6 +406,18 @@ const resolveSectorReparacion = (nombre: string): string | null => {
 // que quedan fuera de la planificación y sirven de apoyo a la Línea de Camas (las marcadas con
 // "Habilitar para Camas"). Hoy aplica solo al plastificado ("MUEBLE DE REPARACIÓN PLAST.").
 const REPARACION_APOYO_CAMAS_KEYWORDS = ['PLAST'];
+
+// Sofás "Spring"/"Foam" (pedido del usuario 2026-10-21): producto terminado cuyo nombre contiene la palabra
+// SOFÁ/SOFA y además SPRING o FOAM — p. ej. "SOFÁ SPRING 101 ELEMENTA AGUA", "SOFÁ FOAM 135 ELEMENTA TRIGO",
+// "SOFÁ RESIFLEX SPRING 101", "SOFÁ CAMA FOAM BOX 112". Exige "SOFÁ" para NO incluir semielaborados que
+// también llevan SPRING/FOAM en el nombre (forros, tapas, láminas, paneles, estructuras pegadas). Se
+// verificó con las órdenes reales: 28 materiales, todos sofás. (No se usa \b: no reconoce la "Á" como letra.)
+const SOFA_PALABRA_REGEX = /(^|[^A-ZÁÉÍÓÚÑ])SOF[AÁ]([^A-ZÁÉÍÓÚÑ]|$)/;
+const SPRING_FOAM_REGEX = /SPRING|FOAM/;
+const esSofaSpringFoam = (nombre: string): boolean => {
+    const n = String(nombre || '').toUpperCase();
+    return SOFA_PALABRA_REGEX.test(n) && SPRING_FOAM_REGEX.test(n);
+};
 
 const esReparacionApoyoCamas = (nombre: string): boolean => {
     const descripcion = nombre.toUpperCase().trim();
@@ -808,6 +820,11 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // CAMAS_OVERFLOW_MESA_IDS = [12, 13]). Configurable por el usuario con el botón "Habilitar para
     // Camas" junto a cada mesa de Línea 2, en vez de estar fijo en el código.
     const [camasOverflowMesaIds, setCamasOverflowMesaIds] = useState<Set<number>>(new Set(CAMAS_OVERFLOW_MESA_IDS));
+    // Mesas de Línea 1 (Camas, mesas 1–7) habilitadas con "HABILITAR SPRING/FOAM" para fabricar también
+    // sofás Spring/Foam (ver esSofaSpringFoam). Simétrico a camasOverflowMesaIds: válvula de alivio — un
+    // sofá Spring/Foam va primero a sus mesas de Muebles y solo usa estas mesas si en ninguna de Muebles
+    // cabe completo, para no quitarle capacidad a las camas sin necesidad.
+    const [springFoamMesaIds, setSpringFoamMesaIds] = useState<Set<number>>(new Set());
 
     // Estado para Horario de Trabajo seleccionado
     const [selectedShift, setSelectedShift] = useState<string>(SHIFT_SCHEDULES[0].id);
@@ -2329,6 +2346,15 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         });
     };
 
+    const toggleSpringFoam = (id: number) => {
+        setSpringFoamMesaIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
     const toggleCamasOverflow = (id: number) => {
         setCamasOverflowMesaIds(prev => {
             const next = new Set(prev);
@@ -3272,6 +3298,19 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 }
             }
 
+            // Válvula de alivio para sofás Spring/Foam: si en ninguna de sus mesas habituales (Muebles) cabe
+            // completo, se habilitan las mesas de Línea 1 marcadas con "HABILITAR SPRING/FOAM".
+            if (esSofaSpringFoam(order.nombre)) {
+                const cabeEnHabituales = candidates.some(id => (remaining.get(id) ?? 0) >= order.horas - 1e-6);
+                if (!cabeEnHabituales) {
+                    springFoamMesaIds.forEach(mesaSpringFoamId => {
+                        if (eligibleMesaIds.includes(mesaSpringFoamId) && !candidates.includes(mesaSpringFoamId)) {
+                            candidates = [...candidates, mesaSpringFoamId];
+                        }
+                    });
+                }
+            }
+
             if (candidates.length === 0) {
                 unassigned.push({ order, motivo: 'sin-mesa' });
                 return;
@@ -3345,6 +3384,8 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         // Las reparaciones de plastificado no salen de las mesas de apoyo a la Línea de Camas
         if (esReparacionApoyoCamas(order.nombre)) return camasOverflowMesaIds.has(mesaId);
         if (mesaAcceptsMaterial(mesaId, order.sector, order.tamano)) return true;
+        // Mesas de Línea 1 habilitadas con "HABILITAR SPRING/FOAM" también reciben sofás Spring/Foam
+        if (esSofaSpringFoam(order.nombre) && springFoamMesaIds.has(mesaId)) return true;
         return order.sector === SECTOR_CAMAS && camasOverflowMesaIds.has(mesaId);
     };
 
@@ -4350,6 +4391,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                 {WORK_TABLES.map(table => {
                                     const isLinea2 = table.id > 7;
                                     const isCamasEnabled = camasOverflowMesaIds.has(table.id);
+                                    const isSpringFoamEnabled = springFoamMesaIds.has(table.id);
                                     return (
                                         <div key={table.id} className="flex flex-col gap-1 p-1 hover:bg-gray-50 rounded transition-colors group">
                                             <div className="flex items-center space-x-3">
@@ -4380,6 +4422,22 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                                 >
                                                     <BedDouble className="w-3 h-3" />
                                                     {isCamasEnabled ? 'Habilitada p/ Camas' : 'Habilitar p/ Camas'}
+                                                </button>
+                                            )}
+                                            {!isLinea2 && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggleSpringFoam(table.id)}
+                                                    title="Habilita esta mesa de Línea 1 (Camas) para fabricar también sofás Spring/Foam cuando ya no quepan en las mesas de Línea 2 (Muebles). Se refleja en la Distribución de Mesas, el Diagrama de Gantt y Modular Distribución de Mesas."
+                                                    className={cn(
+                                                        "ml-7 w-fit inline-flex items-center gap-1 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full border transition-colors",
+                                                        isSpringFoamEnabled
+                                                            ? "bg-amber-100 border-amber-300 text-amber-800 hover:bg-amber-200"
+                                                            : "bg-gray-50 border-gray-200 text-gray-400 hover:bg-gray-100"
+                                                    )}
+                                                >
+                                                    <Sofa className="w-3 h-3" />
+                                                    {isSpringFoamEnabled ? 'Habilitada Spring/Foam' : 'Habilitar Spring/Foam'}
                                                 </button>
                                             )}
                                         </div>
@@ -5302,6 +5360,15 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                                                     <div className="w-44 shrink-0 flex flex-col justify-center">
                                                                         <p className="text-xs font-bold text-gray-800">{WORK_TABLES.find(t => t.id === mesa.tableId)?.name ?? `MESA ${mesa.tableId}`}</p>
                                                                         <p className="text-sm font-extrabold text-gray-900 font-mono">{mesa.usedHours.toFixed(2)} / {mesa.capacityHours.toFixed(2)} h</p>
+                                                                        {springFoamMesaIds.has(mesa.tableId) && (
+                                                                            <span className="mt-0.5 w-fit inline-flex items-center gap-1 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full border bg-amber-100 border-amber-300 text-amber-800">
+                                                                                <Sofa className="w-3 h-3" /> Spring/Foam
+                                                                                {(() => {
+                                                                                    const sofas = mesa.items.filter(it => esSofaSpringFoam(it.order.nombre)).length;
+                                                                                    return sofas > 0 ? ` · ${sofas} sofá(s)` : '';
+                                                                                })()}
+                                                                            </span>
+                                                                        )}
                                                                     </div>
                                                                     <div className="flex-1">
                                                                         <div className="relative h-10 bg-gray-50 border border-gray-200 rounded-md overflow-hidden">
