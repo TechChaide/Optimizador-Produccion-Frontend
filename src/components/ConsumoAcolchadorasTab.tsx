@@ -1,7 +1,13 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { Layers, Loader2, Minus, Plus } from 'lucide-react';
+import { format, parseISO } from 'date-fns';
+import { es } from 'date-fns/locale';
+import { Layers, Loader2, Mail, Minus, Plus } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useAppContext } from '@/context/AppProvider';
+import { restriccionService } from '@/services/restriccion.service';
 import { serviciosService } from '@/services/servicios.service';
 
 // Tab "Consumo Acolchadoras" de Laminado (usuario 2026-10-19). SOLO CONSULTA: no participa del
@@ -161,6 +167,141 @@ interface InventarioRow {
 
 // Mismas bodegas que Resumen Necesidades de Laminado (getStockKg: 1006/1008/1015, LIBREUTILIZACION en Kg).
 const BODEGAS_STOCK = ['1006', '1008', '1015'] as const;
+
+// Correo "Rollos requeridos por referencia de lámina" (usuario 2026-10-21): solo el resumen de arriba,
+// con el mismo esqueleto HTML del reporte de Laminado (cabecera Chaide, KPIs, tabla, pie). Destinatarios
+// precargados de la restricción GRUPO_CONTROL_CONSUMO_ROLLOS (separados por "&", ","; editables en la
+// vista previa). Envío directo: la pestaña es solo consulta, no depende de SAP como el reporte del plan,
+// así que no pasa por Guardar TXT → Recuperar.
+const RESTRICCION_CORREO_CONSUMO = 'GRUPO_CONTROL_CONSUMO_ROLLOS';
+const ASUNTO_CORREO_CONSUMO = 'Control consumo de rollos — Corte y Laminado [Acolchadoras]-[Quito]';
+const NOTA_CORREO = 'Este correo fue generado automáticamente, favor no responder.';
+
+interface LaminaResumen {
+  codigo: string;
+  descripcion: string;
+  kg: number;
+  pesoUN: number;
+  porAcolchadora: Map<string, number>;
+  rollosUn: number;
+  stockUn: Record<string, number>;
+  stockTotalUn: number;
+  saldoUn: number;
+}
+
+const construirCorreoConsumoHtml = (
+  laminas: LaminaResumen[],
+  fechas: string[],
+  corridas: Props['corridasSiguienteDia'],
+): string => {
+  const fechaHoy = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
+  const fechaPlan = fechas.length > 0 ? fechas.map(f => format(parseISO(f), "EEEE d 'de' MMMM", { locale: es })).join(', ') : 'todas las fechas';
+  const conPeso = laminas.filter(l => l.pesoUN > 0);
+  const faltan = conPeso.filter(l => l.saldoUn < 0).length;
+  const totalRollos = conPeso.reduce((s, l) => s + l.rollosUn, 0);
+  const totalKg = laminas.reduce((s, l) => s + l.kg, 0);
+  const corridaLabel = `${corridas.fecha.slice(8, 10)}/${corridas.fecha.slice(5, 7)}`;
+  const th = 'padding:8px 8px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;';
+  const thStock = `${th}background:#f0fdfa;color:#115e59;`;
+  const td = 'padding:7px 8px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;';
+  const filas = laminas.map((l, i) => {
+    const bg = i % 2 === 0 ? '#ffffff' : '#fafafa';
+    const ok = l.pesoUN > 0;
+    const achs = Array.from(l.porAcolchadora.entries()).sort(([a], [b]) => a.localeCompare(b))
+      .map(([ach, n]) => `<span style="display:inline-block;margin:1px 2px;padding:1px 5px;border-radius:4px;background:#f5f3ff;border:1px solid #ede9fe;font-size:10px;color:#5b21b6;white-space:nowrap;">${ach} · <b>${ok ? n : '—'}</b> un</span>`).join('');
+    const cubre = !ok
+      ? '<span style="font-size:10px;color:#d97706;">sin PesoUN</span>'
+      : l.saldoUn >= 0
+        ? '<span style="padding:2px 6px;border-radius:4px;background:#d1fae5;color:#065f46;font-size:10px;font-weight:700;">CUBRE</span>'
+        : `<span style="padding:2px 6px;border-radius:4px;background:#fee2e2;color:#b91c1c;font-size:10px;font-weight:700;">FALTA ${fmt(-l.saldoUn)}</span>`;
+    const c = corridas.porMaterial.get(l.codigo);
+    return `
+        <tr style="background:${bg};">
+          <td style="${td}color:#4338ca;font-family:ui-monospace,Consolas,monospace;">${l.codigo}</td>
+          <td style="${td}font-weight:600;color:#111827;">${l.descripcion}</td>
+          <td style="${td}">${achs}</td>
+          <td align="right" style="${td}">${fmt(l.kg, 1)}</td>
+          <td align="right" style="${td}">${ok ? fmt(l.pesoUN, 2) : '<span style="color:#d97706;">sin Looper</span>'}</td>
+          <td align="right" style="${td}font-weight:700;color:#6d28d9;">${ok ? fmt(l.rollosUn) : '—'}</td>
+          ${BODEGAS_STOCK.map(b => `<td align="right" style="${td}background:#f0fdfa;">${ok ? fmt(l.stockUn[b]) : '—'}</td>`).join('')}
+          <td align="right" style="${td}background:#f0fdfa;font-weight:700;">${ok ? fmt(l.stockTotalUn) : '—'}</td>
+          <td align="right" style="${td}background:#f0fdfa;font-weight:700;color:${l.saldoUn < 0 ? '#dc2626' : '#047857'};">${ok ? (l.saldoUn > 0 ? `+${fmt(l.saldoUn)}` : fmt(l.saldoUn)) : '—'}</td>
+          <td align="center" style="${td}background:#f0fdfa;">${cubre}</td>
+          <td align="right" style="${td}color:#6b7280;">${c ? fmt(Math.round(c.un)) : '—'}</td>
+        </tr>`;
+  }).join('');
+  const kpi = (titulo: string, valor: string, color: string, borde: string) => `
+          <td width="25%" style="background:#f5f3ff;padding:14px 12px;border:1px solid #e5e7eb;${borde}">
+            <p style="margin:0;font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#6b7280;">${titulo}</p>
+            <p style="margin:4px 0 0;font-size:20px;font-weight:700;color:${color};font-variant-numeric:tabular-nums;">${valor}</p>
+          </td>`;
+  return `
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:960px;margin:0 auto;background:#ffffff;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td style="background:#1d4ed8;padding:22px 28px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td style="font-size:15px;font-weight:700;color:#ffffff;letter-spacing:0.02em;">CHAIDE Y CHAIDE</td>
+          <td align="right" style="font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#c7d7fd;">Planificación de Producción</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:26px 28px 6px;">
+      <p style="margin:0;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Corte y Laminado · Consumo acolchadoras</p>
+      <h1 style="margin:4px 0 0;font-size:20px;font-weight:700;color:#111827;">Rollos requeridos por referencia de lámina</h1>
+      <p style="margin:6px 0 0;font-size:12px;color:#6b7280;text-transform:capitalize;">${fechaHoy} · Correo automático, no responder</p>
+      <p style="margin:4px 0 0;font-size:12px;color:#b45309;font-weight:700;">Órdenes FERT de acolchadoras: <span style="text-transform:capitalize;">${fechaPlan}</span></p>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:18px 28px 4px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>${kpi('Láminas', String(laminas.length), '#6d28d9', 'border-radius:10px 0 0 10px;border-right:none;')}${kpi('Rollos req. (un)', fmt(totalRollos), '#6d28d9', 'border-left:none;border-right:none;')}${kpi('Rollos req. (kg)', fmt(totalKg, 0), '#6d28d9', 'border-left:none;border-right:none;')}${kpi('Sin stock suficiente', String(faltan), faltan > 0 ? '#dc2626' : '#047857', 'border-radius:0 10px 10px 0;border-left:none;')}
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:22px 28px 4px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
+        <tr>
+          <td style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Rollos requeridos por referencia de lámina</td>
+          <td align="right" style="font-size:10px;font-weight:700;color:${faltan > 0 ? '#dc2626' : '#047857'};text-transform:uppercase;">${faltan > 0 ? `${faltan} de ${laminas.length} láminas sin stock suficiente` : 'El stock cubre todas las láminas'}</td>
+        </tr>
+      </table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
+        <tr style="background:#f9fafb;">
+          <td style="${th}">Lámina</td>
+          <td style="${th}">Descripción</td>
+          <td style="${th}">Rollos por acolchadora [un]</td>
+          <td align="right" style="${th}">Kg</td>
+          <td align="right" style="${th}">Peso UN</td>
+          <td align="right" style="${th}">Rollos [un]</td>
+          ${BODEGAS_STOCK.map(b => `<td align="right" style="${thStock}">Stock ${b} [un]</td>`).join('')}
+          <td align="right" style="${thStock}">Stock final [un]</td>
+          <td align="right" style="${thStock}">Saldo [un]</td>
+          <td align="center" style="${thStock}">¿Cubre?</td>
+          <td align="right" style="${th}white-space:nowrap;">Corrida ${corridaLabel} [un] (info)</td>
+        </tr>${filas}
+      </table>
+      <p style="margin:8px 0 0;font-size:10px;color:#9ca3af;">
+        Rollos [un] = Kg de lámina (BOM de la referencia × cantidad planificada) ÷ PesoUN Looper, al entero superior por máquina.
+        Stock = libre utilización en bodegas ${BODEGAS_STOCK.join(' / ')} en rollos completos. La corrida del ${corridaLabel} es informativa: no se suma al stock ni al saldo.
+      </p>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:16px 28px 28px;">
+      <p style="margin:0;font-size:11px;line-height:1.6;color:#9ca3af;border-top:1px solid #e5e7eb;padding-top:16px;">
+        Este correo fue generado automáticamente por el Optimizador de Producción, favor no responder.
+        Para dudas sobre estos datos, contacta a Planificación Táctica.
+      </p>
+    </td>
+  </tr>
+</table>`;
+};
 
 interface Props {
   ordenesFert: RawApiRow[];
@@ -352,6 +493,43 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
   const pendiente = <span className="text-[9px] font-black uppercase text-slate-400 italic">pendiente</span>;
   const fechas = Array.from(selectedDates).sort();
 
+  const { addNotification } = useAppContext();
+  const [destinatarios, setDestinatarios] = useState('');
+  const [correoHtml, setCorreoHtml] = useState<string | null>(null);
+  const [enviando, setEnviando] = useState(false);
+  const nDestinatarios = destinatarios.split(/[,;]/).map(s => s.trim()).filter(Boolean).length;
+
+  // Destinatarios de la restricción GRUPO_CONTROL_CONSUMO_ROLLOS (mismo patrón que Grupo_Correos_Laminado):
+  // solo autocompleta si el usuario todavía no escribió nada.
+  useEffect(() => {
+    restriccionService.getAll()
+      .then(res => {
+        const correos = Array.from(new Set((res.data || [])
+          .filter(r => r.estado === 'A' && String(r.nombre_restriccion || '').trim().toUpperCase() === RESTRICCION_CORREO_CONSUMO)
+          .flatMap(r => String(r.valor_restriccion || '').split(/[,;&]/).map(v => v.trim()))
+          .filter(Boolean)));
+        if (correos.length > 0) setDestinatarios(prev => prev.trim() ? prev : correos.join(', '));
+      })
+      .catch(e => console.warn(`[Consumo Acolchadoras] No se pudo cargar ${RESTRICCION_CORREO_CONSUMO}:`, (e as Error).message));
+  }, []);
+
+  // La vista previa congela el HTML al abrirse: se envía exactamente lo que se revisó.
+  const abrirCorreo = () => setCorreoHtml(construirCorreoConsumoHtml(resumenLaminas, fechas, corridasSiguienteDia));
+
+  const enviarCorreo = async () => {
+    if (!correoHtml || !destinatarios.trim()) return;
+    setEnviando(true);
+    try {
+      const res = await serviciosService.enviarCorreo({ destino: destinatarios.trim(), asunto: ASUNTO_CORREO_CONSUMO, cuerpo: correoHtml, nota: NOTA_CORREO });
+      addNotification('success', `Consumo Acolchadoras: ${res.message} — ${res.destinatarios.join(', ')}`);
+      setCorreoHtml(null);
+    } catch (e) {
+      addNotification('error', `Consumo Acolchadoras: no se pudo enviar el correo: ${(e as Error).message}`);
+    } finally {
+      setEnviando(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between px-2 gap-4 flex-wrap">
@@ -380,12 +558,22 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
         <div className="rounded-2xl border border-violet-100 bg-white shadow-sm overflow-hidden">
           <div className="px-4 py-2 bg-violet-50 text-[10px] font-black uppercase tracking-widest text-violet-800 flex items-center justify-between gap-4">
             <span>Rollos requeridos por referencia de lámina</span>
-            {(() => {
-              const faltan = resumenLaminas.filter(l => l.pesoUN > 0 && l.saldoUn < 0).length;
-              return faltan > 0
-                ? <span className="text-red-600">{faltan} de {resumenLaminas.length} láminas sin stock suficiente</span>
-                : <span className="text-emerald-700">El stock cubre todas las láminas</span>;
-            })()}
+            <div className="flex items-center gap-3">
+              {(() => {
+                const faltan = resumenLaminas.filter(l => l.pesoUN > 0 && l.saldoUn < 0).length;
+                return faltan > 0
+                  ? <span className="text-red-600">{faltan} de {resumenLaminas.length} láminas sin stock suficiente</span>
+                  : <span className="text-emerald-700">El stock cubre todas las láminas</span>;
+              })()}
+              <button
+                onClick={abrirCorreo}
+                disabled={!!progreso}
+                title={progreso ? 'Espera a que termine la explosión del BOM' : 'Vista previa del correo con este resumen'}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50"
+              >
+                <Mail className="w-3 h-3" /> Enviar correo
+              </button>
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-[11px] font-bold text-slate-700">
@@ -574,6 +762,42 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
           </table>
         </div>
       </div>
+
+      <Dialog open={!!correoHtml} onOpenChange={(v) => { if (!v && !enviando) setCorreoHtml(null); }}>
+        <DialogContent className="max-w-5xl w-[95vw] h-[90vh] flex flex-col gap-3 overflow-hidden">
+          <DialogHeader className="shrink-0">
+            <DialogTitle className="text-sm font-black uppercase tracking-widest">Vista previa — Control consumo de rollos</DialogTitle>
+            <DialogDescription className="text-[11px]">
+              Asunto: {ASUNTO_CORREO_CONSUMO}. Se envía exactamente esto (foto del resumen al abrir la vista previa).
+            </DialogDescription>
+          </DialogHeader>
+          {/* iframe con sandbox: aísla los estilos inline del correo del resto de la app. */}
+          <iframe title="Vista previa del correo" sandbox="" srcDoc={correoHtml ?? ''} className="flex-1 min-h-0 w-full rounded-lg border border-slate-200 bg-white" />
+          <DialogFooter className="shrink-0 flex-col sm:flex-col gap-2 sm:space-x-0 border-t border-slate-100 pt-3">
+            <label className="flex justify-between gap-2 text-[9px] font-black uppercase text-slate-500 tracking-wider">
+              <span>Destinatarios ({RESTRICCION_CORREO_CONSUMO}) — puedes agregar o quitar correos antes de enviar (separados por coma)</span>
+              <span className="text-slate-400 whitespace-nowrap">{nDestinatarios} {nDestinatarios === 1 ? 'correo' : 'correos'}</span>
+            </label>
+            <textarea
+              value={destinatarios}
+              onChange={(e) => setDestinatarios(e.target.value)}
+              placeholder="correo1@chaideychaide.com, correo2@chaideychaide.com"
+              rows={2}
+              className="w-full text-[11px] border border-slate-200 rounded-lg p-2 outline-none focus:border-indigo-400 resize-y"
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setCorreoHtml(null)} disabled={enviando} className="h-9 text-[10px] font-black uppercase">Cerrar</Button>
+              <Button
+                onClick={() => { void enviarCorreo(); }}
+                disabled={enviando || !destinatarios.trim()}
+                className="h-9 gap-2 text-[10px] font-black uppercase tracking-widest bg-indigo-600 hover:bg-indigo-700 text-white"
+              >
+                {enviando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Enviar correo
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
