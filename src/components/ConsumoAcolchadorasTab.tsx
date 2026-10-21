@@ -189,6 +189,7 @@ interface LaminaResumen {
   saldoUn: number;
   corridasUn: number;
   saldoConCorridasUn: number;
+  cubreEn: string | null;
 }
 
 const construirCorreoConsumoHtml = (
@@ -221,7 +222,7 @@ const construirCorreoConsumoHtml = (
         ? '<span style="padding:2px 6px;border-radius:4px;background:#d1fae5;color:#065f46;font-size:10px;font-weight:700;">CUBRE</span>'
         : l.saldoConCorridasUn >= 0
           ? '<span style="padding:2px 6px;border-radius:4px;background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;white-space:nowrap;">CON CORRIDA</span>'
-          : `<span style="padding:2px 6px;border-radius:4px;background:#fee2e2;color:#b91c1c;font-size:10px;font-weight:700;">FALTA ${fmt(-l.saldoConCorridasUn)}</span>`;
+          : `<span style="padding:2px 6px;border-radius:4px;background:#fee2e2;color:#b91c1c;font-size:10px;font-weight:700;white-space:nowrap;">FALTA ${fmt(-l.saldoConCorridasUn)}</span>${l.cubreEn ? `<br/><span style="font-size:9px;font-weight:700;color:#6b7280;white-space:nowrap;">cubre ${ddmm(l.cubreEn)}</span>` : ''}`;
     const c = corridas.porMaterial.get(l.codigo);
     const corridasHtml = c
       ? corridasPorFecha(c).map(({ fecha, un }) => `<span style="display:inline-block;margin:1px 2px;padding:1px 5px;border-radius:4px;background:#ffffff;border:1px solid #e5e7eb;font-size:10px;white-space:nowrap;">${ddmm(fecha)} · <b>${fmt(un)}</b></span>`).join('')
@@ -299,7 +300,7 @@ const construirCorreoConsumoHtml = (
       </table>
       <p style="margin:8px 0 0;font-size:10px;color:#9ca3af;">
         Rollos [un] = Kg de lámina (BOM de la referencia × cantidad planificada) ÷ PesoUN Looper, al entero superior por máquina.
-        Stock = libre utilización en bodegas ${BODEGAS_STOCK.join(' / ')} en rollos completos. Corridas SAP pendientes = órdenes de Laminado con cantidad pendiente del ${ddmm(corridas.desde)} al ${ddmm(corridas.hasta)} (planes anteriores abiertos, hoy y el siguiente día hábil); no se suman al saldo de stock. "Con corrida" = el stock no alcanza pero con la corrida pendiente sí.
+        Stock = libre utilización en bodegas ${BODEGAS_STOCK.join(' / ')} en rollos completos. Corridas SAP pendientes = órdenes de Laminado con cantidad pendiente del ${ddmm(corridas.desde)} al ${ddmm(corridas.hasta)} (planes anteriores abiertos, hoy y el siguiente día hábil); no se suman al saldo de stock. "Con corrida" = el stock no alcanza pero con las corridas de hoy o anteriores sí; las corridas de días siguientes no evitan el "Falta" (se producen después) y solo indican cuándo se cubre.
       </p>
     </td>
   </tr>
@@ -491,10 +492,19 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
         const stockTotalUn = BODEGAS_STOCK.reduce((s, b) => s + stockUn[b], 0);
         const stockTotalKg = BODEGAS_STOCK.reduce((s, b) => s + (stockKg[b] || 0), 0);
         const saldoUn = stockTotalUn - rollosUn;
-        // Corridas SAP pendientes (hoy, días anteriores abiertos y hoy+1) en rollos enteros: si el stock
-        // no alcanza pero con ellas sí, la lámina "cubre con corrida" (queda sujeto a que se produzca).
-        const corridasUn = Math.round(corridasSap.porMaterial.get(e.codigo)?.un || 0);
-        return { ...e, rollosUn, stockUn, stockTotalUn, stockTotalKg, saldoUn, corridasUn, saldoConCorridasUn: saldoUn + corridasUn };
+        // Criterio del usuario (2026-10-21): solo las corridas con fecha <= hoy (en producción o planes
+        // anteriores aún abiertos) llegan a tiempo y dan "Con corrida"; las de hoy+1 en adelante se
+        // producen después: la lámina sigue en "Falta" y solo se avisa que se cubre en esa fecha.
+        const c = corridasSap.porMaterial.get(e.codigo);
+        const hoy = format(new Date(), 'yyyy-MM-dd');
+        const porFecha = c ? corridasPorFecha(c) : [];
+        const corridasUn = porFecha.filter(x => x.fecha <= hoy).reduce((s, x) => s + x.un, 0);
+        const saldoConCorridasUn = saldoUn + corridasUn;
+        // Primera corrida futura con la que el acumulado deja de faltar.
+        let acumulado = saldoConCorridasUn;
+        const cubreEn = saldoConCorridasUn >= 0 ? null
+          : porFecha.filter(x => x.fecha > hoy).find(x => (acumulado += x.un) >= 0)?.fecha ?? null;
+        return { ...e, rollosUn, stockUn, stockTotalUn, stockTotalKg, saldoUn, corridasUn, saldoConCorridasUn, cubreEn };
       })
       .sort((a, b) => b.kg - a.kg);
   }, [bloques, stockKgPorMaterial, corridasSap]);
@@ -623,7 +633,7 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Stock final [un]</th>
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Saldo [un]</th>
                   <th className="px-3 py-2 text-center bg-teal-50 text-teal-800">¿Cubre?</th>
-                  <th className="px-3 py-2 text-left bg-slate-100 text-slate-600 whitespace-nowrap" title={`Órdenes FERT de Laminado en SAP (014/031) con cantidad pendiente, del ${ddmm(corridasSap.desde)} al ${ddmm(corridasSap.hasta)}: planes anteriores abiertos, hoy y el siguiente día hábil. No se suman al stock ni al saldo; si el stock no alcanza y con ellas sí, ¿Cubre? marca "Con corrida"`}>
+                  <th className="px-3 py-2 text-left bg-slate-100 text-slate-600 whitespace-nowrap" title={`Órdenes FERT de Laminado en SAP (014/031) con cantidad pendiente, del ${ddmm(corridasSap.desde)} al ${ddmm(corridasSap.hasta)}: planes anteriores abiertos, hoy y el siguiente día hábil. No se suman al stock ni al saldo; si el stock no alcanza y con las de hoy o anteriores sí, ¿Cubre? marca "Con corrida". Las de días siguientes no evitan el "Falta": solo indican cuándo se cubre`}>
                     Corridas SAP pendientes [un] <span className="normal-case font-bold">(hasta {ddmm(corridasSap.hasta)})</span>
                   </th>
                 </tr>
@@ -659,8 +669,13 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                         : l.saldoUn >= 0
                           ? <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-black uppercase">Cubre</span>
                           : l.saldoConCorridasUn >= 0
-                            ? <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-black uppercase whitespace-nowrap" title={`Stock falta ${fmt(-l.saldoUn)}; la corrida SAP pendiente (${fmt(l.corridasUn)} un) lo cubre`}>Con corrida</span>
-                            : <span className="px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-black uppercase" title={l.corridasUn > 0 ? `Incluye ${fmt(l.corridasUn)} un de corrida SAP pendiente` : undefined}>Falta {fmt(-l.saldoConCorridasUn)}</span>}
+                            ? <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-black uppercase whitespace-nowrap" title={`Stock falta ${fmt(-l.saldoUn)}; la corrida SAP de hoy o anterior (${fmt(l.corridasUn)} un) lo cubre`}>Con corrida</span>
+                            : (
+                              <span className="inline-flex flex-col items-center gap-0.5" title={l.corridasUn > 0 ? `Ya descuenta ${fmt(l.corridasUn)} un de corrida SAP de hoy o anterior` : undefined}>
+                                <span className="px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-black uppercase whitespace-nowrap">Falta {fmt(-l.saldoConCorridasUn)}</span>
+                                {l.cubreEn && <span className="text-[9px] font-bold text-slate-500 whitespace-nowrap">cubre {ddmm(l.cubreEn)}</span>}
+                              </span>
+                            )}
                     </td>
                     {(() => {
                       const c = corridasSap.porMaterial.get(l.codigo);
