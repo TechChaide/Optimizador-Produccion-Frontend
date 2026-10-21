@@ -204,6 +204,7 @@ const construirCorreoConsumoHtml = (
   const conCorrida = conPeso.filter(l => l.saldoUn < 0 && l.saldoConCorridasUn >= 0).length;
   const totalRollos = conPeso.reduce((s, l) => s + l.rollosUn, 0);
   const totalKg = laminas.reduce((s, l) => s + l.kg, 0);
+  const fechasCorr = fechasDeCorridas(laminas.map(l => l.codigo), corridas);
   const estadoTexto = [
     conCorrida > 0 ? `<span style="color:#d97706;">${conCorrida} cubre(n) solo con corrida SAP</span>` : '',
     faltan > 0 ? `<span style="color:#dc2626;">${faltan} de ${laminas.length} láminas sin stock ni corrida suficiente</span>` : '',
@@ -223,10 +224,10 @@ const construirCorreoConsumoHtml = (
         : l.saldoConCorridasUn >= 0
           ? '<span style="padding:2px 6px;border-radius:4px;background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;white-space:nowrap;">CON CORRIDA</span>'
           : `<span style="padding:2px 6px;border-radius:4px;background:#fee2e2;color:#b91c1c;font-size:10px;font-weight:700;white-space:nowrap;">FALTA ${fmt(-l.saldoConCorridasUn)}</span>${l.cubreEn ? `<br/><span style="font-size:9px;font-weight:700;color:#6b7280;white-space:nowrap;">cubre ${ddmm(l.cubreEn)}</span>` : ''}`;
-    const c = corridas.porMaterial.get(l.codigo);
-    const corridasHtml = c
-      ? corridasPorFecha(c).map(({ fecha, un }) => `<span style="display:inline-block;margin:1px 2px;padding:1px 5px;border-radius:4px;background:#ffffff;border:1px solid #e5e7eb;font-size:10px;white-space:nowrap;">${ddmm(fecha)} · <b>${fmt(un)}</b></span>`).join('')
-      : '—';
+    const corridasHtml = (fechasCorr.length > 0 ? fechasCorr : [null]).map(f => {
+      const un = f ? corridaUnEnFecha(corridas, l.codigo, f) : 0;
+      return `<td align="right" style="${td}color:#6b7280;">${un > 0 ? fmt(un) : '—'}</td>`;
+    }).join('');
     return `
         <tr style="background:${bg};">
           <td style="${td}color:#4338ca;font-family:ui-monospace,Consolas,monospace;">${l.codigo}</td>
@@ -239,7 +240,7 @@ const construirCorreoConsumoHtml = (
           <td align="right" style="${td}background:#f0fdfa;font-weight:700;">${ok ? fmt(l.stockTotalUn) : '—'}</td>
           <td align="right" style="${td}background:#f0fdfa;font-weight:700;color:${l.saldoUn < 0 ? '#dc2626' : '#047857'};">${ok ? (l.saldoUn > 0 ? `+${fmt(l.saldoUn)}` : fmt(l.saldoUn)) : '—'}</td>
           <td align="center" style="${td}background:#f0fdfa;">${cubre}</td>
-          <td style="${td}color:#6b7280;">${corridasHtml}</td>
+          ${corridasHtml}
         </tr>`;
   }).join('');
   const kpi = (titulo: string, valor: string, color: string, borde: string) => `
@@ -295,7 +296,7 @@ const construirCorreoConsumoHtml = (
           <td align="right" style="${thStock}">Stock final [un]</td>
           <td align="right" style="${thStock}">Saldo [un]</td>
           <td align="center" style="${thStock}">¿Cubre?</td>
-          <td style="${th}white-space:nowrap;">Corridas SAP pendientes [un]</td>
+          ${(fechasCorr.length > 0 ? fechasCorr : [null]).map(f => `<td align="right" style="${th}white-space:nowrap;">${f ? `Corrida ${ddmm(f)} [un]` : 'Corridas SAP pendientes [un]'}</td>`).join('')}
         </tr>${filas}
       </table>
       <p style="margin:8px 0 0;font-size:10px;color:#9ca3af;">
@@ -335,6 +336,12 @@ interface CorridasSap {
 const ddmm = (fecha: string) => `${fecha.slice(8, 10)}/${fecha.slice(5, 7)}`;
 const corridasPorFecha = (c: CorridasSap['porMaterial'] extends Map<string, infer V> ? V : never) =>
   Array.from(c.porFecha.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([f, un]) => ({ fecha: f, un: Math.round(un) }));
+const fechasDeCorridas = (codigos: string[], corridas: CorridasSap) =>
+  Array.from(new Set(codigos.flatMap(cod => Array.from(corridas.porMaterial.get(cod)?.porFecha.keys() || [])))).sort();
+const corridaUnEnFecha = (corridas: CorridasSap, codigo: string, fecha: string) => {
+  const un = corridas.porMaterial.get(codigo)?.porFecha.get(fecha);
+  return un ? Math.round(un) : 0;
+};
 
 export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData, inventarioSAP, corridasSap }) => {
   // Órdenes FERT de acolchadoras en la fecha del plan (centro 2000 fuera, igual que Órdenes FERT).
@@ -509,6 +516,9 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
       .sort((a, b) => b.kg - a.kg);
   }, [bloques, stockKgPorMaterial, corridasSap]);
 
+  // Una columna por fecha de corrida (alineadas: el usuario lee 21/10 y 22/10 en columnas fijas).
+  const fechasCorridas = useMemo(() => fechasDeCorridas(resumenLaminas.map(l => l.codigo), corridasSap), [resumenLaminas, corridasSap]);
+
   const totalKg = bloques.reduce((s, b) => s + b.kg, 0);
   const totalRollos = bloques.reduce((s, b) => s + b.rollosUn, 0);
 
@@ -633,9 +643,11 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Stock final [un]</th>
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Saldo [un]</th>
                   <th className="px-3 py-2 text-center bg-teal-50 text-teal-800">¿Cubre?</th>
-                  <th className="px-3 py-2 text-left bg-slate-100 text-slate-600 whitespace-nowrap" title={`Órdenes FERT de Laminado en SAP (014/031) con cantidad pendiente, del ${ddmm(corridasSap.desde)} al ${ddmm(corridasSap.hasta)}: planes anteriores abiertos, hoy y el siguiente día hábil. No se suman al stock ni al saldo; si el stock no alcanza y con las de hoy o anteriores sí, ¿Cubre? marca "Con corrida". Las de días siguientes no evitan el "Falta": solo indican cuándo se cubre`}>
-                    Corridas SAP pendientes [un] <span className="normal-case font-bold">(hasta {ddmm(corridasSap.hasta)})</span>
-                  </th>
+                  {(fechasCorridas.length > 0 ? fechasCorridas : [null]).map(f => (
+                    <th key={f ?? 'sin'} className="px-3 py-2 text-right bg-slate-100 text-slate-600 whitespace-nowrap" title={`Órdenes FERT de Laminado en SAP (014/031) con cantidad pendiente, del ${ddmm(corridasSap.desde)} al ${ddmm(corridasSap.hasta)}: planes anteriores abiertos, hoy y el siguiente día hábil. No se suman al stock ni al saldo; si el stock no alcanza y con las de hoy o anteriores sí, ¿Cubre? marca "Con corrida". Las de días siguientes no evitan el "Falta": solo indican cuándo se cubre`}>
+                      {f ? <>Corrida {ddmm(f)} [un]</> : <>Corridas SAP pendientes [un]</>}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -677,23 +689,16 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                               </span>
                             )}
                     </td>
-                    {(() => {
+                    {(fechasCorridas.length > 0 ? fechasCorridas : [null]).map(f => {
                       const c = corridasSap.porMaterial.get(l.codigo);
+                      const un = f ? corridaUnEnFecha(corridasSap, l.codigo, f) : 0;
                       return (
-                        <td className="px-3 py-1.5 bg-slate-50 text-slate-600"
-                          title={c ? `${c.corridas} orden(es) SAP: ${c.ordenes.join(', ')} · ${fmt(c.kg, 1)} Kg pendientes` : `Sin orden SAP de Laminado pendiente del ${ddmm(corridasSap.desde)} al ${ddmm(corridasSap.hasta)}`}>
-                          {c ? (
-                            <div className="flex flex-wrap gap-1">
-                              {corridasPorFecha(c).map(({ fecha, un }) => (
-                                <span key={fecha} className="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[10px] whitespace-nowrap">
-                                  {ddmm(fecha)} · <span className="font-mono font-black">{fmt(un)}</span>
-                                </span>
-                              ))}
-                            </div>
-                          ) : <span className="text-slate-300">—</span>}
+                        <td key={f ?? 'sin'} className="px-3 py-1.5 text-right font-mono bg-slate-50 text-slate-600"
+                          title={c && un > 0 ? `${c.corridas} orden(es) SAP: ${c.ordenes.join(', ')} · ${fmt(c.kg, 1)} Kg pendientes en total` : undefined}>
+                          {un > 0 ? fmt(un) : <span className="text-slate-300">—</span>}
                         </td>
                       );
-                    })()}
+                    })}
                   </tr>
                 ))}
               </tbody>
