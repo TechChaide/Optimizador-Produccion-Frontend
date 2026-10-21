@@ -264,6 +264,9 @@ const RESP_PRODUCCION_DIARIA = ['014', '031'];
 // Solo "014" corre en el Looper: "031" (CONV) es otra máquina y no ocupa su tiempo — mismo criterio que
 // el T. Proceso del plan, que tampoco suma las filas CONV.
 const RESP_LOOPER = '014';
+// Consumo Acolchadoras: cuántos días hacia atrás se miran órdenes de Laminado aún abiertas en SAP
+// (plan de días anteriores sin notificar completo). Más atrás se asume orden vieja sin cerrar.
+const CORRIDAS_DIAS_ATRAS = 7;
 
 const isConvDescripcion = (desc: string): boolean => {
   const u = desc.toUpperCase();
@@ -4356,33 +4359,41 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return rows;
   }, [groupedNeeds, corridaFechas, ordenCorridas, siguienteDiaHabil]);
 
-  // Solo informativo para el tab Consumo Acolchadoras (usuario 2026-10-19): corridas YA EN SAP para el
-  // siguiente día hábil (hoy+1) — órdenes FERT de Laminado (responsables 014/031, centro ≠ 2000, mismo
-  // criterio que emparejarOrdenesSap), en rollos por material. Se toma SAP y no el plan en pantalla
-  // para reflejar cambios hechos en SAP después de enviar el P3. No entra a ningún cálculo.
-  const corridasSiguienteDia = useMemo(() => {
-    const fecha = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
-    const porMaterial = new Map<string, { un: number; kg: number; corridas: number; ordenes: string[] }>();
+  // Corridas de Laminado YA EN SAP para el tab Consumo Acolchadoras — órdenes FERT de Laminado
+  // (responsables 014/031, centro ≠ 2000, mismo criterio que emparejarOrdenesSap), en rollos por
+  // material. Se toma SAP y no el plan en pantalla para reflejar cambios hechos en SAP después de
+  // enviar el P3. 2026-10-19 solo hoy+1; 2026-10-21 (usuario): también las de hoy y los planes
+  // anteriores que siguen abiertos (hasta CORRIDAS_DIAS_ATRAS días), por CANTPENDIENTE — lo ya
+  // notificado entró al stock y no se cuenta dos veces. El tab las usa para "¿Cubre?" con corridas;
+  // el saldo de stock sigue sin sumarlas.
+  const corridasSap = useMemo(() => {
+    const hasta = format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
+    const desde = format(addDays(new Date(), -CORRIDAS_DIAS_ATRAS), 'yyyy-MM-dd');
+    const porMaterial = new Map<string, { un: number; kg: number; corridas: number; ordenes: string[]; porFecha: Map<string, number> }>();
     ordenesFert.forEach(o => {
       if (getProp(o, ['CENTRO', 'Centro', 'centro']) === '2000') return;
       const responsable = getProp(o, ['RESPCTRLPROD', 'RESP_CONTROL_PROD', 'RESPCONTROLPROD', 'RespControlProd', 'RESPONSABLE']);
       if (!RESP_PRODUCCION_DIARIA.includes(responsable)) return;
       const fechaRaw = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']);
-      if ((fechaRaw.includes('T') ? fechaRaw.split('T')[0] : fechaRaw) !== fecha) return;
+      const fecha = fechaRaw.includes('T') ? fechaRaw.split('T')[0] : fechaRaw;
+      if (!fecha || fecha < desde || fecha > hasta) return;
       const key = cleanCode(getProp(o, ['MATERIAL', 'CodMaterial']));
-      const cantidad = safeNum(getProp(o, ['CANTPROGRAMADA', 'CANTIDAD', 'CANTPENDIENTE']));
+      const cantidad = safeNum(getProp(o, ['CANTPENDIENTE', 'CANT_PEND', 'CANTPROGRAMADA', 'CANTIDAD']));
+      if (cantidad <= 0) return;
       const enKg = getProp(o, ['UNIDAD', 'Unidad', 'UNIDAD_MEDIDA']).toUpperCase() === 'KG';
       const looper = kpiLooperData.find(k => cleanCode(k.Material) === key);
       const pesoUN = looper ? safeNum(looper.PesoUN) : 0;
-      const e = porMaterial.get(key) || { un: 0, kg: 0, corridas: 0, ordenes: [] };
-      e.un += enKg ? (pesoUN > 0 ? cantidad / pesoUN : 0) : cantidad;
+      const un = enKg ? (pesoUN > 0 ? cantidad / pesoUN : 0) : cantidad;
+      const e = porMaterial.get(key) || { un: 0, kg: 0, corridas: 0, ordenes: [], porFecha: new Map<string, number>() };
+      e.un += un;
       e.kg += enKg ? cantidad : cantidad * pesoUN;
       e.corridas += 1;
+      e.porFecha.set(fecha, (e.porFecha.get(fecha) || 0) + un);
       const orden = getProp(o, ['ORDEN', 'ORDEN_PROCESO', 'ORDEN_FERT']);
       if (orden) e.ordenes.push(orden);
       porMaterial.set(key, e);
     });
-    return { fecha, porMaterial };
+    return { desde, hasta, porMaterial };
   }, [ordenesFert, kpiLooperData, siguienteDiaHabil]);
 
   // Mismas columnas en la tabla de pantalla del Plan de Salida: la orden sale de las FERT ya cargadas
@@ -5967,7 +5978,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         </TabsContent>
 
         <TabsContent value="acolchadoras" className="animate-in fade-in duration-300 text-left">
-          <ConsumoAcolchadorasTab ordenesFert={ordenesFert} selectedDates={selectedDates} kpiLooperData={kpiLooperData} inventarioSAP={inventarioSAP} corridasSiguienteDia={corridasSiguienteDia} />
+          <ConsumoAcolchadorasTab ordenesFert={ordenesFert} selectedDates={selectedDates} kpiLooperData={kpiLooperData} inventarioSAP={inventarioSAP} corridasSap={corridasSap} />
         </TabsContent>
 
         <TabsContent value="inventario" className="animate-in fade-in duration-300 space-y-4 text-left">

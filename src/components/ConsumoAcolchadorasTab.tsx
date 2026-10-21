@@ -187,20 +187,26 @@ interface LaminaResumen {
   stockUn: Record<string, number>;
   stockTotalUn: number;
   saldoUn: number;
+  corridasUn: number;
+  saldoConCorridasUn: number;
 }
 
 const construirCorreoConsumoHtml = (
   laminas: LaminaResumen[],
   fechas: string[],
-  corridas: Props['corridasSiguienteDia'],
+  corridas: CorridasSap,
 ): string => {
   const fechaHoy = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
   const fechaPlan = fechas.length > 0 ? fechas.map(f => format(parseISO(f), "EEEE d 'de' MMMM", { locale: es })).join(', ') : 'todas las fechas';
   const conPeso = laminas.filter(l => l.pesoUN > 0);
-  const faltan = conPeso.filter(l => l.saldoUn < 0).length;
+  const faltan = conPeso.filter(l => l.saldoConCorridasUn < 0).length;
+  const conCorrida = conPeso.filter(l => l.saldoUn < 0 && l.saldoConCorridasUn >= 0).length;
   const totalRollos = conPeso.reduce((s, l) => s + l.rollosUn, 0);
   const totalKg = laminas.reduce((s, l) => s + l.kg, 0);
-  const corridaLabel = `${corridas.fecha.slice(8, 10)}/${corridas.fecha.slice(5, 7)}`;
+  const estadoTexto = [
+    conCorrida > 0 ? `<span style="color:#d97706;">${conCorrida} cubre(n) solo con corrida SAP</span>` : '',
+    faltan > 0 ? `<span style="color:#dc2626;">${faltan} de ${laminas.length} láminas sin stock ni corrida suficiente</span>` : '',
+  ].filter(Boolean).join(' · ') || '<span style="color:#047857;">El stock cubre todas las láminas</span>';
   const th = 'padding:8px 8px;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;';
   const thStock = `${th}background:#f0fdfa;color:#115e59;`;
   const td = 'padding:7px 8px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;';
@@ -213,8 +219,13 @@ const construirCorreoConsumoHtml = (
       ? '<span style="font-size:10px;color:#d97706;">sin PesoUN</span>'
       : l.saldoUn >= 0
         ? '<span style="padding:2px 6px;border-radius:4px;background:#d1fae5;color:#065f46;font-size:10px;font-weight:700;">CUBRE</span>'
-        : `<span style="padding:2px 6px;border-radius:4px;background:#fee2e2;color:#b91c1c;font-size:10px;font-weight:700;">FALTA ${fmt(-l.saldoUn)}</span>`;
+        : l.saldoConCorridasUn >= 0
+          ? '<span style="padding:2px 6px;border-radius:4px;background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;white-space:nowrap;">CON CORRIDA</span>'
+          : `<span style="padding:2px 6px;border-radius:4px;background:#fee2e2;color:#b91c1c;font-size:10px;font-weight:700;">FALTA ${fmt(-l.saldoConCorridasUn)}</span>`;
     const c = corridas.porMaterial.get(l.codigo);
+    const corridasHtml = c
+      ? corridasPorFecha(c).map(({ fecha, un }) => `<span style="display:inline-block;margin:1px 2px;padding:1px 5px;border-radius:4px;background:#ffffff;border:1px solid #e5e7eb;font-size:10px;white-space:nowrap;">${ddmm(fecha)} · <b>${fmt(un)}</b></span>`).join('')
+      : '—';
     return `
         <tr style="background:${bg};">
           <td style="${td}color:#4338ca;font-family:ui-monospace,Consolas,monospace;">${l.codigo}</td>
@@ -227,7 +238,7 @@ const construirCorreoConsumoHtml = (
           <td align="right" style="${td}background:#f0fdfa;font-weight:700;">${ok ? fmt(l.stockTotalUn) : '—'}</td>
           <td align="right" style="${td}background:#f0fdfa;font-weight:700;color:${l.saldoUn < 0 ? '#dc2626' : '#047857'};">${ok ? (l.saldoUn > 0 ? `+${fmt(l.saldoUn)}` : fmt(l.saldoUn)) : '—'}</td>
           <td align="center" style="${td}background:#f0fdfa;">${cubre}</td>
-          <td align="right" style="${td}color:#6b7280;">${c ? fmt(Math.round(c.un)) : '—'}</td>
+          <td style="${td}color:#6b7280;">${corridasHtml}</td>
         </tr>`;
   }).join('');
   const kpi = (titulo: string, valor: string, color: string, borde: string) => `
@@ -268,7 +279,7 @@ const construirCorreoConsumoHtml = (
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
         <tr>
           <td style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Rollos requeridos por referencia de lámina</td>
-          <td align="right" style="font-size:10px;font-weight:700;color:${faltan > 0 ? '#dc2626' : '#047857'};text-transform:uppercase;">${faltan > 0 ? `${faltan} de ${laminas.length} láminas sin stock suficiente` : 'El stock cubre todas las láminas'}</td>
+          <td align="right" style="font-size:10px;font-weight:700;text-transform:uppercase;">${estadoTexto}</td>
         </tr>
       </table>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
@@ -283,12 +294,12 @@ const construirCorreoConsumoHtml = (
           <td align="right" style="${thStock}">Stock final [un]</td>
           <td align="right" style="${thStock}">Saldo [un]</td>
           <td align="center" style="${thStock}">¿Cubre?</td>
-          <td align="right" style="${th}white-space:nowrap;">Corrida ${corridaLabel} [un] (info)</td>
+          <td style="${th}white-space:nowrap;">Corridas SAP pendientes [un]</td>
         </tr>${filas}
       </table>
       <p style="margin:8px 0 0;font-size:10px;color:#9ca3af;">
         Rollos [un] = Kg de lámina (BOM de la referencia × cantidad planificada) ÷ PesoUN Looper, al entero superior por máquina.
-        Stock = libre utilización en bodegas ${BODEGAS_STOCK.join(' / ')} en rollos completos. La corrida del ${corridaLabel} es informativa: no se suma al stock ni al saldo.
+        Stock = libre utilización en bodegas ${BODEGAS_STOCK.join(' / ')} en rollos completos. Corridas SAP pendientes = órdenes de Laminado con cantidad pendiente del ${ddmm(corridas.desde)} al ${ddmm(corridas.hasta)} (planes anteriores abiertos, hoy y el siguiente día hábil); no se suman al saldo de stock. "Con corrida" = el stock no alcanza pero con la corrida pendiente sí.
       </p>
     </td>
   </tr>
@@ -308,12 +319,23 @@ interface Props {
   selectedDates: Set<string>;
   kpiLooperData: RawApiRow[];
   inventarioSAP: InventarioRow[];
-  // Órdenes FERT de Laminado ya en SAP (014/031) del siguiente día hábil, por material. SOLO
-  // INFORMATIVO: no entra al stock, saldo ni "¿Cubre?".
-  corridasSiguienteDia: { fecha: string; porMaterial: Map<string, { un: number; kg: number; corridas: number; ordenes: string[] }> };
+  // Órdenes FERT de Laminado ya en SAP (014/031) aún pendientes, de `desde` (planes anteriores) a
+  // `hasta` (siguiente día hábil), por material — cantidad PENDIENTE (lo notificado ya está en stock).
+  // No entra al stock ni al saldo; "¿Cubre?" las usa para marcar "Cubre con corrida".
+  corridasSap: CorridasSap;
 }
 
-export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData, inventarioSAP, corridasSiguienteDia }) => {
+interface CorridasSap {
+  desde: string;
+  hasta: string;
+  porMaterial: Map<string, { un: number; kg: number; corridas: number; ordenes: string[]; porFecha: Map<string, number> }>;
+}
+
+const ddmm = (fecha: string) => `${fecha.slice(8, 10)}/${fecha.slice(5, 7)}`;
+const corridasPorFecha = (c: CorridasSap['porMaterial'] extends Map<string, infer V> ? V : never) =>
+  Array.from(c.porFecha.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([f, un]) => ({ fecha: f, un: Math.round(un) }));
+
+export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData, inventarioSAP, corridasSap }) => {
   // Órdenes FERT de acolchadoras en la fecha del plan (centro 2000 fuera, igual que Órdenes FERT).
   const ordenes = useMemo(() => ordenesFert.filter(o => {
     if (getProp(o, ['CENTRO']) === '2000') return false;
@@ -468,10 +490,14 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
         const stockUn = Object.fromEntries(BODEGAS_STOCK.map(b => [b, e.pesoUN > 0 ? Math.floor((stockKg[b] || 0) / e.pesoUN + 1e-6) : 0])) as Record<string, number>;
         const stockTotalUn = BODEGAS_STOCK.reduce((s, b) => s + stockUn[b], 0);
         const stockTotalKg = BODEGAS_STOCK.reduce((s, b) => s + (stockKg[b] || 0), 0);
-        return { ...e, rollosUn, stockUn, stockTotalUn, stockTotalKg, saldoUn: stockTotalUn - rollosUn };
+        const saldoUn = stockTotalUn - rollosUn;
+        // Corridas SAP pendientes (hoy, días anteriores abiertos y hoy+1) en rollos enteros: si el stock
+        // no alcanza pero con ellas sí, la lámina "cubre con corrida" (queda sujeto a que se produzca).
+        const corridasUn = Math.round(corridasSap.porMaterial.get(e.codigo)?.un || 0);
+        return { ...e, rollosUn, stockUn, stockTotalUn, stockTotalKg, saldoUn, corridasUn, saldoConCorridasUn: saldoUn + corridasUn };
       })
       .sort((a, b) => b.kg - a.kg);
-  }, [bloques, stockKgPorMaterial]);
+  }, [bloques, stockKgPorMaterial, corridasSap]);
 
   const totalKg = bloques.reduce((s, b) => s + b.kg, 0);
   const totalRollos = bloques.reduce((s, b) => s + b.rollosUn, 0);
@@ -514,7 +540,7 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
   }, []);
 
   // La vista previa congela el HTML al abrirse: se envía exactamente lo que se revisó.
-  const abrirCorreo = () => setCorreoHtml(construirCorreoConsumoHtml(resumenLaminas, fechas, corridasSiguienteDia));
+  const abrirCorreo = () => setCorreoHtml(construirCorreoConsumoHtml(resumenLaminas, fechas, corridasSap));
 
   const enviarCorreo = async () => {
     if (!correoHtml || !destinatarios.trim()) return;
@@ -560,10 +586,16 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
             <span>Rollos requeridos por referencia de lámina</span>
             <div className="flex items-center gap-3">
               {(() => {
-                const faltan = resumenLaminas.filter(l => l.pesoUN > 0 && l.saldoUn < 0).length;
-                return faltan > 0
-                  ? <span className="text-red-600">{faltan} de {resumenLaminas.length} láminas sin stock suficiente</span>
-                  : <span className="text-emerald-700">El stock cubre todas las láminas</span>;
+                const faltan = resumenLaminas.filter(l => l.pesoUN > 0 && l.saldoConCorridasUn < 0).length;
+                const conCorrida = resumenLaminas.filter(l => l.pesoUN > 0 && l.saldoUn < 0 && l.saldoConCorridasUn >= 0).length;
+                return (
+                  <>
+                    {conCorrida > 0 && <span className="text-amber-600">{conCorrida} cubre(n) solo con corrida SAP</span>}
+                    {faltan > 0
+                      ? <span className="text-red-600">{faltan} de {resumenLaminas.length} láminas sin stock ni corrida suficiente</span>
+                      : conCorrida === 0 && <span className="text-emerald-700">El stock cubre todas las láminas</span>}
+                  </>
+                );
               })()}
               <button
                 onClick={abrirCorreo}
@@ -591,8 +623,8 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Stock final [un]</th>
                   <th className="px-3 py-2 text-right bg-teal-50 text-teal-800">Saldo [un]</th>
                   <th className="px-3 py-2 text-center bg-teal-50 text-teal-800">¿Cubre?</th>
-                  <th className="px-3 py-2 text-right bg-slate-100 text-slate-600 whitespace-nowrap" title="Órdenes FERT de Laminado ya en SAP (014/031) del siguiente día hábil. Solo informativo: no se suma al stock ni al saldo">
-                    Corrida {corridasSiguienteDia.fecha.slice(8, 10)}/{corridasSiguienteDia.fecha.slice(5, 7)} [un] <span className="normal-case font-bold">(info)</span>
+                  <th className="px-3 py-2 text-left bg-slate-100 text-slate-600 whitespace-nowrap" title={`Órdenes FERT de Laminado en SAP (014/031) con cantidad pendiente, del ${ddmm(corridasSap.desde)} al ${ddmm(corridasSap.hasta)}: planes anteriores abiertos, hoy y el siguiente día hábil. No se suman al stock ni al saldo; si el stock no alcanza y con ellas sí, ¿Cubre? marca "Con corrida"`}>
+                    Corridas SAP pendientes [un] <span className="normal-case font-bold">(hasta {ddmm(corridasSap.hasta)})</span>
                   </th>
                 </tr>
               </thead>
@@ -626,14 +658,24 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                       {l.pesoUN <= 0 ? <span className="text-amber-600 text-[10px]">sin PesoUN</span>
                         : l.saldoUn >= 0
                           ? <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-black uppercase">Cubre</span>
-                          : <span className="px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-black uppercase">Falta {fmt(-l.saldoUn)}</span>}
+                          : l.saldoConCorridasUn >= 0
+                            ? <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-black uppercase whitespace-nowrap" title={`Stock falta ${fmt(-l.saldoUn)}; la corrida SAP pendiente (${fmt(l.corridasUn)} un) lo cubre`}>Con corrida</span>
+                            : <span className="px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-black uppercase" title={l.corridasUn > 0 ? `Incluye ${fmt(l.corridasUn)} un de corrida SAP pendiente` : undefined}>Falta {fmt(-l.saldoConCorridasUn)}</span>}
                     </td>
                     {(() => {
-                      const c = corridasSiguienteDia.porMaterial.get(l.codigo);
+                      const c = corridasSap.porMaterial.get(l.codigo);
                       return (
-                        <td className="px-3 py-1.5 text-right font-mono bg-slate-50 text-slate-600"
-                          title={c ? `${c.corridas} orden(es) SAP: ${c.ordenes.join(', ')} · ${fmt(c.kg, 1)} Kg — solo informativo` : 'Sin orden SAP de Laminado para el siguiente día'}>
-                          {c ? fmt(Math.round(c.un)) : <span className="text-slate-300">—</span>}
+                        <td className="px-3 py-1.5 bg-slate-50 text-slate-600"
+                          title={c ? `${c.corridas} orden(es) SAP: ${c.ordenes.join(', ')} · ${fmt(c.kg, 1)} Kg pendientes` : `Sin orden SAP de Laminado pendiente del ${ddmm(corridasSap.desde)} al ${ddmm(corridasSap.hasta)}`}>
+                          {c ? (
+                            <div className="flex flex-wrap gap-1">
+                              {corridasPorFecha(c).map(({ fecha, un }) => (
+                                <span key={fecha} className="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[10px] whitespace-nowrap">
+                                  {ddmm(fecha)} · <span className="font-mono font-black">{fmt(un)}</span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : <span className="text-slate-300">—</span>}
                         </td>
                       );
                     })()}
