@@ -379,7 +379,7 @@ export const ReportePlanTxtAcciones: React.FC<{ flujo: FlujoReportePlanTxt; clas
           {recuperando ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSearch className="w-4 h-4" />} Recuperar y revisar
         </Button>
         {enviadoEn && <p className="text-[9px] font-bold text-emerald-700">Enviado {horaCorta(enviadoEn)}</p>}
-        {config.restaurarEstado && <AbrirOtraFecha recuperando={recuperando} onAbrir={fecha => { void flujo.recuperar({ fecha }); }} />}
+        {config.restaurarEstado && <AbrirOtraFecha recuperando={recuperando} fechaPlan={config.fechaObjetivo} onAbrir={fecha => { void flujo.recuperar({ fecha }); }} />}
       </PasoReporte>
     </div>
   );
@@ -387,8 +387,10 @@ export const ReportePlanTxtAcciones: React.FC<{ flujo: FlujoReportePlanTxt; clas
 
 // Abre el reporte de otra fecha objetivo (ej. el lunes, el plan guardado el viernes para el lunes)
 // para revisarlo o cargarlo en el módulo. Solo en módulos que saben restaurar su respaldo.
-const AbrirOtraFecha: React.FC<{ recuperando: boolean; onAbrir: (fecha: string) => void }> = ({ recuperando, onAbrir }) => {
-  const [fecha, setFecha] = useState('');
+// Arranca con la fecha de salida del plan; una fecha anterior se elige a mano.
+const AbrirOtraFecha: React.FC<{ recuperando: boolean; fechaPlan: string | null; onAbrir: (fecha: string) => void }> = ({ recuperando, fechaPlan, onAbrir }) => {
+  const [fecha, setFecha] = useState(fechaPlan || '');
+  useEffect(() => { setFecha(fechaPlan || ''); }, [fechaPlan]);
   return (
     <div className="flex items-center gap-1.5 pt-1 border-t border-slate-100">
       <span className="text-[8px] font-black uppercase text-slate-400 whitespace-nowrap">Otra fecha</span>
@@ -671,7 +673,7 @@ export const ReportePlanTxtAccionesGrupo: React.FC<{ grupo: GrupoReportePlanTxt;
         >
           {recuperando ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSearch className="w-4 h-4" />} Recuperar y revisar
         </Button>
-        {grupo.sabeCargar && <AbrirOtraFecha recuperando={recuperando} onAbrir={fecha => { void grupo.recuperarTodos(fecha); }} />}
+        {grupo.sabeCargar && <AbrirOtraFecha recuperando={recuperando} fechaPlan={flujos[0]?.config.fechaObjetivo ?? null} onAbrir={fecha => { void grupo.recuperarTodos(fecha); }} />}
       </PasoReporte>
     </div>
   );
