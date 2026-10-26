@@ -2781,8 +2781,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   };
 
   type FilaResumenEjecutado = ReturnType<typeof calculateSummary>[number];
-  const summaryData1000 = useMemo(() => (resultadoRestaurado?.summaryData['1000'] as FilaResumenEjecutado[] | undefined) ?? calculateSummary(fertC1000Resumen, '1000'), [fertC1000Resumen, resultadoRestaurado]); // eslint-disable-line react-hooks/exhaustive-deps
-  const summaryData2000 = useMemo(() => (resultadoRestaurado?.summaryData['2000'] as FilaResumenEjecutado[] | undefined) ?? calculateSummary(fertC2000Resumen, '2000'), [fertC2000Resumen, resultadoRestaurado]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Depende también del lookup de tiempos (2026-10-26): las FERT llegan antes que los tiempos y sin él
+  // la carga quedaba toda en 15 s/und (3677 und = 15.3 h) sin recalcular al llegar el servicio.
+  const summaryData1000 = useMemo(() => (resultadoRestaurado?.summaryData['1000'] as FilaResumenEjecutado[] | undefined) ?? calculateSummary(fertC1000Resumen, '1000'), [fertC1000Resumen, tiempoLookup1000, resultadoRestaurado]); // eslint-disable-line react-hooks/exhaustive-deps
+  const summaryData2000 = useMemo(() => (resultadoRestaurado?.summaryData['2000'] as FilaResumenEjecutado[] | undefined) ?? calculateSummary(fertC2000Resumen, '2000'), [fertC2000Resumen, tiempoLookup2000, resultadoRestaurado]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Agrupación por Categoría Técnica (la categoría ya embebe la densidad, p.ej. D40ESP)
   const groupByCategoria = (data: typeof summaryData1000) => {
