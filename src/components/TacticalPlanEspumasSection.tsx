@@ -808,6 +808,9 @@ const tipoEspumaDesc = (descripcion: string): string =>
   String(descripcion || '').toUpperCase().split(/\s+/)
     .filter(w => w && !/^(LAMINA|LÁMINA|ESPUMA)$/.test(w) && !/^D\d+(\.\d+)?$/.test(w) && !/\d+(\.\d+)?X\d/.test(w))
     .join(' ');
+// Aperturas técnicas: salen de un bloque madre de LARGO_BLOQUE_M y se cuentan en bloques. El resto
+// (combinación 105/115/135/145/160/200…) llega cortado a medida de sub-bloque y se mide en kg.
+const APERTURAS_TECNICAS_T8 = ['194.5', '206', '219', '228'];
 // Largo del bloque madre (m) para convertir metros de sub-bloque en bloques necesarios — mismo valor
 // que Formulación (BLOCK_LENGTH_METERS).
 const LARGO_BLOQUE_M = 20;
@@ -3119,6 +3122,11 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           cantPend: r.cantPend,
           subBPend: Math.ceil(r.cantPend / unidadesPorSub - 1e-9),
           longitudPendM: (Math.ceil(r.cantPend / unidadesPorSub - 1e-9) * r.ancho) / 100,
+          // Combinación (aperturas no técnicas, usuario 2026-10-27): el sub-bloque ya llega a la medida de
+          // corte, no sale de un bloque madre de 20 m → consumo en kg = ancho × largo × espesor × densidad.
+          kg: (r.cantTotal * r.ancho * r.largo * r.esp * densVal) / 1e6,
+          kgPend: (r.cantPend * r.ancho * r.largo * r.esp * densVal) / 1e6,
+          subCarrusel, plazasCarga: cargas * capGiro,
         };
       });
       type FilaT8 = typeof filas[number];
@@ -3140,7 +3148,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         return m;
       };
       // Aperturas técnicas primero en su orden fijo; el resto (visco 135/160/200…) numérico después.
-      const ordenApertura = (a: string) => { const i = ['194.5', '206', '219', '228'].indexOf(a); return i === -1 ? 100 + (parseFloat(a) || 900) : i; };
+      const ordenApertura = (a: string) => { const i = APERTURAS_TECNICAS_T8.indexOf(a); return i === -1 ? 100 + (parseFloat(a) || 900) : i; };
       // Una fila de primer nivel por bloque madre = densidad + tipo de espuma + apertura (usuario
       // 2026-10-27: "D30BLFR · 206", "D30NRCR · 206", "D30NRRR · 206", "D40VISC · 135"…): misma densidad
       // y apertura con distinto material son bloques distintos. Debajo, directamente los materiales.
@@ -3148,15 +3156,21 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         .sort((a, b) => safeNum(a[0].dens) - safeNum(b[0].dens) || ordenApertura(a[0].apertura) - ordenApertura(b[0].apertura) || a[0].tipo.localeCompare(b[0].tipo))
         .map(items => {
           const { dens, tipo, apertura, tipoDeCategoria } = items[0];
+          // Bloques de 20 m solo en aperturas técnicas; la combinación se mide en kg (ver kg arriba).
+          const esTecnica = APERTURAS_TECNICAS_T8.includes(apertura);
           const metros = items.reduce((s, f) => s + f.longitudM, 0);
-          const bloques = metros / LARGO_BLOQUE_M;
+          const bloques = esTecnica ? metros / LARGO_BLOQUE_M : 0;
           const filasBloque = items.map(f => ({ ...f, metros: f.longitudM, bloquesEnteros: 0 }));
           // Etiquetas de descripción del grupo (ej. "NG FRR"), para leer la categoría.
           const descs = Array.from(new Set(items.map(f => f.tipoDesc).filter(Boolean)));
-          const bloquesPend = items.reduce((s, f) => s + f.longitudPendM, 0) / LARGO_BLOQUE_M;
+          const bloquesPend = esTecnica ? items.reduce((s, f) => s + f.longitudPendM, 0) / LARGO_BLOQUE_M : 0;
+          const plazas = items.reduce((s, f) => s + f.plazasCarga, 0);
           return {
-            clave: `${dens}|${tipo}|${apertura}`, dens, apertura, descs, deCategoria: tipoDeCategoria, bloques,
+            clave: `${dens}|${tipo}|${apertura}`, dens, apertura, descs, deCategoria: tipoDeCategoria, bloques, esTecnica,
             subBPend: items.reduce((s, f) => s + f.subBPend, 0), bloquesPend, bloquesPendEnteros: Math.ceil(bloquesPend - 1e-9),
+            kg: items.reduce((s, f) => s + f.kg, 0), kgPend: items.reduce((s, f) => s + f.kgPend, 0),
+            // Ocupación del bloque madre: sub-bloques al carrusel ÷ plazas de las cargas que paga.
+            ocupacion: plazas > 0 ? items.reduce((s, f) => s + f.subCarrusel, 0) / plazas : 0,
             // "CM-LAM-D30BLFR" → "D30BLFR"; sin categoría el tipo viene de la descripción ("NG FRR") → "D15 NG FRR".
             etiqueta: tipoDeCategoria ? tipo.replace(/^CM-LAM-/, '') : `D${dens} ${tipo}`,
             items: items.sort((a, b) => a.tamano.localeCompare(b.tamano) || a.esp - b.esp),
@@ -7211,17 +7225,16 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               <span className="text-slate-600">=</span>
               <span className="px-3 py-1.5 rounded-xl bg-emerald-100 text-emerald-900 font-black">Altura útil {ALTURA_UTIL_CM} cm</span>
               <span className="text-slate-600">·</span>
-              <span className="text-slate-700">D ≥ 28: útil 85 cm · Bloque madre {LARGO_BLOQUE_M} m · Sobrante ≤ {SUBBLOQUES_SOBRANTE_MAX_CNC} sub-bloque → CNC</span>
-              <p className="w-full text-[11px] text-slate-700">
-                Bloques a consumir el día de corte con las <b>órdenes FERT en firme</b> (solo carrusel, sin provisionales): Colchones/Muebles con fecha fin = día de corte y Venta Externa con fecha fin = siguiente día hábil (su PT). Cúpula por carga = ciclos al espesor de la lámina hasta cubrir ~{CUPULA_CM} cm sin pasar de {CUPULA_MAX_CM} cm
-                (0.8 → 5 ciclos · 1 → 4 · 2 → 2 · ≥ 3 → 1). T. corte = láminas + cúpula (T. Indiv KPI) + carga/descarga. Ocupación &lt; 60% = carga con poco material para los ciclos que paga.
-                Pendiente anterior = FERT de los {DIAS_PENDIENTE_MAX} días hábiles previos que no alcanza el turno en curso (misma regla que Capacidad Operativa): se muestra para sacar esos bloques, pero no suma a los bloques necesarios porque ya se pidieron en el plan de su día.
-              </p>
+              <span className="text-slate-700">D ≥ 28: útil 85 cm · Bloque madre {LARGO_BLOQUE_M} m</span>
             </div>
             {(['1000', '2000'] as const).map(centro => {
               const grupos = subBloquesT8PorCentro[centro];
               const th = 'px-2 py-2 border-r border-slate-200 text-[10px] uppercase font-black text-slate-800';
               const td = 'px-2 py-1.5 border-r border-slate-100 text-right font-mono text-slate-900';
+              // Pendiente de días anteriores que no alcanza el turno en curso: en gris, no suma (ya se pidió en su día).
+              const masPend = (v: number) => v > 0
+                ? <span className="ml-1 text-[9px] font-bold text-slate-400" title="Pendiente de días anteriores (no suma)">+{formatNum(v, 0)}</span>
+                : null;
               return (
                 <div key={centro} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-x-auto">
                   <div className="px-4 py-3 font-black text-indigo-900 uppercase text-sm border-b">Sub-bloques — {centro === '1000' ? 'Quito' : 'Guayaquil'}</div>
@@ -7232,12 +7245,12 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         { l: 'de ellas cúpula', v: grupos.reduce((s, g) => s + g.tCupulaH, 0).toFixed(1) + ' h', c: 'text-amber-800' },
                         { l: 'Sub-bloques', v: String(grupos.reduce((s, g) => s + g.subB, 0)), c: 'text-indigo-900' },
                         { l: 'Cargas CR · CNC', v: `${grupos.reduce((s, g) => s + g.cargas, 0)} · ${grupos.reduce((s, g) => s + g.subCNC, 0)}`, c: 'text-indigo-900' },
-                        { l: 'Bloques necesarios', v: String(grupos.reduce((s, g) => s + g.bloquesEnteros, 0)), c: 'text-violet-700' },
-                        { l: '+ Pendiente anterior', v: `${grupos.reduce((s, g) => s + g.bloquesPendEnteros, 0)} bl.`, c: 'text-slate-500', t: 'Bloques para cortar el pendiente FERT de días anteriores que no alcanza el turno en curso. Ya se pidieron en el plan de su día: NO suman a Bloques necesarios.' },
+                        { l: 'Bloques necesarios', v: String(grupos.reduce((s, g) => s + g.bloquesEnteros, 0)), p: grupos.reduce((s, g) => s + g.bloquesPendEnteros, 0), c: 'text-violet-700' },
+                        { l: 'Combinación (kg)', v: formatNum(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kg), 0), 0), p: Math.round(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kgPend), 0)), c: 'text-violet-700' },
                       ].map(k => (
-                        <div key={k.l} className="rounded-xl bg-slate-50 px-3 py-2" title={'t' in k ? k.t : undefined}>
+                        <div key={k.l} className="rounded-xl bg-slate-50 px-3 py-2">
                           <div className="text-[10px] uppercase font-black text-slate-600">{k.l}</div>
-                          <div className={`text-lg font-black ${k.c}`}>{k.v}</div>
+                          <div className={`text-lg font-black ${k.c}`}>{k.v}{'p' in k && (k.p ?? 0) > 0 && <span className="text-xs font-bold text-slate-400" title="Pendiente de días anteriores que no alcanza el turno en curso; ya se pidió en su día, no suma"> +{formatNum(k.p ?? 0, 0)} pend.</span>}</div>
                         </div>
                       ))}
                     </div>
@@ -7263,22 +7276,27 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Ocupación</th>
                           <th className={`${th} bg-emerald-50/50 text-slate-700`}>Corte láminas (h)</th><th className={`${th} bg-amber-50 text-amber-800`}>+ Cúpula (h)</th><th className={`${th} bg-emerald-50/50 text-slate-700`}>+ Carga / desc. (h)</th>
                           <th className={`${th} bg-emerald-100`}>= T. corte total (h)</th>
-                          <th className={`${th} bg-slate-100`}>Longitud (m)</th><th className={`${th} bg-violet-50`}>N° bloques</th>
-                          <th className={`${th} bg-slate-50 text-slate-500`} title="Pendiente FERT de días anteriores que no alcanza el turno en curso. Informativo: no suma a N° bloques.">Pendiente anterior</th>
+                          <th className={`${th} bg-slate-100`}>Longitud (m)</th><th className={`${th} bg-violet-50`}>N° bloques / kg</th>
                         </tr>
                       </thead>
                       <tbody>
                         {grupos.map(g => {
                           const claveDens = `${centro}|${g.clave}`;
                           const densAbierta = !t8Plegados.has(claveDens);
-                          // Fila de totales del bloque madre: mismas columnas que el detalle.
-                          const filaTotales = (t: { cant: number; subB: number; cargas: number; subCNC: number; tLaminasH: number; tCupulaH: number; tCargaDescargaH: number; tTotalH: number; metros: number; bloquesEnteros: number }, bloques: number) => (
+                          // Fila de totales del bloque madre: mismas columnas que el detalle. El pendiente de días
+                          // anteriores va en gris como "+N" junto al dato del día (no suma).
+                          const filaTotales = () => (
                             <>
-                              <td className={td}>{formatNum(t.cant, 0)}</td><td className={td}></td><td className={td}>{t.subB}</td><td className={td}></td>
-                              <td className={td}>{t.cargas}</td><td className={td}>{t.subCNC}</td><td className={td}></td>
-                              <td className={td}>{t.tLaminasH.toFixed(2)}</td><td className={`${td} text-amber-800`}>{t.tCupulaH.toFixed(2)}</td><td className={td}>{t.tCargaDescargaH.toFixed(2)}</td>
-                              <td className={`${td} text-emerald-800`}>{t.tTotalH.toFixed(1)}</td><td className={td}>{t.metros.toFixed(0)}</td>
-                              <td className={`${td} text-violet-800 font-black`}>{bloques.toFixed(1)} <span className="text-[9px] font-bold opacity-80">({t.bloquesEnteros} ent.)</span></td>
+                              <td className={td}>{formatNum(g.cant, 0)}</td><td className={td}></td><td className={td}>{g.subB}{masPend(g.subBPend)}</td><td className={td}></td>
+                              <td className={td}>{g.cargas}</td><td className={td}>{g.subCNC}</td>
+                              <td className={`${td} ${g.ocupacion > 0 && g.ocupacion < 0.6 ? 'text-orange-600' : ''}`}>{g.cargas > 0 ? `${(g.ocupacion * 100).toFixed(0)}%` : '—'}</td>
+                              <td className={td}>{g.tLaminasH.toFixed(2)}</td><td className={`${td} text-amber-800`}>{g.tCupulaH.toFixed(2)}</td><td className={td}>{g.tCargaDescargaH.toFixed(2)}</td>
+                              <td className={`${td} text-emerald-800`}>{g.tTotalH.toFixed(1)}</td><td className={td}>{g.metros.toFixed(0)}</td>
+                              <td className={`${td} text-violet-800 font-black`}>
+                                {g.esTecnica
+                                  ? <>{g.bloques.toFixed(1)} <span className="text-[9px] font-bold opacity-80">({g.bloquesEnteros} ent.)</span>{masPend(g.bloquesPendEnteros)}</>
+                                  : <>{formatNum(g.kg, 0)} kg{masPend(Math.round(g.kgPend))}</>}
+                              </td>
                             </>
                           );
                           return (
@@ -7290,23 +7308,22 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                     <span className="text-indigo-400">·</span>
                                     {g.apertura === 'Sin apertura' ? <span className="text-orange-600">Sin apertura</span> : g.apertura}</span>
                                 </td>
-                                {filaTotales(g, g.bloques)}
-                                <td className={`${td} text-slate-500 font-bold`}>{g.subBPend > 0 ? <>{g.bloquesPend.toFixed(1)} <span className="text-[9px] opacity-80">({g.bloquesPendEnteros} ent.)</span></> : <span className="text-slate-300">·</span>}</td>
+                                {filaTotales()}
                               </tr>
                                     {densAbierta && g.items.map(f => (
                                       <tr key={f.material} className="border-t border-slate-100">
                                         <td className="pl-8 pr-2 py-1.5 border-r border-slate-100" title={`${f.descripcion}\n${f.categoria || 'sin categoría'}`}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div></td>
                                         <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td>
-                                        <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}</td>
-                                        <td className={`${td} text-slate-700`}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td>
+                                        <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}{masPend(Math.round(f.cantPend))}</td>
+                                        <td className={`${td} text-slate-700`}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}{masPend(f.subBPend)}</td>
                                         <td className={`${td} text-slate-700`}>{f.capGiro}</td><td className={`${td} font-black`}>{f.cargas}</td><td className={td}>{f.subCNC}</td>
                                         <td className={`${td} ${f.ocupacion < 0.6 ? 'text-orange-600 font-black' : 'text-slate-700'}`}>{f.cant > 0 ? `${(f.ocupacion * 100).toFixed(0)}%` : '—'}</td>
                                         <td className={`${td} text-slate-700`}>{f.sinTiempo ? '—' : f.tLaminasH.toFixed(2)}</td>
                                         <td className={`${td} text-amber-800`} title={`${f.ciclosCup} ciclo(s) de cúpula por carga × ${f.cargas} carga(s) = ${f.cupulaCm.toFixed(1)} cm despejados por carga`}>{f.sinTiempo ? '—' : f.tCupulaH.toFixed(2)}</td>
                                         <td className={`${td} text-slate-700`}>{f.tCargaDescargaH.toFixed(2)}</td>
                                         <td className={`${td} bg-emerald-50 font-black`} title={f.sinTiempo ? 'Sin T. Indiv (KPI) para este material' : undefined}>{f.sinTiempo ? '—' : f.tTotalH.toFixed(2)}</td>
-                                        <td className={td}>{f.longitudM.toFixed(0)}</td><td className={td}></td>
-                                        <td className={`${td} text-slate-500`}>{f.subBPend > 0 ? `${formatNum(f.cantPend, 0)} UN · ${f.subBPend} sub` : ''}</td>
+                                        <td className={td}>{f.longitudM.toFixed(0)}</td>
+                                        <td className={`${td} text-slate-700`}>{g.esTecnica ? '' : <>{formatNum(f.kg, 0)} kg{masPend(Math.round(f.kgPend))}</>}</td>
                                       </tr>
                                     ))}
                             </React.Fragment>
@@ -7315,14 +7332,16 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         <tr className="border-t-2 border-indigo-300 bg-indigo-100 font-black text-indigo-900">
                           <td className="px-2 py-2" colSpan={3}>Total {centro === '1000' ? 'Quito' : 'Guayaquil'}</td>
                           <td className={td}>{formatNum(grupos.reduce((s, g) => s + g.cant, 0), 0)}</td><td className={td}></td>
-                          <td className={td}>{grupos.reduce((s, g) => s + g.subB, 0)}</td><td className={td}></td>
+                          <td className={td}>{grupos.reduce((s, g) => s + g.subB, 0)}{masPend(grupos.reduce((s, g) => s + g.subBPend, 0))}</td><td className={td}></td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.cargas, 0)}</td><td className={td}>{grupos.reduce((s, g) => s + g.subCNC, 0)}</td><td className={td}></td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.tLaminasH, 0).toFixed(2)}</td>
                           <td className={`${td} text-amber-800`}>{grupos.reduce((s, g) => s + g.tCupulaH, 0).toFixed(2)}</td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.tCargaDescargaH, 0).toFixed(2)}</td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.tTotalH, 0).toFixed(1)}</td><td className={td}>{grupos.reduce((s, g) => s + g.metros, 0).toFixed(0)}</td>
-                          <td className={td}>{grupos.reduce((s, g) => s + g.bloquesEnteros, 0)} ent.</td>
-                          <td className={`${td} text-slate-500`}>{grupos.reduce((s, g) => s + g.bloquesPendEnteros, 0)} ent.</td>
+                          <td className={td}>
+                            {grupos.reduce((s, g) => s + g.bloquesEnteros, 0)} ent.{masPend(grupos.reduce((s, g) => s + g.bloquesPendEnteros, 0))}
+                            <div className="text-[10px]">{formatNum(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kg), 0), 0)} kg{masPend(Math.round(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kgPend), 0)))}</div>
+                          </td>
                         </tr>
                       </tbody>
                     </table>
