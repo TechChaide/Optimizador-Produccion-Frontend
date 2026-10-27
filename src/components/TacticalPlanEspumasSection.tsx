@@ -809,7 +809,8 @@ const tipoEspumaDesc = (descripcion: string): string =>
     .filter(w => w && !/^(LAMINA|LÁMINA|ESPUMA)$/.test(w) && !/^D\d+(\.\d+)?$/.test(w) && !/\d+(\.\d+)?X\d/.test(w))
     .join(' ');
 // Aperturas técnicas: salen de un bloque madre de LARGO_BLOQUE_M y se cuentan en bloques. El resto
-// (combinación 105/115/135/145/160/200…) llega cortado a medida de sub-bloque y se mide en kg.
+// (combinación 105/115/135/145/160/200…) llega cortado a medida de sub-bloque y se cuenta en UN
+// (= sub-bloques; usuario 2026-10-27, antes kg).
 const APERTURAS_TECNICAS_T8 = ['194.5', '206', '219', '228'];
 // Largo del bloque madre (m) para convertir metros de sub-bloque en bloques necesarios — mismo valor
 // que Formulación (BLOCK_LENGTH_METERS).
@@ -3097,9 +3098,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           tCorteH, tCargaDescargaH, tTotalH: tCorteH + tCargaDescargaH,
           longitudM: (subB * r.ancho) / 100,
           sinTiempo: r.tIndiv <= 0,
-          // Combinación (aperturas no técnicas, usuario 2026-10-27): el sub-bloque ya llega a la medida de
-          // corte, no sale de un bloque madre de 20 m → consumo en kg = ancho × largo × espesor × densidad.
-          kg: (r.cantTotal * r.ancho * r.largo * r.esp * densVal) / 1e6,
           subCarrusel, plazasCarga: cargas * capGiro,
         };
       });
@@ -3130,7 +3128,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         .sort((a, b) => safeNum(a[0].dens) - safeNum(b[0].dens) || ordenApertura(a[0].apertura) - ordenApertura(b[0].apertura) || a[0].tipo.localeCompare(b[0].tipo))
         .map(items => {
           const { dens, tipo, apertura, tipoDeCategoria } = items[0];
-          // Bloques de 20 m solo en aperturas técnicas; la combinación se mide en kg (ver kg arriba).
+          // Bloques de 20 m solo en aperturas técnicas; la combinación se cuenta en UN = sub-bloques.
           const esTecnica = APERTURAS_TECNICAS_T8.includes(apertura);
           const metros = items.reduce((s, f) => s + f.longitudM, 0);
           const bloques = esTecnica ? metros / LARGO_BLOQUE_M : 0;
@@ -3140,7 +3138,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           const plazas = items.reduce((s, f) => s + f.plazasCarga, 0);
           return {
             clave: `${dens}|${tipo}|${apertura}`, dens, apertura, descs, deCategoria: tipoDeCategoria, bloques, esTecnica,
-            kg: items.reduce((s, f) => s + f.kg, 0),
             // Ocupación del bloque madre: sub-bloques al carrusel ÷ plazas de las cargas que paga.
             ocupacion: plazas > 0 ? items.reduce((s, f) => s + f.subCarrusel, 0) / plazas : 0,
             // "CM-LAM-D30BLFR" → "D30BLFR"; sin categoría el tipo viene de la descripción ("NG FRR") → "D15 NG FRR".
@@ -7214,7 +7211,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         { l: 'Sub-bloques', v: String(grupos.reduce((s, g) => s + g.subB, 0)), c: 'text-indigo-900' },
                         { l: 'Cargas CR · CNC', v: `${grupos.reduce((s, g) => s + g.cargas, 0)} · ${grupos.reduce((s, g) => s + g.subCNC, 0)}`, c: 'text-indigo-900' },
                         { l: 'Bloques necesarios', v: String(grupos.reduce((s, g) => s + g.bloquesEnteros, 0)), c: 'text-violet-700' },
-                        { l: 'Combinación (kg)', v: formatNum(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kg), 0), 0), c: 'text-violet-700' },
+                        { l: 'Combinación (UN)', v: formatNum(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.subB), 0), 0), c: 'text-violet-700' },
                       ].map(k => (
                         <div key={k.l} className="rounded-xl bg-slate-50 px-3 py-2">
                           <div className="text-[10px] uppercase font-black text-slate-600">{k.l}</div>
@@ -7244,7 +7241,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Ocupación</th>
                           <th className={`${th} bg-emerald-50/50 text-slate-700`}>Corte láminas (h)</th><th className={`${th} bg-amber-50 text-amber-800`}>+ Cúpula (h)</th><th className={`${th} bg-emerald-50/50 text-slate-700`}>+ Carga / desc. (h)</th>
                           <th className={`${th} bg-emerald-100`}>= T. corte total (h)</th>
-                          <th className={`${th} bg-slate-100`}>Longitud (m)</th><th className={`${th} bg-violet-50`}>N° bloques / kg</th>
+                          <th className={`${th} bg-slate-100`}>Longitud (m)</th><th className={`${th} bg-violet-50`}>N° bloques / UN</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -7258,11 +7255,11 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                               <td className={td}>{g.cargas}</td><td className={td}>{g.subCNC}</td>
                               <td className={`${td} ${g.ocupacion > 0 && g.ocupacion < 0.6 ? 'text-orange-600' : ''}`}>{g.cargas > 0 ? `${(g.ocupacion * 100).toFixed(0)}%` : '—'}</td>
                               <td className={td}>{g.tLaminasH.toFixed(2)}</td><td className={`${td} text-amber-800`}>{g.tCupulaH.toFixed(2)}</td><td className={td}>{g.tCargaDescargaH.toFixed(2)}</td>
-                              <td className={`${td} text-emerald-800`}>{g.tTotalH.toFixed(1)}</td><td className={td}>{g.metros.toFixed(0)}</td>
+                              <td className={`${td} text-emerald-800`}>{g.tTotalH.toFixed(1)}</td><td className={td}>{g.metros.toFixed(1)}</td>
                               <td className={`${td} text-violet-800 font-black`}>
                                 {g.esTecnica
                                   ? <>{g.bloques.toFixed(1)} <span className="text-[9px] font-bold opacity-80">({g.bloquesEnteros} ent.)</span></>
-                                  : <>{formatNum(g.kg, 0)} kg</>}
+                                  : <>{g.subB} UN</>}
                               </td>
                             </>
                           );
@@ -7289,8 +7286,8 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                         <td className={`${td} text-amber-800`} title={`${f.ciclosCup} ciclo(s) de cúpula por carga × ${f.cargas} carga(s) = ${f.cupulaCm.toFixed(1)} cm despejados por carga`}>{f.sinTiempo ? '—' : f.tCupulaH.toFixed(2)}</td>
                                         <td className={`${td} text-slate-700`}>{f.tCargaDescargaH.toFixed(2)}</td>
                                         <td className={`${td} bg-emerald-50 font-black`} title={f.sinTiempo ? 'Sin T. Indiv (KPI) para este material' : undefined}>{f.sinTiempo ? '—' : f.tTotalH.toFixed(2)}</td>
-                                        <td className={td}>{f.longitudM.toFixed(0)}</td>
-                                        <td className={`${td} text-slate-700`}>{g.esTecnica ? '' : `${formatNum(f.kg, 0)} kg`}</td>
+                                        <td className={td}>{f.longitudM.toFixed(1)}</td>
+                                        <td className={`${td} text-slate-700`}>{g.esTecnica ? '' : `${f.subB} UN`}</td>
                                       </tr>
                                     ))}
                             </React.Fragment>
@@ -7304,10 +7301,10 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           <td className={td}>{grupos.reduce((s, g) => s + g.tLaminasH, 0).toFixed(2)}</td>
                           <td className={`${td} text-amber-800`}>{grupos.reduce((s, g) => s + g.tCupulaH, 0).toFixed(2)}</td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.tCargaDescargaH, 0).toFixed(2)}</td>
-                          <td className={td}>{grupos.reduce((s, g) => s + g.tTotalH, 0).toFixed(1)}</td><td className={td}>{grupos.reduce((s, g) => s + g.metros, 0).toFixed(0)}</td>
+                          <td className={td}>{grupos.reduce((s, g) => s + g.tTotalH, 0).toFixed(1)}</td><td className={td}>{grupos.reduce((s, g) => s + g.metros, 0).toFixed(1)}</td>
                           <td className={td}>
                             {grupos.reduce((s, g) => s + g.bloquesEnteros, 0)} ent.
-                            <div className="text-[10px]">{formatNum(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kg), 0), 0)} kg</div>
+                            <div className="text-[10px]">{grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.subB), 0)} UN</div>
                           </td>
                         </tr>
                       </tbody>
