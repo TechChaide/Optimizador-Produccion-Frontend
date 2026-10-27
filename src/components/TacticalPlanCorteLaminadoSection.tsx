@@ -1709,7 +1709,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   }, [initData, fetchNecesidadesPlanta, unifiedNeeds, planManualOverrides, corridasManualOverrides, approvedDeficitRows, panelProgreso]);
 
   // Botón "Sincronizar y Generar Necesidades": antes de tocar SAP, el panel pregunta qué fecha se
-  // evalúa (por defecto la del filtro actual, o hoy) y muestra qué P2 le corresponde — pedido del
+  // evalúa (por defecto SIEMPRE hoy — 27-10: tomaba la del filtro, que tras auto-cargar el último
+  // reporte era la fecha de ese plan; otra fecha se elige a mano) y muestra qué P2 le corresponde — pedido del
   // usuario: al sincronizar no quedaba claro sobre qué día se estaba capturando la data. El
   // calendario se carga primero para que el P2 mostrado ya salte feriados.
   const handleSincronizarYGenerar = useCallback(async () => {
@@ -1721,11 +1722,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       addNotification('error', `No se pudo cargar el calendario laboral: ${(e as Error).message}`);
       return;
     }
-    const filtro = Array.from(selectedDates).sort();
     const fmt = (f: string) => format(parseISO(f), 'EEE dd/MM/yyyy', { locale: es });
     panelProgreso.pedirFecha({
       titulo: 'Corte Laminado — Sincronizar y generar',
-      fechaInicial: filtro.length === 1 ? filtro[0] : format(new Date(), 'yyyy-MM-dd'),
+      fechaInicial: format(new Date(), 'yyyy-MM-dd'),
       sinFecha: 'Plan Maestro (todas las fechas)',
       detalle: fecha => {
         const p2 = format(nextBusinessDayCal(fecha ? parseISO(fecha) : new Date(), noLaborables, laborablesHorizonte(laborablesExtra)), 'yyyy-MM-dd');
@@ -1746,7 +1746,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         : null,
       onConfirmar: fecha => { void ejecutarSincronizacion(fecha, noLaborables, laborablesExtra); },
     });
-  }, [selectedDates, panelProgreso, ejecutarSincronizacion, addNotification, selectedDiaShift, selectedNocheShift, diaShiftOptions, nocheShiftOptions]);
+  }, [panelProgreso, ejecutarSincronizacion, addNotification, selectedDiaShift, selectedNocheShift, diaShiftOptions, nocheShiftOptions]);
 
   // Rehidratación: si ya se había sincronizado en esta sesión, se recupera lo trabajado en vez de
   // dejar el módulo vacío al volver de otro módulo (ver @/lib/cache-modulos). Incluye el resumen ya
