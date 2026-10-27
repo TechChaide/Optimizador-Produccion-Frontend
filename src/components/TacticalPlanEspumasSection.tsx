@@ -2678,113 +2678,33 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const d = t8FechaCorte || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
     return { d, venta: format(siguienteDiaHabil(new Date(`${d}T12:00:00`)), 'yyyy-MM-dd') };
   }, [t8FechaCorte, siguienteDiaHabil]);
+  // Pendiente anterior (usuario 2026-10-27): FERT de los DIAS_PENDIENTE_MAX días hábiles previos a su
+  // fecha objetivo (D, o D+1 para Venta) que siguen con cantidad pendiente — misma ventana que la
+  // Capacidad Operativa. Solo INFORMATIVO: ya se pidió en el T8 de su día, así que no suma a los
+  // bloques necesarios (no duplica la reposición); el operador sí lo ve para sacar esos bloques.
   const fertT8PorCentro = useMemo(() => {
+    const diasPrevios = (objetivo: string) => Array.from({ length: DIAS_PENDIENTE_MAX }, (_, i) => format(restarDiasHabiles(parseFechaLocal(objetivo), i + 1), 'yyyy-MM-dd'));
+    const previosD = diasPrevios(t8Fechas.d);
+    const previosVenta = diasPrevios(t8Fechas.venta);
     // Mismos descartes que getFilteredData (responsables de corte, prensado, forro, aprovechamiento,
     // excepción 015), aplicados sobre fertAuditAll para que funcione también con el plan restaurado.
     const filtrar = (rows: UnifiedRow[], centro: string) => {
       const allowed = allowedRespPorCentro(centro);
-      return rows.filter(r => {
-        if (!allowed.includes(r.responsable)) return false;
-        if (/PRENSAD|APROVECHAMIENTO/i.test(r.descripcion) || ES_FORRO(r.descripcion)) return false;
-        if (respExcepcionExcluye(centro, r.responsable, r.material)) return false;
-        return r.fechaFin === (/venta\s*externa/i.test(r.origenArea || '') ? t8Fechas.venta : t8Fechas.d);
+      const dia: UnifiedRow[] = [];
+      const pendiente: UnifiedRow[] = [];
+      rows.forEach(r => {
+        if (!allowed.includes(r.responsable)) return;
+        if (/PRENSAD|APROVECHAMIENTO/i.test(r.descripcion) || ES_FORRO(r.descripcion)) return;
+        if (respExcepcionExcluye(centro, r.responsable, r.material)) return;
+        const esVenta = /venta\s*externa/i.test(r.origenArea || '');
+        if (r.fechaFin === (esVenta ? t8Fechas.venta : t8Fechas.d)) dia.push(r);
+        else if ((esVenta ? previosVenta : previosD).includes(r.fechaFin)) pendiente.push(r);
       });
+      return { dia, pendiente };
     };
     return { '1000': filtrar(fertAuditAllUIO, '1000'), '2000': filtrar(fertAuditAllGYE, '2000') };
-  }, [fertAuditAllUIO, fertAuditAllGYE, allowedRespPorCentro, t8Fechas]);
+  }, [fertAuditAllUIO, fertAuditAllGYE, allowedRespPorCentro, t8Fechas, restarDiasHabiles]);
 
-  const subBloquesT8PorCentro = useMemo(() => {
-    const calcular = (rows: UnifiedRow[], centro: string) => {
-      const porMaterial = new Map<string, UnifiedRow & { cantTotal: number }>();
-      rows.forEach(r => {
-        if (r.isAlterna || r.esp <= 0 || r.cantUnidadReal <= 0) return;
-        const prev = porMaterial.get(r.material);
-        if (prev) prev.cantTotal += r.cantUnidadReal;
-        else porMaterial.set(r.material, { ...r, cantTotal: r.cantUnidadReal });
-      });
-      const filas = Array.from(porMaterial.values()).map(r => {
-        const aperturaCat = aperturaCategoriaPorCentro.porCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.cualquierCentro.get(r.material) || '';
-        const categoria = aperturaCategoriaPorCentro.categoriaPorCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.categoriaCualquierCentro.get(r.material) || '';
-        // Densidad: de la categoría ("CM-LAM-D30NR-194.5" → 30) y, sin ella, de la descripción. 27-10:
-        // láminas cuya descripción no trae "D30" (ej. "LAMINA BLANCO FIRME…") salían como "D—", se
-        // partían del mismo bloque madre y se calculaban con altura útil 103 en vez de 85.
-        const densCat = categoria.match(/(?:^|-)D(\d+(?:\.\d+)?)/i)?.[1];
-        const dens = densCat || r.dens;
-        const densVal = safeNum(dens);
-        // Altura útil 85 cm para D ≥ 28 confirmada SOLO para aperturas técnicas (194.5/206/219/228);
-        // visco / HS / BIO (135, 160, 200…) tienen otra altura que el usuario va a confirmar — hasta
-        // entonces siguen con la misma regla.
-        const unidadesPorSub = Math.max(1, Math.floor((densVal >= 28 ? 85 : ALTURA_UTIL_CM) / r.esp));
-        const subB = Math.ceil(r.cantTotal / unidadesPorSub - 1e-9);
-        const capGiro = capacidadGiroCarrusel(r.ancho);
-        const completas = capGiro > 0 ? Math.floor(subB / capGiro) : 0;
-        const sobrante = capGiro > 0 ? subB % capGiro : subB;
-        const subCNC = completas > 0 && sobrante > 0 && sobrante <= SUBBLOQUES_SOBRANTE_MAX_CNC ? sobrante : 0;
-        const cargas = completas + (sobrante > 0 && subCNC === 0 ? 1 : 0);
-        const subCarrusel = subB - subCNC;
-        const ciclosCup = ciclosCupula(r.esp);
-        const tCupulaH = (r.tIndiv * ciclosCup * cargas) / 60;
-        const tLaminasH = (r.tIndiv * r.cantTotal) / 60;
-        // Categoría sin el segmento de apertura: "CM-LAM-D12SL-194.5" → "CM-LAM-D12SL".
-        const categoriaBase = categoria.split('-').filter(s => !/^\d{3}(\.\d+)?$/.test(s.trim())).join('-');
-        const tipoDesc = tipoEspumaDesc(r.descripcion);
-        const tCorteH = tLaminasH + tCupulaH;
-        const tCargaDescargaH = (subCarrusel * ((TIEMPO_CARGA_CICLO_SEG[centro] || 0) + (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0))) / 3600;
-        return {
-          material: r.material, descripcion: r.descripcion, dens, densVal,
-          apertura: aperturaCat || (r.apertura !== '—' ? r.apertura : 'Sin apertura'), tLaminasH,
-          categoria, tipo: categoriaBase || tipoDesc || 'Sin tipo', tipoDesc, tipoDeCategoria: !!categoriaBase,
-          tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, alturaTotal: r.esp * r.cantTotal,
-          unidadesPorSub, subB, capGiro, cargas, subCNC, ciclosCup, cupulaCm: alturaCupulaCm(r.esp), tCupulaH,
-          ocupacion: cargas > 0 && capGiro > 0 ? subCarrusel / (cargas * capGiro) : 0,
-          tCorteH, tCargaDescargaH, tTotalH: tCorteH + tCargaDescargaH,
-          longitudM: (subB * r.ancho) / 100,
-          sinTiempo: r.tIndiv <= 0,
-        };
-      });
-      type FilaT8 = typeof filas[number];
-      const totales = (items: { cant: number; subB: number; cargas: number; subCNC: number; tLaminasH: number; tCupulaH: number; tCargaDescargaH: number; tTotalH: number; metros: number; bloquesEnteros: number }[]) => ({
-        cant: items.reduce((s, f) => s + f.cant, 0),
-        tLaminasH: items.reduce((s, f) => s + f.tLaminasH, 0),
-        tCargaDescargaH: items.reduce((s, f) => s + f.tCargaDescargaH, 0),
-        subB: items.reduce((s, f) => s + f.subB, 0),
-        cargas: items.reduce((s, f) => s + f.cargas, 0),
-        subCNC: items.reduce((s, f) => s + f.subCNC, 0),
-        tCupulaH: items.reduce((s, f) => s + f.tCupulaH, 0),
-        tTotalH: items.reduce((s, f) => s + f.tTotalH, 0),
-        metros: items.reduce((s, f) => s + f.metros, 0),
-        bloquesEnteros: items.reduce((s, f) => s + f.bloquesEnteros, 0),
-      });
-      const agrupar = (lista: FilaT8[], clave: (f: FilaT8) => string) => {
-        const m = new Map<string, FilaT8[]>();
-        lista.forEach(f => m.set(clave(f), [...(m.get(clave(f)) || []), f]));
-        return m;
-      };
-      // Aperturas técnicas primero en su orden fijo; el resto (visco 135/160/200…) numérico después.
-      const ordenApertura = (a: string) => { const i = ['194.5', '206', '219', '228'].indexOf(a); return i === -1 ? 100 + (parseFloat(a) || 900) : i; };
-      // Una fila de primer nivel por bloque madre = densidad + tipo de espuma + apertura (usuario
-      // 2026-10-27: "D30BLFR · 206", "D30NRCR · 206", "D30NRRR · 206", "D40VISC · 135"…): misma densidad
-      // y apertura con distinto material son bloques distintos. Debajo, directamente los materiales.
-      return Array.from(agrupar(filas, f => `${f.dens}|${f.tipo}|${f.apertura}`).values())
-        .sort((a, b) => safeNum(a[0].dens) - safeNum(b[0].dens) || ordenApertura(a[0].apertura) - ordenApertura(b[0].apertura) || a[0].tipo.localeCompare(b[0].tipo))
-        .map(items => {
-          const { dens, tipo, apertura, tipoDeCategoria } = items[0];
-          const metros = items.reduce((s, f) => s + f.longitudM, 0);
-          const bloques = metros / LARGO_BLOQUE_M;
-          const filasBloque = items.map(f => ({ ...f, metros: f.longitudM, bloquesEnteros: 0 }));
-          // Etiquetas de descripción del grupo (ej. "NG FRR"), para leer la categoría.
-          const descs = Array.from(new Set(items.map(f => f.tipoDesc).filter(Boolean)));
-          return {
-            clave: `${dens}|${tipo}|${apertura}`, dens, apertura, descs, deCategoria: tipoDeCategoria, bloques,
-            // "CM-LAM-D30BLFR" → "D30BLFR"; sin categoría el tipo viene de la descripción ("NG FRR") → "D15 NG FRR".
-            etiqueta: tipoDeCategoria ? tipo.replace(/^CM-LAM-/, '') : `D${dens} ${tipo}`,
-            items: items.sort((a, b) => a.tamano.localeCompare(b.tamano) || a.esp - b.esp),
-            ...totales(filasBloque), bloquesEnteros: Math.ceil(bloques - 1e-9),
-          };
-        });
-    };
-    return { '1000': calcular(fertT8PorCentro['1000'], '1000'), '2000': calcular(fertT8PorCentro['2000'], '2000') };
-  }, [fertT8PorCentro, aperturaCategoriaPorCentro]);
   // Grupos plegados del tab T8 (claves centro|densidad y centro|densidad|apertura); por defecto todo abierto.
   const [t8Plegados, setT8Plegados] = useState<Set<string>>(new Set());  const toggleT8 = (clave: string) => setT8Plegados(prev => { const n = new Set(prev); if (n.has(clave)) n.delete(clave); else n.add(clave); return n; });
 
@@ -3136,6 +3056,119 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // plan: FERT del día o, si aún no hay, la necesidad de los planes de esa fecha (resolverFecha).
     return { filas: ajuste.filas, pendientes: ajuste.filas, resumen, porMaquina: ajuste.porMaquina };
   }, [restarDiasHabiles, ajustePendienteTurnoAnterior]);
+
+  // Tab T8 — pendiente anterior conciliado contra el turno en curso, con la misma regla que la Capacidad
+  // Operativa (armarPendienteAnterior): solo pasa lo que no alcanza el turno desde la sincronización.
+  const fertT8PendienteTurno = useMemo(() => {
+    const diaAnterior = format(restarDiasHabiles(parseFechaLocal(t8Fechas.d), 1), 'yyyy-MM-dd');
+    const ajustar = (planta: 'UIO' | 'GYE', rows: UnifiedRow[]) =>
+      ajustePendienteTurnoAnterior(planta, diaAnterior, rows.map(row => ({ row }))).filas.map(x => x.row).filter(r => r.cantUnidadReal > 1e-6);
+    return { '1000': ajustar('UIO', fertT8PorCentro['1000'].pendiente), '2000': ajustar('GYE', fertT8PorCentro['2000'].pendiente) };
+  }, [fertT8PorCentro, t8Fechas, restarDiasHabiles, ajustePendienteTurnoAnterior]);
+
+  const subBloquesT8PorCentro = useMemo(() => {
+    const calcular = (rows: UnifiedRow[], pendiente: UnifiedRow[], centro: string) => {
+      // Día y pendiente por material; un material solo pendiente entra con cantidad del día 0.
+      const porMaterial = new Map<string, UnifiedRow & { cantTotal: number; cantPend: number }>();
+      const sumar = (r: UnifiedRow, campo: 'cantTotal' | 'cantPend') => {
+        if (r.isAlterna || r.esp <= 0 || r.cantUnidadReal <= 0) return;
+        const prev = porMaterial.get(r.material) ?? { ...r, cantTotal: 0, cantPend: 0 };
+        prev[campo] += r.cantUnidadReal;
+        porMaterial.set(r.material, prev);
+      };
+      rows.forEach(r => sumar(r, 'cantTotal'));
+      pendiente.forEach(r => sumar(r, 'cantPend'));
+      const filas = Array.from(porMaterial.values()).map(r => {
+        const aperturaCat = aperturaCategoriaPorCentro.porCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.cualquierCentro.get(r.material) || '';
+        const categoria = aperturaCategoriaPorCentro.categoriaPorCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.categoriaCualquierCentro.get(r.material) || '';
+        // Densidad: de la categoría ("CM-LAM-D30NR-194.5" → 30) y, sin ella, de la descripción. 27-10:
+        // láminas cuya descripción no trae "D30" (ej. "LAMINA BLANCO FIRME…") salían como "D—", se
+        // partían del mismo bloque madre y se calculaban con altura útil 103 en vez de 85.
+        const densCat = categoria.match(/(?:^|-)D(\d+(?:\.\d+)?)/i)?.[1];
+        const dens = densCat || r.dens;
+        const densVal = safeNum(dens);
+        // Altura útil 85 cm para D ≥ 28 confirmada SOLO para aperturas técnicas (194.5/206/219/228);
+        // visco / HS / BIO (135, 160, 200…) tienen otra altura que el usuario va a confirmar — hasta
+        // entonces siguen con la misma regla.
+        const unidadesPorSub = Math.max(1, Math.floor((densVal >= 28 ? 85 : ALTURA_UTIL_CM) / r.esp));
+        const subB = Math.ceil(r.cantTotal / unidadesPorSub - 1e-9);
+        const capGiro = capacidadGiroCarrusel(r.ancho);
+        const completas = capGiro > 0 ? Math.floor(subB / capGiro) : 0;
+        const sobrante = capGiro > 0 ? subB % capGiro : subB;
+        const subCNC = completas > 0 && sobrante > 0 && sobrante <= SUBBLOQUES_SOBRANTE_MAX_CNC ? sobrante : 0;
+        const cargas = completas + (sobrante > 0 && subCNC === 0 ? 1 : 0);
+        const subCarrusel = subB - subCNC;
+        const ciclosCup = ciclosCupula(r.esp);
+        const tCupulaH = (r.tIndiv * ciclosCup * cargas) / 60;
+        const tLaminasH = (r.tIndiv * r.cantTotal) / 60;
+        // Categoría sin el segmento de apertura: "CM-LAM-D12SL-194.5" → "CM-LAM-D12SL".
+        const categoriaBase = categoria.split('-').filter(s => !/^\d{3}(\.\d+)?$/.test(s.trim())).join('-');
+        const tipoDesc = tipoEspumaDesc(r.descripcion);
+        const tCorteH = tLaminasH + tCupulaH;
+        const tCargaDescargaH = (subCarrusel * ((TIEMPO_CARGA_CICLO_SEG[centro] || 0) + (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0))) / 3600;
+        return {
+          material: r.material, descripcion: r.descripcion, dens, densVal,
+          apertura: aperturaCat || (r.apertura !== '—' ? r.apertura : 'Sin apertura'), tLaminasH,
+          categoria, tipo: categoriaBase || tipoDesc || 'Sin tipo', tipoDesc, tipoDeCategoria: !!categoriaBase,
+          tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, alturaTotal: r.esp * r.cantTotal,
+          unidadesPorSub, subB, capGiro, cargas, subCNC, ciclosCup, cupulaCm: alturaCupulaCm(r.esp), tCupulaH,
+          ocupacion: cargas > 0 && capGiro > 0 ? subCarrusel / (cargas * capGiro) : 0,
+          tCorteH, tCargaDescargaH, tTotalH: tCorteH + tCargaDescargaH,
+          longitudM: (subB * r.ancho) / 100,
+          sinTiempo: r.tIndiv <= 0,
+          cantPend: r.cantPend,
+          subBPend: Math.ceil(r.cantPend / unidadesPorSub - 1e-9),
+          longitudPendM: (Math.ceil(r.cantPend / unidadesPorSub - 1e-9) * r.ancho) / 100,
+        };
+      });
+      type FilaT8 = typeof filas[number];
+      const totales = (items: { cant: number; subB: number; cargas: number; subCNC: number; tLaminasH: number; tCupulaH: number; tCargaDescargaH: number; tTotalH: number; metros: number; bloquesEnteros: number }[]) => ({
+        cant: items.reduce((s, f) => s + f.cant, 0),
+        tLaminasH: items.reduce((s, f) => s + f.tLaminasH, 0),
+        tCargaDescargaH: items.reduce((s, f) => s + f.tCargaDescargaH, 0),
+        subB: items.reduce((s, f) => s + f.subB, 0),
+        cargas: items.reduce((s, f) => s + f.cargas, 0),
+        subCNC: items.reduce((s, f) => s + f.subCNC, 0),
+        tCupulaH: items.reduce((s, f) => s + f.tCupulaH, 0),
+        tTotalH: items.reduce((s, f) => s + f.tTotalH, 0),
+        metros: items.reduce((s, f) => s + f.metros, 0),
+        bloquesEnteros: items.reduce((s, f) => s + f.bloquesEnteros, 0),
+      });
+      const agrupar = (lista: FilaT8[], clave: (f: FilaT8) => string) => {
+        const m = new Map<string, FilaT8[]>();
+        lista.forEach(f => m.set(clave(f), [...(m.get(clave(f)) || []), f]));
+        return m;
+      };
+      // Aperturas técnicas primero en su orden fijo; el resto (visco 135/160/200…) numérico después.
+      const ordenApertura = (a: string) => { const i = ['194.5', '206', '219', '228'].indexOf(a); return i === -1 ? 100 + (parseFloat(a) || 900) : i; };
+      // Una fila de primer nivel por bloque madre = densidad + tipo de espuma + apertura (usuario
+      // 2026-10-27: "D30BLFR · 206", "D30NRCR · 206", "D30NRRR · 206", "D40VISC · 135"…): misma densidad
+      // y apertura con distinto material son bloques distintos. Debajo, directamente los materiales.
+      return Array.from(agrupar(filas, f => `${f.dens}|${f.tipo}|${f.apertura}`).values())
+        .sort((a, b) => safeNum(a[0].dens) - safeNum(b[0].dens) || ordenApertura(a[0].apertura) - ordenApertura(b[0].apertura) || a[0].tipo.localeCompare(b[0].tipo))
+        .map(items => {
+          const { dens, tipo, apertura, tipoDeCategoria } = items[0];
+          const metros = items.reduce((s, f) => s + f.longitudM, 0);
+          const bloques = metros / LARGO_BLOQUE_M;
+          const filasBloque = items.map(f => ({ ...f, metros: f.longitudM, bloquesEnteros: 0 }));
+          // Etiquetas de descripción del grupo (ej. "NG FRR"), para leer la categoría.
+          const descs = Array.from(new Set(items.map(f => f.tipoDesc).filter(Boolean)));
+          const bloquesPend = items.reduce((s, f) => s + f.longitudPendM, 0) / LARGO_BLOQUE_M;
+          return {
+            clave: `${dens}|${tipo}|${apertura}`, dens, apertura, descs, deCategoria: tipoDeCategoria, bloques,
+            subBPend: items.reduce((s, f) => s + f.subBPend, 0), bloquesPend, bloquesPendEnteros: Math.ceil(bloquesPend - 1e-9),
+            // "CM-LAM-D30BLFR" → "D30BLFR"; sin categoría el tipo viene de la descripción ("NG FRR") → "D15 NG FRR".
+            etiqueta: tipoDeCategoria ? tipo.replace(/^CM-LAM-/, '') : `D${dens} ${tipo}`,
+            items: items.sort((a, b) => a.tamano.localeCompare(b.tamano) || a.esp - b.esp),
+            ...totales(filasBloque), bloquesEnteros: Math.ceil(bloques - 1e-9),
+          };
+        });
+    };
+    return {
+      '1000': calcular(fertT8PorCentro['1000'].dia, fertT8PendienteTurno['1000'], '1000'),
+      '2000': calcular(fertT8PorCentro['2000'].dia, fertT8PendienteTurno['2000'], '2000'),
+    };
+  }, [fertT8PorCentro, fertT8PendienteTurno, aperturaCategoriaPorCentro]);
 
   // Auditoría (solo lectura, pedido del usuario 2026-10-07): cada FERT con cantidad pendiente hasta la
   // fecha evaluada y CUÁNTO de ella entra a la ocupación, con el motivo — para conciliar contra SAP
@@ -7182,6 +7215,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               <p className="w-full text-[11px] text-slate-700">
                 Bloques a consumir el día de corte con las <b>órdenes FERT en firme</b> (solo carrusel, sin provisionales): Colchones/Muebles con fecha fin = día de corte y Venta Externa con fecha fin = siguiente día hábil (su PT). Cúpula por carga = ciclos al espesor de la lámina hasta cubrir ~{CUPULA_CM} cm sin pasar de {CUPULA_MAX_CM} cm
                 (0.8 → 5 ciclos · 1 → 4 · 2 → 2 · ≥ 3 → 1). T. corte = láminas + cúpula (T. Indiv KPI) + carga/descarga. Ocupación &lt; 60% = carga con poco material para los ciclos que paga.
+                Pendiente anterior = FERT de los {DIAS_PENDIENTE_MAX} días hábiles previos que no alcanza el turno en curso (misma regla que Capacidad Operativa): se muestra para sacar esos bloques, pero no suma a los bloques necesarios porque ya se pidieron en el plan de su día.
               </p>
             </div>
             {(['1000', '2000'] as const).map(centro => {
@@ -7192,15 +7226,16 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 <div key={centro} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-x-auto">
                   <div className="px-4 py-3 font-black text-indigo-900 uppercase text-sm border-b">Sub-bloques — {centro === '1000' ? 'Quito' : 'Guayaquil'}</div>
                   {grupos.length > 0 && (
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3 p-4 border-b border-gray-100">
+                    <div className="grid grid-cols-2 md:grid-cols-6 gap-3 p-4 border-b border-gray-100">
                       {[
                         { l: 'Horas carrusel', v: grupos.reduce((s, g) => s + g.tTotalH, 0).toFixed(1), c: 'text-emerald-700' },
                         { l: 'de ellas cúpula', v: grupos.reduce((s, g) => s + g.tCupulaH, 0).toFixed(1) + ' h', c: 'text-amber-800' },
                         { l: 'Sub-bloques', v: String(grupos.reduce((s, g) => s + g.subB, 0)), c: 'text-indigo-900' },
                         { l: 'Cargas CR · CNC', v: `${grupos.reduce((s, g) => s + g.cargas, 0)} · ${grupos.reduce((s, g) => s + g.subCNC, 0)}`, c: 'text-indigo-900' },
                         { l: 'Bloques necesarios', v: String(grupos.reduce((s, g) => s + g.bloquesEnteros, 0)), c: 'text-violet-700' },
+                        { l: '+ Pendiente anterior', v: `${grupos.reduce((s, g) => s + g.bloquesPendEnteros, 0)} bl.`, c: 'text-slate-500', t: 'Bloques para cortar el pendiente FERT de días anteriores que no alcanza el turno en curso. Ya se pidieron en el plan de su día: NO suman a Bloques necesarios.' },
                       ].map(k => (
-                        <div key={k.l} className="rounded-xl bg-slate-50 px-3 py-2">
+                        <div key={k.l} className="rounded-xl bg-slate-50 px-3 py-2" title={'t' in k ? k.t : undefined}>
                           <div className="text-[10px] uppercase font-black text-slate-600">{k.l}</div>
                           <div className={`text-lg font-black ${k.c}`}>{k.v}</div>
                         </div>
@@ -7229,6 +7264,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           <th className={`${th} bg-emerald-50/50 text-slate-700`}>Corte láminas (h)</th><th className={`${th} bg-amber-50 text-amber-800`}>+ Cúpula (h)</th><th className={`${th} bg-emerald-50/50 text-slate-700`}>+ Carga / desc. (h)</th>
                           <th className={`${th} bg-emerald-100`}>= T. corte total (h)</th>
                           <th className={`${th} bg-slate-100`}>Longitud (m)</th><th className={`${th} bg-violet-50`}>N° bloques</th>
+                          <th className={`${th} bg-slate-50 text-slate-500`} title="Pendiente FERT de días anteriores que no alcanza el turno en curso. Informativo: no suma a N° bloques.">Pendiente anterior</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -7255,6 +7291,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                     {g.apertura === 'Sin apertura' ? <span className="text-orange-600">Sin apertura</span> : g.apertura}</span>
                                 </td>
                                 {filaTotales(g, g.bloques)}
+                                <td className={`${td} text-slate-500 font-bold`}>{g.subBPend > 0 ? <>{g.bloquesPend.toFixed(1)} <span className="text-[9px] opacity-80">({g.bloquesPendEnteros} ent.)</span></> : <span className="text-slate-300">·</span>}</td>
                               </tr>
                                     {densAbierta && g.items.map(f => (
                                       <tr key={f.material} className="border-t border-slate-100">
@@ -7263,12 +7300,13 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                         <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}</td>
                                         <td className={`${td} text-slate-700`}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td>
                                         <td className={`${td} text-slate-700`}>{f.capGiro}</td><td className={`${td} font-black`}>{f.cargas}</td><td className={td}>{f.subCNC}</td>
-                                        <td className={`${td} ${f.ocupacion < 0.6 ? 'text-orange-600 font-black' : 'text-slate-700'}`}>{(f.ocupacion * 100).toFixed(0)}%</td>
+                                        <td className={`${td} ${f.ocupacion < 0.6 ? 'text-orange-600 font-black' : 'text-slate-700'}`}>{f.cant > 0 ? `${(f.ocupacion * 100).toFixed(0)}%` : '—'}</td>
                                         <td className={`${td} text-slate-700`}>{f.sinTiempo ? '—' : f.tLaminasH.toFixed(2)}</td>
                                         <td className={`${td} text-amber-800`} title={`${f.ciclosCup} ciclo(s) de cúpula por carga × ${f.cargas} carga(s) = ${f.cupulaCm.toFixed(1)} cm despejados por carga`}>{f.sinTiempo ? '—' : f.tCupulaH.toFixed(2)}</td>
                                         <td className={`${td} text-slate-700`}>{f.tCargaDescargaH.toFixed(2)}</td>
                                         <td className={`${td} bg-emerald-50 font-black`} title={f.sinTiempo ? 'Sin T. Indiv (KPI) para este material' : undefined}>{f.sinTiempo ? '—' : f.tTotalH.toFixed(2)}</td>
                                         <td className={td}>{f.longitudM.toFixed(0)}</td><td className={td}></td>
+                                        <td className={`${td} text-slate-500`}>{f.subBPend > 0 ? `${formatNum(f.cantPend, 0)} UN · ${f.subBPend} sub` : ''}</td>
                                       </tr>
                                     ))}
                             </React.Fragment>
@@ -7284,6 +7322,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           <td className={td}>{grupos.reduce((s, g) => s + g.tCargaDescargaH, 0).toFixed(2)}</td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.tTotalH, 0).toFixed(1)}</td><td className={td}>{grupos.reduce((s, g) => s + g.metros, 0).toFixed(0)}</td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.bloquesEnteros, 0)} ent.</td>
+                          <td className={`${td} text-slate-500`}>{grupos.reduce((s, g) => s + g.bloquesPendEnteros, 0)} ent.</td>
                         </tr>
                       </tbody>
                     </table>
