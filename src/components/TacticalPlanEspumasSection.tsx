@@ -1740,6 +1740,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const code = match ? match[0].slice(-8) : matStr.slice(-8);
     const desc = nameStr || matStr.replace(/^\d+\s*/, '') || '—';
     const dims = parseDimensions(desc);
+    // Descripción sin densidad (ej. "LAMINA BLANCO FIRME 199X199X2.5"): se toma de la CATEGORÍA de la
+    // orden ("CM-LAM-D30BLFR-206" → 30). 27-10: quedaban "D—" y con altura útil 103 en vez de 85.
+    if (!(safeNum(dims.dens) > 0)) {
+      const densCat = getProp(item, ['CATEGORIA', 'Categoria', 'CATEGORIA_DESC']).match(/(?:^|-)D(\d+(?:\.\d+)?)/i)?.[1];
+      if (densCat) dims.dens = densCat;
+    }
 
     const geometriaCompleta = safeNum(dims.dens) > 0 && dims.ancho > 0 && dims.largo > 0 && dims.esp > 0;
     if (!geometriaCompleta) {
@@ -2697,7 +2703,17 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         else porMaterial.set(r.material, { ...r, cantTotal: r.cantUnidadReal });
       });
       const filas = Array.from(porMaterial.values()).map(r => {
-        const densVal = safeNum(r.dens);
+        const aperturaCat = aperturaCategoriaPorCentro.porCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.cualquierCentro.get(r.material) || '';
+        const categoria = aperturaCategoriaPorCentro.categoriaPorCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.categoriaCualquierCentro.get(r.material) || '';
+        // Densidad: de la categoría ("CM-LAM-D30NR-194.5" → 30) y, sin ella, de la descripción. 27-10:
+        // láminas cuya descripción no trae "D30" (ej. "LAMINA BLANCO FIRME…") salían como "D—", se
+        // partían del mismo bloque madre y se calculaban con altura útil 103 en vez de 85.
+        const densCat = categoria.match(/(?:^|-)D(\d+(?:\.\d+)?)/i)?.[1];
+        const dens = densCat || r.dens;
+        const densVal = safeNum(dens);
+        // Altura útil 85 cm para D ≥ 28 confirmada SOLO para aperturas técnicas (194.5/206/219/228);
+        // visco / HS / BIO (135, 160, 200…) tienen otra altura que el usuario va a confirmar — hasta
+        // entonces siguen con la misma regla.
         const unidadesPorSub = Math.max(1, Math.floor((densVal >= 28 ? 85 : ALTURA_UTIL_CM) / r.esp));
         const subB = Math.ceil(r.cantTotal / unidadesPorSub - 1e-9);
         const capGiro = capacidadGiroCarrusel(r.ancho);
@@ -2709,15 +2725,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const ciclosCup = ciclosCupula(r.esp);
         const tCupulaH = (r.tIndiv * ciclosCup * cargas) / 60;
         const tLaminasH = (r.tIndiv * r.cantTotal) / 60;
-        const aperturaCat = aperturaCategoriaPorCentro.porCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.cualquierCentro.get(r.material) || '';
-        const categoria = aperturaCategoriaPorCentro.categoriaPorCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.categoriaCualquierCentro.get(r.material) || '';
         // Categoría sin el segmento de apertura: "CM-LAM-D12SL-194.5" → "CM-LAM-D12SL".
         const categoriaBase = categoria.split('-').filter(s => !/^\d{3}(\.\d+)?$/.test(s.trim())).join('-');
         const tipoDesc = tipoEspumaDesc(r.descripcion);
         const tCorteH = tLaminasH + tCupulaH;
         const tCargaDescargaH = (subCarrusel * ((TIEMPO_CARGA_CICLO_SEG[centro] || 0) + (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0))) / 3600;
         return {
-          material: r.material, descripcion: r.descripcion, dens: r.dens, densVal,
+          material: r.material, descripcion: r.descripcion, dens, densVal,
           apertura: aperturaCat || (r.apertura !== '—' ? r.apertura : 'Sin apertura'), tLaminasH,
           categoria, tipo: categoriaBase || tipoDesc || 'Sin tipo', tipoDesc, tipoDeCategoria: !!categoriaBase,
           tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, alturaTotal: r.esp * r.cantTotal,
