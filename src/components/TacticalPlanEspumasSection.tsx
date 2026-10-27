@@ -801,6 +801,13 @@ const capacidadGiroCarrusel = (ancho: number): number => {
 // Tab "SUB-BLOQUES-T8" (usuario 2026-10-17): sobrante de la última carga que NO justifica otro giro
 // del carrusel y se manda a la CNC (Excel del usuario: 36 sub-bloques = 5 cargas + 1 a CNC). Ajustable.
 const SUBBLOQUES_SOBRANTE_MAX_CNC = 1;
+// Tipo de espuma desde la descripción (respaldo cuando la FERT no trae categoría): las palabras que no
+// son LAMINA/ESPUMA, la densidad ni la medida. "LAMINA ESPUMA D15 NG FRR 100X200X1.5" → "NG FRR",
+// "LAMINA D15 AM AF 103X188X3.2" → "AM AF", "LAMINA SPRING D15 101X023X1" → "SPRING".
+const tipoEspumaDesc = (descripcion: string): string =>
+  String(descripcion || '').toUpperCase().split(/\s+/)
+    .filter(w => w && !/^(LAMINA|LÁMINA|ESPUMA)$/.test(w) && !/^D\d+(\.\d+)?$/.test(w) && !/\d+(\.\d+)?X\d/.test(w))
+    .join(' ');
 // Largo del bloque madre (m) para convertir metros de sub-bloque en bloques necesarios — mismo valor
 // que Formulación (BLOCK_LENGTH_METERS).
 const LARGO_BLOQUE_M = 20;
@@ -2621,9 +2628,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   //    no de cualquier centro. Sin categoría → "Sin apertura" (NO se aproxima por medida: el usuario
   //    confirmó que la medida no determina la apertura).
   //  - Tiempo total = láminas (T. Indiv × UN) + cúpula (T. Indiv × ciclos × cargas) + carga/descarga.
+  //  - Tipo de espuma (usuario 2026-10-27): dentro de una densidad hay formulaciones distintas (D15 NG FRR,
+  //    D15 AM AF, D15 SPRING…) que son bloques madre distintos. Se toma de la misma CATEGORÍA sin el
+  //    segmento de apertura ("CM-LAM-D12SL-194.5" → "CM-LAM-D12SL"); sin categoría, de la descripción
+  //    (ver tipoEspumaDesc). Los bloques se cuentan por densidad + apertura + tipo.
   const aperturaCategoriaPorCentro = useMemo(() => {
     const porCentro: Record<string, Map<string, string>> = { '1000': new Map(), '2000': new Map() };
     const cualquierCentro = new Map<string, string>();
+    const categoriaPorCentro: Record<string, Map<string, string>> = { '1000': new Map(), '2000': new Map() };
+    const categoriaCualquierCentro = new Map<string, string>();
     // Fuente: las filas FERT ya mapeadas (fertAuditAll, categoria = CATEGORIA de la orden) y no la lista
     // cruda ordenesFert — al abrir el módulo se restaura el plan guardado (resultadoRestaurado) y
     // ordenesFert sigue vacía hasta sincronizar con SAP, así que con ella todo salía "Sin apertura".
@@ -2632,6 +2645,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // Segmento numérico de 3 cifras de la categoría: "CM-LAM-D12SL-194.5" → 194.5, "…-206" → 206.
       const ap = String(categoria || '').split(/[-_\s]/).reverse().find(s => /^\d{3}(\.\d+)?$/.test(s));
       const code = cleanCode(material);
+      const cat = String(categoria || '').trim();
+      if (code && cat && cat !== '—') {
+        if (!categoriaCualquierCentro.has(code)) categoriaCualquierCentro.set(code, cat);
+        const mc = categoriaPorCentro[centro];
+        if (mc && !mc.has(code)) mc.set(code, cat);
+      }
       if (!ap || !code) return;
       if (!cualquierCentro.has(code)) cualquierCentro.set(code, ap);
       const map = porCentro[centro];
@@ -2639,7 +2658,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     };
     fertAuditAllUIO.forEach(r => registrar(r.material, r.categoria, '1000'));
     fertAuditAllGYE.forEach(r => registrar(r.material, r.categoria, '2000'));
-    return { porCentro, cualquierCentro };
+    return { porCentro, cualquierCentro, categoriaPorCentro, categoriaCualquierCentro };
   }, [fertAuditAllUIO, fertAuditAllGYE]);
 
   // T8 = bloques a consumir en el día de corte D (usuario 2026-10-20): ya no parte de la necesidad
@@ -2691,11 +2710,16 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const tCupulaH = (r.tIndiv * ciclosCup * cargas) / 60;
         const tLaminasH = (r.tIndiv * r.cantTotal) / 60;
         const aperturaCat = aperturaCategoriaPorCentro.porCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.cualquierCentro.get(r.material) || '';
+        const categoria = aperturaCategoriaPorCentro.categoriaPorCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.categoriaCualquierCentro.get(r.material) || '';
+        // Categoría sin el segmento de apertura: "CM-LAM-D12SL-194.5" → "CM-LAM-D12SL".
+        const categoriaBase = categoria.split('-').filter(s => !/^\d{3}(\.\d+)?$/.test(s.trim())).join('-');
+        const tipoDesc = tipoEspumaDesc(r.descripcion);
         const tCorteH = tLaminasH + tCupulaH;
         const tCargaDescargaH = (subCarrusel * ((TIEMPO_CARGA_CICLO_SEG[centro] || 0) + (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0))) / 3600;
         return {
           material: r.material, descripcion: r.descripcion, dens: r.dens, densVal,
           apertura: aperturaCat || (r.apertura !== '—' ? r.apertura : 'Sin apertura'), tLaminasH,
+          categoria, tipo: categoriaBase || tipoDesc || 'Sin tipo', tipoDesc, tipoDeCategoria: !!categoriaBase,
           tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, alturaTotal: r.esp * r.cantTotal,
           unidadesPorSub, subB, capGiro, cargas, subCNC, ciclosCup, cupulaCm: alturaCupulaCm(r.esp), tCupulaH,
           ocupacion: cargas > 0 && capGiro > 0 ? subCarrusel / (cargas * capGiro) : 0,
@@ -2728,15 +2752,23 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         .map(([dens, itemsDens]) => {
           const aperturas = Array.from(agrupar(itemsDens, f => f.apertura).entries())
             .sort((a, b) => ordenApertura(a[0]) - ordenApertura(b[0]))
-            .map(([apertura, items]) => {
-              const metros = items.reduce((s, f) => s + f.longitudM, 0);
-              const bloques = metros / LARGO_BLOQUE_M;
-              const filasAp = items.map(f => ({ ...f, metros: f.longitudM, bloquesEnteros: 0 }));
-              return {
-                apertura, bloques,
-                items: items.sort((a, b) => a.tamano.localeCompare(b.tamano) || a.esp - b.esp),
-                ...totales(filasAp), bloquesEnteros: Math.ceil(bloques - 1e-9),
-              };
+            .map(([apertura, itemsAp]) => {
+              // Cada tipo de espuma es un bloque madre distinto: bloques por tipo, luego se suman.
+              const tipos = Array.from(agrupar(itemsAp, f => f.tipo).entries())
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .map(([tipo, items]) => {
+                  const metros = items.reduce((s, f) => s + f.longitudM, 0);
+                  const bloques = metros / LARGO_BLOQUE_M;
+                  const filasTipo = items.map(f => ({ ...f, metros: f.longitudM, bloquesEnteros: 0 }));
+                  // Etiquetas de descripción del grupo (ej. "NG FRR"), para leer la categoría.
+                  const descs = Array.from(new Set(items.map(f => f.tipoDesc).filter(Boolean)));
+                  return {
+                    tipo, descs, deCategoria: items[0].tipoDeCategoria, bloques,
+                    items: items.sort((a, b) => a.tamano.localeCompare(b.tamano) || a.esp - b.esp),
+                    ...totales(filasTipo), bloquesEnteros: Math.ceil(bloques - 1e-9),
+                  };
+                });
+              return { apertura, tipos, items: itemsAp, ...totales(tipos), bloques: tipos.reduce((s, t) => s + t.bloques, 0) };
             });
           return { dens, aperturas, ...totales(aperturas), bloques: aperturas.reduce((s, a) => s + a.bloques, 0) };
         });
@@ -7169,7 +7201,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                   {grupos.length === 0 ? (
                     <div className="p-4 text-xs text-slate-600">Sin órdenes FERT de carrusel para el día de corte {t8Fechas.d.split('-').reverse().join('/')} (Venta Externa: {t8Fechas.venta.split('-').reverse().join('/')}). Sincroniza para traer las FERT liberadas.</div>
                   ) : (
-                    // Árbol Densidad → Apertura → material, cada nivel plegable (+/−) con sus totales en la
+                    // Árbol Densidad → Apertura → Tipo de espuma → material, cada nivel plegable (+/−) con sus totales en la
                     // misma fila. Columnas en el orden del Excel del usuario (IMG B); detalle del cálculo al final.
                     <>
                     <div className="flex justify-end gap-2 px-4 pt-3">
@@ -7180,7 +7212,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                     <table className="w-full text-[11px] border-collapse">
                       <thead>
                         <tr>
-                          <th className={`${th} bg-slate-50 text-left`}>Densidad / Apertura / Material</th><th className={`${th} bg-slate-50`}>Tamaño</th><th className={`${th} bg-slate-50`}>Espesor</th>
+                          <th className={`${th} bg-slate-50 text-left`}>Densidad / Apertura / Tipo / Material</th><th className={`${th} bg-slate-50`}>Tamaño</th><th className={`${th} bg-slate-50`}>Espesor</th>
                           <th className={`${th} bg-slate-100`}>Cantidad láminas UN</th>
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Und / sub-bloque</th><th className={`${th} bg-indigo-50`}>N° Sub-bloques</th>
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Cap. giro</th><th className={`${th} bg-indigo-50`}>N° Carga CR-01/03/04</th><th className={`${th} bg-indigo-50`}>N° Carga sub-bloques CNC</th>
@@ -7222,13 +7254,28 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                       <td className="pl-7 pr-2 py-1.5 border-r border-slate-200" colSpan={3}>
                                         <span className="inline-flex items-center gap-2">{apAbierta ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
                                           {a.apertura === 'Sin apertura' ? <span className="text-orange-600">Sin apertura</span> : `Apertura ${a.apertura}`}
-                                          <span className="text-[9px] font-bold text-slate-600">{a.items.length} mat.</span></span>
+                                          <span className="text-[9px] font-bold text-slate-600">{a.items.length} mat. · {a.tipos.length} tipo{a.tipos.length === 1 ? '' : 's'}</span></span>
                                       </td>
                                       {filaTotales(a, a.bloques)}
                                     </tr>
-                                    {apAbierta && a.items.map(f => (
+                                    {apAbierta && a.tipos.map(t => {
+                                      const claveTipo = `${claveAp}|${t.tipo}`;
+                                      const tipoAbierto = !t8Plegados.has(claveTipo);
+                                      return (
+                                      <React.Fragment key={t.tipo}>
+                                    <tr className="border-t border-slate-100 bg-white font-black text-slate-700 cursor-pointer hover:bg-slate-50" onClick={() => toggleT8(claveTipo)}>
+                                      <td className="pl-12 pr-2 py-1.5 border-r border-slate-200" colSpan={3}>
+                                        <span className="inline-flex items-center gap-2">{tipoAbierto ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
+                                          <span className={t.deCategoria ? 'text-teal-800' : 'text-orange-600'} title={t.deCategoria ? 'Tipo tomado de la CATEGORÍA de la orden FERT' : 'Sin categoría en la FERT: tipo tomado de la descripción'}>{t.tipo}</span>
+                                          {t.deCategoria && t.descs.length > 0 && <span className="text-[9px] font-bold text-slate-500">({t.descs.join(' / ')})</span>}
+                                          <span className="text-[9px] font-bold text-slate-600">{t.items.length} mat.</span></span>
+                                      </td>
+                                      {filaTotales(t, t.bloques)}
+                                    </tr>
+                                    {tipoAbierto && t.items.map(f => (
                                       <tr key={f.material} className="border-t border-slate-100">
-                                        <td className="pl-12 pr-2 py-1.5 border-r border-slate-100" title={f.descripcion}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div></td>
+                                        <td className="pl-16 pr-2 py-1.5 border-r border-slate-100" title={f.descripcion}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div>
+                                          <div className="text-[9px] font-bold text-teal-700">{f.categoria || <span className="text-orange-600">sin categoría</span>}</div></td>
                                         <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td>
                                         <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}</td>
                                         <td className={`${td} text-slate-700`}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td>
@@ -7241,6 +7288,9 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                         <td className={td}>{f.longitudM.toFixed(0)}</td><td className={td}></td>
                                       </tr>
                                     ))}
+                                      </React.Fragment>
+                                      );
+                                    })}
                                   </React.Fragment>
                                 );
                               })}
