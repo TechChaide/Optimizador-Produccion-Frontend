@@ -62,6 +62,11 @@ import { cn } from '@/lib/utils';
 import { useReportePlanTxt, useAutoCargaPlanVigente, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, cargarDiasNoLaborables, laborablesHorizonte, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
+import {
+  esAperturaTecnica, APERTURAS_TECNICAS, LARGO_BLOQUE_M, ALTURA_BLOQUE_CM, CUPULA_CM, CUPULA_MAX_CM, ALTURA_UTIL_CM,
+  alturaUtilCm, unidadesPorSubBloque, subBloquesEnteros, longitudSubBloquesM,
+  densidadDeCategoria, aperturaDeCategoria, tipoDeCategoria, tipoEspumaDesc,
+} from '@/lib/bloques-espuma';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
 
@@ -801,27 +806,9 @@ const capacidadGiroCarrusel = (ancho: number): number => {
 // Tab "SUB-BLOQUES-T8" (usuario 2026-10-17): sobrante de la última carga que NO justifica otro giro
 // del carrusel y se manda a la CNC (Excel del usuario: 36 sub-bloques = 5 cargas + 1 a CNC). Ajustable.
 const SUBBLOQUES_SOBRANTE_MAX_CNC = 1;
-// Tipo de espuma desde la descripción (respaldo cuando la FERT no trae categoría): las palabras que no
-// son LAMINA/ESPUMA, la densidad ni la medida. "LAMINA ESPUMA D15 NG FRR 100X200X1.5" → "NG FRR",
-// "LAMINA D15 AM AF 103X188X3.2" → "AM AF", "LAMINA SPRING D15 101X023X1" → "SPRING".
-const tipoEspumaDesc = (descripcion: string): string =>
-  String(descripcion || '').toUpperCase().split(/\s+/)
-    .filter(w => w && !/^(LAMINA|LÁMINA|ESPUMA)$/.test(w) && !/^D\d+(\.\d+)?$/.test(w) && !/\d+(\.\d+)?X\d/.test(w))
-    .join(' ');
-// Aperturas técnicas: salen de un bloque madre de LARGO_BLOQUE_M y se cuentan en bloques. El resto
-// (combinación 105/115/135/145/160/200…) llega cortado a medida de sub-bloque y se cuenta en UN
-// (= sub-bloques; usuario 2026-10-27, antes kg).
-const APERTURAS_TECNICAS_T8 = ['194.5', '206', '219', '228'];
-// Largo del bloque madre (m) para convertir metros de sub-bloque en bloques necesarios — mismo valor
-// que Formulación (BLOCK_LENGTH_METERS).
-const LARGO_BLOQUE_M = 20;
-// Modelo de bloque del tab T8 (usuario 2026-10-17, valores por verificar en planta): bloque real de
-// ~108 cm; la cúpula se despeja con ~4 cm de corte y nunca más de 5 cm → altura útil 108 − 5 = 103.
-// Antes la cúpula eran 4 ciclos fijos al espesor de la lámina: con 20 cm eran 80 cm "de cúpula", irreal.
-const ALTURA_BLOQUE_CM = 108;
-const CUPULA_CM = 4;
-const CUPULA_MAX_CM = 5;
-const ALTURA_UTIL_CM = ALTURA_BLOQUE_CM - CUPULA_MAX_CM;
+// Aperturas técnicas, largo y altura del bloque, sub-bloques y lectura de la categoría: reglas comunes
+// con Formulación en @/lib/bloques-espuma. Antes la cúpula eran 4 ciclos fijos al espesor de la
+// lámina: con 20 cm eran 80 cm "de cúpula", irreal.
 // Ciclos de cúpula por carga: los necesarios para cubrir CUPULA_CM al espesor de la lámina, sin pasar de
 // CUPULA_MAX_CM; mínimo 1 (con espesores > 5 cm la cúpula sale en una sola pasada de ~4 cm).
 // 0.8 → 5 (4 cm) · 1 → 4 · 2 → 2 · 2.5 → 2 (5 cm) · 3 → 1 · 20 → 1.
@@ -857,7 +844,7 @@ const calcularMetricasCapacidad = (
   //  5) Corte = T. Indiv (KPI) × unidades + 4 × T. Indiv × cargas.
   //  6) Und/Batch = lo que realmente va en la carga: unidades por sub-bloque × min(sub-bloques, capacidad
   //     por giro) — "carrusel lleno" solo cuando hay sub-bloques para llenarlo.
-  const usefulHeight = densVal >= 28 ? 85 : 103;
+  const usefulHeight = alturaUtilCm(densVal);
   const hTotal = info.esp * qty;
   const unidadesPorSubBloque = info.esp > 0 ? Math.max(1, Math.floor(usefulHeight / info.esp)) : 0;
   const subB = unidadesPorSubBloque > 0 && qty > 0 ? Math.ceil(qty / unidadesPorSubBloque - 1e-9) : 0;
@@ -1747,7 +1734,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // Descripción sin densidad (ej. "LAMINA BLANCO FIRME 199X199X2.5"): se toma de la CATEGORÍA de la
     // orden ("CM-LAM-D30BLFR-206" → 30). 27-10: quedaban "D—" y con altura útil 103 en vez de 85.
     if (!(safeNum(dims.dens) > 0)) {
-      const densCat = getProp(item, ['CATEGORIA', 'Categoria', 'CATEGORIA_DESC']).match(/(?:^|-)D(\d+(?:\.\d+)?)/i)?.[1];
+      const densCat = densidadDeCategoria(getProp(item, ['CATEGORIA', 'Categoria', 'CATEGORIA_DESC']));
       if (densCat) dims.dens = densCat;
     }
 
@@ -2653,7 +2640,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     // fertAuditAll viene del plan restaurado o de la sincronización, según el caso.
     const registrar = (material: string, categoria: string, centro: string) => {
       // Segmento numérico de 3 cifras de la categoría: "CM-LAM-D12SL-194.5" → 194.5, "…-206" → 206.
-      const ap = String(categoria || '').split(/[-_\s]/).reverse().find(s => /^\d{3}(\.\d+)?$/.test(s));
+      const ap = aperturaDeCategoria(categoria);
       const code = cleanCode(material);
       const cat = String(categoria || '').trim();
       if (code && cat && cat !== '—') {
@@ -3066,14 +3053,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         // Densidad: de la categoría ("CM-LAM-D30NR-194.5" → 30) y, sin ella, de la descripción. 27-10:
         // láminas cuya descripción no trae "D30" (ej. "LAMINA BLANCO FIRME…") salían como "D—", se
         // partían del mismo bloque madre y se calculaban con altura útil 103 en vez de 85.
-        const densCat = categoria.match(/(?:^|-)D(\d+(?:\.\d+)?)/i)?.[1];
+        const densCat = densidadDeCategoria(categoria);
         const dens = densCat || r.dens;
         const densVal = safeNum(dens);
         // Altura útil 85 cm para D ≥ 28 confirmada SOLO para aperturas técnicas (194.5/206/219/228);
         // visco / HS / BIO (135, 160, 200…) tienen otra altura que el usuario va a confirmar — hasta
         // entonces siguen con la misma regla.
-        const unidadesPorSub = Math.max(1, Math.floor((densVal >= 28 ? 85 : ALTURA_UTIL_CM) / r.esp));
-        const subB = Math.ceil(r.cantTotal / unidadesPorSub - 1e-9);
+        const unidadesPorSub = unidadesPorSubBloque(densVal, r.esp);
+        const subB = subBloquesEnteros(r.cantTotal, unidadesPorSub);
         const capGiro = capacidadGiroCarrusel(r.ancho);
         const completas = capGiro > 0 ? Math.floor(subB / capGiro) : 0;
         const sobrante = capGiro > 0 ? subB % capGiro : subB;
@@ -3084,7 +3071,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const tCupulaH = (r.tIndiv * ciclosCup * cargas) / 60;
         const tLaminasH = (r.tIndiv * r.cantTotal) / 60;
         // Categoría sin el segmento de apertura: "CM-LAM-D12SL-194.5" → "CM-LAM-D12SL".
-        const categoriaBase = categoria.split('-').filter(s => !/^\d{3}(\.\d+)?$/.test(s.trim())).join('-');
+        const categoriaBase = tipoDeCategoria(categoria);
         const tipoDesc = tipoEspumaDesc(r.descripcion);
         const tCorteH = tLaminasH + tCupulaH;
         const tCargaDescargaH = (subCarrusel * ((TIEMPO_CARGA_CICLO_SEG[centro] || 0) + (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0))) / 3600;
@@ -3096,7 +3083,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           unidadesPorSub, subB, capGiro, cargas, subCNC, ciclosCup, cupulaCm: alturaCupulaCm(r.esp), tCupulaH,
           ocupacion: cargas > 0 && capGiro > 0 ? subCarrusel / (cargas * capGiro) : 0,
           tCorteH, tCargaDescargaH, tTotalH: tCorteH + tCargaDescargaH,
-          longitudM: (subB * r.ancho) / 100,
+          longitudM: longitudSubBloquesM(subB, r.ancho),
           sinTiempo: r.tIndiv <= 0,
           subCarrusel, plazasCarga: cargas * capGiro,
         };
@@ -3120,7 +3107,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         return m;
       };
       // Aperturas técnicas primero en su orden fijo; el resto (visco 135/160/200…) numérico después.
-      const ordenApertura = (a: string) => { const i = APERTURAS_TECNICAS_T8.indexOf(a); return i === -1 ? 100 + (parseFloat(a) || 900) : i; };
+      const ordenApertura = (a: string) => { const i = APERTURAS_TECNICAS.indexOf(a); return i === -1 ? 100 + (parseFloat(a) || 900) : i; };
       // Una fila de primer nivel por bloque madre = densidad + tipo de espuma + apertura (usuario
       // 2026-10-27: "D30BLFR · 206", "D30NRCR · 206", "D30NRRR · 206", "D40VISC · 135"…): misma densidad
       // y apertura con distinto material son bloques distintos. Debajo, directamente los materiales.
@@ -3129,7 +3116,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         .map(items => {
           const { dens, tipo, apertura, tipoDeCategoria } = items[0];
           // Bloques de 20 m solo en aperturas técnicas; la combinación se cuenta en UN = sub-bloques.
-          const esTecnica = APERTURAS_TECNICAS_T8.includes(apertura);
+          const esTecnica = esAperturaTecnica(apertura);
           const metros = items.reduce((s, f) => s + f.longitudM, 0);
           const bloques = esTecnica ? metros / LARGO_BLOQUE_M : 0;
           const filasBloque = items.map(f => ({ ...f, metros: f.longitudM, bloquesEnteros: 0 }));
