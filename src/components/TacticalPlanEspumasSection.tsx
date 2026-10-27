@@ -2681,32 +2681,22 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const d = t8FechaCorte || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
     return { d, venta: format(siguienteDiaHabil(new Date(`${d}T12:00:00`)), 'yyyy-MM-dd') };
   }, [t8FechaCorte, siguienteDiaHabil]);
-  // Pendiente anterior (usuario 2026-10-27): FERT de los DIAS_PENDIENTE_MAX días hábiles previos a su
-  // fecha objetivo (D, o D+1 para Venta) que siguen con cantidad pendiente — misma ventana que la
-  // Capacidad Operativa. Solo INFORMATIVO: ya se pidió en el T8 de su día, así que no suma a los
-  // bloques necesarios (no duplica la reposición); el operador sí lo ve para sacar esos bloques.
+  // Solo el día de corte: el pendiente de días anteriores NO entra (usuario 2026-10-27) — ya se está
+  // procesando en el turno en curso y su tiempo lo muestra la Capacidad Operativa (exceso del turno).
   const fertT8PorCentro = useMemo(() => {
-    const diasPrevios = (objetivo: string) => Array.from({ length: DIAS_PENDIENTE_MAX }, (_, i) => format(restarDiasHabiles(parseFechaLocal(objetivo), i + 1), 'yyyy-MM-dd'));
-    const previosD = diasPrevios(t8Fechas.d);
-    const previosVenta = diasPrevios(t8Fechas.venta);
     // Mismos descartes que getFilteredData (responsables de corte, prensado, forro, aprovechamiento,
     // excepción 015), aplicados sobre fertAuditAll para que funcione también con el plan restaurado.
     const filtrar = (rows: UnifiedRow[], centro: string) => {
       const allowed = allowedRespPorCentro(centro);
-      const dia: UnifiedRow[] = [];
-      const pendiente: UnifiedRow[] = [];
-      rows.forEach(r => {
-        if (!allowed.includes(r.responsable)) return;
-        if (/PRENSAD|APROVECHAMIENTO/i.test(r.descripcion) || ES_FORRO(r.descripcion)) return;
-        if (respExcepcionExcluye(centro, r.responsable, r.material)) return;
-        const esVenta = /venta\s*externa/i.test(r.origenArea || '');
-        if (r.fechaFin === (esVenta ? t8Fechas.venta : t8Fechas.d)) dia.push(r);
-        else if ((esVenta ? previosVenta : previosD).includes(r.fechaFin)) pendiente.push(r);
+      return rows.filter(r => {
+        if (!allowed.includes(r.responsable)) return false;
+        if (/PRENSAD|APROVECHAMIENTO/i.test(r.descripcion) || ES_FORRO(r.descripcion)) return false;
+        if (respExcepcionExcluye(centro, r.responsable, r.material)) return false;
+        return r.fechaFin === (/venta\s*externa/i.test(r.origenArea || '') ? t8Fechas.venta : t8Fechas.d);
       });
-      return { dia, pendiente };
     };
     return { '1000': filtrar(fertAuditAllUIO, '1000'), '2000': filtrar(fertAuditAllGYE, '2000') };
-  }, [fertAuditAllUIO, fertAuditAllGYE, allowedRespPorCentro, t8Fechas, restarDiasHabiles]);
+  }, [fertAuditAllUIO, fertAuditAllGYE, allowedRespPorCentro, t8Fechas]);
 
   // Grupos plegados del tab T8 (claves centro|densidad y centro|densidad|apertura); por defecto todo abierto.
   const [t8Plegados, setT8Plegados] = useState<Set<string>>(new Set());  const toggleT8 = (clave: string) => setT8Plegados(prev => { const n = new Set(prev); if (n.has(clave)) n.delete(clave); else n.add(clave); return n; });
@@ -3060,27 +3050,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return { filas: ajuste.filas, pendientes: ajuste.filas, resumen, porMaquina: ajuste.porMaquina };
   }, [restarDiasHabiles, ajustePendienteTurnoAnterior]);
 
-  // Tab T8 — pendiente anterior conciliado contra el turno en curso, con la misma regla que la Capacidad
-  // Operativa (armarPendienteAnterior): solo pasa lo que no alcanza el turno desde la sincronización.
-  const fertT8PendienteTurno = useMemo(() => {
-    const diaAnterior = format(restarDiasHabiles(parseFechaLocal(t8Fechas.d), 1), 'yyyy-MM-dd');
-    const ajustar = (planta: 'UIO' | 'GYE', rows: UnifiedRow[]) =>
-      ajustePendienteTurnoAnterior(planta, diaAnterior, rows.map(row => ({ row }))).filas.map(x => x.row).filter(r => r.cantUnidadReal > 1e-6);
-    return { '1000': ajustar('UIO', fertT8PorCentro['1000'].pendiente), '2000': ajustar('GYE', fertT8PorCentro['2000'].pendiente) };
-  }, [fertT8PorCentro, t8Fechas, restarDiasHabiles, ajustePendienteTurnoAnterior]);
-
   const subBloquesT8PorCentro = useMemo(() => {
-    const calcular = (rows: UnifiedRow[], pendiente: UnifiedRow[], centro: string) => {
-      // Día y pendiente por material; un material solo pendiente entra con cantidad del día 0.
-      const porMaterial = new Map<string, UnifiedRow & { cantTotal: number; cantPend: number }>();
-      const sumar = (r: UnifiedRow, campo: 'cantTotal' | 'cantPend') => {
+    const calcular = (rows: UnifiedRow[], centro: string) => {
+      const porMaterial = new Map<string, UnifiedRow & { cantTotal: number }>();
+      rows.forEach(r => {
         if (r.isAlterna || r.esp <= 0 || r.cantUnidadReal <= 0) return;
-        const prev = porMaterial.get(r.material) ?? { ...r, cantTotal: 0, cantPend: 0 };
-        prev[campo] += r.cantUnidadReal;
-        porMaterial.set(r.material, prev);
-      };
-      rows.forEach(r => sumar(r, 'cantTotal'));
-      pendiente.forEach(r => sumar(r, 'cantPend'));
+        const prev = porMaterial.get(r.material);
+        if (prev) prev.cantTotal += r.cantUnidadReal;
+        else porMaterial.set(r.material, { ...r, cantTotal: r.cantUnidadReal });
+      });
       const filas = Array.from(porMaterial.values()).map(r => {
         const aperturaCat = aperturaCategoriaPorCentro.porCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.cualquierCentro.get(r.material) || '';
         const categoria = aperturaCategoriaPorCentro.categoriaPorCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.categoriaCualquierCentro.get(r.material) || '';
@@ -3119,13 +3097,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           tCorteH, tCargaDescargaH, tTotalH: tCorteH + tCargaDescargaH,
           longitudM: (subB * r.ancho) / 100,
           sinTiempo: r.tIndiv <= 0,
-          cantPend: r.cantPend,
-          subBPend: Math.ceil(r.cantPend / unidadesPorSub - 1e-9),
-          longitudPendM: (Math.ceil(r.cantPend / unidadesPorSub - 1e-9) * r.ancho) / 100,
           // Combinación (aperturas no técnicas, usuario 2026-10-27): el sub-bloque ya llega a la medida de
           // corte, no sale de un bloque madre de 20 m → consumo en kg = ancho × largo × espesor × densidad.
           kg: (r.cantTotal * r.ancho * r.largo * r.esp * densVal) / 1e6,
-          kgPend: (r.cantPend * r.ancho * r.largo * r.esp * densVal) / 1e6,
           subCarrusel, plazasCarga: cargas * capGiro,
         };
       });
@@ -3163,12 +3137,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           const filasBloque = items.map(f => ({ ...f, metros: f.longitudM, bloquesEnteros: 0 }));
           // Etiquetas de descripción del grupo (ej. "NG FRR"), para leer la categoría.
           const descs = Array.from(new Set(items.map(f => f.tipoDesc).filter(Boolean)));
-          const bloquesPend = esTecnica ? items.reduce((s, f) => s + f.longitudPendM, 0) / LARGO_BLOQUE_M : 0;
           const plazas = items.reduce((s, f) => s + f.plazasCarga, 0);
           return {
             clave: `${dens}|${tipo}|${apertura}`, dens, apertura, descs, deCategoria: tipoDeCategoria, bloques, esTecnica,
-            subBPend: items.reduce((s, f) => s + f.subBPend, 0), bloquesPend, bloquesPendEnteros: Math.ceil(bloquesPend - 1e-9),
-            kg: items.reduce((s, f) => s + f.kg, 0), kgPend: items.reduce((s, f) => s + f.kgPend, 0),
+            kg: items.reduce((s, f) => s + f.kg, 0),
             // Ocupación del bloque madre: sub-bloques al carrusel ÷ plazas de las cargas que paga.
             ocupacion: plazas > 0 ? items.reduce((s, f) => s + f.subCarrusel, 0) / plazas : 0,
             // "CM-LAM-D30BLFR" → "D30BLFR"; sin categoría el tipo viene de la descripción ("NG FRR") → "D15 NG FRR".
@@ -3179,10 +3151,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         });
     };
     return {
-      '1000': calcular(fertT8PorCentro['1000'].dia, fertT8PendienteTurno['1000'], '1000'),
-      '2000': calcular(fertT8PorCentro['2000'].dia, fertT8PendienteTurno['2000'], '2000'),
+      '1000': calcular(fertT8PorCentro['1000'], '1000'),
+      '2000': calcular(fertT8PorCentro['2000'], '2000'),
     };
-  }, [fertT8PorCentro, fertT8PendienteTurno, aperturaCategoriaPorCentro]);
+  }, [fertT8PorCentro, aperturaCategoriaPorCentro]);
 
   // Auditoría (solo lectura, pedido del usuario 2026-10-07): cada FERT con cantidad pendiente hasta la
   // fecha evaluada y CUÁNTO de ella entra a la ocupación, con el motivo — para conciliar contra SAP
@@ -7231,10 +7203,6 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               const grupos = subBloquesT8PorCentro[centro];
               const th = 'px-2 py-2 border-r border-slate-200 text-[10px] uppercase font-black text-slate-800';
               const td = 'px-2 py-1.5 border-r border-slate-100 text-right font-mono text-slate-900';
-              // Pendiente de días anteriores que no alcanza el turno en curso: en gris, no suma (ya se pidió en su día).
-              const masPend = (v: number) => v > 0
-                ? <span className="ml-1 text-[9px] font-bold text-slate-400" title="Pendiente de días anteriores (no suma)">+{formatNum(v, 0)}</span>
-                : null;
               return (
                 <div key={centro} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-x-auto">
                   <div className="px-4 py-3 font-black text-indigo-900 uppercase text-sm border-b">Sub-bloques — {centro === '1000' ? 'Quito' : 'Guayaquil'}</div>
@@ -7245,12 +7213,12 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         { l: 'de ellas cúpula', v: grupos.reduce((s, g) => s + g.tCupulaH, 0).toFixed(1) + ' h', c: 'text-amber-800' },
                         { l: 'Sub-bloques', v: String(grupos.reduce((s, g) => s + g.subB, 0)), c: 'text-indigo-900' },
                         { l: 'Cargas CR · CNC', v: `${grupos.reduce((s, g) => s + g.cargas, 0)} · ${grupos.reduce((s, g) => s + g.subCNC, 0)}`, c: 'text-indigo-900' },
-                        { l: 'Bloques necesarios', v: String(grupos.reduce((s, g) => s + g.bloquesEnteros, 0)), p: grupos.reduce((s, g) => s + g.bloquesPendEnteros, 0), c: 'text-violet-700' },
-                        { l: 'Combinación (kg)', v: formatNum(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kg), 0), 0), p: Math.round(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kgPend), 0)), c: 'text-violet-700' },
+                        { l: 'Bloques necesarios', v: String(grupos.reduce((s, g) => s + g.bloquesEnteros, 0)), c: 'text-violet-700' },
+                        { l: 'Combinación (kg)', v: formatNum(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kg), 0), 0), c: 'text-violet-700' },
                       ].map(k => (
                         <div key={k.l} className="rounded-xl bg-slate-50 px-3 py-2">
                           <div className="text-[10px] uppercase font-black text-slate-600">{k.l}</div>
-                          <div className={`text-lg font-black ${k.c}`}>{k.v}{'p' in k && (k.p ?? 0) > 0 && <span className="text-xs font-bold text-slate-400" title="Pendiente de días anteriores que no alcanza el turno en curso; ya se pidió en su día, no suma"> +{formatNum(k.p ?? 0, 0)} pend.</span>}</div>
+                          <div className={`text-lg font-black ${k.c}`}>{k.v}</div>
                         </div>
                       ))}
                     </div>
@@ -7283,19 +7251,18 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         {grupos.map(g => {
                           const claveDens = `${centro}|${g.clave}`;
                           const densAbierta = !t8Plegados.has(claveDens);
-                          // Fila de totales del bloque madre: mismas columnas que el detalle. El pendiente de días
-                          // anteriores va en gris como "+N" junto al dato del día (no suma).
+                          // Fila de totales del bloque madre: mismas columnas que el detalle.
                           const filaTotales = () => (
                             <>
-                              <td className={td}>{formatNum(g.cant, 0)}</td><td className={td}></td><td className={td}>{g.subB}{masPend(g.subBPend)}</td><td className={td}></td>
+                              <td className={td}>{formatNum(g.cant, 0)}</td><td className={td}></td><td className={td}>{g.subB}</td><td className={td}></td>
                               <td className={td}>{g.cargas}</td><td className={td}>{g.subCNC}</td>
                               <td className={`${td} ${g.ocupacion > 0 && g.ocupacion < 0.6 ? 'text-orange-600' : ''}`}>{g.cargas > 0 ? `${(g.ocupacion * 100).toFixed(0)}%` : '—'}</td>
                               <td className={td}>{g.tLaminasH.toFixed(2)}</td><td className={`${td} text-amber-800`}>{g.tCupulaH.toFixed(2)}</td><td className={td}>{g.tCargaDescargaH.toFixed(2)}</td>
                               <td className={`${td} text-emerald-800`}>{g.tTotalH.toFixed(1)}</td><td className={td}>{g.metros.toFixed(0)}</td>
                               <td className={`${td} text-violet-800 font-black`}>
                                 {g.esTecnica
-                                  ? <>{g.bloques.toFixed(1)} <span className="text-[9px] font-bold opacity-80">({g.bloquesEnteros} ent.)</span>{masPend(g.bloquesPendEnteros)}</>
-                                  : <>{formatNum(g.kg, 0)} kg{masPend(Math.round(g.kgPend))}</>}
+                                  ? <>{g.bloques.toFixed(1)} <span className="text-[9px] font-bold opacity-80">({g.bloquesEnteros} ent.)</span></>
+                                  : <>{formatNum(g.kg, 0)} kg</>}
                               </td>
                             </>
                           );
@@ -7314,8 +7281,8 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                       <tr key={f.material} className="border-t border-slate-100">
                                         <td className="pl-8 pr-2 py-1.5 border-r border-slate-100" title={`${f.descripcion}\n${f.categoria || 'sin categoría'}`}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div></td>
                                         <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td>
-                                        <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}{masPend(Math.round(f.cantPend))}</td>
-                                        <td className={`${td} text-slate-700`}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}{masPend(f.subBPend)}</td>
+                                        <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}</td>
+                                        <td className={`${td} text-slate-700`}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td>
                                         <td className={`${td} text-slate-700`}>{f.capGiro}</td><td className={`${td} font-black`}>{f.cargas}</td><td className={td}>{f.subCNC}</td>
                                         <td className={`${td} ${f.ocupacion < 0.6 ? 'text-orange-600 font-black' : 'text-slate-700'}`}>{f.cant > 0 ? `${(f.ocupacion * 100).toFixed(0)}%` : '—'}</td>
                                         <td className={`${td} text-slate-700`}>{f.sinTiempo ? '—' : f.tLaminasH.toFixed(2)}</td>
@@ -7323,7 +7290,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                         <td className={`${td} text-slate-700`}>{f.tCargaDescargaH.toFixed(2)}</td>
                                         <td className={`${td} bg-emerald-50 font-black`} title={f.sinTiempo ? 'Sin T. Indiv (KPI) para este material' : undefined}>{f.sinTiempo ? '—' : f.tTotalH.toFixed(2)}</td>
                                         <td className={td}>{f.longitudM.toFixed(0)}</td>
-                                        <td className={`${td} text-slate-700`}>{g.esTecnica ? '' : <>{formatNum(f.kg, 0)} kg{masPend(Math.round(f.kgPend))}</>}</td>
+                                        <td className={`${td} text-slate-700`}>{g.esTecnica ? '' : `${formatNum(f.kg, 0)} kg`}</td>
                                       </tr>
                                     ))}
                             </React.Fragment>
@@ -7332,15 +7299,15 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         <tr className="border-t-2 border-indigo-300 bg-indigo-100 font-black text-indigo-900">
                           <td className="px-2 py-2" colSpan={3}>Total {centro === '1000' ? 'Quito' : 'Guayaquil'}</td>
                           <td className={td}>{formatNum(grupos.reduce((s, g) => s + g.cant, 0), 0)}</td><td className={td}></td>
-                          <td className={td}>{grupos.reduce((s, g) => s + g.subB, 0)}{masPend(grupos.reduce((s, g) => s + g.subBPend, 0))}</td><td className={td}></td>
+                          <td className={td}>{grupos.reduce((s, g) => s + g.subB, 0)}</td><td className={td}></td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.cargas, 0)}</td><td className={td}>{grupos.reduce((s, g) => s + g.subCNC, 0)}</td><td className={td}></td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.tLaminasH, 0).toFixed(2)}</td>
                           <td className={`${td} text-amber-800`}>{grupos.reduce((s, g) => s + g.tCupulaH, 0).toFixed(2)}</td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.tCargaDescargaH, 0).toFixed(2)}</td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.tTotalH, 0).toFixed(1)}</td><td className={td}>{grupos.reduce((s, g) => s + g.metros, 0).toFixed(0)}</td>
                           <td className={td}>
-                            {grupos.reduce((s, g) => s + g.bloquesEnteros, 0)} ent.{masPend(grupos.reduce((s, g) => s + g.bloquesPendEnteros, 0))}
-                            <div className="text-[10px]">{formatNum(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kg), 0), 0)} kg{masPend(Math.round(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kgPend), 0)))}</div>
+                            {grupos.reduce((s, g) => s + g.bloquesEnteros, 0)} ent.
+                            <div className="text-[10px]">{formatNum(grupos.reduce((s, g) => s + (g.esTecnica ? 0 : g.kg), 0), 0)} kg</div>
                           </td>
                         </tr>
                       </tbody>
