@@ -217,25 +217,57 @@ const extraerCorridaCategoria = (categoria: string): string => {
 //     no son consumo.
 // Consumo/D = |Σ(261) + Σ(262)| ÷ 7 — la ventana es hoy y los 6 días anteriores (7 días corridos),
 // según la hipótesis del propio usuario ("últimos 7 días ÷ 7") al plantear esta columna.
-const fetchConsumoDiarioKg = async (material: string): Promise<number> => {
+// Movimientos 261/262 del histórico completo, en Kg de consumo (261 resta del stock → consumo positivo;
+// 262 lo revierte). Se piden una vez por Bloque Formulado y los usan el Consumo/D del Resumen y el tab
+// "Consumo Histórico" (diario / semanal / mensual).
+type MovimientoConsumo = { fecha: Date; kg: number };
+const fetchMovimientosConsumo = async (material: string): Promise<MovimientoConsumo[]> => {
   try {
     const response = await serviciosService.getConsumosFormulado(material);
     const rows: RawApiRow[] = (response as { data?: RawApiRow[] })?.data || [];
-    const hoy = new Date();
-    hoy.setHours(0, 0, 0, 0);
-    const hace7 = new Date(hoy);
-    hace7.setDate(hace7.getDate() - 6);
-    const netoKg = rows.reduce((sum, r) => {
+    return rows.flatMap(r => {
       const mov = getProp(r, ['Movimiento', 'MOVIMIENTO']);
-      if (mov !== '261' && mov !== '262') return sum;
+      if (mov !== '261' && mov !== '262') return [];
       const fecha = parseFechaSAP(getProp(r, ['Fecha', 'FECHA']));
-      if (!fecha || fecha < hace7 || fecha > hoy) return sum;
-      return sum + safeNum(getProp(r, ['Cantidad', 'CANTIDAD']));
-    }, 0);
-    return Math.abs(netoKg) / 7;
+      return fecha ? [{ fecha, kg: -safeNum(getProp(r, ['Cantidad', 'CANTIDAD'])) }] : [];
+    });
   } catch {
-    return 0;
+    return [];
   }
+};
+// Kg consumidos en los `dias` corridos que terminan hoy (incluido).
+const consumoUltimosDiasKg = (movs: MovimientoConsumo[], dias: number, hasta = new Date()): number => {
+  const fin = new Date(hasta);
+  fin.setHours(23, 59, 59, 999);
+  const ini = new Date(fin);
+  ini.setDate(ini.getDate() - dias + 1);
+  ini.setHours(0, 0, 0, 0);
+  return Math.abs(movs.reduce((s, m) => (m.fecha >= ini && m.fecha <= fin ? s + m.kg : s), 0));
+};
+const consumoDiarioKgDe = (movs: MovimientoConsumo[]): number => consumoUltimosDiasKg(movs, 7) / 7;
+
+// Tab "Consumo Histórico" (usuario 2026-10-27, validación antes de usarlo en la reposición): el
+// consumo de cada Bloque Formulado en tres bases con ventanas corridas que terminan hoy — diario
+// (7 días ÷ 7), semanal (28 días ÷ 4) y mensual (90 días ÷ 3) — y las últimas 4 semanas por separado
+// para ver la tendencia.
+const resumenConsumoHistorico = (movs: MovimientoConsumo[]) => {
+  const hoy = new Date();
+  const semanas = [3, 2, 1, 0].map(i => {
+    const hasta = new Date(hoy);
+    hasta.setDate(hasta.getDate() - 7 * i);
+    return consumoUltimosDiasKg(movs, 7, hasta);
+  });
+  const kg28 = consumoUltimosDiasKg(movs, 28);
+  const kg90 = consumoUltimosDiasKg(movs, 90);
+  return {
+    diarioKg: consumoDiarioKgDe(movs),
+    semanalKg: kg28 / 4,
+    mensualKg: kg90 / 3,
+    // Equivalente por día de cada base, para comparar y calcular cobertura con la misma unidad.
+    porDia: { diario: consumoDiarioKgDe(movs), semanal: kg28 / 28, mensual: kg90 / 90 },
+    semanas,
+    movimientos: movs.length,
+  };
 };
 
 // Materiales de PRUEBA (ej. "BLOQUE FORMULADO PRUEBAS MQ COFAMA") — el usuario confirmó que tanto
@@ -517,7 +549,7 @@ interface FormuladoSummaryRow {
   pesoBloque: number;
   kgTotal: number;
   unidades: number;
-  // Consumo diario promedio de los últimos 7 días corridos (ver fetchConsumoDiarioKg /
+  // Consumo diario promedio de los últimos 7 días corridos (ver fetchMovimientosConsumo /
   // getConsumosFormulado) — Kg de movimiento 261 (salida a producción) neteado contra 262
   // (reversa de esa salida), sin incluir 101/102 (recepción de este mismo bloque, no es consumo).
   consumoDiarioKg: number;
@@ -727,6 +759,11 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
 
   const [isProcessingResumen, setIsProcessingResumen] = useState(false);
   const [resumenProgress, setResumenProgress] = useState({ current: 0, total: 0 });
+  // Movimientos 261/262 por Bloque Formulado (ver fetchMovimientosConsumo) para el tab Consumo
+  // Histórico. Se llenan al generar el Resumen; con un resumen restaurado se piden desde el tab.
+  const [movimientosConsumo, setMovimientosConsumo] = useState<Record<string, MovimientoConsumo[]>>({});
+  const [cargandoHistorico, setCargandoHistorico] = useState(false);
+  const [baseConsumo, setBaseConsumo] = useState<'diario' | 'semanal' | 'mensual'>('diario');
   const [unifiedSummaryData, setUnifiedSummaryData] = useState<FormuladoSummaryRow[]>([]);
   // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
   const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
@@ -886,7 +923,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     // Consumo/D se pide UNA vez por Bloque Formulado (no por orden): varias órdenes distintas
     // pueden trazar al mismo blockCode, y getConsumosFormulado ya trae todo el histórico de ese
     // material en una sola llamada — repetirla por orden sería puro desperdicio.
-    const consumoDiarioCache = new Map<string, number>();
+    const movimientosCache = new Map<string, MovimientoConsumo[]>();
     setResumenProgress({ current: 0, total: allOrders.length });
 
     for (let i = 0; i < allOrders.length; i++) {
@@ -969,10 +1006,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
           // Mismo caso que getStockEnCurado: getConsumosFormulado/Registros51Mb solo confirma
           // Movimiento/Fecha/Cantidad, sin Centro — el Consumo/D de acá es compartido entre los dos
           // centros hasta confirmar ese campo en la respuesta real.
-          if (!consumoDiarioCache.has(blockCode)) {
-            consumoDiarioCache.set(blockCode, await fetchConsumoDiarioKg(blockCode));
+          if (!movimientosCache.has(blockCode)) {
+            movimientosCache.set(blockCode, await fetchMovimientosConsumo(blockCode));
           }
-          const consumoDiarioKg = consumoDiarioCache.get(blockCode) ?? 0;
+          const consumoDiarioKg = consumoDiarioKgDe(movimientosCache.get(blockCode) ?? []);
           groupsMap.set(key, {
             blockCode, blockDesc: blockDesc !== '—' ? blockDesc : info.desc, centro: centroOrden, corrida,
             dens: info.dens, apertura: info.apertura,
@@ -1005,6 +1042,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     );
     setUnifiedSummaryData(summaryOrdenado);
     setConsumoBloqueFormulado(consumoRows);
+    setMovimientosConsumo(Object.fromEntries(movimientosCache));
     // Mantiene el snapshot en sync — si el usuario navega a otro módulo y vuelve, el tab Resumen ya
     // no aparece vacío (ver SnapshotFormulacion). No-op si todavía no se sincronizó ningún dato base
     // (actualizarEnCache no escribe sobre un snapshot inexistente).
@@ -1701,6 +1739,99 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     );
   };
 
+  // Con un resumen restaurado (caché / plan guardado) los movimientos no vienen: se piden aquí, una vez
+  // por Bloque Formulado que falte.
+  const cargarHistoricoConsumo = async () => {
+    const faltantes = Array.from(new Set(unifiedSummaryData.map(r => r.blockCode))).filter(c => !movimientosConsumo[c]);
+    if (faltantes.length === 0) return;
+    setCargandoHistorico(true);
+    try {
+      const pares = await Promise.all(faltantes.map(async c => [c, await fetchMovimientosConsumo(c)] as const));
+      setMovimientosConsumo(prev => ({ ...prev, ...Object.fromEntries(pares) }));
+    } finally {
+      setCargandoHistorico(false);
+    }
+  };
+
+  const renderConsumoHistorico = () => {
+    if (unifiedSummaryData.length === 0) {
+      return <div className="py-24 text-center text-[10px] font-bold text-gray-500 uppercase tracking-widest">Genera la Salida de Datos para ver el consumo histórico de sus bloques formulados.</div>;
+    }
+    const faltan = unifiedSummaryData.some(r => !movimientosConsumo[r.blockCode]);
+    const th = 'px-3 py-3 border-r border-gray-100 text-[10px] font-black uppercase text-slate-600';
+    const td = 'px-3 py-2 border-r border-gray-100 text-right font-mono text-slate-800';
+    const bases = [['diario', 'Diario (7 días)'], ['semanal', 'Semanal (4 sem.)'], ['mensual', 'Mensual (3 meses)']] as const;
+    const resaltar = (b: typeof baseConsumo) => (b === baseConsumo ? 'bg-cyan-50 font-black text-cyan-800' : '');
+    return (
+      <Card className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
+        <div className="px-6 py-4 flex flex-wrap items-center justify-between gap-3 border-b border-gray-100">
+          <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
+            {bases.map(([v, l]) => (
+              <button key={v} onClick={() => setBaseConsumo(v)} className={`px-3 py-1.5 text-[10px] font-black uppercase ${baseConsumo === v ? 'bg-cyan-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>{l}</button>
+            ))}
+          </div>
+          {faltan && (
+            <Button size="sm" variant="outline" disabled={cargandoHistorico} onClick={() => void cargarHistoricoConsumo()} className="h-8 text-[10px] font-black uppercase">
+              {cargandoHistorico ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Cargar histórico
+            </Button>
+          )}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-[11px]">
+            <thead className="bg-gray-50">
+              <tr>
+                <th rowSpan={2} className={`${th} text-left`}>Bloque Formulado</th><th rowSpan={2} className={th}>Centro</th><th rowSpan={2} className={th}>Apertura</th>
+                <th rowSpan={2} className={th}>Stock útil (kg)</th>
+                <th colSpan={3} className={`${th} text-center`}>Consumo promedio (kg / día)</th>
+                <th colSpan={4} className={`${th} text-center`}>Consumo por semana (kg)</th>
+                <th rowSpan={2} className={th} title="Consumo diario de los últimos 7 días contra el promedio diario de 3 meses">Tendencia</th>
+                <th rowSpan={2} className={`${th} bg-cyan-50`}>Cobertura (días)</th>
+              </tr>
+              <tr>
+                {bases.map(([v, l]) => <th key={v} className={`${th} ${resaltar(v)}`}>{l.split(' ')[0]}</th>)}
+                {['S-3', 'S-2', 'S-1', 'Actual'].map(s => <th key={s} className={th}>{s}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {unifiedSummaryData.map(r => {
+                const movs = movimientosConsumo[r.blockCode];
+                const h = movs ? resumenConsumoHistorico(movs) : null;
+                const stockUtilKg = r.stockUtilUN * r.pesoBloque;
+                const porDia = h?.porDia[baseConsumo] ?? 0;
+                const tendencia = h && h.porDia.mensual > 0 ? h.porDia.diario / h.porDia.mensual - 1 : null;
+                return (
+                  <tr key={`${r.blockCode}|${r.centro}|${r.apertura}|${r.dens}`} className="border-t border-gray-100 hover:bg-slate-50/60">
+                    <td className="px-3 py-2 border-r border-gray-100 text-left">
+                      <div className="font-mono font-black text-slate-800">{r.blockCode}</div>
+                      <div className="text-[9px] text-slate-500 truncate max-w-[260px]" title={r.blockDesc}>{r.blockDesc}</div>
+                    </td>
+                    <td className={`${td} text-center`}>{r.centro}</td>
+                    <td className={`${td} text-center`}>{r.apertura}</td>
+                    <td className={td}>{formatNum(stockUtilKg, 0)}</td>
+                    {h ? (
+                      <>
+                        <td className={`${td} ${resaltar('diario')}`}>{h.porDia.diario.toFixed(1)}</td>
+                        <td className={`${td} ${resaltar('semanal')}`}>{h.porDia.semanal.toFixed(1)}</td>
+                        <td className={`${td} ${resaltar('mensual')}`}>{h.porDia.mensual.toFixed(1)}</td>
+                        {h.semanas.map((kg, i) => <td key={i} className={`${td} text-slate-600`}>{formatNum(kg, 0)}</td>)}
+                        <td className={`${td} ${tendencia === null ? '' : tendencia > 0.15 ? 'text-orange-600 font-black' : tendencia < -0.15 ? 'text-emerald-700 font-black' : ''}`}>
+                          {tendencia === null ? '—' : `${tendencia > 0 ? '+' : ''}${(tendencia * 100).toFixed(0)}%`}
+                        </td>
+                        <td className={`${td} bg-cyan-50/40 font-black`}>{porDia > 0 ? (stockUtilKg / porDia).toFixed(1) : '—'}</td>
+                      </>
+                    ) : (
+                      <td colSpan={9} className="px-3 py-2 text-center text-[10px] text-slate-400">Sin histórico cargado</td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    );
+  };
+
   const renderContent = () => {
     if (isLoading) {
       return (
@@ -1726,6 +1857,9 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
              </>
            )}
         </div>
+      );
+      case 'consumo': return (
+        <div className="animate-in fade-in duration-300 text-left">{renderConsumoHistorico()}</div>
       );
       case 'curado': return (
         <div className="animate-in fade-in duration-300 text-left space-y-4">
@@ -1997,9 +2131,10 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid grid-cols-5 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
-          {[ 
-            { v: 'resumen', l: 'Salida de Datos', i: LayoutDashboard }, 
+        <TabsList className="grid grid-cols-6 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
+          {[
+            { v: 'resumen', l: 'Salida de Datos', i: LayoutDashboard },
+            { v: 'consumo', l: 'Consumo Histórico', i: TrendingUp },
             { v: 'curado', l: 'Control Curado', i: TableIcon },
             { v: 'ordenes', l: 'Provisionales', i: Package }, 
             { v: 'ordenesProd', l: 'FERT', i: ShoppingCart },
