@@ -2747,13 +2747,15 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         return m;
       };
       const ordenApertura = (a: string) => { const i = ['194.5', '206', '219', '228'].indexOf(a); return i === -1 ? 99 : i; };
-      return Array.from(agrupar(filas, f => f.dens).entries())
-        .sort((a, b) => safeNum(a[0]) - safeNum(b[0]))
-        .map(([dens, itemsDens]) => {
-          // Una línea por bloque madre = tipo + apertura (usuario 2026-10-27: "D15AMAF · 194.5",
-          // "D15AMAF · 206", "D15NGFR · 206" en lineal, sin nivel de apertura aparte), con sus bloques.
-          const bloquesMadre = Array.from(agrupar(itemsDens, f => `${f.tipo}|${f.apertura}`).values())
-            .sort((a, b) => a[0].tipo.localeCompare(b[0].tipo) || ordenApertura(a[0].apertura) - ordenApertura(b[0].apertura))
+      // Primer nivel = densidad + apertura (usuario 2026-10-27: "D12 · 194.5" y "D12 · 206" son bloques
+      // distintos; juntarlos en una sola fila de densidad mostraba 1 bloque). Debajo, una línea por tipo
+      // de espuma (D15AMAF / D15NGFR = bloque madre distinto) con sus bloques, y luego los materiales.
+      return Array.from(agrupar(filas, f => `${f.dens}|${f.apertura}`).values())
+        .sort((a, b) => safeNum(a[0].dens) - safeNum(b[0].dens) || ordenApertura(a[0].apertura) - ordenApertura(b[0].apertura))
+        .map(itemsGrupo => {
+          const { dens, apertura } = itemsGrupo[0];
+          const bloquesMadre = Array.from(agrupar(itemsGrupo, f => f.tipo).values())
+            .sort((a, b) => a[0].tipo.localeCompare(b[0].tipo))
             .map(items => {
               const metros = items.reduce((s, f) => s + f.longitudM, 0);
               const bloques = metros / LARGO_BLOQUE_M;
@@ -2766,8 +2768,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
                 ...totales(filasBloque), bloquesEnteros: Math.ceil(bloques - 1e-9),
               };
             });
-          const aperturas = Array.from(new Set(bloquesMadre.map(b => b.apertura))).sort((a, b) => ordenApertura(a) - ordenApertura(b));
-          return { dens, aperturas, bloquesMadre, ...totales(bloquesMadre), bloques: bloquesMadre.reduce((s, b) => s + b.bloques, 0) };
+          return { clave: `${dens}|${apertura}`, dens, apertura, bloquesMadre, ...totales(bloquesMadre), bloques: bloquesMadre.reduce((s, b) => s + b.bloques, 0) };
         });
     };
     return { '1000': calcular(fertT8PorCentro['1000'], '1000'), '2000': calcular(fertT8PorCentro['2000'], '2000') };
@@ -7197,18 +7198,18 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                   {grupos.length === 0 ? (
                     <div className="p-4 text-xs text-slate-600">Sin órdenes FERT de carrusel para el día de corte {t8Fechas.d.split('-').reverse().join('/')} (Venta Externa: {t8Fechas.venta.split('-').reverse().join('/')}). Sincroniza para traer las FERT liberadas.</div>
                   ) : (
-                    // Árbol Densidad → bloque madre (tipo · apertura, en lineal) → material, cada nivel plegable
+                    // Árbol Densidad · Apertura → bloque madre (tipo de espuma) → material, cada nivel plegable
                     // (+/−) con sus totales y bloques en la misma fila. Columnas en el orden del Excel del usuario (IMG B).
                     <>
                     <div className="flex justify-end gap-2 px-4 pt-3">
-                      <button className="text-[10px] font-black uppercase text-indigo-700 hover:underline" onClick={() => setT8Plegados(prev => { const n = new Set(prev); grupos.forEach(g => n.delete(`${centro}|${g.dens}`)); return n; })}>Expandir todo</button>
+                      <button className="text-[10px] font-black uppercase text-indigo-700 hover:underline" onClick={() => setT8Plegados(prev => { const n = new Set(prev); grupos.forEach(g => n.delete(`${centro}|${g.clave}`)); return n; })}>Expandir todo</button>
                       <span className="text-slate-300">·</span>
-                      <button className="text-[10px] font-black uppercase text-indigo-700 hover:underline" onClick={() => setT8Plegados(prev => { const n = new Set(prev); grupos.forEach(g => n.add(`${centro}|${g.dens}`)); return n; })}>Colapsar todo</button>
+                      <button className="text-[10px] font-black uppercase text-indigo-700 hover:underline" onClick={() => setT8Plegados(prev => { const n = new Set(prev); grupos.forEach(g => n.add(`${centro}|${g.clave}`)); return n; })}>Colapsar todo</button>
                     </div>
                     <table className="w-full text-[11px] border-collapse">
                       <thead>
                         <tr>
-                          <th className={`${th} bg-slate-50 text-left`}>Densidad / Bloque · Apertura / Material</th><th className={`${th} bg-slate-50`}>Tamaño</th><th className={`${th} bg-slate-50`}>Espesor</th>
+                          <th className={`${th} bg-slate-50 text-left`}>Densidad · Apertura / Bloque / Material</th><th className={`${th} bg-slate-50`}>Tamaño</th><th className={`${th} bg-slate-50`}>Espesor</th>
                           <th className={`${th} bg-slate-100`}>Cantidad láminas UN</th>
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Und / sub-bloque</th><th className={`${th} bg-indigo-50`}>N° Sub-bloques</th>
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Cap. giro</th><th className={`${th} bg-indigo-50`}>N° Carga CR-01/03/04</th><th className={`${th} bg-indigo-50`}>N° Carga sub-bloques CNC</th>
@@ -7220,9 +7221,9 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                       </thead>
                       <tbody>
                         {grupos.map(g => {
-                          const claveDens = `${centro}|${g.dens}`;
+                          const claveDens = `${centro}|${g.clave}`;
                           const densAbierta = !t8Plegados.has(claveDens);
-                          // Fila de totales de un grupo (densidad o bloque madre): mismas columnas que el detalle.
+                          // Fila de totales de un grupo (densidad · apertura o bloque madre): mismas columnas que el detalle.
                           const filaTotales = (t: { cant: number; subB: number; cargas: number; subCNC: number; tLaminasH: number; tCupulaH: number; tCargaDescargaH: number; tTotalH: number; metros: number; bloquesEnteros: number }, bloques: number) => (
                             <>
                               <td className={td}>{formatNum(t.cant, 0)}</td><td className={td}></td><td className={td}>{t.subB}</td><td className={td}></td>
@@ -7233,25 +7234,24 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                             </>
                           );
                           return (
-                            <React.Fragment key={g.dens}>
+                            <React.Fragment key={g.clave}>
                               <tr className="border-t-2 border-indigo-200 bg-indigo-50 font-black text-indigo-900 cursor-pointer hover:bg-indigo-100" onClick={() => toggleT8(claveDens)}>
                                 <td className="px-2 py-2 border-r border-slate-200" colSpan={3}>
                                   <span className="inline-flex items-center gap-2">{densAbierta ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}Densidad D{g.dens}
-                                    <span className="text-[9px] font-bold text-indigo-600">{g.aperturas.join(' · ')}</span></span>
+                                    <span className="text-indigo-400">·</span>
+                                    {g.apertura === 'Sin apertura' ? <span className="text-orange-600">Sin apertura</span> : g.apertura}</span>
                                 </td>
                                 {filaTotales(g, g.bloques)}
                               </tr>
                               {densAbierta && g.bloquesMadre.map(b => {
-                                const claveBloque = `${claveDens}|${b.tipo}|${b.apertura}`;
+                                const claveBloque = `${claveDens}|${b.tipo}`;
                                 const bloqueAbierto = !t8Plegados.has(claveBloque);
                                 return (
-                                  <React.Fragment key={`${b.tipo}|${b.apertura}`}>
+                                  <React.Fragment key={b.tipo}>
                                     <tr className="border-t border-slate-200 bg-slate-50 font-black text-slate-700 cursor-pointer hover:bg-slate-100" onClick={() => toggleT8(claveBloque)}>
                                       <td className="pl-7 pr-2 py-1.5 border-r border-slate-200" colSpan={3}>
                                         <span className="inline-flex items-center gap-2">{bloqueAbierto ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
-                                          <span className={b.deCategoria ? 'text-teal-800' : 'text-orange-600'} title={`${b.deCategoria ? 'Categoría FERT' : 'Sin categoría: tomado de la descripción'}${b.descs.length ? ` — ${b.descs.join(' / ')}` : ''}`}>{b.tipo.replace(/^CM-LAM-/, '')}</span>
-                                          <span className="text-slate-400">·</span>
-                                          {b.apertura === 'Sin apertura' ? <span className="text-orange-600">Sin apertura</span> : b.apertura}</span>
+                                          <span className={b.deCategoria ? 'text-teal-800' : 'text-orange-600'} title={`${b.deCategoria ? 'Categoría FERT' : 'Sin categoría: tomado de la descripción'}${b.descs.length ? ` — ${b.descs.join(' / ')}` : ''}`}>{b.tipo.replace(/^CM-LAM-/, '')}</span></span>
                                       </td>
                                       {filaTotales(b, b.bloques)}
                                     </tr>
