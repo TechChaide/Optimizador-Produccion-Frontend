@@ -27,8 +27,11 @@ export const ALTURA_UTIL_REDUCIDA_CM = 85;
 export const alturaUtilCm = (densidad: number): number =>
   densidad >= DENSIDAD_ALTURA_REDUCIDA ? ALTURA_UTIL_REDUCIDA_CM : ALTURA_UTIL_CM;
 
-export const unidadesPorSubBloque = (densidad: number, espesorCm: number): number =>
-  Math.max(1, Math.floor(alturaUtilCm(densidad) / espesorCm));
+// alturaMaestroCm: "Altura" del material en KPIMaestroCarruseles (usuario 2026-10-27) — la altura útil
+// real de ese material, también para visco/HS/BIO. Sin ella (material fuera del maestro) se usa la
+// regla por densidad.
+export const unidadesPorSubBloque = (densidad: number, espesorCm: number, alturaMaestroCm?: number): number =>
+  Math.max(1, Math.floor((alturaMaestroCm && alturaMaestroCm > 0 ? alturaMaestroCm : alturaUtilCm(densidad)) / espesorCm));
 
 export const subBloquesEnteros = (cantidad: number, unidadesPorSub: number): number =>
   Math.ceil(cantidad / unidadesPorSub - 1e-9);

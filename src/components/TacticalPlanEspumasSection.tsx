@@ -64,7 +64,7 @@ import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDa
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import {
   esAperturaTecnica, APERTURAS_TECNICAS, LARGO_BLOQUE_M, ALTURA_BLOQUE_CM, CUPULA_CM, CUPULA_MAX_CM, ALTURA_UTIL_CM,
-  alturaUtilCm, unidadesPorSubBloque, subBloquesEnteros, longitudSubBloquesM,
+  unidadesPorSubBloque as unidadesPorSubBloqueDe, subBloquesEnteros, longitudSubBloquesM,
   densidadDeCategoria, aperturaDeCategoria, tipoDeCategoria, tipoEspumaDesc,
 } from '@/lib/bloques-espuma';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, addDays } from 'date-fns';
@@ -831,7 +831,9 @@ const calcularMetricasCapacidad = (
   // Corte VERTICAL (responsables RespCtrlProd_Verticales): no es carrusel — sin sub-bloques, descarga
   // por sub-bloque ni ciclos de cúpula. Su tiempo es carga/descarga por lote (VERTICAL_MIN_*) + T. Indiv × cantidad (pedido del usuario
   // 2026-10-07: 30000160 LAMINA ESQUINA 12X31X5 sumaba 11.66 h de "descarga" de carrusel en verticales).
-  esVertical: boolean = false
+  esVertical: boolean = false,
+  // "Altura" del material en KPIMaestroCarruseles (ver alturaMaestroDe); sin ella, regla por densidad.
+  alturaMaestroCm?: number
 ): MetricasCapacidad => {
   // Modelo de carrusel (usuario 2026-10-07), en sub-bloques ENTEROS por material/espesor/densidad:
   //  1) Unidades aprovechables por sub-bloque = ⌊altura útil / espesor⌋ (del piso a lo alto del bloque
@@ -844,9 +846,8 @@ const calcularMetricasCapacidad = (
   //  5) Corte = T. Indiv (KPI) × unidades + 4 × T. Indiv × cargas.
   //  6) Und/Batch = lo que realmente va en la carga: unidades por sub-bloque × min(sub-bloques, capacidad
   //     por giro) — "carrusel lleno" solo cuando hay sub-bloques para llenarlo.
-  const usefulHeight = alturaUtilCm(densVal);
   const hTotal = info.esp * qty;
-  const unidadesPorSubBloque = info.esp > 0 ? Math.max(1, Math.floor(usefulHeight / info.esp)) : 0;
+  const unidadesPorSubBloque = info.esp > 0 ? unidadesPorSubBloqueDe(densVal, info.esp, alturaMaestroCm) : 0;
   const subB = unidadesPorSubBloque > 0 && qty > 0 ? Math.ceil(qty / unidadesPorSubBloque - 1e-9) : 0;
   const tiempoDescargaH = (subB * (TIEMPO_DESCARGA_CICLO_SEG[centro] || 0)) / 3600;
   // Sin medición de carga en el centro (Guayaquil todavía), la carga no suma tiempo propio.
@@ -1200,6 +1201,24 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const [mantenimientosSAP, setMantenimientosSAP] = useState<RawApiRow[]>([]);
   const [tiemposCatalogo, setTiemposCatalogo] = useState<RawApiRow[]>([]);
   const [kpiCarruselesData, setKpiCarruselesData] = useState<RawApiRow[]>([]);
+  // Altura útil por material desde KPIMaestroCarruseles (columna "Altura", usuario 2026-10-27): del
+  // mismo centro y, si no, de cualquier centro. Reemplaza la regla por densidad (103 / 85) cuando el
+  // material está en el maestro — así visco/HS/BIO usan su altura real.
+  const alturaMaestroDe = useMemo(() => {
+    const porCentro = new Map<string, number>();
+    const cualquiera = new Map<string, number>();
+    kpiCarruselesData.forEach(c => {
+      const altura = safeNum(getProp(c, ['Altura', 'ALTURA']));
+      const code = cleanCode(getProp(c, ['Material', 'MATERIAL']));
+      if (!code || altura <= 0) return;
+      porCentro.set(`${code}|${String(getProp(c, ['Centro', 'CENTRO'])).trim()}`, altura);
+      if (!cualquiera.has(code)) cualquiera.set(code, altura);
+    });
+    return (material: string, centro: string): number | undefined => {
+      const code = cleanCode(material);
+      return porCentro.get(`${code}|${centro}`) ?? cualquiera.get(code);
+    };
+  }, [kpiCarruselesData]);
   const [operadoresCorte, setOperadoresCorte] = useState<RawApiRow[]>([]);
   const [, setGrupos] = useState<Grupo[]>([]);
   // Días NO laborables (feriados + días que la planta decide no trabajar) del calendario configurado.
@@ -1799,7 +1818,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // REGLA: Responsables de operación alterna (039, 036, 044)
       const isAlterna = esRespVertical(centroId, resp);
 
-      const metrics = calcularMetricasCapacidad(info, densVal, qty, tIndivReal, conocidos, centroId, isAlterna);
+      const metrics = calcularMetricasCapacidad(info, densVal, qty, tIndivReal, conocidos, centroId, isAlterna, alturaMaestroDe(info.code, centroId));
       const { hTotal, subBloques: subB, undBatch, nroCargas: nLoads, tIndiv, tIndivEstimado, tIndivEstimadoNivel, tTotal, tiempoDescargaH, sinGeometria } = metrics;
 
       const looperMatch = kpiLooperData.find(k => cleanCode(k.Material) === info.code);
@@ -1892,7 +1911,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         llegaDiaPT
       };
     });
-  }, [extractMaterialInfo, tiemposCatalogo, kpiCarruselesData, kpiLooperData, materialAreaMap, esRespVertical, ventanaLaminaEnsamblado]);
+  }, [extractMaterialInfo, tiemposCatalogo, kpiCarruselesData, kpiLooperData, materialAreaMap, esRespVertical, ventanaLaminaEnsamblado, alturaMaestroDe]);
 
   // boundary 'future' (Provisionales): descarta fechas pasadas SIEMPRE, sin importar qué haya
   // seleccionado el usuario — ni siquiera "Ver Todo el Plan" (selección vacía) puede traer una
@@ -2550,7 +2569,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       // Misma regla que Provisionales/FERT (ver auditMapper): responsables 039/036/044 son operación alterna.
       const isAlterna = esRespVertical(centroId, respCP);
       const { hTotal, subBloques, undBatch, nroCargas, tIndiv, tIndivEstimado, tIndivEstimadoNivel, tTotal, tiempoDescargaH, sinGeometria } =
-        calcularMetricasCapacidad(info, densVal, qty, tIndivReal, conocidos, centroId, isAlterna);
+        calcularMetricasCapacidad(info, densVal, qty, tIndivReal, conocidos, centroId, isAlterna, alturaMaestroDe(info.code, centroId));
 
       const looperMatch = kpiLooperData.find(k => cleanCode(k.Material) === info.code);
       const pesoUN = looperMatch ? safeNum(looperMatch.PesoUN) : (info.ancho * info.largo * info.esp * densVal) / 1000000;
@@ -2600,7 +2619,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         origenCandidatosCount: 1
       };
     });
-  }, [materialDescMap, tiemposCatalogo, kpiCarruselesData, kpiLooperData, materialRespCPPorCentro, pendientesLaminaPorCentro, esRespVertical]);
+  }, [materialDescMap, tiemposCatalogo, kpiCarruselesData, kpiLooperData, materialRespCPPorCentro, pendientesLaminaPorCentro, esRespVertical, alturaMaestroDe]);
 
   // Capacidad física que representaría cortar toda la demanda de "Necesidades Planta" — mismo formato
   // de tabla que FERT/Provisionales (ver renderAuditTable), un bloque por centro.
@@ -3059,7 +3078,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         // Altura útil 85 cm para D ≥ 28 confirmada SOLO para aperturas técnicas (194.5/206/219/228);
         // visco / HS / BIO (135, 160, 200…) tienen otra altura que el usuario va a confirmar — hasta
         // entonces siguen con la misma regla.
-        const unidadesPorSub = unidadesPorSubBloque(densVal, r.esp);
+        const alturaMaestro = alturaMaestroDe(r.material, centro);
+        const unidadesPorSub = unidadesPorSubBloqueDe(densVal, r.esp, alturaMaestro);
         const subB = subBloquesEnteros(r.cantTotal, unidadesPorSub);
         const capGiro = capacidadGiroCarrusel(r.ancho);
         const completas = capGiro > 0 ? Math.floor(subB / capGiro) : 0;
@@ -3080,7 +3100,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           apertura: aperturaCat || (r.apertura !== '—' ? r.apertura : 'Sin apertura'), tLaminasH,
           categoria, tipo: categoriaBase || tipoDesc || 'Sin tipo', tipoDesc, tipoDeCategoria: !!categoriaBase,
           tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, alturaTotal: r.esp * r.cantTotal,
-          unidadesPorSub, subB, capGiro, cargas, subCNC, ciclosCup, cupulaCm: alturaCupulaCm(r.esp), tCupulaH,
+          unidadesPorSub, alturaMaestro, subB, capGiro, cargas, subCNC, ciclosCup, cupulaCm: alturaCupulaCm(r.esp), tCupulaH,
           ocupacion: cargas > 0 && capGiro > 0 ? subCarrusel / (cargas * capGiro) : 0,
           tCorteH, tCargaDescargaH, tTotalH: tCorteH + tCargaDescargaH,
           longitudM: longitudSubBloquesM(subB, r.ancho),
@@ -3138,7 +3158,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       '1000': calcular(fertT8PorCentro['1000'], '1000'),
       '2000': calcular(fertT8PorCentro['2000'], '2000'),
     };
-  }, [fertT8PorCentro, aperturaCategoriaPorCentro]);
+  }, [fertT8PorCentro, aperturaCategoriaPorCentro, alturaMaestroDe]);
 
   // Auditoría (solo lectura, pedido del usuario 2026-10-07): cada FERT con cantidad pendiente hasta la
   // fecha evaluada y CUÁNTO de ella entra a la ocupación, con el motivo — para conciliar contra SAP
@@ -7181,7 +7201,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               <span className="text-slate-600">=</span>
               <span className="px-3 py-1.5 rounded-xl bg-emerald-100 text-emerald-900 font-black">Altura útil {ALTURA_UTIL_CM} cm</span>
               <span className="text-slate-600">·</span>
-              <span className="text-slate-700">D ≥ 28: útil 85 cm · Bloque madre {LARGO_BLOQUE_M} m</span>
+              <span className="text-slate-700">Altura útil por material (KPI Carruseles; sin dato: D ≥ 28 → 85 cm) · Bloque madre {LARGO_BLOQUE_M} m</span>
             </div>
             {(['1000', '2000'] as const).map(centro => {
               const grupos = subBloquesT8PorCentro[centro];
@@ -7266,7 +7286,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                         <td className="pl-8 pr-2 py-1.5 border-r border-slate-100" title={`${f.descripcion}\n${f.categoria || 'sin categoría'}`}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div></td>
                                         <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td>
                                         <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}</td>
-                                        <td className={`${td} text-slate-700`}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td>
+                                        <td className={`${td} ${f.alturaMaestro ? 'text-slate-700' : 'text-orange-600'}`} title={f.alturaMaestro ? `Altura ${f.alturaMaestro} cm (KPIMaestroCarruseles) ÷ espesor ${f.esp}` : 'Material fuera de KPIMaestroCarruseles: altura por regla de densidad'}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td>
                                         <td className={`${td} text-slate-700`}>{f.capGiro}</td><td className={`${td} font-black`}>{f.cargas}</td><td className={td}>{f.subCNC}</td>
                                         <td className={`${td} ${f.ocupacion < 0.6 ? 'text-orange-600 font-black' : 'text-slate-700'}`}>{f.cant > 0 ? `${(f.ocupacion * 100).toFixed(0)}%` : '—'}</td>
                                         <td className={`${td} text-slate-700`}>{f.sinTiempo ? '—' : f.tLaminasH.toFixed(2)}</td>
