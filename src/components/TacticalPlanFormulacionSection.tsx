@@ -45,6 +45,7 @@ import { cn } from '@/lib/utils';
 import { useReportePlanTxt, useAutoCargaPlanVigente, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
+import { CUPULA_MAX_CM } from '@/lib/bloques-espuma';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
 import { es } from 'date-fns/locale';
 
@@ -277,6 +278,11 @@ const resumenConsumoHistorico = (movs: MovimientoConsumo[]) => {
 // nomenclatura humana en SAP, no hay un flag dedicado para esto.
 const esMaterialPrueba = (descripcion: string): boolean => /PRUEBA/i.test(descripcion);
 
+// Altura real del bloque fabricado (getTiemposCuradoBloqueFormulado, columna CuradoAltura en mm —
+// usuario 2026-10-27): 1174 → 117.4 cm. Útil = altura − cúpula (CUPULA_MAX_CM), misma regla del
+// modelo de bloque de Corte Espuma, para contrastar con la altura útil que usa el cálculo (103 / 85).
+const alturaCuradoCm = (row: RawApiRow): number => safeNum(getProp(row, ['CuradoAltura', 'CURADOALTURA', 'curadoAltura'])) / 10;
+
 const matchesCuradoSpace = (row: RawApiRow, space: CuradoSpaceConfig): boolean => {
   const nomMaterial = getProp(row, ['NomMaterial', 'NOMMATERIAL']);
   if (esMaterialPrueba(nomMaterial)) return false;
@@ -360,6 +366,7 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
       __raw: row, __fechaFabTime: fab ? fab.getTime() : 0, __fechaDisponible: fechaDisponible, __disponible: disponible,
       __unidades: unidades, __apertura: info.apertura, __dens: info.dens,
       __densNum: densNum, __cant1: cant1, __comb1: comb1, __cant2: cant2, __comb2: comb2,
+      __alturaCm: alturaCuradoCm(row),
     };
   }).sort((a, b) => {
     const grupoCmp = space.groupBy === 'apertura'
@@ -414,6 +421,7 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
   // siempre es "1", no una combinación de dimensiones.
   const esCofama = space.key === 'cofama';
   const COLUMNAS_EXTRA_COFAMA = ['Densidad', '1er Cant', '1er Comb', '2da Cant', '2da Comb'];
+  const columnasTotales = COLUMNAS_CURADO.length + 2 + (esCofama ? COLUMNAS_EXTRA_COFAMA.length : 0);
 
   return (
     <div className="space-y-2">
@@ -435,6 +443,8 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
                     {col}
                   </th>
                 ))}
+                <th className="px-4 py-4 border-r border-gray-100 whitespace-nowrap uppercase bg-emerald-50/40 text-emerald-700" title="CuradoAltura (mm) ÷ 10">Altura (cm)</th>
+                <th className="px-4 py-4 border-r border-gray-100 whitespace-nowrap uppercase bg-emerald-50/40 text-emerald-700" title={`Altura − cúpula (${CUPULA_MAX_CM} cm)`}>Útil (cm)</th>
                 {esCofama && COLUMNAS_EXTRA_COFAMA.map((col, i) => (
                   <th key={`extra-${i}`} className="px-4 py-4 border-r border-gray-100 whitespace-nowrap uppercase bg-indigo-50/40 text-indigo-700">
                     {col}
@@ -452,7 +462,7 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
                   <React.Fragment key={idx}>
                     {nuevoGrupo && (
                       <tr className="bg-indigo-50/60">
-                        <td colSpan={COLUMNAS_CURADO.length} className="px-4 py-2 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">
+                        <td colSpan={columnasTotales} className="px-4 py-2 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">
                           {aperturaGroupLabel(row.__apertura)}
                         </td>
                       </tr>
@@ -463,6 +473,8 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
                           {valorColumna(row.__raw, col)}
                         </td>
                       ))}
+                      <td className="px-4 py-3 border-r border-gray-100 font-mono text-emerald-800 font-black whitespace-nowrap text-center bg-emerald-50/10">{row.__alturaCm > 0 ? row.__alturaCm.toFixed(1) : '—'}</td>
+                      <td className="px-4 py-3 border-r border-gray-100 font-mono text-emerald-800 whitespace-nowrap text-center bg-emerald-50/10">{row.__alturaCm > 0 ? (row.__alturaCm - CUPULA_MAX_CM).toFixed(1) : '—'}</td>
                       {esCofama && (
                         <>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono text-slate-500 whitespace-nowrap text-center bg-indigo-50/10">{row.__densNum || '—'}</td>
@@ -1753,6 +1765,21 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     }
   };
 
+  // Altura real promedio por Bloque Formulado (CodMaterial) de los registros de curado cargados, sin
+  // materiales de prueba ni filas sin altura.
+  const alturaRealPorBloque = useMemo(() => {
+    const m = new Map<string, { suma: number; min: number; max: number; n: number }>();
+    curadoData.forEach(row => {
+      if (esMaterialPrueba(getProp(row, ['NomMaterial', 'NOMMATERIAL']))) return;
+      const cm = alturaCuradoCm(row);
+      const code = cleanCode(getProp(row, ['CodMaterial', 'MATERIAL', 'CODMATERIAL']));
+      if (!code || cm <= 0) return;
+      const a = m.get(code) ?? { suma: 0, min: Infinity, max: 0, n: 0 };
+      m.set(code, { suma: a.suma + cm, min: Math.min(a.min, cm), max: Math.max(a.max, cm), n: a.n + 1 });
+    });
+    return m;
+  }, [curadoData]);
+
   const renderConsumoHistorico = () => {
     if (unifiedSummaryData.length === 0) {
       return <div className="py-24 text-center text-[10px] font-bold text-gray-500 uppercase tracking-widest">Genera la Salida de Datos para ver el consumo histórico de sus bloques formulados.</div>;
@@ -1781,6 +1808,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             <thead className="bg-gray-50">
               <tr>
                 <th rowSpan={2} className={`${th} text-left`}>Bloque Formulado</th><th rowSpan={2} className={th}>Centro</th><th rowSpan={2} className={th}>Apertura</th>
+                <th rowSpan={2} className={`${th} text-emerald-700`} title="Promedio de CuradoAltura de los bloques de curado cargados (mín–máx y cantidad en el tooltip)">Altura real (cm)</th>
+                <th rowSpan={2} className={`${th} text-emerald-700`} title={`Altura real − cúpula (${CUPULA_MAX_CM} cm)`}>Útil real (cm)</th>
                 <th rowSpan={2} className={th}>Stock útil (kg)</th>
                 <th colSpan={3} className={`${th} text-center`}>Consumo promedio (kg / día)</th>
                 <th colSpan={4} className={`${th} text-center`}>Consumo por semana (kg)</th>
@@ -1799,6 +1828,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                 const stockUtilKg = r.stockUtilUN * r.pesoBloque;
                 const porDia = h?.porDia[baseConsumo] ?? 0;
                 const tendencia = h && h.porDia.mensual > 0 ? h.porDia.diario / h.porDia.mensual - 1 : null;
+                const altura = alturaRealPorBloque.get(r.blockCode);
                 return (
                   <tr key={`${r.blockCode}|${r.centro}|${r.apertura}|${r.dens}`} className="border-t border-gray-100 hover:bg-slate-50/60">
                     <td className="px-3 py-2 border-r border-gray-100 text-left">
@@ -1807,6 +1837,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                     </td>
                     <td className={`${td} text-center`}>{r.centro}</td>
                     <td className={`${td} text-center`}>{r.apertura}</td>
+                    <td className={`${td} text-emerald-800 font-black`} title={altura ? `${altura.min.toFixed(1)}–${altura.max.toFixed(1)} cm · ${altura.n} bloque(s)` : 'Sin registros de curado con altura'}>{altura ? (altura.suma / altura.n).toFixed(1) : '—'}</td>
+                    <td className={`${td} text-emerald-800`}>{altura ? (altura.suma / altura.n - CUPULA_MAX_CM).toFixed(1) : '—'}</td>
                     <td className={td}>{formatNum(stockUtilKg, 0)}</td>
                     {h ? (
                       <>
