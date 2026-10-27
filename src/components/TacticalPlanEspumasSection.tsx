@@ -2746,29 +2746,27 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         lista.forEach(f => m.set(clave(f), [...(m.get(clave(f)) || []), f]));
         return m;
       };
-      const ordenApertura = (a: string) => { const i = ['194.5', '206', '219', '228'].indexOf(a); return i === -1 ? 99 : i; };
-      // Primer nivel = densidad + apertura (usuario 2026-10-27: "D12 · 194.5" y "D12 · 206" son bloques
-      // distintos; juntarlos en una sola fila de densidad mostraba 1 bloque). Debajo, una línea por tipo
-      // de espuma (D15AMAF / D15NGFR = bloque madre distinto) con sus bloques, y luego los materiales.
-      return Array.from(agrupar(filas, f => `${f.dens}|${f.apertura}`).values())
-        .sort((a, b) => safeNum(a[0].dens) - safeNum(b[0].dens) || ordenApertura(a[0].apertura) - ordenApertura(b[0].apertura))
-        .map(itemsGrupo => {
-          const { dens, apertura } = itemsGrupo[0];
-          const bloquesMadre = Array.from(agrupar(itemsGrupo, f => f.tipo).values())
-            .sort((a, b) => a[0].tipo.localeCompare(b[0].tipo))
-            .map(items => {
-              const metros = items.reduce((s, f) => s + f.longitudM, 0);
-              const bloques = metros / LARGO_BLOQUE_M;
-              const filasBloque = items.map(f => ({ ...f, metros: f.longitudM, bloquesEnteros: 0 }));
-              // Etiquetas de descripción del grupo (ej. "NG FRR"), para leer la categoría.
-              const descs = Array.from(new Set(items.map(f => f.tipoDesc).filter(Boolean)));
-              return {
-                tipo: items[0].tipo, apertura: items[0].apertura, descs, deCategoria: items[0].tipoDeCategoria, bloques,
-                items: items.sort((a, b) => a.tamano.localeCompare(b.tamano) || a.esp - b.esp),
-                ...totales(filasBloque), bloquesEnteros: Math.ceil(bloques - 1e-9),
-              };
-            });
-          return { clave: `${dens}|${apertura}`, dens, apertura, bloquesMadre, ...totales(bloquesMadre), bloques: bloquesMadre.reduce((s, b) => s + b.bloques, 0) };
+      // Aperturas técnicas primero en su orden fijo; el resto (visco 135/160/200…) numérico después.
+      const ordenApertura = (a: string) => { const i = ['194.5', '206', '219', '228'].indexOf(a); return i === -1 ? 100 + (parseFloat(a) || 900) : i; };
+      // Una fila de primer nivel por bloque madre = densidad + tipo de espuma + apertura (usuario
+      // 2026-10-27: "D30BLFR · 206", "D30NRCR · 206", "D30NRRR · 206", "D40VISC · 135"…): misma densidad
+      // y apertura con distinto material son bloques distintos. Debajo, directamente los materiales.
+      return Array.from(agrupar(filas, f => `${f.dens}|${f.tipo}|${f.apertura}`).values())
+        .sort((a, b) => safeNum(a[0].dens) - safeNum(b[0].dens) || ordenApertura(a[0].apertura) - ordenApertura(b[0].apertura) || a[0].tipo.localeCompare(b[0].tipo))
+        .map(items => {
+          const { dens, tipo, apertura, tipoDeCategoria } = items[0];
+          const metros = items.reduce((s, f) => s + f.longitudM, 0);
+          const bloques = metros / LARGO_BLOQUE_M;
+          const filasBloque = items.map(f => ({ ...f, metros: f.longitudM, bloquesEnteros: 0 }));
+          // Etiquetas de descripción del grupo (ej. "NG FRR"), para leer la categoría.
+          const descs = Array.from(new Set(items.map(f => f.tipoDesc).filter(Boolean)));
+          return {
+            clave: `${dens}|${tipo}|${apertura}`, dens, apertura, descs, deCategoria: tipoDeCategoria, bloques,
+            // "CM-LAM-D30BLFR" → "D30BLFR"; sin categoría el tipo viene de la descripción ("NG FRR") → "D15 NG FRR".
+            etiqueta: tipoDeCategoria ? tipo.replace(/^CM-LAM-/, '') : `D${dens} ${tipo}`,
+            items: items.sort((a, b) => a.tamano.localeCompare(b.tamano) || a.esp - b.esp),
+            ...totales(filasBloque), bloquesEnteros: Math.ceil(bloques - 1e-9),
+          };
         });
     };
     return { '1000': calcular(fertT8PorCentro['1000'], '1000'), '2000': calcular(fertT8PorCentro['2000'], '2000') };
@@ -7198,7 +7196,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                   {grupos.length === 0 ? (
                     <div className="p-4 text-xs text-slate-600">Sin órdenes FERT de carrusel para el día de corte {t8Fechas.d.split('-').reverse().join('/')} (Venta Externa: {t8Fechas.venta.split('-').reverse().join('/')}). Sincroniza para traer las FERT liberadas.</div>
                   ) : (
-                    // Árbol Densidad · Apertura → bloque madre (tipo de espuma) → material, cada nivel plegable
+                    // Bloque madre (densidad + tipo de espuma · apertura) → material, cada grupo plegable
                     // (+/−) con sus totales y bloques en la misma fila. Columnas en el orden del Excel del usuario (IMG B).
                     <>
                     <div className="flex justify-end gap-2 px-4 pt-3">
@@ -7209,7 +7207,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                     <table className="w-full text-[11px] border-collapse">
                       <thead>
                         <tr>
-                          <th className={`${th} bg-slate-50 text-left`}>Densidad · Apertura / Bloque / Material</th><th className={`${th} bg-slate-50`}>Tamaño</th><th className={`${th} bg-slate-50`}>Espesor</th>
+                          <th className={`${th} bg-slate-50 text-left`}>Densidad · Apertura / Material</th><th className={`${th} bg-slate-50`}>Tamaño</th><th className={`${th} bg-slate-50`}>Espesor</th>
                           <th className={`${th} bg-slate-100`}>Cantidad láminas UN</th>
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Und / sub-bloque</th><th className={`${th} bg-indigo-50`}>N° Sub-bloques</th>
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Cap. giro</th><th className={`${th} bg-indigo-50`}>N° Carga CR-01/03/04</th><th className={`${th} bg-indigo-50`}>N° Carga sub-bloques CNC</th>
@@ -7223,7 +7221,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         {grupos.map(g => {
                           const claveDens = `${centro}|${g.clave}`;
                           const densAbierta = !t8Plegados.has(claveDens);
-                          // Fila de totales de un grupo (densidad · apertura o bloque madre): mismas columnas que el detalle.
+                          // Fila de totales del bloque madre: mismas columnas que el detalle.
                           const filaTotales = (t: { cant: number; subB: number; cargas: number; subCNC: number; tLaminasH: number; tCupulaH: number; tCargaDescargaH: number; tTotalH: number; metros: number; bloquesEnteros: number }, bloques: number) => (
                             <>
                               <td className={td}>{formatNum(t.cant, 0)}</td><td className={td}></td><td className={td}>{t.subB}</td><td className={td}></td>
@@ -7237,27 +7235,16 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                             <React.Fragment key={g.clave}>
                               <tr className="border-t-2 border-indigo-200 bg-indigo-50 font-black text-indigo-900 cursor-pointer hover:bg-indigo-100" onClick={() => toggleT8(claveDens)}>
                                 <td className="px-2 py-2 border-r border-slate-200" colSpan={3}>
-                                  <span className="inline-flex items-center gap-2">{densAbierta ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}Densidad D{g.dens}
+                                  <span className="inline-flex items-center gap-2">{densAbierta ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}Densidad
+                                    <span className={g.deCategoria ? '' : 'text-orange-600'} title={`${g.deCategoria ? 'Categoría FERT' : 'Sin categoría: tomado de la descripción'}${g.descs.length ? ` — ${g.descs.join(' / ')}` : ''}`}>{g.etiqueta}</span>
                                     <span className="text-indigo-400">·</span>
                                     {g.apertura === 'Sin apertura' ? <span className="text-orange-600">Sin apertura</span> : g.apertura}</span>
                                 </td>
                                 {filaTotales(g, g.bloques)}
                               </tr>
-                              {densAbierta && g.bloquesMadre.map(b => {
-                                const claveBloque = `${claveDens}|${b.tipo}`;
-                                const bloqueAbierto = !t8Plegados.has(claveBloque);
-                                return (
-                                  <React.Fragment key={b.tipo}>
-                                    <tr className="border-t border-slate-200 bg-slate-50 font-black text-slate-700 cursor-pointer hover:bg-slate-100" onClick={() => toggleT8(claveBloque)}>
-                                      <td className="pl-7 pr-2 py-1.5 border-r border-slate-200" colSpan={3}>
-                                        <span className="inline-flex items-center gap-2">{bloqueAbierto ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
-                                          <span className={b.deCategoria ? 'text-teal-800' : 'text-orange-600'} title={`${b.deCategoria ? 'Categoría FERT' : 'Sin categoría: tomado de la descripción'}${b.descs.length ? ` — ${b.descs.join(' / ')}` : ''}`}>{b.tipo.replace(/^CM-LAM-/, '')}</span></span>
-                                      </td>
-                                      {filaTotales(b, b.bloques)}
-                                    </tr>
-                                    {bloqueAbierto && b.items.map(f => (
+                                    {densAbierta && g.items.map(f => (
                                       <tr key={f.material} className="border-t border-slate-100">
-                                        <td className="pl-12 pr-2 py-1.5 border-r border-slate-100" title={`${f.descripcion}\n${f.categoria || 'sin categoría'}`}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div></td>
+                                        <td className="pl-8 pr-2 py-1.5 border-r border-slate-100" title={`${f.descripcion}\n${f.categoria || 'sin categoría'}`}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div></td>
                                         <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td>
                                         <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}</td>
                                         <td className={`${td} text-slate-700`}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td>
@@ -7270,9 +7257,6 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                         <td className={td}>{f.longitudM.toFixed(0)}</td><td className={td}></td>
                                       </tr>
                                     ))}
-                                  </React.Fragment>
-                                );
-                              })}
                             </React.Fragment>
                           );
                         })}
