@@ -67,7 +67,7 @@ import { cn } from '@/lib/utils';
 import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { pasoPanelDiagnosticoP2, type DiagnosticoP2 } from '@/lib/diagnostico-p2';
-import { nextBusinessDay as nextBusinessDayCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { nextBusinessDay as nextBusinessDayCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, marcarDiaComoJornada, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, fechaHoraCreacionPlanGrupo, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { buscarUltimoPlanTxt } from '@/lib/planes-txt';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, parseISO, addDays } from 'date-fns';
@@ -720,7 +720,7 @@ const filtrarPlanesP3ActivosQueCubren = (planes: PlanGrupo[], fechasSeleccionada
     // de Laminado.
     /rollo/i.test(String(p.valor || '')) &&
     /p3/i.test(String(p.valor || '')) && !/pfd/i.test(String(p.valor || '')) &&
-    soloFecha(p.fecha_creacion) !== todayStr &&
+    fechaHoraCreacionPlanGrupo(p.fecha_creacion).fecha !== todayStr &&
     planCubreAlgunaFecha(p, fechasSeleccionadas)
   );
 };
@@ -2244,11 +2244,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return { actualizados, agregados, eliminados, fallidos };
   }, [puestoTrabajoLineaPorMaterial]);
 
-  // Desactiva un PlanGrupo (estado -> 'I'). El servicio no tiene PATCH parcial: se reenvía el
-  // objeto completo tal cual vino de getAll(), solo sobreescribiendo estado. Los DetalleTactico
-  // hijos NO cambian de estado (quedan 'A'), por decisión de negocio explícita.
+  // Desactiva un PlanGrupo (estado -> 'I'). Se manda SOLO código + estado: el backend actualiza
+  // únicamente los campos que llegan, y reenviar el objeto de la API devolvía sus fechas corridas
+  // +5h (ver fechaHoraCreacionPlanGrupo). Los DetalleTactico hijos NO cambian de estado (quedan
+  // 'A'), por decisión de negocio explícita.
   const desactivarPlanGrupo = useCallback(async (plan: PlanGrupo) => {
-    await planGrupoService.save({ ...plan, estado: 'I' } as PlanGrupo);
+    await planGrupoService.save({ codigo_plan_grupo: plan.codigo_plan_grupo, estado: 'I' } as unknown as PlanGrupo);
   }, []);
 
   // Al confirmar un nuevo P3 o PFD, cualquier otro PlanGrupo de Laminado del MISMO canal (P3 con P3,
@@ -5688,7 +5689,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                           <td className="px-3 py-2 font-mono">#{plan.codigo_plan_grupo}</td>
                           <td className="px-3 py-2">{plan.valor}</td>
                           <td className="px-3 py-2 font-mono">{soloFecha(plan.fecha_inicio_plan)} → {soloFecha(plan.fecha_fin_plan)}</td>
-                          <td className="px-3 py-2 font-mono">{soloFecha(plan.fecha_creacion)}</td>
+                          <td className="px-3 py-2 font-mono">{(({ fecha, hora }) => `${fecha} ${hora}`.trim())(fechaHoraCreacionPlanGrupo(plan.fecha_creacion))}</td>
                         </tr>
                       ))}
                     </tbody>

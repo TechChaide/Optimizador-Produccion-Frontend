@@ -351,6 +351,29 @@ export const fechaLocalPlana = (v: unknown): string => {
   return String(v).trim().slice(0, 10);
 };
 
+/**
+ * `fecha_creacion` de plan_grupo TAL COMO LA DEVUELVE LA API → { fecha 'yyyy-MM-dd', hora 'HH:mm' } de
+ * Ecuador. En BD queda la hora literal de Ecuador (ecuadorNowNaiveISO), pero el backend (Docker con
+ * TZ=America/Guayaquil + tedious useUTC:false) la lee como hora LOCAL del servidor y la devuelve como
+ * instante UTC real: 10:35 grabado vuelve "T15:35:00.000Z" (verificado 2026-10-28, Data Aprobada
+ * mostraba "#1384 15:35" consultado a las 10:52). Por eso acá se convierte a Ecuador (no slice): da
+ * la hora grabada y no corre el día para planes creados después de las 19:00. fecha_inicio_plan /
+ * fecha_fin_plan (medianoche → "T05:00Z") siguen bien con fechaLocalPlana.
+ */
+export const fechaHoraCreacionPlanGrupo = (v: unknown): { fecha: string; hora: string } => {
+  const s = v instanceof Date ? v.toISOString() : String(v ?? '').trim();
+  if (!s || s === 'null' || s === 'undefined') return { fecha: '', hora: '' };
+  if (!/T\d{2}:\d{2}/.test(s)) return { fecha: s.slice(0, 10), hora: '' };
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return { fecha: s.slice(0, 10), hora: '' };
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: ZONA_HORARIA_NEGOCIO,
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const get = (type: string) => parts.find(p => p.type === type)?.value ?? '00';
+  return { fecha: `${get('year')}-${get('month')}-${get('day')}`, hora: `${get('hour') === '24' ? '00' : get('hour')}:${get('minute')}` };
+};
+
 export const fechaLocalEcuador = (v: unknown): string => {
   if (v === null || v === undefined || v === '') return '';
   if (v instanceof Date) {

@@ -4744,7 +4744,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       });
       for (const plan of superados) {
         try {
-          await planGrupoService.save({ ...plan, estado: 'I' } as unknown as PlanGrupo);
+          // Solo código + estado: el objeto de la API trae sus fechas corridas +5h (ver fechaHoraCreacionPlanGrupo).
+          await planGrupoService.save({ codigo_plan_grupo: plan.codigo_plan_grupo, estado: 'I' } as unknown as PlanGrupo);
         } catch (e) {
           console.warn(`[Respuesta Espuma] No se pudo desactivar el Plan Grupo #${plan.codigo_plan_grupo} superado:`, (e as Error).message);
         }

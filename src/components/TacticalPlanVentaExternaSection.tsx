@@ -24,7 +24,7 @@ import { useReportePlanTxt, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, t
 import { useEstadoDelDia } from '@/components/EstadoDelDia';
 import { hitosDePlanes } from '@/lib/estado-dia';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
-import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { nextBusinessDay as nextBusinessDayCal, addBusinessDays as addBusinessDaysCal, esDiaNoLaborable, cargarDiasNoLaborables, laborablesHorizonte, fechaLocalEcuador, fechaLocalPlana, ecuadorMidnightISO, ecuadorNowNaiveISO, fechaHoraCreacionPlanGrupo, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, parseISO, addMonths, subMonths, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -34,6 +34,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
 
 // Respaldo SOLO para cuando el material no tiene tiempo estándar real en el catálogo SAP (ver
@@ -182,6 +183,14 @@ const soloFecha = (v: unknown): string => {
   if (!s || s === 'null' || s === 'undefined') return '';
   return fechaLocalPlana(s);
 };
+// fecha_creacion vuelve de la API +5h (ver fechaHoraCreacionPlanGrupo): con soloFecha un P2 creado
+// después de las 19:00 quedaba fechado al día siguiente.
+const fechaCreacion = (v: unknown): string => fechaHoraCreacionPlanGrupo(v).fecha;
+// Desactiva un PlanGrupo mandando SOLO código + estado (el backend actualiza únicamente los campos que
+// llegan). Antes se reenviaba el objeto completo leído de la API, con fecha_creacion/fecha_inicio_plan
+// ya corridas +5h: así ningún UPDATE de desactivación puede regrabar las fechas corridas en BD.
+const desactivarPlanGrupo = (pg: PlanGrupo) =>
+  planGrupoService.save({ codigo_plan_grupo: pg.codigo_plan_grupo, estado: 'I' } as unknown as PlanGrupo);
 
 // Solo el plan "P3" es una respuesta real contra el P2 (desde 2026-10-03 = faltante a fabricar, sin
 // líneas en 0; ver el emparejamiento en fetchDataAprobada) — "PFD" es una
@@ -1561,6 +1570,59 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     codigoPlan?: number;
   };
 
+  // Vista previa de lo que hará generarPlanP2Base con un centro+tipo, SIN escribir nada (misma lectura
+  // y mismas reglas): qué plan se crea o se reconcilia y qué P2 activos quedan desactivados. Alimenta
+  // la ventana "Confirmar P2" (usuario 2026-10-28: mismo flujo que la confirmación de Laminado, antes
+  // los planes anteriores se apagaban sin aviso).
+  type PreviaP2 = {
+    centro: '1000' | '2000';
+    tipo: 'ESPUMAS' | 'ROLLOS';
+    accion: 'crear' | 'actualizar' | 'solo-desactivar' | 'sin-cambios';
+    materiales: number;
+    diferidos: number;
+    fechaInicio: string;
+    fechaPT: string;
+    conservar: PlanGrupo | null;
+    desactivar: PlanGrupo[];
+    respondidoPorP3: number[];
+  };
+  const previsualizarP2 = useCallback(async (centro: '1000' | '2000', tipo: 'ESPUMAS' | 'ROLLOS'): Promise<PreviaP2> => {
+    const diferidos = tipo === 'ESPUMAS' ? new Set(materialesDiferidos[centro]) : new Set<string>();
+    const lineas = (tipo === 'ESPUMAS'
+      ? (centro === '1000' ? necesidadEspumas1000 : necesidadEspumas2000)
+      : (centro === '1000' ? necesidadRollos1000 : necesidadRollos2000)
+    ).filter(l => l.cantidad > 0 && !diferidos.has(String(Number(l.material))));
+    const fechaPT = fechasHorizonte.pt;
+    const fechaInicio = recuperacionDePT(fechaPT);
+    const { planActivo, planesActivos, planesP3 } = await verificarPlanP2Activo(centro, tipo);
+    const base = { centro, tipo, materiales: lineas.length, diferidos: diferidos.size, fechaInicio, fechaPT, respondidoPorP3: planesP3.map(p => p.codigo_plan_grupo) };
+    if (lineas.length === 0) {
+      return { ...base, accion: planesActivos.length > 0 ? 'solo-desactivar' : 'sin-cambios', conservar: null, desactivar: planesActivos };
+    }
+    const conservar = planActivo && soloFecha(planActivo.fecha_inicio_plan) === fechaInicio ? planActivo : null;
+    return {
+      ...base,
+      accion: conservar ? 'actualizar' : 'crear',
+      conservar,
+      desactivar: planesActivos.filter(p => p.codigo_plan_grupo !== conservar?.codigo_plan_grupo),
+    };
+  // verificarPlanP2Activo / recuperacionDePT: funciones del render, mismo criterio que generarPlanP2Base.
+  }, [grupos, necesidadEspumas1000, necesidadEspumas2000, necesidadRollos1000, necesidadRollos2000, materialesDiferidos, fechasHorizonte.pt, siguienteDiaHabil]);
+
+  // La ventana se resuelve con una promesa para que el mismo flujo (botón o panel de Sincronizar)
+  // espere la decisión antes de escribir.
+  const [confirmacionP2, setConfirmacionP2] = useState<PreviaP2[] | null>(null);
+  const resolverConfirmacionP2 = useRef<((ok: boolean) => void) | null>(null);
+  const pedirConfirmacionP2 = useCallback((previas: PreviaP2[]) => new Promise<boolean>(resolve => {
+    resolverConfirmacionP2.current = resolve;
+    setConfirmacionP2(previas);
+  }), []);
+  const responderConfirmacionP2 = useCallback((ok: boolean) => {
+    resolverConfirmacionP2.current?.(ok);
+    resolverConfirmacionP2.current = null;
+    setConfirmacionP2(null);
+  }, []);
+
   // Núcleo sin notificaciones: genera el PlanGrupo "origen" (P2) de un centro para UN tipo de
   // necesidad (Espumas o Rollos — son dos planes independientes, no uno combinado) y devuelve un
   // resultado estructurado por subgrupo (centro+tipo). Al ser el origen de la cadena (Venta Externa
@@ -1594,7 +1656,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         const { planesActivos } = await verificarPlanP2Activo(centro, tipo);
         const planesDesactivados: number[] = [];
         for (const pg of planesActivos) {
-          await planGrupoService.save({ ...pg, estado: 'I' } as unknown as PlanGrupo);
+          await desactivarPlanGrupo(pg);
           planesDesactivados.push(pg.codigo_plan_grupo);
         }
         const sufijo = planesDesactivados.length > 0
@@ -1685,7 +1747,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       const desactivarOtrosPlanes = async (conservar: number | null) => {
         for (const pg of planesActivos) {
           if (pg.codigo_plan_grupo === conservar) continue;
-          await planGrupoService.save({ ...pg, estado: 'I' } as unknown as PlanGrupo);
+          await desactivarPlanGrupo(pg);
           planesDesactivados.push(pg.codigo_plan_grupo);
         }
       };
@@ -1798,7 +1860,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       if (pg.estado !== 'A' || pg.codigo_grupo !== grupoCentro.codigo_grupo || !regex.test(String(pg.valor || ''))) continue;
       const inicio = soloFecha(pg.fecha_inicio_plan);
       if (inicio === recuperacion || inicio < fechasHorizonte.recuperacion) {
-        await planGrupoService.save({ ...pg, estado: 'I' } as unknown as PlanGrupo);
+        await desactivarPlanGrupo(pg);
         apagados.push(pg.codigo_plan_grupo);
       }
     }
@@ -1897,7 +1959,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         pg.estado === 'A' && pg.codigo_grupo === grupoP2.codigo_grupo && valorRegexPfd.test(String(pg.valor || ''))
       );
       for (const pg of planesActivosPfd) {
-        await planGrupoService.save({ ...pg, estado: 'I' } as unknown as PlanGrupo);
+        await desactivarPlanGrupo(pg);
       }
 
       const planPayload = {
@@ -1957,23 +2019,51 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     }
   }, [pfdVentaPreview, siguienteDiaHabil, tiempoLookup1000, tiempoLookup2000, resultadoRestaurado]);
 
+  // Una sola lectura de Plan Grupo / Detalle Táctico para la vista previa y los guardados (ver
+  // lecturaP2Ref). Se consumen con .catch para no dejar una promesa rechazada sin manejar si ningún
+  // combo llega a leerla.
+  const iniciarLecturaP2 = () => {
+    const planes = sapCompartido.planGrupos();
+    // Solo los detalles que usa verificarPlanP2Activo (2026-10-12, endpoint por plan_grupo): los P2 de
+    // VE activos y los P3 activos creados desde el P2 más viejo (sus respuestas). Antes, tabla completa.
+    const detalles = planes.then(async r => {
+      const todos = r.data || [];
+      const p2 = todos.filter(pg => pg.estado === 'A' && /p2\s*-\s*venta/i.test(String(pg.valor || '')));
+      const desde = p2.map(pg => fechaCreacion(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)).filter(Boolean).sort()[0] || '';
+      const p3 = todos.filter(pg => pg.estado === 'A' && esPlanP3(pg.valor) && (!desde || (fechaCreacion(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)) >= desde));
+      return { data: await detallesDePlanes([...p2, ...p3].map(pg => pg.codigo_plan_grupo)) };
+    });
+    planes.catch(() => {}); detalles.catch(() => {});
+    lecturaP2Ref.current = { planes, detalles };
+  };
+
+  // Ventana "Confirmar P2" antes de escribir (usuario 2026-10-28): muestra qué se crea/actualiza y qué
+  // P2 anteriores se desactivan. Aceptarla equivale a forzar=true (reemplaza el antiguo window.confirm
+  // de 'confirmar-reemplazo'). Si no hay nada que grabar ni apagar, no se pregunta.
+  const confirmarP2 = useCallback(async (combos: Array<{ centro: '1000' | '2000'; tipo: 'ESPUMAS' | 'ROLLOS' }>): Promise<boolean> => {
+    if (resultadoRestaurado) return true; // generarPlanP2Core ya corta con su propio mensaje
+    const previas = await Promise.all(combos.map(c => previsualizarP2(c.centro, c.tipo)));
+    if (previas.every(p => p.accion === 'sin-cambios')) return true;
+    return pedirConfirmacionP2(previas);
+  }, [resultadoRestaurado, previsualizarP2, pedirConfirmacionP2]);
+
   // Botón individual por bloque: genera un solo subgrupo y notifica su resultado puntual.
-  // 'confirmar-reemplazo' (solo ESPUMAS, ver generarPlanP2Core): se cortó ANTES de escribir porque la
-  // fecha seleccionada reemplazaría un plan activo fechado distinto — se confirma acá y, si se
-  // acepta, se reintenta la misma llamada con forzar=true.
   const handleGenerarPlanP2 = useCallback(async (centro: '1000' | '2000', tipo: 'ESPUMAS' | 'ROLLOS') => {
-    let resultado = await generarPlanP2Core(centro, tipo);
-    if (resultado.status === 'confirmar-reemplazo') {
-      if (window.confirm(resultado.mensaje)) {
-        resultado = await generarPlanP2Core(centro, tipo, true);
-      } else {
-        addNotification('warning', `${resultado.mensaje} (cancelado por el usuario, no se hizo ningún cambio)`);
+    iniciarLecturaP2();
+    try {
+      if (!(await confirmarP2([{ centro, tipo }]))) {
+        addNotification('warning', `P2 ${TIPO_TAG[tipo]} Centro ${centro}: cancelado por el usuario, no se hizo ningún cambio.`);
         return;
       }
+      const resultado = await generarPlanP2Core(centro, tipo, true);
+      const nivel = resultado.status === 'ok' ? 'success' : resultado.status === 'sin-datos' ? 'warning' : 'error';
+      addNotification(nivel, resultado.mensaje);
+    } catch (e) {
+      addNotification('error', `Error al generar el P2: ${(e as Error).message}`);
+    } finally {
+      lecturaP2Ref.current = null;
     }
-    const nivel = resultado.status === 'ok' ? 'success' : resultado.status === 'sin-datos' ? 'warning' : 'error';
-    addNotification(nivel, resultado.mensaje);
-  }, [generarPlanP2Core, addNotification]);
+  }, [confirmarP2, generarPlanP2Core, addNotification]);
 
   // Botón único "Generar Todos los P2": recorre los 3 subgrupos vigentes SECUENCIALMENTE (cada uno
   // hace su propia verificación P3 + guardado/actualización; correrlos en paralelo arriesgaría
@@ -1984,20 +2074,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // muestran en el panel; desde el botón manual sigue el toast de siempre.
   const handleGenerarTodosPlanesP2 = useCallback(async (silencioso = false, onAvance?: (hechos: number, total: number) => void): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string }> => {
     setIsSavingAllPlanP2(true);
-    // Una sola lectura para los 3 guardados (ver lecturaP2Ref). Se consumen con .catch para no dejar
-    // una promesa rechazada sin manejar si ningún combo llega a leerla.
-    const planes = sapCompartido.planGrupos();
-    // Solo los detalles que usa verificarPlanP2Activo (2026-10-12, endpoint por plan_grupo): los P2 de
-    // VE activos y los P3 activos creados desde el P2 más viejo (sus respuestas). Antes, tabla completa.
-    const detalles = planes.then(async r => {
-      const todos = r.data || [];
-      const p2 = todos.filter(pg => pg.estado === 'A' && /p2\s*-\s*venta/i.test(String(pg.valor || '')));
-      const desde = p2.map(pg => soloFecha(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)).filter(Boolean).sort()[0] || '';
-      const p3 = todos.filter(pg => pg.estado === 'A' && esPlanP3(pg.valor) && (!desde || (soloFecha(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)) >= desde));
-      return { data: await detallesDePlanes([...p2, ...p3].map(pg => pg.codigo_plan_grupo)) };
-    });
-    planes.catch(() => {}); detalles.catch(() => {});
-    lecturaP2Ref.current = { planes, detalles };
+    iniciarLecturaP2();
     try {
       const combos: Array<{ centro: '1000' | '2000'; tipo: 'ESPUMAS' | 'ROLLOS' }> = [
         { centro: '1000', tipo: 'ESPUMAS' },
@@ -2005,19 +2082,16 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         { centro: '2000', tipo: 'ESPUMAS' },
       ];
 
+      // Una sola ventana para los 3 subgrupos; cancelar no escribe nada.
+      if (!(await confirmarP2(combos))) {
+        const mensaje = 'Generación de P2 cancelada por el usuario: no se hizo ningún cambio.';
+        if (!silencioso) addNotification('warning', mensaje);
+        return { estado: 'aviso', mensaje };
+      }
+
       const resultados: ResultadoGeneracionP2[] = [];
       for (const combo of combos) {
-        let resultado = await generarPlanP2Core(combo.centro, combo.tipo);
-        // 'confirmar-reemplazo' (solo ESPUMAS): mismo criterio que el botón individual — se confirma
-        // acá antes de seguir con el resto del loop, y si se cancela se cuenta como 'bloqueado' (no
-        // se escribió nada, mismo tratamiento de notificación que ya existe para ese status).
-        if (resultado.status === 'confirmar-reemplazo') {
-          if (window.confirm(resultado.mensaje)) {
-            resultado = await generarPlanP2Core(combo.centro, combo.tipo, true);
-          } else {
-            resultado = { ...resultado, status: 'bloqueado', mensaje: `${resultado.mensaje} (cancelado por el usuario, no se hizo ningún cambio)` };
-          }
-        }
+        const resultado = await generarPlanP2Core(combo.centro, combo.tipo, true);
         resultados.push(resultado);
         onAvance?.(resultados.length, combos.length);
       }
@@ -2043,7 +2117,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       lecturaP2Ref.current = null;
       setIsSavingAllPlanP2(false);
     }
-  }, [generarPlanP2Core, addNotification]);
+  }, [confirmarP2, generarPlanP2Core, addNotification]);
 
   // Tercera fase de "Sincronizar" (ver el efecto de handleCalcularNecesidadRollos más arriba, y el
   // comentario de autoGenerarP2Pendiente en su declaración): dispara "Generar Todos los P2"
@@ -2061,8 +2135,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     panelProgreso.actualizar('p2gen', { estado: r.estado, detalle: r.mensaje });
     setRecargaEstadoDia(n => n + 1);
     panelProgreso.concluir(
-      r.estado === 'error' ? undefined : 'P2 guardado. Cuando Laminado y Corte Espuma respondan su P3, sigue en 2 · Data Aprobada.',
-      r.estado === 'error' ? undefined : [{ etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') }],
+      r.estado !== 'ok' ? undefined : 'P2 guardado. Cuando Laminado y Corte Espuma respondan su P3, sigue en 2 · Data Aprobada.',
+      r.estado !== 'ok' ? undefined : [{ etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') }],
     );
   }, [handleGenerarTodosPlanesP2, panelProgreso]);
 
@@ -2077,8 +2151,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         r => {
           panelProgreso.actualizar('p2', { estado: r.estado, detalle: r.mensaje });
           panelProgreso.concluir(
-            r.estado === 'error' ? undefined : 'P2 guardado. Cuando Laminado y Corte Espuma respondan su P3, sigue en 2 · Data Aprobada.',
-            r.estado === 'error' ? undefined : [{ etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') }],
+            r.estado !== 'ok' ? undefined : 'P2 guardado. Cuando Laminado y Corte Espuma respondan su P3, sigue en 2 · Data Aprobada.',
+            r.estado !== 'ok' ? undefined : [{ etiqueta: 'Ir a 2 · Data Aprobada', onClick: () => setActiveTab('dataAprobada') }],
           );
         },
         e => {
@@ -2109,9 +2183,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       // P3 activos creados desde el P2 más viejo — las respuestas viven en esos P3 (padre = nuestro
       // P2). Antes se bajaba detalle_tactico completo (~80 MB).
       const p2Propios = planes.filter(pg => pg.estado === 'A' && /p2\s*-\s*venta/i.test(String(pg.valor || '')) && !/diferido/i.test(String(pg.valor || '')));
-      const desdeP2 = p2Propios.map(pg => soloFecha(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)).filter(Boolean).sort()[0] || '';
+      const desdeP2 = p2Propios.map(pg => fechaCreacion(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)).filter(Boolean).sort()[0] || '';
       const p3Candidatos = planes.filter(pg => pg.estado === 'A' && esPlanP3(pg.valor) &&
-        (!desdeP2 || (soloFecha(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)) >= desdeP2));
+        (!desdeP2 || (fechaCreacion(pg.fecha_creacion) || soloFecha(pg.fecha_inicio_plan)) >= desdeP2));
       const detalles = await detallesDePlanes([...p2Propios, ...p3Candidatos].map(pg => pg.codigo_plan_grupo));
 
       const descripcionPorMaterial = new Map<string, string>();
@@ -2143,14 +2217,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         // está cubierto por stock/provisional — pero solo si el consumidor respondió ESTE ciclo: un P3
         // activo del mismo centro y canal, creado el día del P2 o después y fechado (recuperación)
         // antes o el mismo día del PT del P2. Sin ese P3, nada se da por cubierto (pendiente).
-        const fechaCreacionP2 = soloFecha(planPropio.fecha_creacion);
+        const fechaCreacionP2 = fechaCreacion(planPropio.fecha_creacion);
         const ptP2 = soloFecha(planPropio.fecha_fin_plan) || soloFecha(planPropio.fecha_inicio_plan);
         const canalP3 = combo.tipo === 'ESPUMAS' ? 'espuma' : 'rollo';
         const p3DelCiclo = planes.filter(pg => {
           const valor = String(pg.valor || '');
           if (pg.estado !== 'A' || !esPlanP3(valor) || !new RegExp(`centro\\s*${combo.centro}`, 'i').test(valor) || !new RegExp(canalP3, 'i').test(valor)) return false;
           const fechaP3 = soloFecha(pg.fecha_inicio_plan);
-          return soloFecha(pg.fecha_creacion) >= fechaCreacionP2 && fechaP3 >= fechaCreacionP2 && fechaP3 <= ptP2;
+          return fechaCreacion(pg.fecha_creacion) >= fechaCreacionP2 && fechaP3 >= fechaCreacionP2 && fechaP3 <= ptP2;
         }).sort((a, b) => b.codigo_plan_grupo - a.codigo_plan_grupo)[0];
 
         const misLineas = detalles.filter(d => d.estado === 'A' && d.codigo_plan_grupo === planPropio.codigo_plan_grupo);
@@ -4570,6 +4644,79 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           })}
         </TabsContent>
       </Tabs>
+
+      {/* Fuera de los <TabsContent>: se abre también desde el panel de Sincronizar, en cualquier
+          pestaña. Mismo esquema que "Confirmar Respuesta P3" / "Confirmar desactivación" de Laminado. */}
+      <Dialog open={confirmacionP2 !== null} onOpenChange={(open) => { if (!open) responderConfirmacionP2(false); }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Confirmar P2 — Venta Externa</DialogTitle>
+            <DialogDescription>
+              Revisa lo que se va a grabar antes de continuar. Por cada centro y tipo queda UN P2 vigente: los P2 activos
+              anteriores se marcan como inactivos (estado &apos;I&apos;); sus detalles no se tocan. Esta acción escribe en producción.
+            </DialogDescription>
+          </DialogHeader>
+          {confirmacionP2 && (
+            <div className="space-y-5 text-left text-sm">
+              {confirmacionP2.map(p => (
+                <div key={`${p.centro}-${p.tipo}`} className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-block text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 rounded-full px-3 py-1">Centro {p.centro} · {TIPO_TAG[p.tipo]}</span>
+                    <span className={cn("text-[11px] font-bold",
+                      p.accion === 'crear' ? 'text-emerald-700' : p.accion === 'actualizar' ? 'text-indigo-700' : p.accion === 'solo-desactivar' ? 'text-amber-700' : 'text-gray-500')}>
+                      {p.accion === 'crear' && `Plan nuevo · ${p.materiales} material(es) · Recup. ${p.fechaInicio} → PT ${p.fechaPT}`}
+                      {p.accion === 'actualizar' && `Actualiza el Plan #${p.conservar?.codigo_plan_grupo} del mismo ciclo · ${p.materiales} material(es)`}
+                      {p.accion === 'solo-desactivar' && 'Sin necesidad hoy: no se crea plan, solo se desactivan los anteriores'}
+                      {p.accion === 'sin-cambios' && 'Sin necesidad y sin P2 activo: no se hace nada'}
+                      {p.tipo === 'ESPUMAS' && p.diferidos > 0 && p.accion !== 'sin-cambios' && ` · +P2 DIFERIDO (${p.diferidos})`}
+                    </span>
+                  </div>
+                  {/* Solo el mismo ciclo: un P2 de un ciclo anterior ya quedó cerrado por su P3 (ver generarPlanP2Base). */}
+                  {p.accion === 'actualizar' && p.respondidoPorP3.length > 0 && (
+                    <p className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                      El Plan #{p.conservar?.codigo_plan_grupo} ya fue respondido por el/los P3 #{p.respondidoPorP3.join(', #')}: si continúas, Laminado / Corte Espuma tendrían que volver a responder.
+                    </p>
+                  )}
+                  {p.desactivar.length > 0 ? (
+                    <div className="border border-slate-100 rounded-xl overflow-hidden">
+                      <table className="w-full text-[11px] border-collapse">
+                        <thead className="bg-gray-50 text-gray-500 uppercase font-bold">
+                          <tr>
+                            <th className="px-3 py-2 text-left">Se desactiva</th>
+                            <th className="px-3 py-2 text-left">Valor</th>
+                            <th className="px-3 py-2 text-left">Rango</th>
+                            <th className="px-3 py-2 text-left">Creado</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-50">
+                          {p.desactivar.map(plan => {
+                            const creado = fechaHoraCreacionPlanGrupo(plan.fecha_creacion);
+                            return (
+                              <tr key={plan.codigo_plan_grupo}>
+                                <td className="px-3 py-2 font-mono">#{plan.codigo_plan_grupo}</td>
+                                <td className="px-3 py-2">{plan.valor}</td>
+                                <td className="px-3 py-2 font-mono">{soloFecha(plan.fecha_inicio_plan)} → {soloFecha(plan.fecha_fin_plan)}</td>
+                                <td className="px-3 py-2 font-mono">{`${creado.fecha} ${creado.hora}`.trim() || '—'}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : p.accion !== 'sin-cambios' && (
+                    <p className="text-[11px] text-gray-500">No hay P2 anteriores activos que desactivar.</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => responderConfirmacionP2(false)}>Cancelar</Button>
+            <Button onClick={() => responderConfirmacionP2(true)} className="bg-emerald-600 hover:bg-emerald-700 text-white">Confirmar y Guardar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <PanelProgreso panel={panelProgreso} />
     </div>
   );

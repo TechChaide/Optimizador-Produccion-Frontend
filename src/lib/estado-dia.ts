@@ -5,7 +5,7 @@
  * último reporte guardado. Solo lectura: Plan Grupo (tabla chica) + metadatos de la carpeta de reportes.
  */
 import type { PlanGrupo } from '@/types/interfaces';
-import { fechaLocalPlana } from '@/lib/dias-laborables';
+import { fechaLocalPlana, fechaHoraCreacionPlanGrupo } from '@/lib/dias-laborables';
 import { consultarPlanTxt, type ModuloPlanTxt, type CentroPlanTxt } from '@/lib/planes-txt';
 
 export type EtapaFlujo = 1 | 2;
@@ -21,12 +21,10 @@ export interface HitoDia {
   detalle: string;
 }
 
-const fecha = (v: unknown) => {
-  const s = String(v ?? '').trim();
-  return !s || s === 'null' ? '' : fechaLocalPlana(s);
-};
-// fecha_creacion se graba "naive Ecuador" (ecuadorNowNaiveISO): la hora literal es la del string.
-const hora = (v: unknown) => String(v ?? '').match(/T(\d{2}:\d{2})/)?.[1] ?? '';
+// fecha_creacion vuelve de la API corrida +5h (ver fechaHoraCreacionPlanGrupo): antes se tomaba la
+// hora literal del string y Data Aprobada mostraba 15:35 para un P2 grabado a las 10:35.
+const fecha = (v: unknown) => fechaHoraCreacionPlanGrupo(v).fecha;
+const hora = (v: unknown) => fechaHoraCreacionPlanGrupo(v).hora;
 
 /** Planes ACTIVOS creados hoy cuyo valor cumple la expresión. */
 const creadosHoy = (planes: PlanGrupo[], hoy: string, re: RegExp, excluir?: RegExp) => planes
