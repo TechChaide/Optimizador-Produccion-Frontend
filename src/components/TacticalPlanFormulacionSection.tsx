@@ -1353,11 +1353,16 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     const resp = { '1000': responsablesCorte(restriccionesCorte, '1000'), '2000': responsablesCorte(restriccionesCorte, '2000') } as const;
     const corte = new Map<string, OrdenCuadre>();
     const fueraDeCorte = new Map<string, string>();
+    // Diagnóstico (2026-10-28: el panel salía "0 UN · cuadra" sin FERT cargadas): cuántas FERT hay y
+    // cuántas caen en el día de corte, para distinguir "no hay datos" de "no cuadra".
+    let enVentanaCount = 0;
+    const motivos = new Map<string, number>();
     ordenesFert.forEach(o => {
       const centro = getProp(o, ['CENTRO', 'Centro']).trim();
       if (centro !== '1000' && centro !== '2000') return;
       const info = extractMaterialInfo(o);
       if (!fertEnVentanaCorte(soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']), venta.has(`${centro}|${info.code}`), ventana)) return;
+      enVentanaCount++;
       const un = safeNum(getProp(o, ['CANTPEND', 'CANTPENDIENTE', 'CANTPROGRAMADA', 'CANTIDAD', 'CANT_PROG']));
       if (un <= 0) return;
       const orden = getProp(o, ['ORDENPREVISIONAL', 'ORDEN', 'ORDEN_PROCESO']) || '—';
@@ -1365,7 +1370,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       const key = `${centro}|${orden}`;
       const motivo = motivoFueraDeSubBloques(resp[centro], centro, r, info.code, info.desc)
         ?? ((parseFloat(info.esp) || 0) <= 0 ? 'Sin espesor (no es lámina)' : null);
-      if (motivo) { fueraDeCorte.set(key, motivo); return; }
+      if (motivo) { fueraDeCorte.set(key, motivo); motivos.set(motivo, (motivos.get(motivo) || 0) + 1); return; }
       corte.set(key, { centro, orden, material: info.code, descripcion: info.desc, resp: r, un, motivo: '' });
     });
     const formulacion = new Map<string, OrdenCuadre>();
@@ -1386,7 +1391,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       const unDe = (m: Map<string, OrdenCuadre>) => Array.from(m.values()).filter(o => o.centro === centro).reduce((s, o) => s + o.un, 0);
       return { centro, unCorte: unDe(corte), unFormulacion: unDe(formulacion) };
     });
-    return { porCentro, diferencias: [...soloCorte.map(o => ({ ...o, lado: 'Solo Corte' as const })), ...soloFormulacion.map(o => ({ ...o, lado: 'Solo Formulación' as const }))] };
+    const diagnostico = { cargadas: ordenesFert.length, enVentana: enVentanaCount, deCorte: corte.size, motivos: Array.from(motivos.entries()).sort((a, b) => b[1] - a[1]) };
+    return { porCentro, diagnostico, diferencias: [...soloCorte.map(o => ({ ...o, lado: 'Solo Corte' as const })), ...soloFormulacion.map(o => ({ ...o, lado: 'Solo Formulación' as const }))] };
   }, [fertSinVentana, materialesVenta, fertConsumoResponsable, fertConsumoVentana, restriccionesCorte, ordenesFert, ventana, respPorCentroDinamico]);
 
   // Evaluación de Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material "BLOQUE
@@ -2081,7 +2087,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
           <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-100 bg-white px-4 py-3 text-xs">
             <label className="flex items-center gap-2 font-black uppercase text-slate-700">
               Día de corte
-              <input type="date" value={ventana.d} min={rangeStart || undefined} max={rangeEnd || undefined} onChange={e => setDiaCorte(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1 font-mono text-slate-900" />
+              <input type="date" value={ventana.d} onChange={e => setDiaCorte(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1 font-mono text-slate-900" />
             </label>
             <span className="text-slate-500">Venta Externa: fecha fin {ventana.venta.split('-').reverse().join('/')}</span>
             <span className="text-slate-400">· FERT en firme cuya fecha fin cae en el día de corte (misma ventana que Sub-Bloques-T8 de Corte Espuma); provisionales y pendiente de días anteriores no entran.</span>
@@ -2095,12 +2101,25 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                 <h4 className="text-[11px] font-black uppercase tracking-widest text-slate-700">Cuadre con Corte Espuma · Sub-Bloques-T8 (láminas UN)</h4>
                 <span className="text-[10px] text-slate-400">Corte separa por centro; Formulación produce todo en UIO y lo de GYE se le envía en bloques.</span>
               </div>
+              {planCargadoDe && (
+                <p className="text-[11px] font-bold text-amber-700">Estás viendo el reporte guardado del {planCargadoDe.fechaObjetivo.split('-').reverse().join('/')}: no trae las órdenes FERT de SAP. Pulsa &quot;Sincronizar y generar necesidades&quot; con un rango que incluya el día de corte.</p>
+              )}
+              {cuadreCorte.diagnostico.cargadas === 0 ? (
+                <p className="text-[11px] font-bold text-amber-700">Sin órdenes FERT cargadas en este módulo — pulsa &quot;Sincronizar y generar necesidades&quot;. No hay nada que comparar todavía.</p>
+              ) : (
+                <p className="text-[10px] text-slate-500">
+                  FERT cargadas: <b>{cuadreCorte.diagnostico.cargadas}</b> · con fecha fin del día de corte: <b>{cuadreCorte.diagnostico.enVentana}</b> · del universo de Corte: <b>{cuadreCorte.diagnostico.deCorte}</b>
+                  {cuadreCorte.diagnostico.motivos.length > 0 && <> · fuera de Corte: {cuadreCorte.diagnostico.motivos.map(([m, n]) => `${m} (${n})`).join(' · ')}</>}
+                  {cuadreCorte.diagnostico.enVentana === 0 && <b className="text-amber-700"> — ninguna FERT termina el {ventana.d.split('-').reverse().join('/')}: revisa el día de corte o sincroniza datos de hoy.</b>}
+                </p>
+              )}
               <div className="flex flex-wrap gap-2">
                 {cuadreCorte.porCentro.map(c => {
-                  const cuadra = Math.abs(c.unCorte - c.unFormulacion) < 0.5;
+                  const sinDatos = c.unCorte === 0 && c.unFormulacion === 0;
+                  const cuadra = !sinDatos && Math.abs(c.unCorte - c.unFormulacion) < 0.5;
                   return (
-                    <span key={c.centro} className={cn("rounded-xl border px-3 py-2 text-[11px] font-bold", cuadra ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800')}>
-                      {c.centro === '1000' ? 'Quito (1000)' : 'Guayaquil (2000) — destino'}: Corte {formatNum(c.unCorte, 0)} UN · Formulación {formatNum(c.unFormulacion, 0)} UN {cuadra ? '· cuadra' : `· diferencia ${formatNum(c.unFormulacion - c.unCorte, 0)}`}
+                    <span key={c.centro} className={cn("rounded-xl border px-3 py-2 text-[11px] font-bold", sinDatos ? 'border-slate-200 bg-slate-50 text-slate-500' : cuadra ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800')}>
+                      {c.centro === '1000' ? 'Quito (1000)' : 'Guayaquil (2000) — destino'}: Corte {formatNum(c.unCorte, 0)} UN · Formulación {formatNum(c.unFormulacion, 0)} UN {sinDatos ? '· sin datos' : cuadra ? '· cuadra' : `· diferencia ${formatNum(c.unFormulacion - c.unCorte, 0)}`}
                     </span>
                   );
                 })}
