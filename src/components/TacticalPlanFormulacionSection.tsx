@@ -46,7 +46,7 @@ import { useReportePlanTxt, useAutoCargaPlanVigente, useReportePlanTxtGrupo, Rep
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { CUPULA_MAX_CM } from '@/lib/bloques-espuma';
-import { ventanaCorte, fertEnVentanaCorte } from '@/lib/ventana-corte';
+import { ventanaCorte, fertEnVentanaCorte, responsablesCorte, motivoFueraDeSubBloques, CODIGO_GRUPO_CORTE_POR_CENTRO } from '@/lib/ventana-corte';
 import { nextBusinessDay, laborablesHorizonte, cargarDiasNoLaborables, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -551,6 +551,8 @@ interface ConsumoBloqueRow {
   ventaExterna?: boolean;
   // false = la orden entró solo por la ventana de corte (FECHA fuera del rango): no alimenta la Salida de Datos.
   enRango?: boolean;
+  // Cantidad pendiente de la orden (láminas, UN) — la misma que cuenta Sub-Bloques-T8 de Corte.
+  cantidad?: number;
 }
 
 // Una orden individual (provisional o FERT) que consume un Bloque Formulado del grupo agregado.
@@ -783,6 +785,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // Día de corte del tab FERT (misma ventana que Sub-Bloques-T8 de Corte, ver @/lib/ventana-corte) con
   // el calendario de feriados / días no trabajados; '' = hoy + 1 hábil.
   const [diaCorte, setDiaCorte] = useState('');
+  // Sin sincronizar (reporte restaurado) queda vacío y responsablesCorte cae a su respaldo fijo.
+  const [restriccionesCorte, setRestriccionesCorte] = useState<Restriccion[]>([]);
+  // `centro|material` de los P2 de Venta Externa activos, leído al generar (ver handleProcessResumen).
+  const [materialesVenta, setMaterialesVenta] = useState<ReadonlySet<string>>(new Set());
   const [calendario, setCalendario] = useState<{ noLaborables: DiasNoLaborables; laborablesExtra: DiasNoLaborables }>({ noLaborables: new Set(), laborablesExtra: new Set() });
   useEffect(() => {
     cargarDiasNoLaborables().then(c => setCalendario({ noLaborables: c.noLaborables, laborablesExtra: c.laborablesExtra })).catch(() => {});
@@ -979,6 +985,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         if (d.estado === 'A') materialesVenta.add(`${centroDePlan.get(d.codigo_plan_grupo)}|${cleanCode(d.codigo_material)}`);
       });
     } catch { console.warn('[Formulación] No se pudo leer el P2 de Venta Externa: sus FERT se fechan como colchones en el tab FERT.'); }
+    setMaterialesVenta(materialesVenta);
     const groupsMap = new Map<string, FormuladoSummaryRow>();
     const consumoRows: ConsumoBloqueRow[] = [];
     // Consumo/D se pide UNA vez por Bloque Formulado (no por orden): varias órdenes distintas
@@ -1003,7 +1010,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       // Las provisionales siempre vienen del rango; una FERT puede venir solo por la ventana de corte.
       const enRango = origin === 'prov' || enRangoFechas(soloFechaOrden(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']));
       const marcaVentana: Partial<ConsumoBloqueRow> = origin === 'fert'
-        ? { fechaFin: soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']), ventaExterna: materialesVenta.has(`${centroOrden}|${info.code}`), enRango }
+        ? { fechaFin: soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']), ventaExterna: materialesVenta.has(`${centroOrden}|${info.code}`), enRango, cantidad: qty }
         : {};
       const consumoDesde = consumoRows.length;
 
@@ -1327,13 +1334,60 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
   // @/lib/ventana-corte): FECHAFIN = D (Venta Externa D+1). Un reporte guardado antes del cambio no trae
   // FECHAFIN: se muestra completo, como antes, con aviso en el tab.
   const fertSinVentana = fertConsumoResponsable.length > 0 && fertConsumoResponsable.every(r => r.fechaFin === undefined);
-  const fertConsumoPorCentro = useMemo(() => {
-    const enVentana = fertSinVentana ? fertConsumoResponsable : fertConsumoResponsable.filter(r => fertEnVentanaCorte(r.fechaFin || '', !!r.ventaExterna, ventana));
-    return {
-      '1000': enVentana.filter(r => r.centro === '1000'),
-      '2000': enVentana.filter(r => r.centro === '2000'),
-    };
-  }, [fertConsumoResponsable, fertSinVentana, ventana]);
+  // Una sola lista con los dos destinos: Formulación produce solo en UIO (ver renderConsumoBloqueTable porDestino).
+  const fertConsumoVentana = useMemo(
+    () => fertSinVentana ? fertConsumoResponsable : fertConsumoResponsable.filter(r => fertEnVentanaCorte(r.fechaFin || '', !!r.ventaExterna, ventana)),
+    [fertConsumoResponsable, fertSinVentana, ventana]
+  );
+
+  // Cuadre con Sub-Bloques-T8 de Corte Espuma (usuario 2026-10-28: "es la misma data, deberían cuadrar
+  // los subtotales"). Lado Corte = las FERT crudas del día de corte con el universo de Corte
+  // (responsablesCorte + descartes, sin verticales, solo láminas con espesor) — calculado acá con la
+  // misma regla compartida, sin BOM. Lado Formulación = las órdenes del tab FERT. Se cruza por orden y
+  // se explica cada diferencia; en UN porque es lo que cuenta Corte ("Cantidad láminas UN").
+  type OrdenCuadre = { centro: string; orden: string; material: string; descripcion: string; resp: string; un: number; motivo: string };
+  const cuadreCorte = useMemo(() => {
+    if (fertSinVentana) return null;
+    const venta = new Set(materialesVenta);
+    fertConsumoResponsable.forEach(r => { if (r.ventaExterna) venta.add(`${r.centro}|${cleanCode(r.material)}`); });
+    const resp = { '1000': responsablesCorte(restriccionesCorte, '1000'), '2000': responsablesCorte(restriccionesCorte, '2000') } as const;
+    const corte = new Map<string, OrdenCuadre>();
+    const fueraDeCorte = new Map<string, string>();
+    ordenesFert.forEach(o => {
+      const centro = getProp(o, ['CENTRO', 'Centro']).trim();
+      if (centro !== '1000' && centro !== '2000') return;
+      const info = extractMaterialInfo(o);
+      if (!fertEnVentanaCorte(soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']), venta.has(`${centro}|${info.code}`), ventana)) return;
+      const un = safeNum(getProp(o, ['CANTPEND', 'CANTPENDIENTE', 'CANTPROGRAMADA', 'CANTIDAD', 'CANT_PROG']));
+      if (un <= 0) return;
+      const orden = getProp(o, ['ORDENPREVISIONAL', 'ORDEN', 'ORDEN_PROCESO']) || '—';
+      const r = getProp(o, ['RESPCTRLPROD', 'RESPCONTROLPROD', 'RESP_CONTROL_PROD', 'RESPONSABLE']).trim();
+      const key = `${centro}|${orden}`;
+      const motivo = motivoFueraDeSubBloques(resp[centro], centro, r, info.code, info.desc)
+        ?? ((parseFloat(info.esp) || 0) <= 0 ? 'Sin espesor (no es lámina)' : null);
+      if (motivo) { fueraDeCorte.set(key, motivo); return; }
+      corte.set(key, { centro, orden, material: info.code, descripcion: info.desc, resp: r, un, motivo: '' });
+    });
+    const formulacion = new Map<string, OrdenCuadre>();
+    fertConsumoVentana.forEach(r => {
+      const key = `${r.centro}|${r.orden}`;
+      if (!formulacion.has(key)) formulacion.set(key, { centro: r.centro, orden: r.orden, material: r.material, descripcion: r.nombre, resp: r.respCtrlProd, un: r.cantidad ?? 0, motivo: '' });
+    });
+    const soloCorte = Array.from(corte.entries()).filter(([k]) => !formulacion.has(k)).map(([, o]) => ({
+      ...o,
+      motivo: !isResponsableAllowed(o.centro, o.resp, respPorCentroDinamico)
+        ? `Responsable ${o.resp || '—'} no está en RespCtrlProd_Consumo_${o.centro}`
+        : 'No se explotó (fuera del rango sincronizado)',
+    }));
+    const soloFormulacion = Array.from(formulacion.entries()).filter(([k]) => !corte.has(k)).map(([k, o]) => ({
+      ...o, motivo: fueraDeCorte.get(k) ?? 'No es FERT del día de corte en SAP',
+    }));
+    const porCentro = (['1000', '2000'] as const).map(centro => {
+      const unDe = (m: Map<string, OrdenCuadre>) => Array.from(m.values()).filter(o => o.centro === centro).reduce((s, o) => s + o.un, 0);
+      return { centro, unCorte: unDe(corte), unFormulacion: unDe(formulacion) };
+    });
+    return { porCentro, diferencias: [...soloCorte.map(o => ({ ...o, lado: 'Solo Corte' as const })), ...soloFormulacion.map(o => ({ ...o, lado: 'Solo Formulación' as const }))] };
+  }, [fertSinVentana, materialesVenta, fertConsumoResponsable, fertConsumoVentana, restriccionesCorte, ordenesFert, ventana, respPorCentroDinamico]);
 
   // Evaluación de Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material "BLOQUE
   // FORMULADO", con la misma base de conversión (TamLoteMin) que el Resumen e Inventarios — para
@@ -1427,6 +1481,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
         detalle: fallidas.length > 0 ? `Sin respuesta: ${fallidas.join(', ')} — se siguió con datos vacíos.` : undefined,
       });
       setRestricciones((restrsRes.data || []).filter((r) => groupsIds.includes(r.codigo_grupo)));
+      // Responsables de Corte (grupos 8 / 16) para el cuadre del tab FERT con Sub-Bloques-T8.
+      setRestriccionesCorte((restrsRes.data || []).filter((r) => Object.values(CODIGO_GRUPO_CORTE_POR_CENTRO).includes(r.codigo_grupo)));
       setOrders(provsRes.data?.data || provsRes.data || []);
       setOrdersFert(fertsRes.data?.data || fertsRes.data || []);
       setCuboInventarios(Array.isArray(cuboRes.data) ? cuboRes.data : []);
@@ -1552,7 +1608,13 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
 
   // Resumen compacto de trazabilidad: qué componentes finales (ej. láminas) consumen cada
   // Bloque Formulado, a través del nivel intermedio (bloque cortado), por orden.
-  const renderConsumoBloqueTable = (data: ConsumoBloqueRow[], title: string = "Consumo de Bloque Formulado por Componente (Trazabilidad)") => {
+  // porDestino (tab FERT, usuario 2026-10-28): Formulación produce en UN solo centro (UIO) y el 2000 solo
+  // recibe bloques — una sola tabla con columna Destino y Cant. (UN) de la orden, en vez de una por centro.
+  const renderConsumoBloqueTable = (data: ConsumoBloqueRow[], title: string = "Consumo de Bloque Formulado por Componente (Trazabilidad)", porDestino = false) => {
+    // UN por orden una sola vez (una orden puede trazar a más de una fila del BOM).
+    const unDe = (rows: ConsumoBloqueRow[]) => Array.from(new Map(rows.map(r => [`${r.centro}|${r.orden}`, r.cantidad ?? 0])).values()).reduce((s, v) => s + v, 0);
+    const kgDestino = (rows: ConsumoBloqueRow[], centro: string) => rows.filter(r => r.centro === centro).reduce((s, r) => s + r.total, 0);
+    const columnas = porDestino ? 10 : 8;
     const grouped: Record<string, { nombreFormulado: string; items: ConsumoBloqueRow[] }> = {};
     data.forEach(row => {
       if (!grouped[row.codFormulado]) grouped[row.codFormulado] = { nombreFormulado: row.nombreFormulado, items: [] };
@@ -1568,7 +1630,12 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             <FlaskConical className="w-4 h-4 text-indigo-600" />
             {title}
           </h3>
-          <Badge variant="outline" className="text-[10px] font-black border-slate-200 bg-slate-50">T. CONSUMO: {formatNum(total, 1)}</Badge>
+          <div className="flex items-center gap-2">
+            {porDestino && (
+              <Badge variant="outline" className="text-[10px] font-black border-slate-200 bg-white">UIO {formatNum(kgDestino(data, '1000'), 1)} · GYE {formatNum(kgDestino(data, '2000'), 1)} · {formatNum(unDe(data), 0)} UN</Badge>
+            )}
+            <Badge variant="outline" className="text-[10px] font-black border-slate-200 bg-slate-50">T. CONSUMO: {formatNum(total, 1)}</Badge>
+          </div>
         </div>
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
           <div className="overflow-x-auto max-h-[500px]">
@@ -1581,13 +1648,15 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                   <th className="px-6 py-4 text-left border-r border-gray-100">NOMBRE</th>
                   <th className="px-4 py-4 border-r border-gray-100">MATERIAL</th>
                   <th className="px-4 py-4 border-r border-gray-100">ORDEN</th>
+                  {porDestino && <th className="px-3 py-4 border-r border-gray-100" title="Centro de la orden: 1000 se corta en UIO; 2000 recibe los bloques desde UIO">DESTINO</th>}
+                  {porDestino && <th className="px-3 py-4 border-r border-gray-100" title="Cantidad pendiente de la orden FERT (láminas)">CANT. (UN)</th>}
                   <th className="px-3 py-4 border-r border-gray-100">UN</th>
                   <th className="px-4 py-4 bg-indigo-50 text-indigo-700 font-black">Total</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50 font-bold">
                 {codes.length === 0 ? (
-                  <tr><td colSpan={8} className="py-20 text-center text-slate-200 uppercase font-black">Sin consumo de Bloque Formulado detectado</td></tr>
+                  <tr><td colSpan={columnas} className="py-20 text-center text-slate-200 uppercase font-black">Sin consumo de Bloque Formulado detectado</td></tr>
                 ) : (
                   codes.map(code => {
                     const group = grouped[code];
@@ -1597,6 +1666,10 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         <tr className="bg-slate-50">
                           <td className="px-4 py-2 text-left font-mono font-black text-indigo-600 border-r border-gray-100">{code}</td>
                           <td colSpan={5} className="px-6 py-2 text-left uppercase font-black text-slate-700 border-r border-gray-100 truncate max-w-[300px]">{group.nombreFormulado}</td>
+                          {porDestino && (
+                            <td className="px-3 py-2 border-r border-gray-100 text-[9px] text-slate-500 whitespace-nowrap">UIO {formatNum(kgDestino(group.items, '1000'), 1)} · GYE {formatNum(kgDestino(group.items, '2000'), 1)}</td>
+                          )}
+                          {porDestino && <td className="px-3 py-2 border-r border-gray-100 font-mono font-black text-slate-700">{formatNum(unDe(group.items), 0)}</td>}
                           <td className="px-3 py-2 border-r border-gray-100 opacity-40 uppercase">Subtotal</td>
                           <td className="px-4 py-2 bg-indigo-50 text-indigo-800 font-black">{formatNum(subtotal, 1)}</td>
                         </tr>
@@ -1608,6 +1681,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                             <td className="px-6 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[220px]">{row.nombre}</td>
                             <td className="px-4 py-2 border-r border-gray-100 text-slate-500">{row.material}</td>
                             <td className="px-4 py-2 border-r border-gray-100 text-slate-500">{row.orden}</td>
+                            {porDestino && <td className={cn("px-3 py-2 border-r border-gray-100 font-black", row.centro === '2000' ? 'text-amber-700' : 'text-slate-500')}>{row.centro === '2000' ? 'GYE' : 'UIO'}</td>}
+                            {porDestino && <td className="px-3 py-2 border-r border-gray-100 text-slate-600">{row.cantidad !== undefined ? formatNum(row.cantidad, 0) : '—'}</td>}
                             <td className="px-3 py-2 border-r border-gray-100 uppercase">{row.un}</td>
                             <td className="px-4 py-2 font-black text-slate-900">{formatNum(row.total, 3)}</td>
                           </tr>
@@ -2014,8 +2089,57 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
               <span className="w-full font-bold text-amber-700">Reporte guardado antes de la ventana de corte: se muestran todas las FERT del rango. Sincroniza para filtrar por día de corte.</span>
             )}
           </div>
-          {renderConsumoBloqueTable(fertConsumoPorCentro['1000'], "Consumo de Bloque Formulado por Componente — FERT (Centro 1000, Quito)")}
-          {renderConsumoBloqueTable(fertConsumoPorCentro['2000'], "Consumo de Bloque Formulado por Componente — FERT (Centro 2000, Guayaquil)")}
+          {cuadreCorte && (
+            <div className="rounded-2xl border border-gray-100 bg-white px-4 py-3 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-[11px] font-black uppercase tracking-widest text-slate-700">Cuadre con Corte Espuma · Sub-Bloques-T8 (láminas UN)</h4>
+                <span className="text-[10px] text-slate-400">Corte separa por centro; Formulación produce todo en UIO y lo de GYE se le envía en bloques.</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {cuadreCorte.porCentro.map(c => {
+                  const cuadra = Math.abs(c.unCorte - c.unFormulacion) < 0.5;
+                  return (
+                    <span key={c.centro} className={cn("rounded-xl border px-3 py-2 text-[11px] font-bold", cuadra ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800')}>
+                      {c.centro === '1000' ? 'Quito (1000)' : 'Guayaquil (2000) — destino'}: Corte {formatNum(c.unCorte, 0)} UN · Formulación {formatNum(c.unFormulacion, 0)} UN {cuadra ? '· cuadra' : `· diferencia ${formatNum(c.unFormulacion - c.unCorte, 0)}`}
+                    </span>
+                  );
+                })}
+              </div>
+              {cuadreCorte.diferencias.length > 0 && (
+                <div className="overflow-x-auto max-h-[260px] rounded-xl border border-slate-100">
+                  <table className="w-full border-collapse text-[10px]">
+                    <thead className="bg-gray-50 sticky top-0 text-gray-500 uppercase font-bold">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Dónde está</th>
+                        <th className="px-3 py-2 text-left">Orden</th>
+                        <th className="px-3 py-2 text-left">Material</th>
+                        <th className="px-3 py-2 text-left">Descripción</th>
+                        <th className="px-3 py-2">Centro</th>
+                        <th className="px-3 py-2">Resp.</th>
+                        <th className="px-3 py-2 text-right">UN</th>
+                        <th className="px-3 py-2 text-left">Motivo</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50 font-mono">
+                      {cuadreCorte.diferencias.map(d => (
+                        <tr key={`${d.lado}|${d.centro}|${d.orden}`}>
+                          <td className={cn("px-3 py-1.5 font-sans font-black", d.lado === 'Solo Corte' ? 'text-red-700' : 'text-indigo-700')}>{d.lado}</td>
+                          <td className="px-3 py-1.5">{d.orden}</td>
+                          <td className="px-3 py-1.5">{d.material}</td>
+                          <td className="px-3 py-1.5 font-sans uppercase truncate max-w-[260px]">{d.descripcion}</td>
+                          <td className="px-3 py-1.5 text-center">{d.centro}</td>
+                          <td className="px-3 py-1.5 text-center">{d.resp || '—'}</td>
+                          <td className="px-3 py-1.5 text-right">{formatNum(d.un, 0)}</td>
+                          <td className="px-3 py-1.5 font-sans text-slate-600">{d.motivo}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+          {renderConsumoBloqueTable(fertConsumoVentana, "Consumo de Bloque Formulado por Componente — FERT (producción UIO · destinos Quito y Guayaquil)", true)}
         </div>
       );
       case 'inventario': return (
