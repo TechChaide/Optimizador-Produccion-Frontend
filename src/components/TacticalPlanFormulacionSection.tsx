@@ -35,7 +35,7 @@ import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { useJornadaGrupo, type JornadaGrupoEditable } from '@/hooks/useJornadaGrupo';
 import { serviciosService } from '@/services/servicios.service';
-import { sapCompartido, refrescarDatosSap, refrescarAlSincronizar } from '@/lib/datos-sap-compartidos';
+import { sapCompartido, refrescarDatosSap, refrescarAlSincronizar, detallesDePlanes } from '@/lib/datos-sap-compartidos';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { useRuntimeInspector } from '@/services/RuntimeInspector';
 import { useAppContext } from '@/context/AppProvider';
@@ -46,6 +46,8 @@ import { useReportePlanTxt, useAutoCargaPlanVigente, useReportePlanTxtGrupo, Rep
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { CUPULA_MAX_CM } from '@/lib/bloques-espuma';
+import { ventanaCorte, fertEnVentanaCorte } from '@/lib/ventana-corte';
+import { nextBusinessDay, laborablesHorizonte, cargarDiasNoLaborables, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
 import { es } from 'date-fns/locale';
 
@@ -102,6 +104,9 @@ const safeNum = (val: unknown): number => {
 const cleanCode = (code: unknown): string => {
   return String(code || '').replace(/^0+/, '').trim();
 };
+
+// Fecha 'yyyy-MM-dd' de una orden SAP (recorta la hora si viene "…T00:00:00").
+const soloFechaOrden = (o: Record<string, unknown>, keys: string[]): string => getProp(o, keys).split('T')[0];
 
 const formatNum = (val: unknown, decimals: number = 0): string => {
   const n = safeNum(val);
@@ -539,6 +544,13 @@ interface ConsumoBloqueRow {
   origin: 'prov' | 'fert';
   centro: string;
   respCtrlProd: string;
+  // Solo FERT (2026-10-28, ver @/lib/ventana-corte): FECHAFIN de la orden y si su material va en un P2
+  // de Venta Externa — con eso el tab FERT filtra el mismo día de corte que Sub-Bloques-T8 de Corte.
+  // Ausentes en reportes guardados antes de ese cambio.
+  fechaFin?: string;
+  ventaExterna?: boolean;
+  // false = la orden entró solo por la ventana de corte (FECHA fuera del rango): no alimenta la Salida de Datos.
+  enRango?: boolean;
 }
 
 // Una orden individual (provisional o FERT) que consume un Bloque Formulado del grupo agregado.
@@ -768,6 +780,15 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   const [ordenesFert, setOrdersFert] = useState<RawApiRow[]>([]);
   const [cuboInventarios, setCuboInventarios] = useState<CuboInventariosItem[]>([]);
   const [curadoData, setCuradoData] = useState<RawApiRow[]>([]);
+  // Día de corte del tab FERT (misma ventana que Sub-Bloques-T8 de Corte, ver @/lib/ventana-corte) con
+  // el calendario de feriados / días no trabajados; '' = hoy + 1 hábil.
+  const [diaCorte, setDiaCorte] = useState('');
+  const [calendario, setCalendario] = useState<{ noLaborables: DiasNoLaborables; laborablesExtra: DiasNoLaborables }>({ noLaborables: new Set(), laborablesExtra: new Set() });
+  useEffect(() => {
+    cargarDiasNoLaborables().then(c => setCalendario({ noLaborables: c.noLaborables, laborablesExtra: c.laborablesExtra })).catch(() => {});
+  }, []);
+  const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDay(d, calendario.noLaborables, laborablesHorizonte(calendario.laborablesExtra)), [calendario]);
+  const ventana = useMemo(() => ventanaCorte(diaCorte, siguienteDiaHabil), [diaCorte, siguienteDiaHabil]);
   // El módulo YA NO sincroniza solo al abrirse — mismo criterio que Corte Espuma/Venta Externa/
   // Laminado (ver [[carga_manual_modulos_tacticos]], antes marcado como pendiente para este módulo).
   const [isLoading, setIsLoading] = useState(false);
@@ -855,15 +876,21 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     });
   }, [ordenes, enRangoFechas]);
 
+  // FERT que se explotan: las del rango por FECHA (alimentan la Salida de Datos, sin cambios) MÁS las
+  // que se cortan dentro del rango por FECHAFIN (ventana de corte, ver @/lib/ventana-corte): una FERT
+  // liberada días antes tiene FECHA fuera del rango pero se corta en D, y el tab FERT debe mostrarla
+  // igual que Sub-Bloques-T8. +4 días al final del rango para alcanzar la FECHAFIN de Venta Externa (D+1
+  // hábil) aun con fin de semana o feriado de por medio.
   const prodFiltradas = useMemo(() => {
+    const finVentana = rangeEnd ? format(new Date(new Date(`${rangeEnd}T12:00:00`).getTime() + 4 * 86400000), 'yyyy-MM-dd') : null;
     return ordenesFert.filter(o => {
       const centro = getProp(o, ['CENTRO', 'Centro']).trim();
       if (centro && !['1000', '2000'].includes(centro)) return false;
-      const itemDateFull = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']).trim();
-      const itemDate = itemDateFull.includes('T') ? itemDateFull.split('T')[0] : itemDateFull;
-      return enRangoFechas(itemDate);
+      if (enRangoFechas(soloFechaOrden(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']))) return true;
+      const fechaFin = soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']);
+      return !!fechaFin && (!rangeStart || fechaFin >= rangeStart) && (!finVentana || fechaFin <= finVentana);
     });
-  }, [ordenesFert, enRangoFechas]);
+  }, [ordenesFert, enRangoFechas, rangeStart, rangeEnd]);
 
   // Inventario SAP (fuente CuboInventarios) filtrado a materiales "BLOQUE FORMULADO". El
   // StockActual de CuboInventarios ya viene en KG para estos materiales HALB (PesoNetoActual/
@@ -942,6 +969,16 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       return { estado: 'aviso', mensaje: 'Sin órdenes FERT/provisionales de los responsables de Formulación en el rango elegido.' };
     }
     setIsProcessingResumen(true);
+    // Materiales de Venta Externa por centro (`centro|material`) = líneas de los P2 de Venta activos —
+    // mismo cruce con el que Corte reconoce una FERT de Venta (origenArea) para fecharla a D+1.
+    const materialesVenta = new Set<string>();
+    try {
+      const planes = ((await sapCompartido.planGrupos()).data || []).filter(pg => pg.estado === 'A' && /p2\s*-\s*venta/i.test(String(pg.valor || '')));
+      const centroDePlan = new Map(planes.map(pg => [pg.codigo_plan_grupo, String(pg.valor || '').match(/centro\s*(\d{4})/i)?.[1] || '']));
+      (await detallesDePlanes(planes.map(pg => pg.codigo_plan_grupo))).forEach(d => {
+        if (d.estado === 'A') materialesVenta.add(`${centroDePlan.get(d.codigo_plan_grupo)}|${cleanCode(d.codigo_material)}`);
+      });
+    } catch { console.warn('[Formulación] No se pudo leer el P2 de Venta Externa: sus FERT se fechan como colchones en el tab FERT.'); }
     const groupsMap = new Map<string, FormuladoSummaryRow>();
     const consumoRows: ConsumoBloqueRow[] = [];
     // Consumo/D se pide UNA vez por Bloque Formulado (no por orden): varias órdenes distintas
@@ -963,6 +1000,12 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         : 0;
       const itemKg = (anchoVal * 200 * espVal * densVal * qty) / 10000;
       const ordenNum = getProp(o, ['ORDENPREVISIONAL', 'ORDEN', 'ORDEN_PROCESO']) || '—';
+      // Las provisionales siempre vienen del rango; una FERT puede venir solo por la ventana de corte.
+      const enRango = origin === 'prov' || enRangoFechas(soloFechaOrden(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']));
+      const marcaVentana: Partial<ConsumoBloqueRow> = origin === 'fert'
+        ? { fechaFin: soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']), ventaExterna: materialesVenta.has(`${centroOrden}|${info.code}`), enRango }
+        : {};
+      const consumoDesde = consumoRows.length;
 
       let blockCode = '—';
       let blockDesc = '—';
@@ -1000,6 +1043,12 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
           centro: centroOrden,
           respCtrlProd: respOrden
         });
+      }
+      for (let k = consumoDesde; k < consumoRows.length; k++) Object.assign(consumoRows[k], marcaVentana);
+      // Una FERT que entró solo por la ventana de corte no cambia la Salida de Datos (rango por FECHA).
+      if (!enRango) {
+        if (i % 10 === 0) setResumenProgress({ current: i + 1, total: allOrders.length });
+        continue;
       }
 
       // "Salida de Datos" (unifiedSummaryData) SOLO debe reflejar Bloque Formulado real — el usuario
@@ -1076,7 +1125,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     });
     setIsProcessingResumen(false);
     return { estado: 'ok', mensaje: `${allOrders.length} orden(es) → ${summaryOrdenado.length} bloque(s) formulado(s) en el resumen.`, progreso: { actual: allOrders.length, total: allOrders.length } };
-  }, [provFiltradas, prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico]);
+  }, [provFiltradas, prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico, enRangoFechas]);
 
   // Segunda fase de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar): corre
   // handleProcessResumen automáticamente en cuanto el render con los datos recién sincronizados ya
@@ -1274,10 +1323,17 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     '1000': provConsumoResponsable.filter(r => r.centro === '1000'),
     '2000': provConsumoResponsable.filter(r => r.centro === '2000'),
   }), [provConsumoResponsable]);
-  const fertConsumoPorCentro = useMemo(() => ({
-    '1000': fertConsumoResponsable.filter(r => r.centro === '1000'),
-    '2000': fertConsumoResponsable.filter(r => r.centro === '2000'),
-  }), [fertConsumoResponsable]);
+  // Tab FERT = mismo día de corte que Sub-Bloques-T8 de Corte (usuario 2026-10-28, ver
+  // @/lib/ventana-corte): FECHAFIN = D (Venta Externa D+1). Un reporte guardado antes del cambio no trae
+  // FECHAFIN: se muestra completo, como antes, con aviso en el tab.
+  const fertSinVentana = fertConsumoResponsable.length > 0 && fertConsumoResponsable.every(r => r.fechaFin === undefined);
+  const fertConsumoPorCentro = useMemo(() => {
+    const enVentana = fertSinVentana ? fertConsumoResponsable : fertConsumoResponsable.filter(r => fertEnVentanaCorte(r.fechaFin || '', !!r.ventaExterna, ventana));
+    return {
+      '1000': enVentana.filter(r => r.centro === '1000'),
+      '2000': enVentana.filter(r => r.centro === '2000'),
+    };
+  }, [fertConsumoResponsable, fertSinVentana, ventana]);
 
   // Evaluación de Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material "BLOQUE
   // FORMULADO", con la misma base de conversión (TamLoteMin) que el Resumen e Inventarios — para
@@ -1946,6 +2002,18 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       );
       case 'ordenesProd': return (
         <div className="animate-in fade-in duration-300 text-left space-y-10">
+          {/* Mismo selector y regla que "Día de corte" en Sub-Bloques-T8 de Corte Espuma. */}
+          <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-100 bg-white px-4 py-3 text-xs">
+            <label className="flex items-center gap-2 font-black uppercase text-slate-700">
+              Día de corte
+              <input type="date" value={ventana.d} min={rangeStart || undefined} max={rangeEnd || undefined} onChange={e => setDiaCorte(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1 font-mono text-slate-900" />
+            </label>
+            <span className="text-slate-500">Venta Externa: fecha fin {ventana.venta.split('-').reverse().join('/')}</span>
+            <span className="text-slate-400">· FERT en firme cuya fecha fin cae en el día de corte (misma ventana que Sub-Bloques-T8 de Corte Espuma); provisionales y pendiente de días anteriores no entran.</span>
+            {fertSinVentana && (
+              <span className="w-full font-bold text-amber-700">Reporte guardado antes de la ventana de corte: se muestran todas las FERT del rango. Sincroniza para filtrar por día de corte.</span>
+            )}
+          </div>
           {renderConsumoBloqueTable(fertConsumoPorCentro['1000'], "Consumo de Bloque Formulado por Componente — FERT (Centro 1000, Quito)")}
           {renderConsumoBloqueTable(fertConsumoPorCentro['2000'], "Consumo de Bloque Formulado por Componente — FERT (Centro 2000, Guayaquil)")}
         </div>

@@ -67,6 +67,7 @@ import {
   unidadesPorSubBloque as unidadesPorSubBloqueDe, subBloquesEnteros, longitudSubBloquesM,
   densidadDeCategoria, aperturaDeCategoria, tipoDeCategoria, tipoEspumaDesc,
 } from '@/lib/bloques-espuma';
+import { ventanaCorte, fertEnVentanaCorte, esAreaVentaExterna } from '@/lib/ventana-corte';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
 
@@ -2684,10 +2685,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // D por defecto = hoy+1 hábil, con selector. Venta se reconoce por origenArea (cruce con el P2): sin
   // Necesidades Planta cargadas, una FERT de Venta se trataría como colchones.
   const [t8FechaCorte, setT8FechaCorte] = useState('');
-  const t8Fechas = useMemo(() => {
-    const d = t8FechaCorte || format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd');
-    return { d, venta: format(siguienteDiaHabil(new Date(`${d}T12:00:00`)), 'yyyy-MM-dd') };
-  }, [t8FechaCorte, siguienteDiaHabil]);
+  // Regla compartida con Formulación (ver @/lib/ventana-corte): el mismo día de corte da el mismo dato.
+  const t8Fechas = useMemo(() => ventanaCorte(t8FechaCorte, siguienteDiaHabil), [t8FechaCorte, siguienteDiaHabil]);
   // Solo el día de corte: el pendiente de días anteriores NO entra (usuario 2026-10-27) — ya se está
   // procesando en el turno en curso y su tiempo lo muestra la Capacidad Operativa (exceso del turno).
   const fertT8PorCentro = useMemo(() => {
@@ -2699,7 +2698,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (!allowed.includes(r.responsable)) return false;
         if (/PRENSAD|APROVECHAMIENTO/i.test(r.descripcion) || ES_FORRO(r.descripcion)) return false;
         if (respExcepcionExcluye(centro, r.responsable, r.material)) return false;
-        return r.fechaFin === (/venta\s*externa/i.test(r.origenArea || '') ? t8Fechas.venta : t8Fechas.d);
+        return fertEnVentanaCorte(r.fechaFin, esAreaVentaExterna(r.origenArea), t8Fechas);
       });
     };
     return { '1000': filtrar(fertAuditAllUIO, '1000'), '2000': filtrar(fertAuditAllGYE, '2000') };
