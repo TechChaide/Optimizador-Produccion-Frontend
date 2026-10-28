@@ -141,3 +141,12 @@ export const motivoFueraDeSubBloques = (r: ResponsablesCorte, centro: string, re
   if (r.verticales.includes(resp)) return `Corte vertical (resp. ${resp})`;
   return null;
 };
+
+/**
+ * Variante por MATERIAL (Formulación, que no tiene el origen por orden que Corte saca del cruce con
+ * Necesidades Planta): una FERT con FECHAFIN = D siempre se corta en D; con FECHAFIN = D+1 solo si su
+ * material va en un P2 de Venta Externa. Así un material que piden Colchones y Venta a la vez no pierde
+ * sus órdenes de colchones del día (con la regla por orden quedaban todas fechadas a D+1).
+ */
+export const fertEnVentanaCorteMaterial = (fechaFin: string, materialEnVenta: boolean, v: VentanaCorte): boolean =>
+  fechaFin === v.d || (materialEnVenta && fechaFin === v.venta);

@@ -46,7 +46,7 @@ import { useReportePlanTxt, useAutoCargaPlanVigente, useReportePlanTxtGrupo, Rep
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { CUPULA_MAX_CM } from '@/lib/bloques-espuma';
-import { ventanaCorte, fertEnVentanaCorte, responsablesCorte, motivoFueraDeSubBloques, CODIGO_GRUPO_CORTE_POR_CENTRO } from '@/lib/ventana-corte';
+import { ventanaCorte, fertEnVentanaCorteMaterial, responsablesCorte, motivoFueraDeSubBloques, CODIGO_GRUPO_CORTE_POR_CENTRO } from '@/lib/ventana-corte';
 import { nextBusinessDay, laborablesHorizonte, cargarDiasNoLaborables, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -105,8 +105,20 @@ const cleanCode = (code: unknown): string => {
   return String(code || '').replace(/^0+/, '').trim();
 };
 
-// Fecha 'yyyy-MM-dd' de una orden SAP (recorta la hora si viene "…T00:00:00").
-const soloFechaOrden = (o: Record<string, unknown>, keys: string[]): string => getProp(o, keys).split('T')[0];
+// Fecha 'yyyy-MM-dd' de una orden SAP: acepta ISO (con hora tras 'T' o espacio) y DD/MM/YYYY; '' si
+// no hay o viene "null".
+const soloFechaOrden = (o: Record<string, unknown>, keys: string[]): string => {
+  const v = getProp(o, keys);
+  const iso = v.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso) return iso[1];
+  const dmy = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  return dmy ? `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}` : '';
+};
+// FECHAFIN de una orden con el MISMO respaldo que Corte (auditMapper: sin FECHAFIN = orden de un solo
+// día, su FECHAINICIO). 2026-10-28: sin este respaldo las FERT sin FECHAFIN no caían en el día de corte y
+// el tab FERT quedaba vacío aunque la Salida de Datos sí las tenía.
+const fechaFinOrden = (o: Record<string, unknown>): string =>
+  soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']) || soloFechaOrden(o, ['FECHAINICIO', 'FECHA', 'FECHA_INICIO']);
 
 const formatNum = (val: unknown, decimals: number = 0): string => {
   const n = safeNum(val);
@@ -893,7 +905,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       const centro = getProp(o, ['CENTRO', 'Centro']).trim();
       if (centro && !['1000', '2000'].includes(centro)) return false;
       if (enRangoFechas(soloFechaOrden(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']))) return true;
-      const fechaFin = soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']);
+      const fechaFin = fechaFinOrden(o);
       return !!fechaFin && (!rangeStart || fechaFin >= rangeStart) && (!finVentana || fechaFin <= finVentana);
     });
   }, [ordenesFert, enRangoFechas, rangeStart, rangeEnd]);
@@ -1010,7 +1022,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       // Las provisionales siempre vienen del rango; una FERT puede venir solo por la ventana de corte.
       const enRango = origin === 'prov' || enRangoFechas(soloFechaOrden(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']));
       const marcaVentana: Partial<ConsumoBloqueRow> = origin === 'fert'
-        ? { fechaFin: soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']), ventaExterna: materialesVenta.has(`${centroOrden}|${info.code}`), enRango, cantidad: qty }
+        ? { fechaFin: fechaFinOrden(o), ventaExterna: materialesVenta.has(`${centroOrden}|${info.code}`), enRango, cantidad: qty }
         : {};
       const consumoDesde = consumoRows.length;
 
@@ -1335,9 +1347,11 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
   // FECHAFIN: se muestra completo, como antes, con aviso en el tab.
   const fertSinVentana = fertConsumoResponsable.length > 0 && fertConsumoResponsable.every(r => r.fechaFin === undefined);
   // Una sola lista con los dos destinos: Formulación produce solo en UIO (ver renderConsumoBloqueTable porDestino).
+  // fertTodoRango: vista anterior (todas las FERT del rango sincronizado, sin filtro de día de corte).
+  const [fertTodoRango, setFertTodoRango] = useState(false);
   const fertConsumoVentana = useMemo(
-    () => fertSinVentana ? fertConsumoResponsable : fertConsumoResponsable.filter(r => fertEnVentanaCorte(r.fechaFin || '', !!r.ventaExterna, ventana)),
-    [fertConsumoResponsable, fertSinVentana, ventana]
+    () => fertSinVentana || fertTodoRango ? fertConsumoResponsable.filter(r => fertSinVentana || r.enRango !== false) : fertConsumoResponsable.filter(r => fertEnVentanaCorteMaterial(r.fechaFin || "", !!r.ventaExterna, ventana)),
+    [fertConsumoResponsable, fertSinVentana, fertTodoRango, ventana]
   );
 
   // Cuadre con Sub-Bloques-T8 de Corte Espuma (usuario 2026-10-28: "es la misma data, deberían cuadrar
@@ -1356,12 +1370,15 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     // Diagnóstico (2026-10-28: el panel salía "0 UN · cuadra" sin FERT cargadas): cuántas FERT hay y
     // cuántas caen en el día de corte, para distinguir "no hay datos" de "no cuadra".
     let enVentanaCount = 0;
+    const fechasFin = new Map<string, number>();
     const motivos = new Map<string, number>();
     ordenesFert.forEach(o => {
       const centro = getProp(o, ['CENTRO', 'Centro']).trim();
       if (centro !== '1000' && centro !== '2000') return;
       const info = extractMaterialInfo(o);
-      if (!fertEnVentanaCorte(soloFechaOrden(o, ['FECHAFIN', 'FECHA_FIN']), venta.has(`${centro}|${info.code}`), ventana)) return;
+      const ff = fechaFinOrden(o) || "sin fecha";
+      fechasFin.set(ff, (fechasFin.get(ff) || 0) + 1);
+      if (!fertEnVentanaCorteMaterial(fechaFinOrden(o), venta.has(`${centro}|${info.code}`), ventana)) return;
       enVentanaCount++;
       const un = safeNum(getProp(o, ['CANTPEND', 'CANTPENDIENTE', 'CANTPROGRAMADA', 'CANTIDAD', 'CANT_PROG']));
       if (un <= 0) return;
@@ -1374,7 +1391,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       corte.set(key, { centro, orden, material: info.code, descripcion: info.desc, resp: r, un, motivo: '' });
     });
     const formulacion = new Map<string, OrdenCuadre>();
-    fertConsumoVentana.forEach(r => {
+    // Siempre el día de corte, aunque la tabla muestre todo el rango (fertTodoRango).
+    fertConsumoResponsable.filter(r => fertEnVentanaCorteMaterial(r.fechaFin || "", !!r.ventaExterna, ventana)).forEach(r => {
       const key = `${r.centro}|${r.orden}`;
       if (!formulacion.has(key)) formulacion.set(key, { centro: r.centro, orden: r.orden, material: r.material, descripcion: r.nombre, resp: r.respCtrlProd, un: r.cantidad ?? 0, motivo: '' });
     });
@@ -1391,9 +1409,9 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       const unDe = (m: Map<string, OrdenCuadre>) => Array.from(m.values()).filter(o => o.centro === centro).reduce((s, o) => s + o.un, 0);
       return { centro, unCorte: unDe(corte), unFormulacion: unDe(formulacion) };
     });
-    const diagnostico = { cargadas: ordenesFert.length, enVentana: enVentanaCount, deCorte: corte.size, motivos: Array.from(motivos.entries()).sort((a, b) => b[1] - a[1]) };
+    const diagnostico = { cargadas: ordenesFert.length, enVentana: enVentanaCount, deCorte: corte.size, motivos: Array.from(motivos.entries()).sort((a, b) => b[1] - a[1]), fechasFin: Array.from(fechasFin.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6) };
     return { porCentro, diagnostico, diferencias: [...soloCorte.map(o => ({ ...o, lado: 'Solo Corte' as const })), ...soloFormulacion.map(o => ({ ...o, lado: 'Solo Formulación' as const }))] };
-  }, [fertSinVentana, materialesVenta, fertConsumoResponsable, fertConsumoVentana, restriccionesCorte, ordenesFert, ventana, respPorCentroDinamico]);
+  }, [fertSinVentana, materialesVenta, fertConsumoResponsable, restriccionesCorte, ordenesFert, ventana, respPorCentroDinamico]);
 
   // Evaluación de Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material "BLOQUE
   // FORMULADO", con la misma base de conversión (TamLoteMin) que el Resumen e Inventarios — para
@@ -2090,6 +2108,10 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
               <input type="date" value={ventana.d} onChange={e => setDiaCorte(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1 font-mono text-slate-900" />
             </label>
             <span className="text-slate-500">Venta Externa: fecha fin {ventana.venta.split('-').reverse().join('/')}</span>
+            <label className="flex items-center gap-1.5 font-bold text-slate-600">
+              <input type="checkbox" checked={fertTodoRango} onChange={e => setFertTodoRango(e.target.checked)} />
+              Ver todas las FERT del rango (sin filtro de día de corte)
+            </label>
             <span className="text-slate-400">· FERT en firme cuya fecha fin cae en el día de corte (misma ventana que Sub-Bloques-T8 de Corte Espuma); provisionales y pendiente de días anteriores no entran.</span>
             {fertSinVentana && (
               <span className="w-full font-bold text-amber-700">Reporte guardado antes de la ventana de corte: se muestran todas las FERT del rango. Sincroniza para filtrar por día de corte.</span>
@@ -2111,6 +2133,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                   FERT cargadas: <b>{cuadreCorte.diagnostico.cargadas}</b> · con fecha fin del día de corte: <b>{cuadreCorte.diagnostico.enVentana}</b> · del universo de Corte: <b>{cuadreCorte.diagnostico.deCorte}</b>
                   {cuadreCorte.diagnostico.motivos.length > 0 && <> · fuera de Corte: {cuadreCorte.diagnostico.motivos.map(([m, n]) => `${m} (${n})`).join(' · ')}</>}
                   {cuadreCorte.diagnostico.enVentana === 0 && <b className="text-amber-700"> — ninguna FERT termina el {ventana.d.split('-').reverse().join('/')}: revisa el día de corte o sincroniza datos de hoy.</b>}
+                  <br />Fechas fin de las FERT cargadas: {cuadreCorte.diagnostico.fechasFin.map(([f, n]) => `${f.split('-').reverse().join('/')} (${n})`).join(' · ')}
                 </p>
               )}
               <div className="flex flex-wrap gap-2">
