@@ -16,6 +16,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { addBusinessDays, cargarDiasNoLaborables, feriadosNacionales, type DiasLaborablesConfig } from '@/lib/dias-laborables';
 
 const normalizeMaterialCode = (code: string | number): string => {
   const codeStr = String(code).trim();
@@ -1016,6 +1017,25 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
 
   const [selectedDates, setSelectedDates] = useState<string[]>([]);
   const [hasSetDefaultDate, setHasSetDefaultDate] = useState(false);
+  // Feriados nacionales por ley + calendario de la app (con excepciones "Jornada"). La fecha objetivo por
+  // defecto (hoy + 3 días hábiles) antes solo saltaba fines de semana: el 28-oct-2026 daba 02-nov (Difuntos)
+  // en vez de 04-nov, y quedaba seleccionada aunque no estuviera en la lista de fechas.
+  const [diasLaborables, setDiasLaborables] = useState<DiasLaborablesConfig | null>(null);
+  useEffect(() => {
+    let cancelado = false;
+    cargarDiasNoLaborables()
+      .catch((): DiasLaborablesConfig => {
+        const anio = new Date().getFullYear();
+        return { noLaborables: new Set([...feriadosNacionales(anio), ...feriadosNacionales(anio + 1)]), laborablesExtra: new Set() };
+      })
+      .then(cfg => { if (!cancelado) setDiasLaborables(cfg); });
+    return () => { cancelado = true; };
+  }, []);
+  // Fecha objetivo de planificación = hoy + 3 días hábiles (sin fines de semana ni feriados), "YYYY-MM-DD" local
+  const fechaObjetivoPlan = useMemo(() => {
+    if (!diasLaborables) return null;
+    return fechaLocalKey(addBusinessDays(new Date(), 3, diasLaborables.noLaborables, diasLaborables.laborablesExtra));
+  }, [diasLaborables]);
 
   // Estado para Explosión de Materiales
   const [explosionResults, setExplosionResults] = useState<ComponentExplosion[]>([]);
@@ -1350,20 +1370,9 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   }, [structuralFilteredOrders, tiemposMap]);
 
   const statusSummary = useMemo(() => {
-    const getTargetDateStr = () => {
-      const today = new Date();
-      let daysAdded = 0;
-      let result = new Date(today);
-      while (daysAdded < 3) {
-        result.setDate(result.getDate() + 1);
-        const day = result.getDay();
-        if (day !== 0 && day !== 6) daysAdded++;
-      }
-      return result.toISOString().split('T')[0];
-    };
-
-    const todayStr = new Date().toISOString().split('T')[0];
-    const targetPlanningDateStr = getTargetDateStr();
+    const todayStr = fechaLocalKey(new Date());
+    const targetPlanningDateStr = fechaObjetivoPlan
+      ?? fechaLocalKey(addBusinessDays(new Date(), 3, new Set(feriadosNacionales(new Date().getFullYear()))));
 
     let pastCant = 0, pastHours = 0;
     let todayCant = 0, todayHours = 0;
@@ -1390,7 +1399,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
     });
 
     return { pastCant, pastHours, todayCant, todayHours, futureCant, futureHours };
-  }, [structuralFilteredOrders, tiemposMap]);
+  }, [structuralFilteredOrders, tiemposMap, fechaObjetivoPlan]);
 
   const uniqueDates = useMemo(() => {
     const dates = new Set(structuralFilteredOrders.map(order => order.FECHA));
@@ -1400,24 +1409,17 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   }, [structuralFilteredOrders, displayMode, planesArchivoFechas]);
 
   useEffect(() => {
-    if (!hasSetDefaultDate && uniqueDates.length > 0 && displayMode === 'plan') {
-      const getTargetDate = () => {
-        const today = new Date();
-        let daysAdded = 0;
-        let result = new Date(today);
-        while (daysAdded < 3) {
-          result.setDate(result.getDate() + 1);
-          const day = result.getDay();
-          if (day !== 0 && day !== 6) daysAdded++;
-        }
-        return result.toISOString().split('T')[0];
-      };
-
-      const target = getTargetDate();
-      setSelectedDates([target]);
+    if (!hasSetDefaultDate && uniqueDates.length > 0 && displayMode === 'plan' && fechaObjetivoPlan) {
+      // Solo se preselecciona una fecha que exista en la lista; si la fecha objetivo no tiene órdenes ni plan,
+      // la siguiente fecha disponible (o ninguna = todas).
+      const disponibles = [...uniqueDates].sort();
+      const target = disponibles.includes(fechaObjetivoPlan)
+        ? fechaObjetivoPlan
+        : disponibles.find(f => f > fechaObjetivoPlan);
+      setSelectedDates(target ? [target] : []);
       setHasSetDefaultDate(true);
     }
-  }, [uniqueDates, hasSetDefaultDate, displayMode]);
+  }, [uniqueDates, hasSetDefaultDate, displayMode, fechaObjetivoPlan]);
 
   const filteredOrders = useMemo(() => {
     return structuralFilteredOrders.filter(order => {

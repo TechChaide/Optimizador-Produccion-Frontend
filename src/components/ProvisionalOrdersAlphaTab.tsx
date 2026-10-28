@@ -5,6 +5,7 @@ import * as XLSX from 'xlsx';
 import { serviciosService } from '@/services/servicios.service';
 import { formatMaterialSap, SAP_ESTATUS_REG_ORD_CARGADO, usuarioProcesoSap } from '@/lib/sap-material';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
+import { cargarDiasNoLaborables, feriadosNacionales } from '@/lib/dias-laborables';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { restriccionService } from '@/services/restriccion.service';
@@ -256,6 +257,20 @@ const toDateKey = (date: Date): string => {
     const m = String(date.getMonth() + 1).padStart(2, '0');
     const d = String(date.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
+};
+
+// Nombre de los feriados nacionales FIJOS (Código del Trabajo, art. 65) por "MM-DD", para etiquetar en la
+// Ventana de Fabricación los que agrega la línea base de @/lib/dias-laborables cuando la API externa no los
+// trae en esa fecha.
+const NOMBRE_FERIADO_NACIONAL_POR_FECHA: Record<string, string> = {
+    '01-01': 'Año Nuevo',
+    '05-01': 'Día del Trabajo',
+    '05-24': 'Batalla del Pichincha',
+    '08-10': 'Primer Grito de Independencia',
+    '10-09': 'Independencia de Guayaquil',
+    '11-02': 'Día de los Difuntos',
+    '11-03': 'Independencia de Cuenca',
+    '12-25': 'Navidad',
 };
 
 // Suma N días laborables (omite sábado y domingo) a una fecha
@@ -1500,9 +1515,33 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 start.setDate(start.getDate() + 1);
                 const end = new Date(start);
                 end.setDate(end.getDate() + PLANNING_LOOKAHEAD_DAYS);
-                const holidays = await ecuadorHolidaysService.getHolidaysForRange(start, end);
+                // Dos fuentes, combinadas (2026-10-28): la API externa de feriados (nager.at) Y la línea base de
+                // feriados nacionales por ley + el calendario de la app (cargarDiasNoLaborables, mismo criterio
+                // que Espumas/Corte y Laminado/Venta Externa). Antes solo se usaba la API externa, que cambió sus
+                // datos y pasó la "Independencia de Cuenca" 2026 al lunes 02-nov (junto a Difuntos), dejando el
+                // martes 03-nov como laborable: la fecha objetivo salía 03-nov en vez de 04-nov. Un feriado de
+                // más se puede habilitar con "Activar" en la ventana; uno de menos daba un plan con fecha errada.
+                // Las fechas que el calendario de la app marca como "Jornada" anulan el feriado (se trabajan).
+                const [holidays, calendario] = await Promise.all([
+                    ecuadorHolidaysService.getHolidaysForRange(start, end).catch(() => []),
+                    cargarDiasNoLaborables().catch(() => null),
+                ]);
+                const startKey = toDateKey(start);
+                const endKey = toDateKey(end);
                 const map = new Map<string, string>();
                 holidays.forEach(h => map.set(h.date, h.name));
+                const nacionales = new Set([...feriadosNacionales(start.getFullYear()), ...feriadosNacionales(end.getFullYear())]);
+                (calendario?.noLaborables ?? nacionales).forEach(fecha => {
+                    if (fecha < startKey || fecha > endKey || map.has(fecha)) return;
+                    map.set(fecha, NOMBRE_FERIADO_NACIONAL_POR_FECHA[fecha.slice(5)] ?? (nacionales.has(fecha) ? 'Feriado nacional' : 'Día no laborable (Calendario)'));
+                });
+                // Los feriados fijos por ley se etiquetan siempre con su nombre legal (la API externa puede
+                // traer otro nombre en esa fecha, p. ej. dos feriados juntos en un mismo día)
+                map.forEach((_, fecha) => {
+                    const nombreLegal = NOMBRE_FERIADO_NACIONAL_POR_FECHA[fecha.slice(5)];
+                    if (nombreLegal && nacionales.has(fecha)) map.set(fecha, nombreLegal);
+                });
+                calendario?.laborablesExtra.forEach(fecha => map.delete(fecha));
                 setHolidaysMap(map);
             } catch (error) {
                 console.error('Error al cargar feriados para la ventana de fabricación:', error);
