@@ -281,7 +281,19 @@ const esMaterialPrueba = (descripcion: string): boolean => /PRUEBA/i.test(descri
 // Altura real del bloque fabricado (getTiemposCuradoBloqueFormulado, columna CuradoAltura en mm —
 // usuario 2026-10-27): 1174 → 117.4 cm. Útil = altura − cúpula (CUPULA_MAX_CM), misma regla del
 // modelo de bloque de Corte Espuma, para contrastar con la altura útil que usa el cálculo (103 / 85).
-const alturaCuradoCm = (row: RawApiRow): number => safeNum(getProp(row, ['CuradoAltura', 'CURADOALTURA', 'curadoAltura'])) / 10;
+// 2026-10-28: la respuesta del servicio cambió — se busca el campo por nombre (con o sin "_") y, si no
+// está, cualquier columna con "altura"; el valor puede venir en mm (1174) o ya en cm (117.4) y con
+// coma decimal. Ningún bloque mide más de 400 cm, así que > 400 se toma como mm.
+const curadoAlturaRaw = (row: RawApiRow): string => {
+  const directo = getProp(row, ['CuradoAltura', 'Curado_Altura', 'AlturaCurado', 'Altura_Curado']);
+  if (directo) return directo;
+  const clave = Object.keys(row).find(k => /altura/i.test(k));
+  return clave ? String(row[clave] ?? '').trim() : '';
+};
+const alturaCuradoCm = (row: RawApiRow): number => {
+  const v = safeNum(curadoAlturaRaw(row).replace(',', '.'));
+  return v > 400 ? v / 10 : v;
+};
 
 const matchesCuradoSpace = (row: RawApiRow, space: CuradoSpaceConfig): boolean => {
   const nomMaterial = getProp(row, ['NomMaterial', 'NOMMATERIAL']);
@@ -1698,12 +1710,13 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                   <th className="px-4 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50 font-black">Stock (UN)</th>
                   <th className="px-4 py-4 border-r border-gray-100 text-amber-700 bg-amber-50/50">En Curado Leader (UN)</th>
                   <th className="px-4 py-4 border-r border-gray-100 text-orange-700 bg-orange-50/50">En Curado Cofama (UN)</th>
-                  <th className="px-4 py-4 text-emerald-700 bg-emerald-50/50 font-black">Stock Útil (UN)</th>
+                  <th className="px-4 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50 font-black">Stock Útil (UN)</th>
+                  <th className="px-4 py-4 text-teal-700 bg-teal-50/50" title="Promedio de CuradoAltura de los bloques de curado del material (mín–máx y cantidad en el tooltip)">Curado Altura (cm)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50 font-bold">
                 {data.length === 0 ? (
-                  <tr><td colSpan={8} className="py-16 text-center text-slate-200 uppercase font-black">Sin stock de &quot;BLOQUE FORMULADO&quot; registrado</td></tr>
+                  <tr><td colSpan={9} className="py-16 text-center text-slate-200 uppercase font-black">Sin stock de &quot;BLOQUE FORMULADO&quot; registrado</td></tr>
                 ) : (
                   data.map((row, idx) => {
                     const prevApertura = idx > 0 ? data[idx - 1].apertura : null;
@@ -1712,7 +1725,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                       <React.Fragment key={idx}>
                         {nuevoGrupo && (
                           <tr className="bg-indigo-50/60">
-                            <td colSpan={8} className="px-4 py-2 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">
+                            <td colSpan={9} className="px-4 py-2 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">
                               {aperturaGroupLabel(row.apertura)}
                             </td>
                           </tr>
@@ -1725,7 +1738,15 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                           <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-emerald-800 bg-emerald-50/20">{row.stockUN.toFixed(1)}</td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-amber-700 bg-amber-50/20">{row.stockEnCuradoLeaderUN.toFixed(1)}</td>
                           <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-orange-700 bg-orange-50/20">{row.stockEnCuradoCofamaUN.toFixed(1)}</td>
-                          <td className="px-4 py-3 font-mono font-black text-emerald-800 bg-emerald-50/30">{row.stockUtilUN.toFixed(1)}</td>
+                          <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-emerald-800 bg-emerald-50/30">{row.stockUtilUN.toFixed(1)}</td>
+                          {(() => {
+                            const altura = alturaRealPorBloque.get(row.materialCode);
+                            return (
+                              <td className="px-4 py-3 font-mono font-black text-teal-800 bg-teal-50/20" title={altura ? `${altura.min.toFixed(1)}–${altura.max.toFixed(1)} cm · ${altura.n} bloque(s)` : 'Sin registros de curado con altura'}>
+                                {altura ? (altura.suma / altura.n).toFixed(1) : '—'}
+                              </td>
+                            );
+                          })()}
                         </tr>
                       </React.Fragment>
                     );
@@ -1740,7 +1761,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                     <td className="px-4 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{tStockUN.toFixed(1)}</td>
                     <td className="px-4 py-4 border-r border-gray-200 font-mono text-amber-700 bg-amber-50">{tEnCuradoLeaderUN.toFixed(1)}</td>
                     <td className="px-4 py-4 border-r border-gray-200 font-mono text-orange-700 bg-orange-50">{tEnCuradoCofamaUN.toFixed(1)}</td>
-                    <td className="px-4 py-4 font-mono text-emerald-700 bg-emerald-50">{tUtilUN.toFixed(1)}</td>
+                    <td className="px-4 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{tUtilUN.toFixed(1)}</td>
+                    <td className="px-4 py-4 bg-teal-50" />
                   </tr>
                 </tfoot>
               )}
