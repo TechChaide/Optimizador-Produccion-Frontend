@@ -68,7 +68,7 @@ import {
   densidadDeCategoria, aperturaDeCategoria, tipoDeCategoria, tipoEspumaDesc,
 } from '@/lib/bloques-espuma';
 import {
-  ventanaCorte, fertEnVentanaCorte, esAreaVentaExterna, responsablesCorte, respExcepcionExcluye, ES_FORRO,
+  ventanaCorte, fertEnVentanaCorte, fertEnVentanaCorteMaterial, esAreaVentaExterna, responsablesCorte, respExcepcionExcluye, ES_FORRO,
   CODIGO_GRUPO_CORTE_POR_CENTRO, MATERIALES_LA02_GYE,
   NOMBRE_RESTRICCION_RESP_VERTICALES,
 } from '@/lib/ventana-corte';
@@ -1923,29 +1923,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     return porCentro;
   }, [ordenesFert, extractMaterialInfo, resultadoRestaurado]);
 
-  // Quita de la carga las provisionales que ya existen como FERT (ver clavesProvisionalesTransformadas).
-  const sinProvisionalesTransformadas = useCallback((rows: UnifiedRow[], centroId: '1000' | '2000'): UnifiedRow[] => {
-    const claves = clavesProvisionalesTransformadas[centroId];
-    if (!claves || claves.size === 0) return rows;
-    return rows.filter(r => !claves.has(`${r.material}|${r.fecha}|${r.cant}`));
-  }, [clavesProvisionalesTransformadas]);
-
-  // Capacidad Operativa Nivel 1/2 (ver renderDashboard): filas de FERT/Provisional de un centro cuyo
-  // RANGO (fecha..fechaFin) incluye `fechaPareo` — no coincidencia exacta contra `fecha`, porque un
-  // Provisional trae rango propio (fecha_inicio..fecha_fin), no un día puntual (mismo bug ya
-  // corregido para Respuesta P3, ver fechaOrdenCoincideConP2). Para FERT, que normalmente es un solo
-  // día (fecha===fechaFin), el rango se reduce solo a esa fecha exacta igual. `allowedRespPorCentro`
-  // + PRENSADO/FORRO/APROVECHAMIENTO: mismo filtro que getFilteredData aplica para los tabs —
-  // auditMapper (fuente de fertAuditAllUIO/GYE, provAuditAllUIO/GYE) no lo aplica por su cuenta.
-  const filasCentroEnFechaPareo = useCallback((rows: UnifiedRow[], centroId: '1000' | '2000', fechaPareo: string): UnifiedRow[] => {
-    const allowed = allowedRespPorCentro(centroId);
-    return rows.filter(r =>
-      r.fecha <= fechaPareo && fechaPareo <= r.fechaFin &&
-      allowed.includes(r.responsable) &&
-      !/PRENSAD/i.test(r.descripcion) && !ES_FORRO(r.descripcion) && !/APROVECHAMIENTO/i.test(r.descripcion)
-    );
-  }, [allowedRespPorCentro]);
-
   // Selector de fecha de Capacidad Operativa (ver renderDashboard): mismo filtro base que
   // filasCentroEnFechaPareo (allowed + PRENSAD/FORRO/APROVECHAMIENTO), pero con coincidencia de fecha
   // EXACTA o ACUMULADA en vez de ventana de pareo — confirmado con el usuario con ejemplos reales:
@@ -1993,6 +1970,30 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     });
     return porCentro;
   }, [necesidadesPlantaConPFF]);
+
+  // Capacidad Operativa del día D (usuario 2026-10-28): SOLO órdenes FERT del ciclo de producción, con
+  // la misma ventana de corte que Sub-Bloques-T8 y Formulación (@/lib/ventana-corte): FECHAFIN = D
+  // siempre (Colchones/Muebles/PFF) y FECHAFIN = D+1 hábil si el material va en un P2 de Venta Externa
+  // (su HALB va fechada al PT). La necesidad P2/PFF y las provisionales quedan solo para la Respuesta
+  // P3: contarlas aquí inflaba la carga (las órdenes se generan por lote, no por la cantidad del plan)
+  // y el día cambiaba de "todo FERT" a "toda necesidad" según cuántas órdenes ya estuvieran liberadas.
+  const materialesVentaPorCentro = useMemo(() => {
+    const porCentro: Record<string, Set<string>> = { '1000': new Set(), '2000': new Set() };
+    Object.entries(fechasP2PorMaterialPorCentro).forEach(([centro, map]) => {
+      map.forEach((candidatos, material) => {
+        if (candidatos.some(c => esAreaVentaExterna(c.area))) porCentro[centro]?.add(material);
+      });
+    });
+    return porCentro;
+  }, [fechasP2PorMaterialPorCentro]);
+  const fertDelDiaCapacidad = useCallback((rows: UnifiedRow[], centroId: '1000' | '2000', fecha: string): UnifiedRow[] => {
+    const v = ventanaCorte(fecha, siguienteDiaHabil);
+    const venta = materialesVentaPorCentro[centroId];
+    // origenArea como respaldo: con un plan restaurado sin Necesidades Planta cargadas el set queda vacío.
+    return filasCentroEnFecha(rows, centroId, v.venta, 'hasta').filter(r =>
+      fertEnVentanaCorteMaterial(r.fechaFin, venta.has(r.material) || esAreaVentaExterna(r.origenArea), v)
+    );
+  }, [filasCentroEnFecha, materialesVentaPorCentro, siguienteDiaHabil]);
 
   // Respuesta P3: mismo problema que motivó fertAuditAllUIO/GYE, pero sin corregir hasta ahora —
   // provAuditUIO/GYE (usadas por el tab "Provisionales") dependen de selectedDatesProv, el calendario
@@ -2640,113 +2641,6 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   );
   const necesidadCapacidadNivel2UIO = useMemo(() => resultadoRestaurado?.necesidadCapacidadNivel2['1000'] ?? necesidadCapacidadMapper(necesidadPFFNivel2Consolidada, '1000'), [necesidadCapacidadMapper, necesidadPFFNivel2Consolidada, resultadoRestaurado]);
   const necesidadCapacidadNivel2GYE = useMemo(() => resultadoRestaurado?.necesidadCapacidadNivel2['2000'] ?? necesidadCapacidadMapper(necesidadPFFNivel2Consolidada, '2000'), [necesidadCapacidadMapper, necesidadPFFNivel2Consolidada, resultadoRestaurado]);
-  // Pool de necesidad por material del Nivel 2 — mismo formato de clave que materialNecesidadesPlantaMapPorCentro
-  // (String(Number(codigo_material))), para que calcularFaltanteNecesidadPlanta pueda netear contra él.
-  const materialNecesidadPFFNivel2MapPorCentro = useMemo(() => {
-    const porCentro: Record<'1000' | '2000', Map<string, number>> = { '1000': new Map(), '2000': new Map() };
-    (['1000', '2000'] as const).forEach(centro => {
-      necesidadPFFNivel2Data[centro].forEach(row => {
-        const key = String(Number(row.codigo_material));
-        const map = porCentro[centro];
-        map.set(key, (map.get(key) || 0) + parseQty(row.cantidad_produccion_neta));
-      });
-    });
-    return porCentro;
-  }, [necesidadPFFNivel2Data]);
-  // Necesidad total por material, Nivel 1 + Nivel 2 combinados — para `resolverFecha` (más abajo en
-  // renderDashboard), que evalúa ambos niveles JUNTOS en una sola llamada a
-  // calcularFaltanteNecesidadPlanta para una fecha puntual. Sin este mapa combinado, esa llamada caía
-  // por defecto solo al pool de Nivel 1 (materialNecesidadesPlantaMapPorCentro) y un material con
-  // necesidad SOLO en Nivel 2 quedaba con necesidad=0 ahí — se perdía del todo, no solo se contaba mal.
-  const necesidadPorMaterialCombinadoPorCentro = useMemo(() => {
-    const porCentro: Record<'1000' | '2000', Map<string, number>> = { '1000': new Map(), '2000': new Map() };
-    (['1000', '2000'] as const).forEach(centro => {
-      const combinado = new Map<string, number>();
-      materialNecesidadesPlantaMapPorCentro[centro]?.forEach((qty, material) => combinado.set(material, (combinado.get(material) || 0) + qty));
-      materialNecesidadPFFNivel2MapPorCentro[centro]?.forEach((qty, material) => combinado.set(material, (combinado.get(material) || 0) + qty));
-      porCentro[centro] = combinado;
-    });
-    return porCentro;
-  }, [materialNecesidadesPlantaMapPorCentro, materialNecesidadPFFNivel2MapPorCentro]);
-
-  // "Necesidades Planta" (P2) que todavía NO cubre ni el stock ni una orden provisional — la parte de
-  // la demanda que aún no tiene con qué producirse y que, por lo tanto, sigue pesando en la capacidad.
-  //
-  // Misma regla que la Respuesta P3 (ver respuestaSalidaRowsPorCentro), pero en unidades en vez de Kg:
-  //   faltante = max(0, necesidad_P2 - stock - provisionales)
-  //
-  // Las FERT ya NO se descuentan aquí (antes sí: `necesidad - (FERT + Provisional)`). Son provisionales
-  // ya transformadas que responden a un P2 anterior, así que descontarlas de la necesidad vigente
-  // acreditaba dos veces la misma producción. En el resumen las FERT entran por el otro lado —como
-  // carga en curso, con su CANTPENDIENTE (ver auditMapper)—, no como cobertura del P2 de hoy.
-  //
-  // Esto también es la red de seguridad cuando una orden provisional se borra en SAP: la necesidad no
-  // desaparece con ella, reaparece íntegra como faltante y sigue ocupando capacidad. Por eso el
-  // resumen se alimenta de "provisionales + faltante" y nunca solo de provisionales.
-  //
-  // Colchones/Muebles generan sus láminas por LOTE (una orden puede cubrir de sobra o solo en parte la
-  // necesidad de un material compartido entre áreas — de ahí que se sume necesidad y cobertura por
-  // material, no por fila/orden individual); Venta Externa genera 1 a 1, pero la cuenta es la misma.
-  // Si sobra faltante, se prorratea el tTotal que necesidadCapacidadUIO/GYE ya calculó para TODA la
-  // necesidad de ese material por la razón faltante/necesidad — mismo criterio de escalado que
-  // reconciliarProvisionalesConNecesidad, para no duplicar horas que una orden real ya cubre.
-  // Devuelve UnifiedRow[] (no un número) para reusar el mismo sumByResp/reduce que ya usa
-  // renderDashboard para Carrusel/Vertical — cada fila conserva su "responsable".
-  // `cobertura`: FERT + Provisional combinados (antes solo recibía Provisional) — un FERT ya firme
-  // cubre la necesidad exactamente igual que un Provisional, ambos son "ya hay algo generándose para
-  // esto". `necesidadPorMaterialOverride`: para Capacidad Operativa Nivel 2 (ver renderDashboard),
-  // que debe netear contra el pool de necesidad DE ESE nivel, no contra el de Nivel 1
-  // (materialNecesidadesPlantaMapPorCentro, que solo tiene el ciclo fresco de hoy). Sin override, el
-  // único call-site preexistente (Nivel 1, antes de esta reestructuración) sigue igual.
-  // stockYaReservadoPorMaterial: stock que YA se le adjudicó a otra necesidad evaluada antes (ver
-  // Nivel 1/Nivel 2 en renderDashboard) — sin esto, dos necesidades del mismo material podían netear
-  // cada una contra el stock COMPLETO por separado, "cubriendo" el mismo stock dos veces y escondiendo
-  // un faltante real (caso reportado por el usuario, 2026-09-02: material con necesidad repartida
-  // entre Nivel 1 y Nivel 2, stock=80, cada nivel por su lado veía faltante=0 aunque la necesidad
-  // combinada fuera mayor a 80). Devuelve también stockUsadoPorMaterial para encadenar la reserva
-  // hacia la siguiente llamada.
-  const calcularFaltanteNecesidadPlanta = useCallback((
-    centroId: '1000' | '2000',
-    provRows: UnifiedRow[],
-    necesidadRows: UnifiedRow[],
-    necesidadPorMaterialOverride?: Map<string, number>,
-    stockYaReservadoPorMaterial?: Map<string, number>
-  ): { faltante: UnifiedRow[]; stockUsadoPorMaterial: Map<string, number> } => {
-    const necesidadPorMaterial = necesidadPorMaterialOverride ?? materialNecesidadesPlantaMapPorCentro[centroId];
-    const stockUsadoPorMaterial = new Map<string, number>();
-    if (!necesidadPorMaterial || necesidadPorMaterial.size === 0) return { faltante: [], stockUsadoPorMaterial };
-
-    const stockPorMaterial = stockUnidadesPorMaterialPorCentro[centroId];
-    const provisionalPorMaterial = new Map<string, number>();
-    provRows.forEach(r => provisionalPorMaterial.set(r.material, (provisionalPorMaterial.get(r.material) || 0) + r.cant));
-
-    // Faltante y stock realmente consumido, UNA vez por material (no por fila): necesidadRows puede
-    // traer varias filas del mismo material (una por área de origen), todas comparten el mismo total.
-    const faltantePorMaterial = new Map<string, number>();
-    necesidadPorMaterial.forEach((necesidad, material) => {
-      if (necesidad <= 0) return;
-      const provisional = provisionalPorMaterial.get(material) || 0;
-      const stockTotal = stockPorMaterial?.get(material) || 0;
-      const stockYaReservado = stockYaReservadoPorMaterial?.get(material) || 0;
-      const stockDisponible = Math.max(0, stockTotal - stockYaReservado);
-      const cubierta = provisional + stockDisponible;
-      faltantePorMaterial.set(material, Math.max(0, necesidad - cubierta));
-      const stockUsado = Math.min(stockDisponible, Math.max(0, necesidad - provisional));
-      if (stockUsado > 0) stockUsadoPorMaterial.set(material, stockUsado);
-    });
-
-    const faltante = necesidadRows.reduce<UnifiedRow[]>((acc, r) => {
-      const necesidad = necesidadPorMaterial.get(r.material) || 0;
-      if (necesidad <= 0) return acc;
-      const faltanteQty = faltantePorMaterial.get(r.material) || 0;
-      if (faltanteQty <= 0) return acc;
-      acc.push({ ...r, tTotal: r.tTotal * (faltanteQty / necesidad) });
-      return acc;
-    }, []);
-
-    return { faltante, stockUsadoPorMaterial };
-  }, [materialNecesidadesPlantaMapPorCentro, stockUnidadesPorMaterialPorCentro]);
-
   // Duración en horas de una fila de Mantenimiento SAP. El campo real es Duracion_Minutos
   // (en minutos); T_MTTO_PLANIFICADO no existe en el endpoint pero se conserva como
   // resguardo por si alguna variante del servicio lo llega a incluir (en horas).
@@ -3084,10 +2978,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // Auditoría (solo lectura, pedido del usuario 2026-10-07): cada FERT con cantidad pendiente hasta la
   // fecha evaluada y CUÁNTO de ella entra a la ocupación, con el motivo — para conciliar contra SAP
   // (COHV) sin exportar. Replica las reglas de resumenReportePorPlanta/armarPendienteAnterior, no las
-  // cambia: plan del día completo; día hábil anterior solo el exceso del turno; los 2 previos completos;
-  // fechas con plan de necesidad aún activo completas; más viejo, fuera. Incluye también órdenes de
+  // cambia: plan del día (FERT de la ventana de corte) completo; pendiente de hasta 3 días hábiles
+  // conciliado contra el turno en curso; más viejo, fuera. Incluye también órdenes de
   // hojas de ruta de corte con responsable fuera de la restricción, para detectar un responsable faltante.
-  type EstadoAuditoriaPendiente = 'Plan del día' | 'Día anterior (exceso del turno)' | 'Pendiente previo' | 'Plan aún activo' | 'Más de 3 días hábiles' | 'Responsable no permitido';
+  type EstadoAuditoriaPendiente = 'Plan del día' | 'Día anterior (exceso del turno)' | 'Pendiente previo' | 'Más de 3 días hábiles' | 'Responsable no permitido';
   const [auditoriaPendientePlanta, setAuditoriaPendientePlanta] = useState<'UIO' | 'GYE' | null>(null);
   const auditoriaPendiente = useMemo(() => {
     const planta = auditoriaPendientePlanta;
@@ -3096,21 +2990,22 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const fecha = Array.from(selectedDatesCapacidad[planta]).sort()[0];
     if (!fecha) return { planta, fecha: '', filas: [] as never[] };
     const fertSinVentana = planta === 'UIO' ? fertAuditAllUIO : fertAuditAllGYE;
-    const necesidad = planta === 'UIO' ? [...necesidadCapacidadUIO, ...necesidadCapacidadNivel2UIO] : [...necesidadCapacidadGYE, ...necesidadCapacidadNivel2GYE];
-    const fechasConNecesidad = new Set(necesidad.map(r => r.fecha).filter(f => f < fecha));
     const { permitidos, verticales, carruseles } = responsablesPorCentro[centroId];
     const base = parseFechaLocal(fecha);
     const dias = Array.from({ length: DIAS_PENDIENTE_MAX }, (_, i) => format(restarDiasHabiles(base, i + 1), 'yyyy-MM-dd'));
     const esHojaDeCorte = (maquina: string) => /HR[-_ ]?(CAR|V0|TACO|CTCNC)/i.test(maquina);
+    // Plan del día = FERT de la ventana de corte (FECHAFIN = D, o D+1 para materiales de Venta Externa).
+    const planDelDia = new Set(fertDelDiaCapacidad(fertSinVentana, centroId, fecha));
+    const fechaVenta = ventanaCorte(fecha, siguienteDiaHabil).venta;
 
     const candidatas = fertSinVentana.filter(r =>
-      r.centro === centroId && r.cant > 0 && r.fechaFin && r.fechaFin <= fecha &&
+      r.centro === centroId && r.cant > 0 && r.fechaFin && r.fechaFin <= fechaVenta && (r.fechaFin <= fecha || planDelDia.has(r)) &&
       !/PRENSAD/i.test(r.descripcion) && !ES_FORRO(r.descripcion) && !/APROVECHAMIENTO/i.test(r.descripcion) &&
       (permitidos.includes(r.responsable) || esHojaDeCorte(r.maquina))
     );
     // Factor del descuento del turno en curso, por fila: todo el pendiente previo al plan (3 días y
     // planes aún activos) se concilia junto contra el turno, igual que armarPendienteAnterior.
-    const enTurno = candidatas.filter(r => permitidos.includes(r.responsable) && r.fechaFin < fecha && (dias.includes(r.fechaFin) || fechasConNecesidad.has(r.fechaFin))).map(row => ({ row }));
+    const enTurno = candidatas.filter(r => permitidos.includes(r.responsable) && !planDelDia.has(r) && dias.includes(r.fechaFin)).map(row => ({ row }));
     const ajuste = ajustePendienteTurnoAnterior(planta, dias[0], enTurno);
     const factorTurno = new Map<UnifiedRow, number>();
     enTurno.forEach((x, i) => factorTurno.set(x.row, x.row.tTotal > 0 ? ajuste.filas[i].row.tTotal / x.row.tTotal : (x.row.cantUnidadReal > 0 ? ajuste.filas[i].row.cantUnidadReal / x.row.cantUnidadReal : 1)));
@@ -3120,10 +3015,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       let estado: EstadoAuditoriaPendiente;
       let factor: number;
       if (!permitidos.includes(r.responsable)) { estado = 'Responsable no permitido'; factor = 0; }
-      else if (r.fechaFin === fecha) { estado = 'Plan del día'; factor = 1; }
+      else if (planDelDia.has(r)) { estado = 'Plan del día'; factor = 1; }
       else if (r.fechaFin === dias[0]) { estado = 'Día anterior (exceso del turno)'; factor = factorTurno.get(r) ?? 1; }
       else if (dias.includes(r.fechaFin)) { estado = 'Pendiente previo'; factor = factorTurno.get(r) ?? 1; }
-      else if (fechasConNecesidad.has(r.fechaFin)) { estado = 'Plan aún activo'; factor = factorTurno.get(r) ?? 1; }
       else { estado = 'Más de 3 días hábiles'; factor = 0; }
       return {
         orden: r.orden, material: r.material, descripcion: r.descripcion, maquina: r.maquina || '—',
@@ -3134,7 +3028,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       };
     }).sort((a, b) => a.fechaFin.localeCompare(b.fechaFin) || a.proceso.localeCompare(b.proceso) || a.material.localeCompare(b.material));
     return { planta, fecha, filas };
-  }, [auditoriaPendientePlanta, selectedDatesCapacidad, fertAuditAllUIO, fertAuditAllGYE, necesidadCapacidadUIO, necesidadCapacidadNivel2UIO, necesidadCapacidadGYE, necesidadCapacidadNivel2GYE, responsablesPorCentro, restarDiasHabiles, ajustePendienteTurnoAnterior]);
+  }, [auditoriaPendientePlanta, selectedDatesCapacidad, fertAuditAllUIO, fertAuditAllGYE, fertDelDiaCapacidad, siguienteDiaHabil, responsablesPorCentro, restarDiasHabiles, ajustePendienteTurnoAnterior]);
 
   // Ventana del plan de la PLANTA para mostrarla (inicio más temprano / fin más tardío de sus
   // máquinas en servicio) — solo con UNA fecha evaluada.
@@ -3158,43 +3052,18 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const resumenReportePorPlanta = useMemo(() => {
     const calcularPlanta = (planta: 'UIO' | 'GYE') => {
       const centroId: '1000' | '2000' = planta === 'UIO' ? '1000' : '2000';
-      const necesidadCapacidad = planta === 'UIO' ? necesidadCapacidadUIO : necesidadCapacidadGYE;
-      const necesidadCapacidadNivel2 = planta === 'UIO' ? necesidadCapacidadNivel2UIO : necesidadCapacidadNivel2GYE;
       const fertSinVentana = planta === 'UIO' ? fertAuditAllUIO : fertAuditAllGYE;
-      const provSinVentana = sinProvisionalesTransformadas(planta === 'UIO' ? provAuditAllUIO : provAuditAllGYE, centroId);
 
-      const resolverFecha = (fecha: string): { row: UnifiedRow; estado: 'FERT' | 'Ya firme' | 'Faltante' }[] => {
-        const fertX = filasCentroEnFecha(fertSinVentana, centroId, fecha, 'exacta');
-        if (fertX.length > 0) return fertX.map(row => ({ row, estado: 'FERT' as const }));
-        const necesidadX = [...necesidadCapacidad, ...necesidadCapacidadNivel2].filter(r => r.fecha === fecha);
-        if (necesidadX.length === 0) return [];
-        const provX = filasCentroEnFecha(provSinVentana, centroId, fecha, 'hasta');
-        const materialesNecesidad = new Set(necesidadX.map(r => r.material));
-        const { faltante: faltanteX } = calcularFaltanteNecesidadPlanta(centroId, provX, necesidadX, necesidadPorMaterialCombinadoPorCentro[centroId]);
-        return [
-          ...provX.filter(r => materialesNecesidad.has(r.material)).map(row => ({ row, estado: 'Ya firme' as const })),
-          ...faltanteX.map(row => ({ row, estado: 'Faltante' as const })),
-        ];
-      };
+      // Mismo criterio que renderDashboard (2026-10-28): solo FERT del ciclo en la ventana de corte.
+      const resolverFecha = (fecha: string): { row: UnifiedRow; estado: 'FERT' | 'Ya firme' | 'Faltante' }[] =>
+        fertDelDiaCapacidad(fertSinVentana, centroId, fecha).map(row => ({ row, estado: 'FERT' as const }));
 
-      // Mismo criterio que renderDashboard (ver su comentario extenso): además del backlog "por
-      // necesidad" (solo fechas con PlanGrupo todavía activo), se suma el backlog "por orden real" —
-      // FERT pendiente (CANTPENDIENTE>0) cuyo plan origen ya rotó a inactivo. ACOTADO al día hábil
-      // INMEDIATO anterior a la fecha elegida (no "todo hacia atrás" sin límite): verificado con
-      // datos reales que órdenes FERT con CANTPENDIENTE>0 pueden remontar semanas atrás (SAP no
-      // siempre cierra el remanente aunque la orden ya esté resuelta en la práctica) — sumar eso sin
-      // tope disparó la Ocupación Total a 200%. El backlog es "lo de ayer que no se hizo", no un
-      // acumulado histórico completo.
-      // Pendiente FERT del día anterior y cuánto pasa al plan (ver ajustePendienteTurnoAnterior).
+      // Pendiente FERT de días anteriores y cuánto pasa al plan (ver armarPendienteAnterior /
+      // ajustePendienteTurnoAnterior): solo órdenes reales, ya no desde las fechas de la necesidad.
       let pendienteTurnoAnterior = null as PendienteTurnoAnterior | null;
       let filasPendientes: ItemCarga[] = [];
       const calcularBacklogAntesDe = (fechaLimite: string) => {
-        const fechasConNecesidad = Array.from(new Set(
-          [...necesidadCapacidad, ...necesidadCapacidadNivel2].map(r => r.fecha)
-        )).filter(f => f < fechaLimite);
-        const backlogNecesidad = fechasConNecesidad.flatMap(f => resolverFecha(f).map(x => ({ ...x, fecha: f })));
-
-        const pend = armarPendienteAnterior(planta, centroId, fechaLimite, backlogNecesidad, fertSinVentana);
+        const pend = armarPendienteAnterior(planta, centroId, fechaLimite, [], fertSinVentana);
         pendienteTurnoAnterior = pend.resumen;
         filasPendientes = pend.pendientes;
         return pend.filas;
@@ -3330,9 +3199,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     };
     return { UIO: calcularPlanta('UIO'), GYE: calcularPlanta('GYE') };
   }, [
-    necesidadCapacidadUIO, necesidadCapacidadGYE, necesidadCapacidadNivel2UIO, necesidadCapacidadNivel2GYE,
-    fertAuditAllUIO, fertAuditAllGYE, provAuditAllUIO, provAuditAllGYE, sinProvisionalesTransformadas,
-    filasCentroEnFecha, calcularFaltanteNecesidadPlanta, necesidadPorMaterialCombinadoPorCentro,
+    fertAuditAllUIO, fertAuditAllGYE, fertDelDiaCapacidad,
     selectedDatesCapacidad, uioConfig, gyeConfig, shiftOptions, nightShiftOptions, responsablesPorCentro,
     getMttoTimeParaFecha, sabadoCuentaEnPlanta, diasVentanaPlan, armarPendienteAnterior,
   ]);
@@ -5841,72 +5708,25 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
       return { lista, resumen };
     };
 
-    // Capacidad Operativa se organiza por FECHA (una tarjeta por día) — "Nivel 1/2/3" es la
-    // maquinaria interna que decide de dónde sale cada fecha y qué tan firme está, pero ya no es el
-    // eje que ve el usuario (antes lo era, y resultó ilegible para alguien que no construyó el
-    // código). Referencia de qué alimenta cada fecha:
-    //   Necesidad "a tiempo" (antes Nivel 1): 3 fuentes con su propia fecha real de origen — P1/PFF
-    //     hoy+2 días hábiles (DIAS_HABILES_PT_ENSAMBLADO), P2-Espumas Venta y P2-Muebles/
-    //     Prensado hoy+1 día hábil exacto.
-    //   Necesidad "red de seguridad" (antes Nivel 2, ver necesidadPFFNivel2Data): solo P1/PFF, para
-    //     un plan que se quedó fechado hoy+1 en vez de hoy+2 (activo pero invisible para la necesidad
-    //     "a tiempo", que exige match exacto). Venta Externa-Espumas no la necesita: garantiza un
-    //     solo plan activo por centro, si está atrasado ya es el que usa la necesidad "a tiempo".
-    //   Tarjeta "Atrasado" (antes Nivel 3, WIP — SIN CAMBIOS): todo FERT con fecha ≤ hoy, sin ventana.
+    // Capacidad Operativa se organiza por FECHA (una tarjeta por día). Desde 2026-10-28 la carga es
+    // SOLO de órdenes FERT (ver fertDelDiaCapacidad): las del día de corte D en la ventana de corte +
+    // el pendiente FERT de hasta 3 días hábiles conciliado contra el turno en curso. La necesidad
+    // P2/PFF y las provisionales quedan para la Respuesta P3. "Atrasado": todo FERT con fecha ≤ hoy.
     const centroId = planta === 'UIO' ? '1000' : '2000';
     const necesidadCapacidad = planta === 'UIO' ? necesidadCapacidadUIO : necesidadCapacidadGYE;
-    const necesidadCapacidadNivel2 = planta === 'UIO' ? necesidadCapacidadNivel2UIO : necesidadCapacidadNivel2GYE;
 
     const nivel3Fert = (planta === 'UIO' ? fertAuditUIO : fertAuditGYE).filter(r => r.fecha <= todayStr);
 
     // fertAuditAllUIO/GYE, provAuditAllUIO/GYE: mismas fuentes ya usadas por Respuesta P3, sin ventana
     // de fecha — no dependen del selector de los tabs Provisionales/FERT (esos siguen intactos).
     const fertSinVentana = planta === 'UIO' ? fertAuditAllUIO : fertAuditAllGYE;
-    // Provisionales sin las que ya se transformaron en FERT (ver clavesProvisionalesTransformadas):
-    // esas ya resolvieron una necesidad de un ciclo anterior, no deben descontar la de hoy.
-    const provSinVentana = sinProvisionalesTransformadas(planta === 'UIO' ? provAuditAllUIO : provAuditAllGYE, centroId);
 
-    // calcularNivel: agrupa las filas de necesidad por su fecha PROPIA (fecha objetivo real), y por
-    // cada una busca lo YA firme (FERT/Provisional fechado 1 día hábil antes — la lámina se corta el
-    // día previo a cuando se necesita) y calcula el Faltante neto. Alimenta únicamente el total de
-    // fondo (candidatosDiferir) — el resultado visible del panel ahora lo resuelve `resolverFecha`,
-    // más abajo, por selección manual del usuario.
-    // stockYaReservadoPorMaterial: encadena lo que un nivel anterior ya usó del stock, para que el
-    // siguiente no vuelva a netear contra el stock COMPLETO (ver comentario en
-    // calcularFaltanteNecesidadPlanta — caso real 2026-09-02: mismo material con necesidad en Nivel 1
-    // y Nivel 2 a la vez, cada uno "cubría" con el mismo stock por separado).
-    const calcularNivel = (
-      necesidadRows: UnifiedRow[],
-      necesidadPorMaterialOverride?: Map<string, number>,
-      stockYaReservadoPorMaterial?: Map<string, number>
-    ) => {
-      const fechasUnicas = Array.from(new Set(necesidadRows.map(r => r.fecha).filter(f => f && f !== '—')));
-      const fertRows: UnifiedRow[] = [];
-      const provRows: UnifiedRow[] = [];
-      fechasUnicas.forEach(fecha => {
-        const fechaPareo = format(restarDiasHabiles(parseFechaLocal(fecha), 1), 'yyyy-MM-dd');
-        // Anti doble-conteo: si la fecha de pareo cae en hoy o antes, esas horas de FERT ya las
-        // cuenta "Pendientes" (fecha <= hoy) — se omiten aquí como horas (el Faltante igual las sigue
-        // usando como cobertura, más abajo).
-        const fert = fechaPareo > todayStr ? filasCentroEnFechaPareo(fertSinVentana, centroId, fechaPareo) : [];
-        const prov = filasCentroEnFechaPareo(provSinVentana, centroId, fechaPareo);
-        fertRows.push(...fert); provRows.push(...prov);
-      });
-      const { faltante, stockUsadoPorMaterial } = calcularFaltanteNecesidadPlanta(
-        centroId, [...fertRows, ...provRows], necesidadRows, necesidadPorMaterialOverride, stockYaReservadoPorMaterial
-      );
-      return { fertRows, provRows, faltante, stockUsadoPorMaterial };
-    };
-
-    const nivel1 = calcularNivel(necesidadCapacidad);
-    const nivel2 = calcularNivel(necesidadCapacidadNivel2, materialNecesidadPFFNivel2MapPorCentro[centroId], nivel1.stockUsadoPorMaterial);
-
-    const faltanteNecesidad = [...nivel1.faltante, ...nivel2.faltante];
-    const firmeNivel1y2 = [...nivel1.fertRows, ...nivel1.provRows, ...nivel2.fertRows, ...nivel2.provRows];
+    // 2026-10-28: el total de fondo (candidatos a diferir, horas sin clasificar) también es solo FERT: las
+    // del ciclo hoy+1 hábil en la ventana de corte. Ya no suma necesidad ni provisionales (calcularNivel).
+    const fertCiclo = fertDelDiaCapacidad(fertSinVentana, centroId, format(siguienteDiaHabil(new Date()), 'yyyy-MM-dd'));
 
     const totalPlannedH = nivel3Fert.reduce((s, r) => s + r.tTotal, 0)
-      + firmeNivel1y2.reduce((s, r) => s + r.tTotal, 0)
-      + faltanteNecesidad.reduce((s, r) => s + r.tTotal, 0);
+      + fertCiclo.reduce((s, r) => s + r.tTotal, 0);
     // globalOccupancy ya no se muestra como cifra única (mezclaba horas de VARIOS días — pasado sin
     // límite + ~3 días futuros — contra la capacidad de UN SOLO día): cada tarjeta de fecha, más
     // abajo, sí compara 1 día de demanda contra 1 día de capacidad. Se conserva solo como criterio
@@ -5919,7 +5739,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
     // lista incluía 044 y 034, cuando la restricción real de verticales dice 039&036&029.
     const CARRUSEL_RESP = responsablesPorCentro[centroId].carruseles;
     const VERTICAL_RESP = responsablesPorCentro[centroId].verticales;
-    const todasLasFilasCarga = [...nivel3Fert, ...firmeNivel1y2, ...faltanteNecesidad];
+    const todasLasFilasCarga = [...nivel3Fert, ...fertCiclo];
 
     // Horas que NO caen en ninguno de los dos procesos: su responsable no está en CARRUSEL_RESP ni en
     // VERTICAL_RESP. Dos orígenes reales: (a) responsable 034, permitido en Corte Espuma pero sin
@@ -6101,24 +5921,9 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
     // Muebles/Prensado) menos la cobertura Provisional (mismo material, fechaFin <= X, lote
     // completo). Confirmado con el usuario con ejemplos reales de SAP — no son categorías separadas,
     // es la MISMA pregunta ("¿cuánto tengo ocupado en X?") resuelta con la fuente que exista.
-    const resolverFecha = (fecha: string): { row: UnifiedRow; estado: 'FERT' | 'Ya firme' | 'Faltante' }[] => {
-      const fertX = filasCentroEnFecha(fertSinVentana, centroId, fecha, 'exacta');
-      if (fertX.length > 0) return fertX.map(row => ({ row, estado: 'FERT' as const }));
-
-      const necesidadX = [...necesidadCapacidad, ...necesidadCapacidadNivel2].filter(r => r.fecha === fecha);
-      if (necesidadX.length === 0) return [];
-
-      const provX = filasCentroEnFecha(provSinVentana, centroId, fecha, 'hasta');
-      const materialesNecesidad = new Set(necesidadX.map(r => r.material));
-      // necesidadPorMaterialCombinadoPorCentro: necesidadX mezcla filas de Nivel 1 Y Nivel 2 — sin el
-      // pool combinado, calcularFaltanteNecesidadPlanta caía por defecto solo al de Nivel 1 y perdía
-      // por completo la necesidad de un material que solo existiera en Nivel 2.
-      const { faltante: faltanteX } = calcularFaltanteNecesidadPlanta(centroId, provX, necesidadX, necesidadPorMaterialCombinadoPorCentro[centroId]);
-      return [
-        ...provX.filter(r => materialesNecesidad.has(r.material)).map(row => ({ row, estado: 'Ya firme' as const })),
-        ...faltanteX.map(row => ({ row, estado: 'Faltante' as const })),
-      ];
-    };
+    // 2026-10-28: solo FERT del ciclo (ver fertDelDiaCapacidad); ya no cae a necesidad − provisionales.
+    const resolverFecha = (fecha: string): { row: UnifiedRow; estado: 'FERT' | 'Ya firme' | 'Faltante' }[] =>
+      fertDelDiaCapacidad(fertSinVentana, centroId, fecha).map(row => ({ row, estado: 'FERT' as const }));
 
     // Backlog: todo lo pendiente (Ya firme/Faltante, es decir, SIN FERT que lo confirme ejecutado) de
     // cualquier fecha ANTERIOR a la seleccionada — decisión del usuario: lo que no se procesó un día
@@ -6142,13 +5947,10 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
     // siempre cierra el remanente aunque la orden ya esté resuelta en la práctica. Sumar eso sin tope
     // disparó la Ocupación Total a 200% en la primera versión de este fix. El backlog es "lo de ayer
     // que no se hizo", no un acumulado histórico completo.
+    // 2026-10-28: el pendiente sale solo de las FERT (hasta DIAS_PENDIENTE_MAX hábiles atrás, conciliado
+    // contra el turno en curso); ya no se arma desde las fechas de la necesidad.
     const calcularBacklogAntesDe = (fechaLimite: string) => {
-      const fechasConNecesidad = Array.from(new Set(
-        [...necesidadCapacidad, ...necesidadCapacidadNivel2].map(r => r.fecha)
-      )).filter(f => f < fechaLimite);
-      const backlogNecesidad = fechasConNecesidad.flatMap(f => resolverFecha(f).map(x => ({ ...x, fecha: f })));
-
-      const pend = armarPendienteAnterior(planta, centroId, fechaLimite, backlogNecesidad, fertSinVentana);
+      const pend = armarPendienteAnterior(planta, centroId, fechaLimite, [], fertSinVentana);
       pend.porMaquina.forEach((v, id) => pendienteAnteriorPorMaquina.set(id, { dia: pend.resumen?.dia ?? '', ...v }));
       return pend.filas;
     };
