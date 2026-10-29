@@ -325,6 +325,8 @@ interface Props {
   // `hasta` (siguiente día hábil), por material — cantidad PENDIENTE (lo notificado ya está en stock).
   // No entra al stock ni al saldo; "¿Cubre?" las usa para marcar "Cubre con corrida".
   corridasSap: CorridasSap;
+  // P2 de Forros [Kg] por material (sin ceros a la izquierda): lo solicitado vs. lo planificado (Kg).
+  p2ForrosKg: Map<string, number>;
 }
 
 interface CorridasSap {
@@ -343,7 +345,7 @@ const corridaUnEnFecha = (corridas: CorridasSap, codigo: string, fecha: string) 
   return un ? Math.round(un) : 0;
 };
 
-export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData, inventarioSAP, corridasSap }) => {
+export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedDates, kpiLooperData, inventarioSAP, corridasSap, p2ForrosKg }) => {
   // Órdenes FERT de acolchadoras en la fecha del plan (centro 2000 fuera, igual que Órdenes FERT).
   const ordenes = useMemo(() => ordenesFert.filter(o => {
     if (getProp(o, ['CENTRO']) === '2000') return false;
@@ -634,7 +636,9 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                   <th className="px-3 py-2 text-left">Lámina</th>
                   <th className="px-3 py-2 text-left">Descripción</th>
                   <th className="px-3 py-2 text-left">Rollos por acolchadora [un]</th>
+                  <th className="px-3 py-2 text-right bg-amber-50 text-amber-800">P2 Forros [Kg]</th>
                   <th className="px-3 py-2 text-right">Kg</th>
+                  <th className="px-3 py-2 text-right bg-amber-50 text-amber-800" title="Kg planificado − P2 Forros [Kg]">Var. [Kg]</th>
                   <th className="px-3 py-2 text-right">Peso UN</th>
                   <th className="px-3 py-2 text-right">Rollos [un]</th>
                   {BODEGAS_STOCK.map(b => (
@@ -664,7 +668,20 @@ export const ConsumoAcolchadorasTab: React.FC<Props> = ({ ordenesFert, selectedD
                         ))}
                       </div>
                     </td>
-                    <td className="px-3 py-1.5 text-right font-mono">{fmt(l.kg, 1)}</td>
+                    {(() => {
+                      const p2 = p2ForrosKg.get(l.codigo) || 0;
+                      const varKg = l.kg - p2;
+                      return (
+                        <>
+                          <td className="px-3 py-1.5 text-right font-mono bg-amber-50/40">{p2 > 0 ? fmt(p2, 1) : <span className="text-slate-300">—</span>}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{fmt(l.kg, 1)}</td>
+                          <td className={`px-3 py-1.5 text-right font-mono font-black bg-amber-50/40 ${varKg > 0.05 ? 'text-red-600' : varKg < -0.05 ? 'text-emerald-700' : 'text-slate-400'}`}
+                            title={p2 > 0 ? `${fmt(varKg / p2 * 100, 1)} % sobre P2` : undefined}>
+                            {varKg > 0.05 ? `+${fmt(varKg, 1)}` : fmt(varKg, 1)}
+                          </td>
+                        </>
+                      );
+                    })()}
                     <td className="px-3 py-1.5 text-right font-mono">{l.pesoUN > 0 ? fmt(l.pesoUN, 2) : <span className="text-amber-600">sin Looper</span>}</td>
                     <td className="px-3 py-1.5 text-right font-mono font-black text-violet-700">{l.pesoUN > 0 ? fmt(l.rollosUn) : '—'}</td>
                     {BODEGAS_STOCK.map(b => (

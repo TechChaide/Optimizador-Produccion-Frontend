@@ -1854,6 +1854,19 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     return map;
   }, [necesidadesPlantaData]);
 
+  // P2 de Forros [Kg] por material: lo solicitado, para compararlo con el consumo de acolchadoras.
+  const materialNecesidadForrosMap = useMemo(() => {
+    const map = new Map<string, number>();
+    Object.entries(necesidadesPlantaData).forEach(([area, rows]) => {
+      if (!/forro/i.test(area)) return;
+      rows.forEach(row => {
+        const key = String(Number(row.codigo_material));
+        map.set(key, (map.get(key) || 0) + parseQty(row.cantidad_produccion_neta));
+      });
+    });
+    return map;
+  }, [necesidadesPlantaData]);
+
   // codigo_plan_grupo de los orígenes cuya área es "Venta Externa" — necesidadesPlantaData ya viene
   // agrupado por área (nombre_grupo), así que basta con recorrer las claves. Usado en
   // getOrigenesProrrateo para distinguir, entre los orígenes de un material, cuál es Venta Externa
@@ -5978,7 +5991,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         </TabsContent>
 
         <TabsContent value="acolchadoras" className="animate-in fade-in duration-300 text-left">
-          <ConsumoAcolchadorasTab ordenesFert={ordenesFert} selectedDates={selectedDates} kpiLooperData={kpiLooperData} inventarioSAP={inventarioSAP} corridasSap={corridasSap} />
+          <ConsumoAcolchadorasTab ordenesFert={ordenesFert} selectedDates={selectedDates} kpiLooperData={kpiLooperData} inventarioSAP={inventarioSAP} corridasSap={corridasSap} p2ForrosKg={materialNecesidadForrosMap} />
         </TabsContent>
 
         <TabsContent value="inventario" className="animate-in fade-in duration-300 space-y-4 text-left">
