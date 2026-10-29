@@ -1850,8 +1850,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     return (
       <div className="space-y-2">
         <div className="px-2 flex items-center justify-between">
-          <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Evaluación Stock / En Curado / Stock Útil por Material</h4>
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Stock (UN) = Stock (KG) ÷ Lote Mínimo (igual que Inventarios) · En Curado separado por proceso (Leader / Cofama), no combinado</p>
+          <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest" title="Stock (UN) = Stock (KG) ÷ Lote Mínimo · En Curado separado por proceso (Leader / Cofama)">Evaluación Stock / En Curado / Stock Útil por Material</h4>
         </div>
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left mb-8">
           <div className="overflow-x-auto max-h-[500px]">
@@ -2112,28 +2111,26 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
               <input type="checkbox" checked={fertTodoRango} onChange={e => setFertTodoRango(e.target.checked)} />
               Ver todas las FERT del rango (sin filtro de día de corte)
             </label>
-            <span className="text-slate-400">· FERT en firme cuya fecha fin cae en el día de corte (misma ventana que Sub-Bloques-T8 de Corte Espuma); provisionales y pendiente de días anteriores no entran.</span>
             {fertSinVentana && (
-              <span className="w-full font-bold text-amber-700">Reporte guardado antes de la ventana de corte: se muestran todas las FERT del rango. Sincroniza para filtrar por día de corte.</span>
+              <span className="w-full font-bold text-amber-700">Reporte sin ventana de corte: se muestran todas las FERT del rango.</span>
             )}
           </div>
           {cuadreCorte && (
             <div className="rounded-2xl border border-gray-100 bg-white px-4 py-3 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h4 className="text-[11px] font-black uppercase tracking-widest text-slate-700">Cuadre con Corte Espuma · Sub-Bloques-T8 (láminas UN)</h4>
-                <span className="text-[10px] text-slate-400">Corte separa por centro; Formulación produce todo en UIO y lo de GYE se le envía en bloques.</span>
+                <h4 className="text-[11px] font-black uppercase tracking-widest text-slate-700" title="Corte separa por centro; Formulación produce todo en UIO y lo de GYE se envía en bloques.">Cuadre con Corte Espuma · Sub-Bloques-T8 (láminas UN)</h4>
               </div>
               {planCargadoDe && (
-                <p className="text-[11px] font-bold text-amber-700">Estás viendo el reporte guardado del {planCargadoDe.fechaObjetivo.split('-').reverse().join('/')}: no trae las órdenes FERT de SAP. Pulsa &quot;Sincronizar y generar necesidades&quot; con un rango que incluya el día de corte.</p>
+                <p className="text-[11px] font-bold text-amber-700">Reporte guardado del {planCargadoDe.fechaObjetivo.split('-').reverse().join('/')}: sin órdenes FERT de SAP.</p>
               )}
               {cuadreCorte.diagnostico.cargadas === 0 ? (
-                <p className="text-[11px] font-bold text-amber-700">Sin órdenes FERT cargadas en este módulo — pulsa &quot;Sincronizar y generar necesidades&quot;. No hay nada que comparar todavía.</p>
+                <p className="text-[11px] font-bold text-amber-700">Sin órdenes FERT cargadas.</p>
               ) : (
                 <p className="text-[10px] text-slate-500">
-                  FERT cargadas: <b>{cuadreCorte.diagnostico.cargadas}</b> · con fecha fin del día de corte: <b>{cuadreCorte.diagnostico.enVentana}</b> · del universo de Corte: <b>{cuadreCorte.diagnostico.deCorte}</b>
-                  {cuadreCorte.diagnostico.motivos.length > 0 && <> · fuera de Corte: {cuadreCorte.diagnostico.motivos.map(([m, n]) => `${m} (${n})`).join(' · ')}</>}
-                  {cuadreCorte.diagnostico.enVentana === 0 && <b className="text-amber-700"> — ninguna FERT termina el {ventana.d.split('-').reverse().join('/')}: revisa el día de corte o sincroniza datos de hoy.</b>}
-                  <br />Fechas fin de las FERT cargadas: {cuadreCorte.diagnostico.fechasFin.map(([f, n]) => `${f.split('-').reverse().join('/')} (${n})`).join(' · ')}
+                  FERT cargadas <b>{cuadreCorte.diagnostico.cargadas}</b> · día de corte <b>{cuadreCorte.diagnostico.enVentana}</b> · Corte <b>{cuadreCorte.diagnostico.deCorte}</b>
+                  {cuadreCorte.diagnostico.motivos.length > 0 && <> · fuera: {cuadreCorte.diagnostico.motivos.map(([m, n]) => `${m} (${n})`).join(' · ')}</>}
+                  {cuadreCorte.diagnostico.enVentana === 0 && <b className="text-amber-700"> · ninguna FERT termina el {ventana.d.split('-').reverse().join('/')}</b>}
+                  <br />Fechas fin: {cuadreCorte.diagnostico.fechasFin.map(([f, n]) => `${f.split('-').reverse().join('/')} (${n})`).join(' · ')}
                 </p>
               )}
               <div className="flex flex-wrap gap-2">
@@ -2188,11 +2185,9 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
         <div className="animate-in fade-in duration-300 text-left">
           <Card className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
             <div className="px-6 pt-5 pb-3 flex items-start gap-2 text-slate-500">
-              <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-              <p className="text-[10px] leading-relaxed">
-                Fuente: <span className="font-black text-slate-500">CuboInventarios SAP</span>. <span className="font-black text-green-600">Stock (KG)</span> es el <code className="font-mono">StockActual</code> reportado por SAP.
-                <span className="font-black text-blue-600"> Stock (UN)</span> = Stock (KG) ÷ Lote Mínimo, es decir, cuántos lotes mínimos de fabricación caben en el stock disponible.
-              </p>
+              <span className="inline-flex cursor-help" title="Fuente: CuboInventarios SAP. Stock (KG) = StockActual de SAP; Stock (UN) = Stock (KG) ÷ Lote Mínimo.">
+                <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              </span>
             </div>
             <div className="overflow-x-auto max-h-[600px] relative">
               <table className="w-full border-collapse text-center font-sans text-[10px]">
@@ -2280,7 +2275,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             <PopoverContent className="w-80 p-4 space-y-3" align="end">
               <div>
                 <p className="text-xs font-black uppercase tracking-widest text-slate-700">Reporte de producción <span className="text-amber-600">(en desarrollo)</span></p>
-                <p className="text-[10px] text-slate-500 mt-1">Bloque Formulado — necesidad, stock y plan de reposición. Guarda el plan y envíalo después desde la vista previa.</p>
               </div>
               <ReportePlanTxtAccionesGrupo grupo={reporteGrupo} />
             </PopoverContent>
@@ -2296,8 +2290,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-[520px] p-4" align="end">
-              <p className="text-xs font-black uppercase tracking-widest text-slate-700 mb-1">Jornada laboral</p>
-              <p className="text-[10px] text-slate-500 mb-3">Precargada desde las restricciones del grupo; puedes ajustarla. Aún no entra en ningún cálculo del módulo.</p>
+              <p className="text-xs font-black uppercase tracking-widest text-slate-700 mb-3" title="Precargada desde las restricciones del grupo; aún no entra en ningún cálculo del módulo.">Jornada laboral</p>
               <div className="grid grid-cols-2 gap-4">
                 <JornadaCentroPanel titulo="Quito (1000)" jornada={jornada1000} sinGrupo={codigoGrupoFormulacion1000 === null} />
                 <JornadaCentroPanel titulo="Guayaquil (2000)" jornada={jornada2000} sinGrupo={codigoGrupoFormulacion2000 === null} />
@@ -2401,8 +2394,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
         >
           <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
-            Plan cargado del reporte del <span className="font-black text-emerald-700">{format(new Date(planCargadoDe.fechaObjetivo + 'T00:00:00'), 'EEE dd/MM/yyyy', { locale: es })}</span>
-            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — Salida de Datos tal como se planificó; <span className="font-black text-blue-700">Sincronizar</span> lo recalcula con SAP.
+            Reporte del <span className="font-black text-emerald-700">{format(new Date(planCargadoDe.fechaObjetivo + 'T00:00:00'), 'EEE dd/MM/yyyy', { locale: es })}</span>
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')})
           </p>
         </div>
       )}
