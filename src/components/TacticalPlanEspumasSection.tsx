@@ -68,7 +68,7 @@ import {
   densidadDeCategoria, aperturaDeCategoria, tipoDeCategoria, tipoEspumaDesc,
 } from '@/lib/bloques-espuma';
 import {
-  ventanaCorte, fertEnVentanaCorte, fertEnVentanaCorteMaterial, esAreaVentaExterna, responsablesCorte, respExcepcionExcluye, ES_FORRO,
+  ventanaCorte, fertEnVentanaCorteMaterial, esAreaVentaExterna, responsablesCorte, respExcepcionExcluye, ES_FORRO,
   CODIGO_GRUPO_CORTE_POR_CENTRO, MATERIALES_LA02_GYE,
   NOMBRE_RESTRICCION_RESP_VERTICALES,
 } from '@/lib/ventana-corte';
@@ -2605,9 +2605,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // (eso es capacidad, otro tab) sino de las órdenes FERT en firme (liberadas) de láminas de corte,
   // por FECHAFIN: Colchones/Muebles con FECHAFIN = D (PT−1) y Venta Externa con FECHAFIN = D+1 hábil
   // (su HALB va fechada al PT), así en D se cuentan las dos para el mismo PT. Provisionales no entran.
-  // D por defecto = hoy+1 hábil, con selector. Venta se reconoce por origenArea (cruce con el P2): sin
-  // Necesidades Planta cargadas, una FERT de Venta se trataría como colchones.
+  // D por defecto = hoy+1 hábil, con selector.
+  // 2026-10-28 (usuario): VE se corta en D porque su empaque arranca el turno noche de D, pero se muestra
+  // aparte (columnas Planta / VE) y se puede ocultar. Venta se reconoce POR MATERIAL (en un P2 de Venta,
+  // respaldo origenArea), igual que Capacidad y Formulación: por orden, una FERT de Muebles del día D de
+  // un material que también pide VE podía quedar como VE (el rango del P2 VE contiene D) y salir del día.
   const [t8FechaCorte, setT8FechaCorte] = useState('');
+  const [t8IncluirVenta, setT8IncluirVenta] = useState(true);
   // Regla compartida con Formulación (ver @/lib/ventana-corte): el mismo día de corte da el mismo dato.
   const t8Fechas = useMemo(() => ventanaCorte(t8FechaCorte, siguienteDiaHabil), [t8FechaCorte, siguienteDiaHabil]);
   // Solo el día de corte: el pendiente de días anteriores NO entra (usuario 2026-10-27) — ya se está
@@ -2621,11 +2625,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         if (!allowed.includes(r.responsable)) return false;
         if (/PRENSAD|APROVECHAMIENTO/i.test(r.descripcion) || ES_FORRO(r.descripcion)) return false;
         if (respExcepcionExcluye(centro, r.responsable, r.material)) return false;
-        return fertEnVentanaCorte(r.fechaFin, esAreaVentaExterna(r.origenArea), t8Fechas);
+        if (!t8IncluirVenta && r.fechaFin === t8Fechas.venta) return false;
+        const enVenta = materialesVentaPorCentro[centro]?.has(r.material) || esAreaVentaExterna(r.origenArea);
+        return fertEnVentanaCorteMaterial(r.fechaFin, enVenta, t8Fechas);
       });
     };
     return { '1000': filtrar(fertAuditAllUIO, '1000'), '2000': filtrar(fertAuditAllGYE, '2000') };
-  }, [fertAuditAllUIO, fertAuditAllGYE, allowedRespPorCentro, t8Fechas]);
+  }, [fertAuditAllUIO, fertAuditAllGYE, allowedRespPorCentro, t8Fechas, t8IncluirVenta, materialesVentaPorCentro]);
 
   // Grupos plegados del tab T8 (claves centro|densidad y centro|densidad|apertura); por defecto todo abierto.
   const [t8Plegados, setT8Plegados] = useState<Set<string>>(new Set());  const toggleT8 = (clave: string) => setT8Plegados(prev => { const n = new Set(prev); if (n.has(clave)) n.delete(clave); else n.add(clave); return n; });
@@ -2874,12 +2880,14 @@ export const TacticalPlanEspumasSection: React.FC = () => {
 
   const subBloquesT8PorCentro = useMemo(() => {
     const calcular = (rows: UnifiedRow[], centro: string) => {
-      const porMaterial = new Map<string, UnifiedRow & { cantTotal: number }>();
+      // cantVenta: FERT con FECHAFIN = D+1 (Venta Externa); el resto (FECHAFIN = D) es Planta.
+      const porMaterial = new Map<string, UnifiedRow & { cantTotal: number; cantVenta: number }>();
       rows.forEach(r => {
         if (r.isAlterna || r.esp <= 0 || r.cantUnidadReal <= 0) return;
+        const venta = r.fechaFin === t8Fechas.venta ? r.cantUnidadReal : 0;
         const prev = porMaterial.get(r.material);
-        if (prev) prev.cantTotal += r.cantUnidadReal;
-        else porMaterial.set(r.material, { ...r, cantTotal: r.cantUnidadReal });
+        if (prev) { prev.cantTotal += r.cantUnidadReal; prev.cantVenta += venta; }
+        else porMaterial.set(r.material, { ...r, cantTotal: r.cantUnidadReal, cantVenta: venta });
       });
       const filas = Array.from(porMaterial.values()).map(r => {
         const aperturaCat = aperturaCategoriaPorCentro.porCentro[centro]?.get(r.material) || aperturaCategoriaPorCentro.cualquierCentro.get(r.material) || '';
@@ -2914,7 +2922,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
           material: r.material, descripcion: r.descripcion, dens, densVal,
           apertura: aperturaCat || (r.apertura !== '—' ? r.apertura : 'Sin apertura'), tLaminasH,
           categoria, tipo: categoriaBase || tipoDesc || 'Sin tipo', tipoDesc, tipoDeCategoria: !!categoriaBase,
-          tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, alturaTotal: r.esp * r.cantTotal,
+          tamano: `${r.ancho}X${r.largo}`, esp: r.esp, cant: r.cantTotal, cantVenta: r.cantVenta, cantPlanta: r.cantTotal - r.cantVenta, alturaTotal: r.esp * r.cantTotal,
           unidadesPorSub, alturaMaestro, subB, capGiro, cargas, subCNC, ciclosCup, cupulaCm: alturaCupulaCm(r.esp), tCupulaH,
           ocupacion: cargas > 0 && capGiro > 0 ? subCarrusel / (cargas * capGiro) : 0,
           tCorteH, tCargaDescargaH, tTotalH: tCorteH + tCargaDescargaH,
@@ -2924,8 +2932,10 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         };
       });
       type FilaT8 = typeof filas[number];
-      const totales = (items: { cant: number; subB: number; cargas: number; subCNC: number; tLaminasH: number; tCupulaH: number; tCargaDescargaH: number; tTotalH: number; metros: number; bloquesEnteros: number }[]) => ({
+      const totales = (items: { cant: number; cantPlanta: number; cantVenta: number; subB: number; cargas: number; subCNC: number; tLaminasH: number; tCupulaH: number; tCargaDescargaH: number; tTotalH: number; metros: number; bloquesEnteros: number }[]) => ({
         cant: items.reduce((s, f) => s + f.cant, 0),
+        cantPlanta: items.reduce((s, f) => s + f.cantPlanta, 0),
+        cantVenta: items.reduce((s, f) => s + f.cantVenta, 0),
         tLaminasH: items.reduce((s, f) => s + f.tLaminasH, 0),
         tCargaDescargaH: items.reduce((s, f) => s + f.tCargaDescargaH, 0),
         subB: items.reduce((s, f) => s + f.subB, 0),
@@ -2973,7 +2983,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       '1000': calcular(fertT8PorCentro['1000'], '1000'),
       '2000': calcular(fertT8PorCentro['2000'], '2000'),
     };
-  }, [fertT8PorCentro, aperturaCategoriaPorCentro, alturaMaestroDe]);
+  }, [fertT8PorCentro, aperturaCategoriaPorCentro, alturaMaestroDe, t8Fechas]);
 
   // Auditoría (solo lectura, pedido del usuario 2026-10-07): cada FERT con cantidad pendiente hasta la
   // fecha evaluada y CUÁNTO de ella entra a la ocupación, con el motivo — para conciliar contra SAP
@@ -6917,6 +6927,10 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 <input type="date" value={t8Fechas.d} onChange={e => setT8FechaCorte(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-mono text-slate-900" />
                 <span className="normal-case font-semibold text-slate-600">Venta Externa: fecha fin {t8Fechas.venta.split('-').reverse().join('/')}</span>
               </label>
+              <label className="flex items-center gap-1.5 font-semibold text-slate-700 cursor-pointer" title="VE se corta en el día D porque su empaque arranca el turno noche de D. Desmarcar muestra solo lo que va al ensamble (Planta).">
+                <input type="checkbox" checked={t8IncluirVenta} onChange={e => setT8IncluirVenta(e.target.checked)} className="accent-indigo-600" />
+                Incluir Venta Externa
+              </label>
               <span className="text-slate-300">|</span>
               <span className="font-black uppercase text-slate-700 text-[10px]">Modelo de bloque</span>
               <span className="px-3 py-1.5 rounded-xl bg-slate-100 font-black">Altura bloque {ALTURA_BLOQUE_CM} cm</span>
@@ -6931,6 +6945,8 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               const grupos = subBloquesT8PorCentro[centro];
               const th = 'px-2 py-2 border-r border-slate-200 text-[10px] uppercase font-black text-slate-800';
               const td = 'px-2 py-1.5 border-r border-slate-100 text-right font-mono text-slate-900';
+              const diaMes = (f: string) => f.split('-').reverse().slice(0, 2).join('/');
+              const celdaVenta = (v: number) => <td className={`${td} text-sky-800`}>{v > 0 ? formatNum(v, 0) : '—'}</td>;
               return (
                 <div key={centro} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-x-auto">
                   <div className="px-4 py-3 font-black text-indigo-900 uppercase text-sm border-b">Sub-bloques — {centro === '1000' ? 'Quito' : 'Guayaquil'}</div>
@@ -6966,6 +6982,8 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                       <thead>
                         <tr>
                           <th className={`${th} bg-slate-50 text-left`}>Densidad · Apertura / Material</th><th className={`${th} bg-slate-50`}>Tamaño</th><th className={`${th} bg-slate-50`}>Espesor</th>
+                          <th className={`${th} bg-slate-50 text-slate-700`}>Planta UN (fin {diaMes(t8Fechas.d)})</th>
+                          <th className={`${th} bg-sky-50 text-sky-800`}>Venta Ext. UN (fin {diaMes(t8Fechas.venta)})</th>
                           <th className={`${th} bg-slate-100`}>Cantidad láminas UN</th>
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Und / sub-bloque</th><th className={`${th} bg-indigo-50`}>N° Sub-bloques</th>
                           <th className={`${th} bg-indigo-50/50 text-slate-700`}>Cap. giro</th><th className={`${th} bg-indigo-50`}>N° Carga CR-01/03/04</th><th className={`${th} bg-indigo-50`}>N° Carga sub-bloques CNC</th>
@@ -6982,6 +7000,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                           // Fila de totales del bloque madre: mismas columnas que el detalle.
                           const filaTotales = () => (
                             <>
+                              <td className={td}>{formatNum(g.cantPlanta, 0)}</td>{celdaVenta(g.cantVenta)}
                               <td className={td}>{formatNum(g.cant, 0)}</td><td className={td}></td><td className={td}>{g.subB}</td><td className={td}></td>
                               <td className={td}>{g.cargas}</td><td className={td}>{g.subCNC}</td>
                               <td className={`${td} ${g.ocupacion > 0 && g.ocupacion < 0.6 ? 'text-orange-600' : ''}`}>{g.cargas > 0 ? `${(g.ocupacion * 100).toFixed(0)}%` : '—'}</td>
@@ -7009,6 +7028,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                       <tr key={f.material} className="border-t border-slate-100">
                                         <td className="pl-8 pr-2 py-1.5 border-r border-slate-100" title={`${f.descripcion}\n${f.categoria || 'sin categoría'}`}>{f.material}<div className="text-[9px] text-slate-600 truncate max-w-[220px]">{f.descripcion}</div></td>
                                         <td className={td}>{f.tamano}</td><td className={td}>{f.esp}</td>
+                                        <td className={`${td} text-slate-700`}>{f.cantPlanta > 0 ? formatNum(f.cantPlanta, 0) : '—'}</td>{celdaVenta(f.cantVenta)}
                                         <td className={`${td} bg-slate-50`}>{formatNum(f.cant, 0)}</td>
                                         <td className={`${td} ${f.alturaMaestro ? 'text-slate-700' : 'text-orange-600'}`} title={f.alturaMaestro ? `Altura ${f.alturaMaestro} cm (KPIMaestroCarruseles) ÷ espesor ${f.esp}` : 'Material fuera de KPIMaestroCarruseles: altura por regla de densidad'}>{f.unidadesPorSub}</td><td className={`${td} font-black`}>{f.subB}</td>
                                         <td className={`${td} text-slate-700`}>{f.capGiro}</td><td className={`${td} font-black`}>{f.cargas}</td><td className={td}>{f.subCNC}</td>
@@ -7026,6 +7046,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         })}
                         <tr className="border-t-2 border-indigo-300 bg-indigo-100 font-black text-indigo-900">
                           <td className="px-2 py-2" colSpan={3}>Total {centro === '1000' ? 'Quito' : 'Guayaquil'}</td>
+                          <td className={td}>{formatNum(grupos.reduce((s, g) => s + g.cantPlanta, 0), 0)}</td>{celdaVenta(grupos.reduce((s, g) => s + g.cantVenta, 0))}
                           <td className={td}>{formatNum(grupos.reduce((s, g) => s + g.cant, 0), 0)}</td><td className={td}></td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.subB, 0)}</td><td className={td}></td>
                           <td className={td}>{grupos.reduce((s, g) => s + g.cargas, 0)}</td><td className={td}>{grupos.reduce((s, g) => s + g.subCNC, 0)}</td><td className={td}></td>
