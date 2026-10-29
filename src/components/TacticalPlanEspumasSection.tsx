@@ -621,6 +621,11 @@ const getProp = (obj: Record<string, unknown> | null | undefined, keys: string[]
   return '';
 };
 
+// Mantenimiento SAP (ListarMantenimientosPreventivos, estructura 2026-10-28): área "Corte y Laminado"
+// (SAP la trae con doble espacio) y la máquina en MaquinaSismac (respaldo ID_MAQUINA).
+const esMttoCorteYLaminado = (m: Record<string, unknown>): boolean => /^corte\s+y\s+laminado$/i.test(getProp(m, ['AREA']));
+const maquinaSismacDe = (m: Record<string, unknown>): string => (getProp(m, ['MaquinaSismac']) || getProp(m, ['ID_MAQUINA'])).toUpperCase();
+
 // Columnas de la tabla editable del diálogo "Confirmar envío a SAP" — mismo orden y campos que
 // SOLICITUD_PRODUCCION_FIELDS en TacticalPlanCorteLaminadoSection, para que la vista previa refleje
 // 1:1 el body real que recibe InsertarSolicitudProduccionHB.
@@ -1166,6 +1171,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const [mttoCrudoCargando, setMttoCrudoCargando] = useState(false);
   const [mttoCrudoError, setMttoCrudoError] = useState('');
   const [mttoCrudoFiltro, setMttoCrudoFiltro] = useState('');
+  const [mttoVerTodasAreas, setMttoVerTodasAreas] = useState(false);
   const recuperarMttoCrudo = useCallback(async () => {
     setMttoCrudoCargando(true);
     setMttoCrudoError('');
@@ -2695,13 +2701,17 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // planta, sin filtrar por área — y los ID_MAQUINA de este módulo NO son exclusivos de Corte
   // Espuma en SAP, se reutilizan en otras áreas (verificado con datos reales). El valor real en SAP
   // trae doble espacio ("Corte y  Laminado"), de ahí el \s+ en vez de comparar literal.
+  // 2026-10-28 (nueva captura del SP): la máquina se cruza por MaquinaSismac (respaldo ID_MAQUINA) y
+  // solo cuentan las máquinas operativas del flujo (MACHINES_BY_PLANTA; Centro 1000: CR04/CR03/CR01/
+  // CNC01/V02/V03 — PG03 Puente Grúa y otras quedan fuera). La clave de duplicado incluye el Centro.
   const uniqueMantenimientosSAP = useMemo(() => {
     const seen = new Set<string>();
     return mantenimientosSAP
-      .filter(m => /^corte\s+y\s+laminado$/i.test(getProp(m, ['AREA']).trim()))
+      .filter(esMttoCorteYLaminado)
       .filter(m => {
         const key = [
-          getProp(m, ['ID_MAQUINA']),
+          maquinaSismacDe(m),
+          getProp(m, ['Centro', 'CENTRO']),
           getProp(m, ['FECHA_OT_PRG_INI']),
           getProp(m, ['FECHA_OT_PRG_FIN']),
         ].join('|').trim().toUpperCase();
@@ -2727,7 +2737,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     else if (pStr.includes('GUAYAQUIL')) candidates = ['GYE'];
     else candidates = ['UIO', 'GYE'];
     for (const planta of candidates) {
-      const match = MACHINES_BY_PLANTA[planta].find(m => m.id === id || id.includes(m.id));
+      const match = MACHINES_BY_PLANTA[planta].find(m => m.id === id);
       if (match) return { ...match, planta };
     }
     return null;
@@ -2787,25 +2797,30 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // esa máquina (ej. el viernes en la noche o el lunes en la mañana sí; un sábado sin turno no).
   // Antes: todo el mantenimiento que EMPEZABA el día del plan, aunque cayera fuera de turno, y nada
   // del de la noche anterior. Sin turnos (máquina apagada o sin horario) queda el criterio anterior.
-  const getMttoTimeParaFecha = useCallback((machineId: string, planta: string, fecha: string): number => {
-    const target = machineId.trim().toUpperCase();
-    const filas = uniqueMantenimientosSAP.filter(m => {
-      const idMaquina = getProp(m, ['ID_MAQUINA', 'MAQUINA']);
-      const link = resolveMachineLink(idMaquina, getProp(m, ['Centro', 'CENTRO']), getProp(m, ['PLANTA']));
-      return !!link && link.id === target && link.planta === planta;
-    });
-    const turnos = planta === 'UIO' || planta === 'GYE' ? turnosVentanaMaquina(planta, target, fecha) : [];
-    const delDia = (m: RawApiRow) => fechaLocalEcuador(getProp(m, ['FECHA_OT_PRG_INI'])) === fecha;
-    if (turnos.length === 0) return filas.filter(delDia).reduce((sum, row) => sum + getMttoDurationH(row), 0);
+  // Horas que UNA orden de mantenimiento resta al plan de `fecha` en su máquina (0 si la máquina no es
+  // operativa del flujo). La usan la capacidad (suma por máquina) y el tab Mantenimiento SAP (por fila).
+  const horasMttoFilaParaFecha = useCallback((row: RawApiRow, fecha: string): number => {
+    const link = resolveMachineLink(maquinaSismacDe(row), getProp(row, ['Centro', 'CENTRO']), getProp(row, ['PLANTA']));
+    if (!link) return 0;
+    const turnos = turnosVentanaMaquina(link.planta, link.id, fecha);
+    if (turnos.length === 0) return fechaLocalEcuador(getProp(row, ['FECHA_OT_PRG_INI'])) === fecha ? getMttoDurationH(row) : 0;
     // Regla única de los 3 módulos (ver mttoEnVentana): con hora real, el turno donde cae (también la
     // Noche); solo con fecha (SISMAC, 0:00), completo en el turno Día de ese día — antes esa OT no
     // solapaba ningún turno y quedaba en 0.
-    return filas.reduce((sum, row) => {
-      const iniStr = getProp(row, ['FECHA_OT_PRG_INI']) || getProp(row, ['FECHA_PRO']);
-      const r = mttoEnVentana({ inicio: iniStr, fin: getProp(row, ['FECHA_OT_PRG_FIN']), fecha: getProp(row, ['FECHA_PRO']) || iniStr, duracionH: getMttoDurationH(row) }, turnos);
-      return sum + (r?.horas ?? 0);
-    }, 0);
-  }, [uniqueMantenimientosSAP, turnosVentanaMaquina]);
+    const iniStr = getProp(row, ['FECHA_OT_PRG_INI']) || getProp(row, ['FECHA_PRO']);
+    const r = mttoEnVentana({ inicio: iniStr, fin: getProp(row, ['FECHA_OT_PRG_FIN']), fecha: getProp(row, ['FECHA_PRO']) || iniStr, duracionH: getMttoDurationH(row) }, turnos);
+    return r?.horas ?? 0;
+  }, [turnosVentanaMaquina]);
+
+  const getMttoTimeParaFecha = useCallback((machineId: string, planta: string, fecha: string): number => {
+    const target = machineId.trim().toUpperCase();
+    return uniqueMantenimientosSAP
+      .filter(m => {
+        const link = resolveMachineLink(maquinaSismacDe(m), getProp(m, ['Centro', 'CENTRO']), getProp(m, ['PLANTA']));
+        return !!link && link.id === target && link.planta === planta;
+      })
+      .reduce((sum, row) => sum + horasMttoFilaParaFecha(row, fecha), 0);
+  }, [uniqueMantenimientosSAP, horasMttoFilaParaFecha]);
 
   // Pendiente FERT = solo el EXCESO del turno (regla de Laminado, usuario 2026-10-06; desde 2026-10-07 con
   // todo el pendiente, no solo el del día anterior). Esas FERT se están cortando en el turno Día del día hábil anterior: a la
@@ -2838,7 +2853,7 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         const rendimiento = proceso === 'vertical' ? 1 : proceso === 'cnc' ? config.performanceCNC / 100 : config.performance / 100;
         const target = id.trim().toUpperCase();
         const mtto = uniqueMantenimientosSAP.reduce((s, m) => {
-          const link = resolveMachineLink(getProp(m, ['ID_MAQUINA', 'MAQUINA']), getProp(m, ['Centro', 'CENTRO']), getProp(m, ['PLANTA']));
+          const link = resolveMachineLink(maquinaSismacDe(m), getProp(m, ['Centro', 'CENTRO']), getProp(m, ['PLANTA']));
           if (!link || link.id !== target || link.planta !== planta) return s;
           const ini = new Date(getProp(m, ['FECHA_OT_PRG_INI']));
           const fin = new Date(getProp(m, ['FECHA_OT_PRG_FIN']));
@@ -7440,15 +7455,32 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             </div>
           </TabsContent>
           <TabsContent value="mantenimiento" className="animate-in fade-in duration-300 text-left space-y-4">
-            {/* Respuesta cruda de ListarMantenimientosPreventivos (usuario 2026-10-28): todas las columnas
-                que trae el SP, en su orden, sin filtros ni deduplicación, para definir columnas y filtros. */}
+            {/* Todo lo planificado en ListarMantenimientosPreventivos (usuario 2026-10-28), sin filtro de
+                fecha: por defecto solo AREA = Corte y Laminado, con todas las columnas del SP y, delante,
+                la máquina operativa vinculada (por MaquinaSismac) y las horas que resta al plan de la
+                fecha elegida en Capacidad Operativa (misma regla que la capacidad, sin duplicados). */}
             {(() => {
-              const filas = mttoCrudo?.filas ?? [];
+              const todas = mttoCrudo?.filas ?? [];
+              const filas = mttoVerTodasAreas ? todas : todas.filter(esMttoCorteYLaminado);
               const columnas: string[] = [];
               filas.forEach(f => Object.keys(f).forEach(k => { if (!columnas.includes(k)) columnas.push(k); }));
               const q = mttoCrudoFiltro.trim().toUpperCase();
-              const visibles = q ? filas.filter(f => columnas.some(c => String(f[c] ?? '').toUpperCase().includes(q))) : filas;
               const texto = (v: unknown) => v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+              const vistas = new Set<string>();
+              const vinculo = (f: RawApiRow) => {
+                if (!esMttoCorteYLaminado(f)) return { estado: 'Otra área' as const };
+                const link = resolveMachineLink(maquinaSismacDe(f), getProp(f, ['Centro', 'CENTRO']), getProp(f, ['PLANTA']));
+                if (!link) return { estado: 'No operativa' as const };
+                const clave = [maquinaSismacDe(f), getProp(f, ['Centro', 'CENTRO']), getProp(f, ['FECHA_OT_PRG_INI']), getProp(f, ['FECHA_OT_PRG_FIN'])].join('|').toUpperCase();
+                if (vistas.has(clave)) return { estado: 'Duplicada' as const, link };
+                vistas.add(clave);
+                const fecha = Array.from(selectedDatesCapacidad[link.planta]).sort()[0];
+                return { estado: 'Vinculada' as const, link, fecha, horas: fecha ? horasMttoFilaParaFecha(f, fecha) : 0 };
+              };
+              // El vínculo se arma sobre todas las filas (antes del buscador) para que "Duplicada" no cambie al buscar.
+              const conVinculo = filas.map(f => ({ f, v: vinculo(f) }));
+              const visibles = q ? conVinculo.filter(({ f }) => columnas.some(c => String(f[c] ?? '').toUpperCase().includes(q))) : conVinculo;
+              const totalResta = conVinculo.reduce((s, x) => s + (x.v.estado === 'Vinculada' ? x.v.horas : 0), 0);
               return (
                 <>
                   <div className="flex items-center justify-between gap-3 px-2 flex-wrap">
@@ -7457,13 +7489,19 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                       <div>
                         <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Mantenimientos Preventivos (ListarMantenimientosPreventivos)</h3>
                         <p className="text-[10px] font-bold text-slate-600">
-                          Respuesta cruda del servicio, sin caché ni filtros
-                          {mttoCrudo && <> · {filas.length} filas · {columnas.length} columnas · recuperado {format(mttoCrudo.recuperadoEn, 'dd/MM/yyyy HH:mm')}</>}
+                          Todo lo planificado, sin caché{mttoVerTodasAreas ? ' · todas las áreas' : ' · área Corte y Laminado'}
+                          {mttoCrudo && <> · {filas.length} de {todas.length} filas · recuperado {format(mttoCrudo.recuperadoEn, 'dd/MM/yyyy HH:mm')}</>}
                           {q && <> · {visibles.length} con «{mttoCrudoFiltro.trim()}»</>}
+                          {mttoCrudo && <> · resta a la capacidad: {totalResta.toFixed(2)} h</>}
                         </p>
+                        <p className="text-[10px] text-slate-600">Solo restan las máquinas operativas del flujo (cruce por MaquinaSismac): UIO {MACHINES_BY_PLANTA.UIO.map(m => m.id).join(' / ')} · GYE {MACHINES_BY_PLANTA.GYE.map(m => m.id).join(' / ')}. Las horas son para la fecha elegida en Capacidad Operativa.</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-700 cursor-pointer">
+                        <input type="checkbox" checked={mttoVerTodasAreas} onChange={e => setMttoVerTodasAreas(e.target.checked)} className="accent-indigo-600" />
+                        Ver todas las áreas
+                      </label>
                       <Input value={mttoCrudoFiltro} onChange={e => setMttoCrudoFiltro(e.target.value)} placeholder="Buscar en todas las columnas…" className="w-[240px] h-9 text-xs" />
                       <Button onClick={() => void recuperarMttoCrudo()} disabled={mttoCrudoCargando} variant="outline" className="rounded-xl h-9 px-4 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 border-indigo-200 text-indigo-700 hover:bg-indigo-50">
                         {mttoCrudoCargando ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Recuperar
@@ -7477,17 +7515,29 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         <thead className="bg-gray-50 sticky top-0 z-10 text-[10px] font-black uppercase text-slate-700">
                           <tr>
                             <th className="px-3 py-3 border-r border-gray-100 text-right">#</th>
+                            <th className="px-3 py-3 border-r border-gray-100 text-left whitespace-nowrap bg-emerald-50 text-emerald-800">Máquina vinculada</th>
+                            <th className="px-3 py-3 border-r border-gray-100 text-right whitespace-nowrap bg-indigo-50 text-indigo-800">Resta al plan (h)</th>
                             {columnas.map(c => <th key={c} className="px-3 py-3 border-r border-gray-100 text-left whitespace-nowrap normal-case font-mono">{c}</th>)}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-50 text-slate-800">
                           {visibles.length === 0 ? (
-                            <tr><td colSpan={columnas.length + 1} className="py-16 text-slate-500 font-bold text-center">
+                            <tr><td colSpan={columnas.length + 3} className="py-16 text-slate-500 font-bold text-center">
                               {mttoCrudoCargando ? 'Recuperando…' : mttoCrudo ? 'Sin filas' : 'Sin datos todavía'}
                             </td></tr>
-                          ) : visibles.map((f, i) => (
-                            <tr key={i} className="hover:bg-indigo-50/30">
+                          ) : visibles.map(({ f, v }, i) => (
+                            <tr key={i} className={cn('hover:bg-indigo-50/30', v.estado !== 'Vinculada' && 'text-slate-500')}>
                               <td className="px-3 py-1.5 border-r border-gray-100 text-right font-mono text-slate-500">{i + 1}</td>
+                              <td className="px-3 py-1.5 border-r border-gray-100 whitespace-nowrap font-bold">
+                                {v.estado === 'Vinculada'
+                                  ? <span className="inline-flex items-center gap-1.5 text-emerald-700"><CheckCircle2 className="w-3.5 h-3.5 shrink-0" />{v.link.id} · {v.link.planta}</span>
+                                  : v.estado === 'Duplicada'
+                                    ? <span title="Misma máquina, centro, inicio y fin que una fila anterior: no se vuelve a restar">{v.link.id} · duplicada</span>
+                                    : <span title={v.estado === 'No operativa' ? 'MaquinaSismac no es una máquina operativa del flujo de Corte Espuma: no resta capacidad' : 'Fuera del área Corte y Laminado'}>{v.estado}</span>}
+                              </td>
+                              <td className="px-3 py-1.5 border-r border-gray-100 text-right font-mono font-black text-indigo-700">
+                                {v.estado !== 'Vinculada' ? '—' : !v.fecha ? <span className="text-[10px] font-semibold text-slate-500">sin fecha</span> : <span title={`Plan del ${v.fecha.split('-').reverse().join('/')}`}>{v.horas.toFixed(2)}</span>}
+                              </td>
                               {columnas.map(c => <td key={c} className="px-3 py-1.5 border-r border-gray-100 whitespace-nowrap font-mono">{texto(f[c])}</td>)}
                             </tr>
                           ))}

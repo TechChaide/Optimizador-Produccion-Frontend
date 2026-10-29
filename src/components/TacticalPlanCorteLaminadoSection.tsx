@@ -3734,9 +3734,12 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // MTTO es UN total con todas — confirmado por el usuario 2026-10-08, no se deduplica.
   // Vale el ID de la restricción O la descripción con "LOOPER" (un "LO00" escrito con cero en vez de
   // O en un lado no debe dejar el MTTO en 0).
+  // 2026-10-28 (nueva captura del SP): solo AREA = Corte y Laminado (SAP la trae con doble espacio) y la
+  // máquina por MaquinaSismac (respaldo ID_MAQUINA), igual que Corte Espuma.
   const mantenimientosLooper = useMemo(() => mantenimientosSAP.filter(m =>
-    maquinasMttoLooper.includes(getProp(m, ['ID_MAQUINA']).toUpperCase())
-    || getProp(m, ['MAQUINA']).toUpperCase().includes('LOOPER')), [mantenimientosSAP, maquinasMttoLooper]);
+    /^corte\s+y\s+laminado$/i.test(getProp(m, ['AREA']).trim()) && (
+      maquinasMttoLooper.includes((getProp(m, ['MaquinaSismac']) || getProp(m, ['ID_MAQUINA'])).toUpperCase())
+      || getProp(m, ['MAQUINA']).toUpperCase().includes('LOOPER'))), [mantenimientosSAP, maquinasMttoLooper]);
 
   // Duración de una OT en horas: Duracion_Minutos o TIEMPO (minutos, SISMAC); si no vienen,
   // T_MTTO_PLANIFICADO (horas) o la diferencia Inicio/Fin.
