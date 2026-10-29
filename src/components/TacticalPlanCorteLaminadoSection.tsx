@@ -2609,6 +2609,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           if (!(row.DESCRIPCION_COMPONENTE || '').toUpperCase().includes('LAMINA CILINDRICA')) return;
           const compCode = cleanCode(row.COMPONENTE);
           if (EXCLUDED_LAMINA_MATERIALS.has(compCode)) return;
+          // Una orden de la propia lámina (ej. 31144747 de 30012660, HR-LAMIN) es oferta, no consumo:
+          // si la explosión devuelve su propia fila, se contaba como OF_HALB interno de sí misma.
+          if (compCode === cleanCode(matCode)) return;
           if (!laminaRowsByComponente.has(compCode)) laminaRowsByComponente.set(compCode, row);
         });
 
