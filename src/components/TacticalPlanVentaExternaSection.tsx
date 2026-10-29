@@ -3485,8 +3485,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         >
           <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
-            Plan cargado del reporte del <span className="font-black text-emerald-700">{format(parseISO(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
-            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — <span className="font-black text-emerald-700">solo consulta</span>, tal cual se guardó; <span className="font-black text-blue-700">Sincronizar</span> trae datos vigentes y habilita generar y enviar.
+            Reporte del <span className="font-black text-emerald-700">{format(parseISO(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) · <span className="font-black text-emerald-700">solo consulta</span>
           </p>
         </div>
       )}
@@ -3559,7 +3559,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               <div className="text-left">
                 <p className="text-[10px] font-bold uppercase text-cyan-500 tracking-wider">Capacidad vs. Necesidad</p>
                 <h3 className="text-sm font-black text-gray-700 uppercase">Capacidad Operativa · Empaque</h3>
-                <p className="text-[10px] text-gray-500 mt-1">Turnos, operadores y mantenimiento de cada máquina de empaque — junto con las horas necesarias (mismo dato que sale en el correo), da el % de ocupación.</p>
               </div>
             </div>
             {(['1000', '2000'] as const).map(centro => {
@@ -3614,10 +3613,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                         <PopoverContent className="w-80 p-4 space-y-3" align="end">
                           <div>
                             <p className="text-xs font-black uppercase tracking-widest text-slate-700">Empaque · Centro {centro}</p>
-                            <p className="text-[10px] text-slate-500 mt-1">Venta Externa / Muebles — gestión de tiempos y capacidad de este centro, con datos de Data Aprobada (respuesta ya verificada), no del PFD-VENTA.</p>
                           </div>
                           <ReportePlanTxtAcciones flujo={reporteFlujoEmpaque[centro]} />
-                          <p className="text-[10px] text-slate-500">Destinatarios precargados desde Grupo_correos_VentaExterna — editables en la vista previa.</p>
                         </PopoverContent>
                       </Popover>
                       <ReportePlanTxtVistaPrevia
@@ -4033,9 +4030,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         </TabsContent>
 
         <TabsContent value="ordenesFert" className="space-y-8 animate-in fade-in duration-300">
-          <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest -mt-2">
-            Vista de referencia — no depende del filtro &quot;Fecha&quot; (ese selector ahora solo filtra el tab Provisionales). Muestra todas las Órdenes FERT con las restricciones de Venta Externa aplicadas.
-          </p>
           {[
             { t: 'Quito 1000 - Órdenes FERT', d: fertC1000SinFecha, b: 'bg-green-600', c: 'text-green-700', lookup: tiempoLookup1000 },
             { t: 'Guayaquil 2000 - Órdenes FERT', d: fertC2000SinFecha, b: 'bg-indigo-600', c: 'text-indigo-700', lookup: tiempoLookup2000 }
@@ -4113,8 +4107,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div className="text-left">
                 <p className="text-[10px] font-bold uppercase text-gray-500 tracking-wider">Necesidad Origen (P2)</p>
-                <h3 className="text-sm font-black text-gray-700 uppercase">Espumas + Rollos (BOM de Órdenes FERT)</h3>
-                <p className="text-[10px] text-gray-500 mt-1">Ambas necesidades se calculan explotando la lista de materiales de las Órdenes FERT (Provisionales queda como tab de referencia, ya no alimenta este cálculo): componentes &quot;ESPUMA&quot; → Corte Espuma, &quot;LAMINA CILINDRICA&quot; → Corte y Laminado.</p>
+                <h3 className="text-sm font-black text-gray-700 uppercase" title="BOM de las Órdenes FERT: componentes ESPUMA → Corte Espuma, LAMINA CILINDRICA → Corte y Laminado">Espumas + Rollos (BOM de Órdenes FERT)</h3>
                 {/* Fechas del P2 (regla del usuario 2026-10-02): ya no se eligen — PT = hoy+2 hábiles,
                     recuperación de Corte/Laminado = hoy+1. Debajo, los materiales diferidos desde
                     Corte Espuma (ver materialesDiferidos / guardarP2Diferido). */}
@@ -4159,7 +4152,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                               </div>
                             );
                           })}
-                          <p className="text-[10px] text-amber-700/80">Al generar el P2 de Espumas estos materiales salen del plan de hoy y se graban en el P2 DIFERIDO; Corte Espuma los recupera el día siguiente.</p>
                         </div>
                       )}
                     </>
@@ -4279,7 +4271,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
             <div className="text-left">
               <p className="text-[10px] font-bold uppercase text-gray-500 tracking-wider">Recepción de Datos (P3)</p>
               <h3 className="text-sm font-black text-gray-700 uppercase">Respuesta del Plan Consumidor</h3>
-              <p className="text-[10px] text-gray-500 mt-1">Por cada material que enviamos en nuestro P2, busca si algún Plan P3 (consumidor real, no PFD) ya respondió — un DetalleTactico cuyo <span className="font-mono">codigo_plan_grupo_padre</span> apunta a nuestro plan. La columna &quot;Fechas&quot; avisa si esa respuesta NO se guardó exactamente un día después de nuestra línea (regla &quot;revisión hoy, devolución mañana&quot;).</p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
               {/* De cuándo es lo que se ve (2026-10-12): antes podía quedar Data Aprobada de un reporte
@@ -4391,7 +4382,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               <div>
                 <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-wider">Paso 3</p>
                 <h3 className="text-sm font-black text-gray-700 uppercase">PFD - Venta (FERT/PT listos)</h3>
-                <p className="text-[10px] text-gray-500 mt-1">Por cada componente en estado &quot;completo&quot; arriba, sube al FERT/PT que depende de él (mismo BOM de la Necesidad P2, en sentido inverso) y agrupa por categoría — igual que &quot;Resumen Necesidades&quot;, con el tiempo real de plastificado.</p>
               </div>
               <Button
                 onClick={handleGenerarYGuardarPfdVenta}
@@ -4413,7 +4403,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
               <div className="flex items-center gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-left">
                 <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
                 <p className="text-[11px] font-bold text-amber-700">
-                  Todavía no actualizaste Data Aprobada en esta sesión — el PFD-VENTA podría generarse con una respuesta desactualizada. Abre la pestaña 2 · Data Aprobada (se consulta sola) antes de continuar.
+                  Data Aprobada sin actualizar en esta sesión: abre la pestaña 2 antes de generar.
                 </p>
               </div>
             ) : (
@@ -4496,7 +4486,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                       {preview.sinTrazabilidad.length > 0 && (
                         <Card className="rounded-2xl border border-dashed border-amber-200 bg-amber-50/30 p-4">
                           <p className="text-[10px] font-black uppercase text-amber-700 tracking-widest mb-2">Sin trazabilidad ({preview.sinTrazabilidad.length})</p>
-                          <p className="text-[10px] text-amber-600/80 mb-3">Estos componentes ya están &quot;completo&quot; pero no se encontró su FERT/PT padre en la Necesidad P2 (BOM sin match, o el componente ya no pertenece al P2 activo) — no cuentan como cubiertos, revísalos aparte.</p>
                           <div className="space-y-1">
                             {preview.sinTrazabilidad.map(r => (
                               <div key={r.material} className="flex items-center justify-between text-[10px] font-mono text-amber-700 bg-white/60 rounded-lg px-3 py-1.5">
@@ -4656,8 +4645,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
           <DialogHeader>
             <DialogTitle>Confirmar P2 — Venta Externa</DialogTitle>
             <DialogDescription>
-              Revisa lo que se va a grabar antes de continuar. Por cada centro y tipo queda UN P2 vigente: los P2 activos
-              anteriores se marcan como inactivos (estado &apos;I&apos;); sus detalles no se tocan. Esta acción escribe en producción.
+              Queda un P2 vigente por centro y tipo; los anteriores pasan a inactivos (&apos;I&apos;).
             </DialogDescription>
           </DialogHeader>
           {confirmacionP2 && (
