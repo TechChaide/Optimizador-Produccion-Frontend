@@ -2380,7 +2380,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       EMPAQUE_MACHINES_BY_CENTRO[centro].forEach(m => {
         const turnos = ventanaEmpaque.turnosDe(m.id);
         const ordenes = maquinasSAP.length === 0 ? [] : mantenimientosSAP.flatMap(row => {
-          const maquina = norm(getProp(row, ['ID_MAQUINA', 'MAQUINA']));
+          // 2026-10-28 (nueva captura del SP): AREA = Corte y Laminado y máquina por MaquinaSismac
+          // (MEE01 = Empacadora Elektroteks), mismo criterio que Corte Espuma y Laminado.
+          if (!/^corte\s+y\s+laminado$/i.test(String(getProp(row, ['AREA'])).trim())) return [];
+          const maquina = norm(getProp(row, ['MaquinaSismac']) || getProp(row, ['ID_MAQUINA', 'MAQUINA']));
           if (!maquinasSAP.includes(maquina)) return [];
           // Regla única de los 3 módulos (ver mttoEnVentana): con hora real, el turno donde cae
           // (también la Noche); solo con fecha (SISMAC, 0:00), completo en el turno Día de ese día.
