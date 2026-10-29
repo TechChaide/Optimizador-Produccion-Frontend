@@ -4816,10 +4816,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                   </button>
                 </PopoverTrigger>
                 <PopoverContent className="w-[300px] p-4 bg-white border border-gray-100 rounded-2xl shadow-xl text-slate-800" align="end">
-                  <p className="text-[9px] font-black uppercase text-indigo-700 tracking-widest mb-1">Enviar Reporte por Correo</p>
-                  <p className="text-[8px] text-slate-500 font-bold uppercase mb-3">Rollos, Gestión de Tiempos, Ocupación y Disponibilidad — guarda el plan antes de exportar a SAP y envíalo después desde la vista previa</p>
+                  <p className="text-[9px] font-black uppercase text-indigo-700 tracking-widest mb-3">Enviar Reporte por Correo</p>
                   <ReportePlanTxtAcciones flujo={reporteFlujo} />
-                  <p className="text-[8px] text-slate-500 mt-2">Destinatarios precargados desde Grupo_Correos_Laminado — editables en la vista previa.</p>
                 </PopoverContent>
               </Popover>
               <ReportePlanTxtVistaPrevia
@@ -4930,8 +4928,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                     </PopoverTrigger>
                     <PopoverContent className="w-[320px] p-4 bg-white border border-gray-100 rounded-2xl shadow-xl text-slate-800" align="start">
                       <p className="text-[9px] font-black uppercase text-orange-700 tracking-widest mb-1">Corrida pendiente — Looper</p>
-                      <p className="text-[8px] text-slate-500 font-bold uppercase mb-3">
-                        Órdenes 014 (Looper) hasta el {format(parseISO(ventanaPlan.baseStr), 'dd/MM')} (plan anterior) con cantidad pendiente en SAP. Solo cuenta lo que no alcanza a terminar el turno que cierra{corridaPendienteSAP.turnoAnterior ? ` a las ${format(corridaPendienteSAP.turnoAnterior.fin, 'HH:mm')}` : ''}: ese exceso ocupa el turno siguiente
+                      <p className="text-[8px] text-slate-500 font-bold uppercase mb-3" title="Solo cuenta lo que no alcanza a terminar el turno que cierra: ese exceso ocupa el turno siguiente">
+                        Órdenes 014 hasta el {format(parseISO(ventanaPlan.baseStr), 'dd/MM')}{corridaPendienteSAP.turnoAnterior ? ` · turno cierra ${format(corridaPendienteSAP.turnoAnterior.fin, 'HH:mm')}` : ''}
                       </p>
                       {corridaPendienteSAP.ordenes.length === 0 ? (
                         <p className="text-[10px] text-slate-500 italic mb-3">SAP no reporta órdenes pendientes del plan anterior.</p>
@@ -5334,8 +5332,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
         >
           <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
-            Plan cargado del reporte del <span className="font-black text-emerald-700">{format(parseISO(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
-            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — se puede revisar y <span className="font-black text-blue-700">Enviar a SAP</span> tal cual; <span className="font-black text-blue-700">Sincronizar</span> lo recalcula con SAP.
+            Reporte del <span className="font-black text-emerald-700">{format(parseISO(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')})
           </p>
         </div>
       )}
@@ -5670,10 +5668,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               <DialogHeader>
                 <DialogTitle>Confirmar desactivación de Plan Activo</DialogTitle>
                 <DialogDescription>
-                  La(s) fecha(s) seleccionada(s) incluye una ya vencida o de hoy, cubierta por el/los siguiente(s)
-                  Plan Grupo P3 (creados en un día anterior a hoy). Al confirmar, se reconcilian sus detalles contra
-                  la necesidad recién calculada y se marcan como inactivos (estado &apos;I&apos;). Esta acción no crea un plan
-                  nuevo ni afecta Provisionales/FERT.
+                  Estos P3 de días anteriores se marcarán como inactivos (&apos;I&apos;).
                 </DialogDescription>
               </DialogHeader>
               {planActivoPendienteConfirmacion && (
@@ -5734,7 +5729,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               <DialogHeader>
                 <DialogTitle>¿Qué Plan Grupo quieres editar?</DialogTitle>
                 <DialogDescription>
-                  Hay {planesGrupoDisponibles?.length ?? 0} Plan Grupo activo(s) para Corte y Laminado (Centro 1000). El último guardado queda preseleccionado; elige otro si necesitas corregir uno anterior.
+                  {planesGrupoDisponibles?.length ?? 0} Plan Grupo activo(s) · Centro 1000
                 </DialogDescription>
               </DialogHeader>
               {planesGrupoDisponibles && (
@@ -5786,7 +5781,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               <DialogHeader>
                 <DialogTitle>Editar Plan Grupo guardado</DialogTitle>
                 <DialogDescription>
-                  Se recalculó la salida de datos actual del Plan Grupo #{editPlanPreview?.codigo_plan_grupo}: los materiales que ya no aplican quedaron premarcados para eliminar. Corrige cantidades, agrega o quita materiales si hace falta. Los cambios se graban solo al confirmar.
+                  Plan Grupo #{editPlanPreview?.codigo_plan_grupo} · se graba al confirmar
                 </DialogDescription>
               </DialogHeader>
               {editPlanPreview && (
@@ -5869,9 +5864,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
 
         <TabsContent value="necesidadesPlanta" className="animate-in fade-in duration-300 space-y-10 text-left">
           <div className="flex items-center justify-between">
-            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-              Se actualiza automáticamente al guardar o editar un plan. Usa este botón si otra área registró cambios.
-            </p>
             <Button
               onClick={() => fetchNecesidadesPlanta()}
               disabled={necesidadesPlantaLoading}
@@ -6041,9 +6033,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               <div className="p-2 bg-red-600 rounded-xl text-white shadow-lg"><ClipboardList className="w-4 h-4" /></div>
               <div>
                 <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Plan de Salida — Corridas Looper</h3>
-                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                  Prioridad: 1) Déficit de stock &nbsp;2) % de déficit &nbsp;3) Mayor consumo (Kg) — corridas intercaladas por grupo
-                </p>
               </div>
             </div>
             <div className="flex items-center gap-3">
@@ -6152,9 +6141,6 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
               <div className="p-2 bg-amber-600 rounded-xl text-white shadow-lg"><ClipboardList className="w-4 h-4" /></div>
               <div>
                 <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Simulación — Salida de Datos por Respuesta (Paso 3)</h3>
-                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                  Materiales referenciados en &quot;Necesidades Planta&quot; · respuesta = stock libre (stock disponible − HALB lanzada) + corrida planificada · aún no se graba en base de datos
-                </p>
               </div>
             </div>
           </div>
@@ -6206,8 +6192,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
             <div className="flex items-center gap-3 text-left">
               <div className="p-2 bg-slate-600 rounded-xl text-white shadow-lg"><Info className="w-4 h-4" /></div>
               <div>
-                <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Validar PR2 — Data Cruda</h3>
-                <p className="text-[10px] font-bold text-slate-500">Tal cual la devuelve tiemposEnsambladoByGrupoYCentroPR2, sin pasar por resolvePuestoTrabajo. Solo lectura/auditoría — no afecta el plan.</p>
+                <h3 className="text-sm font-black uppercase tracking-widest text-slate-800" title="Tal cual la devuelve tiemposEnsambladoByGrupoYCentroPR2. Solo lectura.">Validar PR2 — Data Cruda</h3>
               </div>
             </div>
             <Input
@@ -6264,7 +6249,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <DialogHeader>
             <DialogTitle>Confirmar Respuesta P3 — Corte y Laminado</DialogTitle>
             <DialogDescription>
-              Revisa los datos que se van a grabar antes de continuar — se crea UN registro: la Respuesta P3 (stock + corridas planificadas), que reemplaza al P3/PFD anterior. Al confirmar, el panel guarda el P3 y el reporte. Esta acción crea registros nuevos en producción.
+              Se crea la Respuesta P3 en producción y reemplaza al P3/PFD anterior.
             </DialogDescription>
           </DialogHeader>
           {planPreviewP3PFD && (
@@ -6334,7 +6319,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-amber-700"><AlertCircle className="w-5 h-5" /> Exportación bloqueada — falta Respuesta P3</DialogTitle>
             <DialogDescription>
-              {exportTxtBloqueado?.length} material(es) con origen Venta Externa todavía no tienen una Respuesta P3 de Laminado registrada (revisión hoy, devolución mañana — mismo criterio que &quot;Data Aprobada&quot; en Venta Externa). Esa respuesta se genera ACÁ, en el tab &quot;Resumen Necesidades&quot; de este mismo módulo (botón &quot;Generar Respuestas · P3 - Rollos&quot;) — Venta Externa solo refleja el estado, no permite generarla.
+              {exportTxtBloqueado?.length} material(es) de Venta Externa sin Respuesta P3 de Laminado. Se genera en &quot;Resumen Necesidades&quot; · &quot;Generar Respuestas · P3 - Rollos&quot;.
             </DialogDescription>
           </DialogHeader>
           {exportTxtBloqueado && (
