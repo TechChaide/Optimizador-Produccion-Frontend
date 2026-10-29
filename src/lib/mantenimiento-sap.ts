@@ -47,6 +47,8 @@ export const MAQUINAS_MTTO: Record<string, { modulo: ModuloMtto; nombre: string;
   BT01: { modulo: 'Formulación', nombre: 'Espumadora Laader', restaCapacidad: false },
   BT02: { modulo: 'Formulación', nombre: 'Espumadora Cofama', restaCapacidad: false },
   PG03: { modulo: 'Formulación', nombre: 'Puente Grúa IPF', restaCapacidad: false },
+  ME00: { modulo: 'Formulación', nombre: 'Mesa Elevadora Bloques Espuma', restaCapacidad: false },
+  T201: { modulo: 'Formulación', nombre: 'Cortadora Fecken T 2', restaCapacidad: false },
 };
 
 /** Módulo al que pertenece la OT (null = área fuera de la evaluación o máquina aún no mapeada). */
