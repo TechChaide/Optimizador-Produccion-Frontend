@@ -59,6 +59,7 @@ import { detalleTacticoService } from '@/services/detalletactico.service';
 import { VistaPreviaEnvioSap, versionesFabricacionCacheadas, medirPaso } from '@/components/VistaPreviaEnvioSap';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
 import { sapCompartido, refrescarDatosSap, momentoDato, detallesDePlanes, refrescarAlSincronizar } from '@/lib/datos-sap-compartidos';
+import { esAreaMtto, maquinaSismacDe } from '@/lib/mantenimiento-sap';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { useAppContext } from '@/context/AppProvider';
 import type { Grupo, Restriccion, PlanGrupo, DetalleTactico } from '@/types/interfaces';
@@ -3734,11 +3735,11 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // MTTO es UN total con todas — confirmado por el usuario 2026-10-08, no se deduplica.
   // Vale el ID de la restricción O la descripción con "LOOPER" (un "LO00" escrito con cero en vez de
   // O en un lado no debe dejar el MTTO en 0).
-  // 2026-10-28 (nueva captura del SP): solo AREA = Corte y Laminado (SAP la trae con doble espacio) y la
-  // máquina por MaquinaSismac (respaldo ID_MAQUINA), igual que Corte Espuma.
+  // 2026-10-28 (nueva captura del SP): áreas Corte y Laminado / Espuma y máquina por MaquinaSismac
+  // (respaldo ID_MAQUINA), mismo criterio de los 3 módulos (ver @/lib/mantenimiento-sap).
   const mantenimientosLooper = useMemo(() => mantenimientosSAP.filter(m =>
-    /^corte\s+y\s+laminado$/i.test(getProp(m, ['AREA']).trim()) && (
-      maquinasMttoLooper.includes((getProp(m, ['MaquinaSismac']) || getProp(m, ['ID_MAQUINA'])).toUpperCase())
+    esAreaMtto(m) && (
+      maquinasMttoLooper.includes(maquinaSismacDe(m))
       || getProp(m, ['MAQUINA']).toUpperCase().includes('LOOPER'))), [mantenimientosSAP, maquinasMttoLooper]);
 
   // Duración de una OT en horas: Duracion_Minutos o TIEMPO (minutos, SISMAC); si no vienen,

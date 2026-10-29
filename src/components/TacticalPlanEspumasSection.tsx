@@ -72,6 +72,7 @@ import {
   CODIGO_GRUPO_CORTE_POR_CENTRO, MATERIALES_LA02_GYE,
   NOMBRE_RESTRICCION_RESP_VERTICALES,
 } from '@/lib/ventana-corte';
+import { esAreaMtto, maquinaSismacDe, moduloMttoDe } from '@/lib/mantenimiento-sap';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isValid, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
 
@@ -620,11 +621,6 @@ const getProp = (obj: Record<string, unknown> | null | undefined, keys: string[]
   }
   return '';
 };
-
-// Mantenimiento SAP (ListarMantenimientosPreventivos, estructura 2026-10-28): área "Corte y Laminado"
-// (SAP la trae con doble espacio) y la máquina en MaquinaSismac (respaldo ID_MAQUINA).
-const esMttoCorteYLaminado = (m: Record<string, unknown>): boolean => /^corte\s+y\s+laminado$/i.test(getProp(m, ['AREA']));
-const maquinaSismacDe = (m: Record<string, unknown>): string => (getProp(m, ['MaquinaSismac']) || getProp(m, ['ID_MAQUINA'])).toUpperCase();
 
 // Columnas de la tabla editable del diálogo "Confirmar envío a SAP" — mismo orden y campos que
 // SOLICITUD_PRODUCCION_FIELDS en TacticalPlanCorteLaminadoSection, para que la vista previa refleje
@@ -2701,13 +2697,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   // planta, sin filtrar por área — y los ID_MAQUINA de este módulo NO son exclusivos de Corte
   // Espuma en SAP, se reutilizan en otras áreas (verificado con datos reales). El valor real en SAP
   // trae doble espacio ("Corte y  Laminado"), de ahí el \s+ en vez de comparar literal.
-  // 2026-10-28 (nueva captura del SP): la máquina se cruza por MaquinaSismac (respaldo ID_MAQUINA) y
-  // solo cuentan las máquinas operativas del flujo (MACHINES_BY_PLANTA; Centro 1000: CR04/CR03/CR01/
-  // CNC01/V02/V03 — PG03 Puente Grúa y otras quedan fuera). La clave de duplicado incluye el Centro.
+  // 2026-10-28 (nueva captura del SP): áreas Corte y Laminado / Espuma y máquina por MaquinaSismac (ver
+  // @/lib/mantenimiento-sap); en la capacidad solo restan las máquinas de Corte Espuma (MACHINES_BY_PLANTA;
+  // Centro 1000: CR04/CR03/CR01/CNC01/V02/V03). La clave de duplicado incluye el Centro.
   const uniqueMantenimientosSAP = useMemo(() => {
     const seen = new Set<string>();
     return mantenimientosSAP
-      .filter(esMttoCorteYLaminado)
+      .filter(esAreaMtto)
       .filter(m => {
         const key = [
           maquinaSismacDe(m),
@@ -7461,16 +7457,17 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 fecha elegida en Capacidad Operativa (misma regla que la capacidad, sin duplicados). */}
             {(() => {
               const todas = mttoCrudo?.filas ?? [];
-              const filas = mttoVerTodasAreas ? todas : todas.filter(esMttoCorteYLaminado);
+              const filas = mttoVerTodasAreas ? todas : todas.filter(esAreaMtto);
               const columnas: string[] = [];
               filas.forEach(f => Object.keys(f).forEach(k => { if (!columnas.includes(k)) columnas.push(k); }));
               const q = mttoCrudoFiltro.trim().toUpperCase();
               const texto = (v: unknown) => v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
               const vistas = new Set<string>();
               const vinculo = (f: RawApiRow) => {
-                if (!esMttoCorteYLaminado(f)) return { estado: 'Otra área' as const };
+                if (!esAreaMtto(f)) return { estado: 'Otra área' as const };
                 const link = resolveMachineLink(maquinaSismacDe(f), getProp(f, ['Centro', 'CENTRO']), getProp(f, ['PLANTA']));
-                if (!link) return { estado: 'No operativa' as const };
+                // Máquina de otro módulo (Laminado, Venta Externa, Formulación) o todavía sin mapear.
+                if (!link) return { estado: 'Otro módulo' as const, modulo: moduloMttoDe(f) };
                 const clave = [maquinaSismacDe(f), getProp(f, ['Centro', 'CENTRO']), getProp(f, ['FECHA_OT_PRG_INI']), getProp(f, ['FECHA_OT_PRG_FIN'])].join('|').toUpperCase();
                 if (vistas.has(clave)) return { estado: 'Duplicada' as const, link };
                 vistas.add(clave);
@@ -7489,7 +7486,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                       <div>
                         <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Mantenimientos Preventivos (ListarMantenimientosPreventivos)</h3>
                         <p className="text-[10px] font-bold text-slate-600">
-                          Todo lo planificado, sin caché{mttoVerTodasAreas ? ' · todas las áreas' : ' · área Corte y Laminado'}
+                          Todo lo planificado, sin caché{mttoVerTodasAreas ? ' · todas las áreas' : ' · áreas Corte y Laminado / Espuma'}
                           {mttoCrudo && <> · {filas.length} de {todas.length} filas · recuperado {format(mttoCrudo.recuperadoEn, 'dd/MM/yyyy HH:mm')}</>}
                           {q && <> · {visibles.length} con «{mttoCrudoFiltro.trim()}»</>}
                           {mttoCrudo && <> · resta a la capacidad: {totalResta.toFixed(2)} h</>}
@@ -7533,7 +7530,11 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                                   ? <span className="inline-flex items-center gap-1.5 text-emerald-700"><CheckCircle2 className="w-3.5 h-3.5 shrink-0" />{v.link.id} · {v.link.planta}</span>
                                   : v.estado === 'Duplicada'
                                     ? <span title="Misma máquina, centro, inicio y fin que una fila anterior: no se vuelve a restar">{v.link.id} · duplicada</span>
-                                    : <span title={v.estado === 'No operativa' ? 'MaquinaSismac no es una máquina operativa del flujo de Corte Espuma: no resta capacidad' : 'Fuera del área Corte y Laminado'}>{v.estado}</span>}
+                                    : v.estado === 'Otro módulo'
+                                      ? (v.modulo
+                                          ? <span title={v.modulo.restaCapacidad ? `Resta en el módulo ${v.modulo.modulo}, no en Corte Espuma` : `${v.modulo.modulo}: mapeada, todavía sin capacidad de la que restar`}>{v.modulo.id} · {v.modulo.modulo}{v.modulo.restaCapacidad ? '' : ' (sin capacidad)'}</span>
+                                          : <span className="text-orange-600" title="MaquinaSismac sin mapear en @/lib/mantenimiento-sap (MAQUINAS_MTTO): no resta en ningún módulo">Sin mapear</span>)
+                                      : <span title="Fuera de las áreas Corte y Laminado / Espuma">{v.estado}</span>}
                               </td>
                               <td className="px-3 py-1.5 border-r border-gray-100 text-right font-mono font-black text-indigo-700">
                                 {v.estado !== 'Vinculada' ? '—' : !v.fecha ? <span className="text-[10px] font-semibold text-slate-500">sin fecha</span> : <span title={`Plan del ${v.fecha.split('-').reverse().join('/')}`}>{v.horas.toFixed(2)}</span>}

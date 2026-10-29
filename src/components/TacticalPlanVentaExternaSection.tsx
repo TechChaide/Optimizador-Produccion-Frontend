@@ -13,6 +13,7 @@ import { porcentajeRestriccion, RESTRICCION_CAPACIDAD, jornadaDesdeRestricciones
 import { ejecucionPlanHtml, fechaHoraEjecucion, mttoEnVentana } from '@/lib/ventana-plan';
 import { serviciosService } from '@/services/servicios.service';
 import { sapCompartido, refrescarDatosSap, detallesDePlanes, refrescarAlSincronizar } from '@/lib/datos-sap-compartidos';
+import { esAreaMtto, maquinaSismacDe } from '@/lib/mantenimiento-sap';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
@@ -2380,10 +2381,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       EMPAQUE_MACHINES_BY_CENTRO[centro].forEach(m => {
         const turnos = ventanaEmpaque.turnosDe(m.id);
         const ordenes = maquinasSAP.length === 0 ? [] : mantenimientosSAP.flatMap(row => {
-          // 2026-10-28 (nueva captura del SP): AREA = Corte y Laminado y máquina por MaquinaSismac
-          // (MEE01 = Empacadora Elektroteks), mismo criterio que Corte Espuma y Laminado.
-          if (!/^corte\s+y\s+laminado$/i.test(String(getProp(row, ['AREA'])).trim())) return [];
-          const maquina = norm(getProp(row, ['MaquinaSismac']) || getProp(row, ['ID_MAQUINA', 'MAQUINA']));
+          // 2026-10-28 (nueva captura del SP): áreas Corte y Laminado / Espuma y máquina por MaquinaSismac
+          // (MEE01 = Empacadora Elektroteks), mismo criterio de los 3 módulos (ver @/lib/mantenimiento-sap).
+          if (!esAreaMtto(row)) return [];
+          const maquina = norm(maquinaSismacDe(row) || getProp(row, ['MAQUINA']));
           if (!maquinasSAP.includes(maquina)) return [];
           // Regla única de los 3 módulos (ver mttoEnVentana): con hora real, el turno donde cae
           // (también la Noche); solo con fecha (SISMAC, 0:00), completo en el turno Día de ese día.
