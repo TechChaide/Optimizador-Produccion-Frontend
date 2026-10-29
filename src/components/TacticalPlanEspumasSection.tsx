@@ -1159,6 +1159,29 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const [cuboInventarios, setCuboInventarios] = useState<RawApiRow[]>([]);
   const [kpiLooperData, setKpiLooperData] = useState<RawApiRow[]>([]);
   const [mantenimientosSAP, setMantenimientosSAP] = useState<RawApiRow[]>([]);
+  // Tab "Mantenimiento SAP" (usuario 2026-10-28): el SP de ListarMantenimientosPreventivos cambió de
+  // estructura; el tab muestra la respuesta CRUDA y fresca (sin caché), con todas sus columnas, para
+  // definir después columnas y filtros. No alimenta la capacidad (esa sigue con mantenimientosSAP).
+  const [mttoCrudo, setMttoCrudo] = useState<{ filas: RawApiRow[]; recuperadoEn: Date } | null>(null);
+  const [mttoCrudoCargando, setMttoCrudoCargando] = useState(false);
+  const [mttoCrudoError, setMttoCrudoError] = useState('');
+  const [mttoCrudoFiltro, setMttoCrudoFiltro] = useState('');
+  const recuperarMttoCrudo = useCallback(async () => {
+    setMttoCrudoCargando(true);
+    setMttoCrudoError('');
+    try {
+      const r = await serviciosService.ListarMantenimientoPreventivosProgramados();
+      setMttoCrudo({ filas: Array.isArray(r?.data) ? r.data : [], recuperadoEn: new Date() });
+    } catch (e) {
+      setMttoCrudoError((e as Error).message);
+    } finally {
+      setMttoCrudoCargando(false);
+    }
+  }, []);
+  // Se recupera al abrir el tab la primera vez; después, con el botón.
+  useEffect(() => {
+    if (activeTab === 'mantenimiento' && !mttoCrudo && !mttoCrudoCargando && !mttoCrudoError) void recuperarMttoCrudo();
+  }, [activeTab, mttoCrudo, mttoCrudoCargando, mttoCrudoError, recuperarMttoCrudo]);
   const [tiemposCatalogo, setTiemposCatalogo] = useState<RawApiRow[]>([]);
   const [kpiCarruselesData, setKpiCarruselesData] = useState<RawApiRow[]>([]);
   // Altura útil por material desde KPIMaestroCarruseles (columna "Altura", usuario 2026-10-27): del
@@ -7417,72 +7440,64 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             </div>
           </TabsContent>
           <TabsContent value="mantenimiento" className="animate-in fade-in duration-300 text-left space-y-4">
-            <div className="flex items-center gap-3 px-2">
-              <div className="p-2 bg-indigo-600 rounded-xl text-white shadow-lg"><Wrench className="w-4 h-4" /></div>
-              <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Mantenimientos Preventivos Programados (SAP)</h3>
-            </div>
-            <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
-              <div className="overflow-x-auto max-h-[600px]">
-                <table className="w-full text-center border-collapse text-[10px]">
-                  <thead className="bg-gray-50 sticky top-0 z-10 text-[10px] font-bold uppercase text-gray-500">
-                    <tr>
-                      <th className="px-4 py-5 border-r border-gray-100">Centro</th>
-                      <th className="px-6 py-5 border-r border-gray-100">Planta</th>
-                      <th className="px-6 py-5 border-r border-gray-100">Área</th>
-                      <th className="px-4 py-5 border-r border-gray-100">ID Máquina</th>
-                      <th className="px-6 py-5 border-r border-gray-100">Máquina</th>
-                      <th className="px-6 py-5 border-r border-gray-100">Línea de Proceso</th>
-                      <th className="px-5 py-5 border-r border-gray-100">Inicio</th>
-                      <th className="px-5 py-5 border-r border-gray-100">Fin</th>
-                      <th className="px-6 py-5 text-indigo-700 bg-indigo-50/50 uppercase font-black tracking-tighter">Duración (H)</th>
-                      <th className="px-6 py-5 text-emerald-700 bg-emerald-50/50 uppercase font-black tracking-tighter">Vínculo Resumen</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50 font-black text-[11px] text-slate-700">
-                    {uniqueMantenimientosSAP.length === 0 ? (
-                      <tr><td colSpan={10} className="py-24 text-slate-400 uppercase font-black tracking-widest italic opacity-50 text-center">Sin mantenimientos programados detectados</td></tr>
-                    ) : (
-                      uniqueMantenimientosSAP.map((row, i) => {
-                        const iniStr = getProp(row, ['FECHA_OT_PRG_INI']).trim();
-                        const finStr = getProp(row, ['FECHA_OT_PRG_FIN']).trim();
-                        const diffHrs = getMttoDurationH(row);
-                        const idMaquina = getProp(row, ['ID_MAQUINA']);
-                        const centro = getProp(row, ['Centro', 'CENTRO']);
-                        const link = resolveMachineLink(idMaquina, centro, getProp(row, ['PLANTA']));
-                        const plantaTexto = centro === '1000' ? 'QUITO' : centro === '2000' ? 'GUAYAQUIL' : (getProp(row, ['PLANTA']) || '—');
-
-                        return (
-                          <tr key={i} className="hover:bg-indigo-50/10 transition-colors">
-                            <td className="px-4 py-3 border-r border-dashed border-gray-100 uppercase opacity-40">{centro}</td>
-                            <td className="px-6 py-3 border-r border-dashed border-gray-100 uppercase">{plantaTexto}</td>
-                            <td className="px-6 py-3 border-r border-dashed border-gray-100 uppercase">{getProp(row, ['AREA'])}</td>
-                            <td className="px-4 py-3 border-r border-dashed border-gray-100 uppercase font-bold text-red-600">{idMaquina}</td>
-                            <td className="px-6 py-3 border-r border-dashed border-gray-100 uppercase font-black text-left">{getProp(row, ['MAQUINA'])}</td>
-                            <td className="px-6 py-3 border-r border-dashed border-gray-100 uppercase text-left">{getProp(row, ['LineaProceso'])}</td>
-                            <td className="px-5 py-3 border-r border-dashed border-gray-100 font-mono text-center text-slate-500">{iniStr}</td>
-                            <td className="px-5 py-3 border-r border-dashed border-gray-100 font-mono text-center text-slate-500">{finStr}</td>
-                            <td className="px-6 py-3 font-mono text-indigo-700 bg-indigo-50/30 text-center font-black">{diffHrs.toFixed(2)}</td>
-                            <td className="px-6 py-3 bg-emerald-50/20 text-left">
-                              {link ? (
-                                <span className="inline-flex items-center gap-1.5 text-emerald-600">
-                                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                                  <span className="truncate">{link.id} · {link.n} ({link.planta})</span>
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1.5 text-red-500">
-                                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                                  <span>SIN VINCULAR</span>
-                                </span>
-                              )}
-                            </td>
+            {/* Respuesta cruda de ListarMantenimientosPreventivos (usuario 2026-10-28): todas las columnas
+                que trae el SP, en su orden, sin filtros ni deduplicación, para definir columnas y filtros. */}
+            {(() => {
+              const filas = mttoCrudo?.filas ?? [];
+              const columnas: string[] = [];
+              filas.forEach(f => Object.keys(f).forEach(k => { if (!columnas.includes(k)) columnas.push(k); }));
+              const q = mttoCrudoFiltro.trim().toUpperCase();
+              const visibles = q ? filas.filter(f => columnas.some(c => String(f[c] ?? '').toUpperCase().includes(q))) : filas;
+              const texto = (v: unknown) => v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+              return (
+                <>
+                  <div className="flex items-center justify-between gap-3 px-2 flex-wrap">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-indigo-600 rounded-xl text-white shadow-lg"><Wrench className="w-4 h-4" /></div>
+                      <div>
+                        <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Mantenimientos Preventivos (ListarMantenimientosPreventivos)</h3>
+                        <p className="text-[10px] font-bold text-slate-600">
+                          Respuesta cruda del servicio, sin caché ni filtros
+                          {mttoCrudo && <> · {filas.length} filas · {columnas.length} columnas · recuperado {format(mttoCrudo.recuperadoEn, 'dd/MM/yyyy HH:mm')}</>}
+                          {q && <> · {visibles.length} con «{mttoCrudoFiltro.trim()}»</>}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Input value={mttoCrudoFiltro} onChange={e => setMttoCrudoFiltro(e.target.value)} placeholder="Buscar en todas las columnas…" className="w-[240px] h-9 text-xs" />
+                      <Button onClick={() => void recuperarMttoCrudo()} disabled={mttoCrudoCargando} variant="outline" className="rounded-xl h-9 px-4 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 border-indigo-200 text-indigo-700 hover:bg-indigo-50">
+                        {mttoCrudoCargando ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Recuperar
+                      </Button>
+                    </div>
+                  </div>
+                  {mttoCrudoError && <div className="mx-2 rounded-xl bg-red-50 border border-red-200 px-4 py-2 text-xs font-bold text-red-700">Error al recuperar: {mttoCrudoError}</div>}
+                  <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
+                    <div className="overflow-auto max-h-[600px]">
+                      <table className="w-full border-collapse text-[11px]">
+                        <thead className="bg-gray-50 sticky top-0 z-10 text-[10px] font-black uppercase text-slate-700">
+                          <tr>
+                            <th className="px-3 py-3 border-r border-gray-100 text-right">#</th>
+                            {columnas.map(c => <th key={c} className="px-3 py-3 border-r border-gray-100 text-left whitespace-nowrap normal-case font-mono">{c}</th>)}
                           </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+                        </thead>
+                        <tbody className="divide-y divide-gray-50 text-slate-800">
+                          {visibles.length === 0 ? (
+                            <tr><td colSpan={columnas.length + 1} className="py-16 text-slate-500 font-bold text-center">
+                              {mttoCrudoCargando ? 'Recuperando…' : mttoCrudo ? 'Sin filas' : 'Sin datos todavía'}
+                            </td></tr>
+                          ) : visibles.map((f, i) => (
+                            <tr key={i} className="hover:bg-indigo-50/30">
+                              <td className="px-3 py-1.5 border-r border-gray-100 text-right font-mono text-slate-500">{i + 1}</td>
+                              {columnas.map(c => <td key={c} className="px-3 py-1.5 border-r border-gray-100 whitespace-nowrap font-mono">{texto(f[c])}</td>)}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
           </TabsContent>
 
           <TabsContent value="debugStock" className="animate-in fade-in duration-300 space-y-4 text-left">

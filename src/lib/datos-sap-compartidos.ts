@@ -120,7 +120,9 @@ const conReintentoRed = <T,>(pedir: () => Promise<T>) => (): Promise<T> =>
 // reintento ante corte de red; la respuesta conserva la forma de antes ({ data, length, totalRegistros }).
 const FILAS_PAGINA_CUBO = 10000;
 const CLAVE_CUBO_DIARIO = 'cuboInventarios';
-const CLAVE_MTTO_SEMANAL = 'mantenimientos';
+// v2 (2026-10-28): el SP sp_Get_MantenimientosPreventivosAgendados cambió de estructura; la copia
+// semanal guardada con la estructura vieja deja de leerse y se vuelve a descargar.
+const CLAVE_MTTO_SEMANAL = 'mantenimientos-v2';
 // Datos con su propia vigencia (día / semana): ni "Actualizar datos SAP" ni la hora del chip los toman.
 const CLAVES_PERIODICAS: ClaveDato[] = ['cuboInventarios', 'mantenimientos'];
 type RespuestaCubo = Awaited<ReturnType<typeof serviciosService.getCuboInventarios>>;
