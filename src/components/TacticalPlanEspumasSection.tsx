@@ -6184,11 +6184,9 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                 </PopoverTrigger>
                 <PopoverContent className="w-80 p-4 space-y-3" align="end">
                   <div>
-                    <p className="text-xs font-black uppercase tracking-widest text-slate-700">Reporte de producción</p>
-                    <p className="text-[10px] text-slate-500 mt-1">Gestión de tiempos y ocupación por proceso — {planta === 'UIO' ? 'Quito' : 'Guayaquil'}. El plan se guarda al confirmar el P3; exporta primero a SAP (pestaña 2) y luego envía el reporte desde la vista previa.</p>
+                    <p className="text-xs font-black uppercase tracking-widest text-slate-700">Reporte de producción — {planta === 'UIO' ? 'Quito' : 'Guayaquil'}</p>
                   </div>
                   <ReportePlanTxtAcciones flujo={reporteFlujo[planta]} />
-                  <p className="text-[10px] text-slate-500">Destinatarios precargados desde Grupo_Correos_Corte_Espuma — editables en la vista previa.</p>
                 </PopoverContent>
               </Popover>
               <ReportePlanTxtVistaPrevia
@@ -6406,13 +6404,12 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             <div className="flex items-center justify-between mb-3">
               <h4 className="text-[10px] font-black uppercase tracking-widest text-amber-800 flex items-center gap-2">
                 <div className="w-2 h-2 rounded-full bg-amber-600" /> {planta === 'UIO' ? `Carruseles sobre capacidad tras redistribuir (${pctCarruselesPostRedistribucion.toFixed(0)}%)` : `${planta} sobre-ocupado (${globalOccupancy.toFixed(0)}%)`} — candidatos a diferir
+                <span className="inline-flex cursor-help" title="Materiales de Venta Externa con holgura frente a su entrega real (no atrasados): moverlos a un día posterior no incumple al cliente y libera horas de hoy. No se mueve nada automáticamente.">
+                  <Info className="w-3.5 h-3.5 text-amber-600" />
+                </span>
               </h4>
               <span className="text-[10px] font-black uppercase text-amber-700">{horasDiferibles.toFixed(1)}h diferibles sin incumplir entrega</span>
             </div>
-            <p className="text-[10px] text-amber-700/80 mb-3">
-              {planta === 'UIO' && "Segundo paso: aunque ya se redistribuyó lo posible entre carruseles (ver sugerencia arriba), la carga combinada de CR01/CR03/CR04 sigue por encima de su capacidad. "}
-              Estos materiales de Venta Externa todavía tienen holgura frente a su entrega real (no están atrasados) — moverlos a un día posterior no incumple al cliente y libera horas de hoy. No se mueve nada automáticamente.
-            </p>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-[10px]">
                 <thead className="text-[9px] font-black uppercase text-amber-600/70 border-b border-amber-200/60">
@@ -6466,12 +6463,12 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             <div className="flex items-center justify-between mb-3">
               <h4 className="text-[10px] font-black uppercase tracking-widest text-cyan-800 flex items-center gap-2">
                 <div className="w-2 h-2 rounded-full bg-cyan-600" /> Sugerencias de redistribución entre carruseles
+                <span className="inline-flex cursor-help" title="Órdenes en un carrusel que superó su techo de capacidad (restricción SAP Capacidad_Horas_HR-CARxx). El carrusel sugerido ya cortó esta densidad antes (histórico FERT) y tiene espacio libre. Es solo una sugerencia para ajustar en SAP.">
+                  <Info className="w-3.5 h-3.5 text-cyan-600" />
+                </span>
               </h4>
               <span className="text-[10px] font-black uppercase text-cyan-700">{sugerenciasRedistribucionUIO.sugerencias.reduce((s, x) => s + x.horas, 0).toFixed(1)}h a mover</span>
             </div>
-            <p className="text-[10px] text-cyan-700/80 mb-3">
-              Estas órdenes están en un carrusel que superó su techo de capacidad (restricción SAP Capacidad_Horas_HR-CARxx). El carrusel sugerido ya ha cortado esta misma densidad antes (histórico de Órdenes FERT) y tiene espacio libre. No se mueve nada automáticamente — es solo una sugerencia para ajustar en SAP.
-            </p>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-[10px]">
                 <thead className="text-[9px] font-black uppercase text-cyan-600/70 border-b border-cyan-200/60">
@@ -6919,8 +6916,8 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
         >
           <FileText className="w-4 h-4 text-emerald-700 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
-            Plan cargado del reporte del <span className="font-black text-emerald-700">{format(parseFechaLocal(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
-            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) — <span className="font-black text-emerald-700">solo consulta</span>, tal cual se guardó; <span className="font-black text-blue-700">Sincronizar</span> trae datos vigentes y habilita generar y enviar.
+            Reporte del <span className="font-black text-emerald-700">{format(parseFechaLocal(planCargadoDe.fechaObjetivo), 'EEE dd/MM/yyyy', { locale: es })}</span>
+            {' '}(guardado {format(new Date(planCargadoDe.guardadoEn), 'dd/MM HH:mm')}) · <span className="font-black text-emerald-700">solo consulta</span>
           </p>
         </div>
       )}
@@ -6970,9 +6967,8 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               <span className="text-slate-600">−</span>
               <span className="px-3 py-1.5 rounded-xl bg-amber-100 text-amber-900 font-black">Cúpula ≈ {CUPULA_CM} cm (máx. {CUPULA_MAX_CM})</span>
               <span className="text-slate-600">=</span>
-              <span className="px-3 py-1.5 rounded-xl bg-emerald-100 text-emerald-900 font-black">Altura útil {ALTURA_UTIL_CM} cm</span>
-              <span className="text-slate-600">·</span>
-              <span className="text-slate-700">Altura útil por material (KPI Carruseles; sin dato: D ≥ 28 → 85 cm) · Bloque madre {LARGO_BLOQUE_M} m</span>
+              <span className="px-3 py-1.5 rounded-xl bg-emerald-100 text-emerald-900 font-black" title="Altura útil por material desde KPI Carruseles; sin dato: D ≥ 28 → 85 cm">Altura útil {ALTURA_UTIL_CM} cm</span>
+              <span className="px-3 py-1.5 rounded-xl bg-slate-100 font-black">Bloque madre {LARGO_BLOQUE_M} m</span>
             </div>
             {(['1000', '2000'] as const).map(centro => {
               const grupos = subBloquesT8PorCentro[centro];
@@ -7141,10 +7137,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               <div className="bg-white border border-emerald-100 rounded-2xl p-4 space-y-3">
                 <div className="flex items-start justify-between gap-3 flex-wrap">
                   <div>
-                    <p className="text-xs font-black uppercase tracking-widest text-slate-700">Verificación BOM · P2 Muebles / P1-PFF Ensamblado</p>
-                    <p className="text-[10px] text-slate-500 mt-1">
-                      Cantidad de cada FERT del plan × CANTIDAD_ACUMULADA de cada línea del BOM que llega a un componente de corte. Se suman todas las líneas (nivel 1 = directa del FERT, nivel 2+ = vía semielaborado); solo se descarta la fila corrupta de SAP (relación directa con acumulada ≠ unitaria). Clic en una fila para ver las líneas.
-                    </p>
+                    <p className="text-xs font-black uppercase tracking-widest text-slate-700" title="Cantidad de cada FERT del plan × CANTIDAD_ACUMULADA de cada línea del BOM que llega a un componente de corte (N1 directa, N2+ vía semielaborado). Clic en una fila para ver las líneas.">Verificación BOM · P2 Muebles / P1-PFF Ensamblado</p>
                     {verificacionBomP2Errores.length > 0 && (
                       <p className="text-[10px] text-red-700 mt-1">Error al consultar el BOM de: <span className="font-mono">{verificacionBomP2Errores.join(', ')}</span></p>
                     )}
@@ -7269,9 +7262,6 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
             ) : (
               <>
                 <div className="pt-4 space-y-8">
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                    Capacidad que representaría cortar toda esta demanda en carrusel — mismo cálculo que Órdenes FERT/Provisionales.
-                  </p>
                   {renderAuditTable(necesidadCapacidadUIO, 'Necesidades Planta — Capacidad Quito', true, 'Código Plan Grupo', 'Grupo Origen', true, true, true)}
                   {renderAuditTable(necesidadCapacidadGYE, 'Necesidades Planta — Capacidad Guayaquil', true, 'Código Plan Grupo', 'Grupo Origen', true, true, true)}
                 </div>
@@ -7553,8 +7543,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               <div className="flex items-center gap-3 text-left">
                 <div className="p-2 bg-slate-600 rounded-xl text-white shadow-lg"><Info className="w-4 h-4" /></div>
                 <div>
-                  <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Validar Stock — Data Cruda</h3>
-                  <p className="text-[10px] font-bold text-slate-500">Tal cual la devuelve /InventarioAnioActual (inventarioSAP), sin pasar por el filtro de ALMACENES_STOCK_POR_CENTRO. Solo lectura/auditoría — no afecta el plan.</p>
+                  <h3 className="text-sm font-black uppercase tracking-widest text-slate-800" title="Tal cual la devuelve /InventarioAnioActual, sin el filtro de ALMACENES_STOCK_POR_CENTRO. Solo lectura.">Validar Stock — Data Cruda</h3>
                 </div>
               </div>
               <Input
@@ -7643,7 +7632,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
           <DialogHeader>
             <DialogTitle>Confirmar Respuesta P3 — Corte Espuma</DialogTitle>
             <DialogDescription>
-              Revisa los datos que se van a grabar antes de continuar — se crea UN registro por centro: la Respuesta P3 con lo que se fabrica: faltante (Necesidad P2 − Stock − Provisional − FERT de VE al PT) + la provisional del material, que se convierte en orden al exportar a SAP. Lo cubierto con stock o FERT no se graba. Es el mismo P3 que lee Exportar a SAP y que concilia Venta Externa. Esta acción crea registros nuevos en producción.
+              Se crea una Respuesta P3 por centro en producción.
             </DialogDescription>
           </DialogHeader>
           {planPreviewP3PFD && (
@@ -7740,7 +7729,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
           <DialogHeader>
             <DialogTitle>Auditoría de pendiente FERT — {auditoriaPendiente?.planta === 'GYE' ? 'Guayaquil' : 'Quito'}{auditoriaPendiente?.fecha ? ` · plan del ${format(parseFechaLocal(auditoriaPendiente.fecha), 'EEE dd/MM/yyyy', { locale: es })}` : ''}</DialogTitle>
             <DialogDescription>
-              Órdenes FERT con cantidad pendiente (teórica − entregada) y fecha fin hasta la fecha evaluada. &quot;Cuenta&quot; es lo que entra hoy a la ocupación con la regla vigente; la diferencia contra &quot;Pendiente SAP&quot; es lo que queda fuera. Solo lectura: no cambia el cálculo.
+              FERT pendientes hasta la fecha evaluada · solo lectura.
             </DialogDescription>
           </DialogHeader>
           {auditoriaPendiente && auditoriaPendiente.filas.length === 0 && (
@@ -7842,7 +7831,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
           <DialogHeader>
             <DialogTitle>¿Qué Plan Grupo quieres editar?</DialogTitle>
             <DialogDescription>
-              Hay {planesGrupoDisponibles?.planes.length ?? 0} Plan Grupo activo(s) para Corte Espuma (Centro {planesGrupoDisponibles?.centro}). El último guardado queda preseleccionado; elige otro si necesitas corregir uno anterior.
+              {planesGrupoDisponibles?.planes.length ?? 0} Plan Grupo activo(s) · Centro {planesGrupoDisponibles?.centro}
             </DialogDescription>
           </DialogHeader>
           {planesGrupoDisponibles && (
@@ -7894,7 +7883,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
           <DialogHeader>
             <DialogTitle>Editar Plan Grupo guardado</DialogTitle>
             <DialogDescription>
-              Se recalculó la salida de datos actual del Plan Grupo #{editPlanPreview?.codigo_plan_grupo} (Centro {editPlanPreview?.centro}): los materiales que ya no aplican quedaron premarcados para eliminar. Corrige cantidades (en UN), agrega o quita materiales si hace falta. Los cambios se graban solo al confirmar.
+              Plan Grupo #{editPlanPreview?.codigo_plan_grupo} · Centro {editPlanPreview?.centro} · cantidades en UN · se graba al confirmar
             </DialogDescription>
           </DialogHeader>
           {editPlanPreview && (
