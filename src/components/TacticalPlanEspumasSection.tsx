@@ -6959,7 +6959,6 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
               <label className="flex items-center gap-2 font-black uppercase text-slate-700 text-[10px]">
                 Día de corte
                 <input type="date" value={t8Fechas.d} onChange={e => setT8FechaCorte(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-mono text-slate-900" />
-                <span className="normal-case font-semibold text-slate-600">Venta Externa: fecha fin {t8Fechas.venta.split('-').reverse().join('/')}</span>
               </label>
               <label className="flex items-center gap-1.5 font-semibold text-slate-700 cursor-pointer" title="VE se corta en el día D porque su empaque arranca el turno noche de D. Desmarcar muestra solo lo que va al ensamble (Planta).">
                 <input type="checkbox" checked={t8IncluirVenta} onChange={e => setT8IncluirVenta(e.target.checked)} className="accent-indigo-600" />
@@ -7002,7 +7001,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                     </div>
                   )}
                   {grupos.length === 0 ? (
-                    <div className="p-4 text-xs text-slate-600">Sin órdenes FERT de carrusel para el día de corte {t8Fechas.d.split('-').reverse().join('/')} (Venta Externa: {t8Fechas.venta.split('-').reverse().join('/')}). Sincroniza para traer las FERT liberadas.</div>
+                    <div className="p-4 text-xs text-slate-600">Sin FERT de carrusel para el {t8Fechas.d.split('-').reverse().join('/')}.</div>
                   ) : (
                     // Bloque madre (densidad + tipo de espuma · apertura) → material, cada grupo plegable
                     // (+/−) con sus totales y bloques en la misma fila. Columnas en el orden del Excel del usuario (IMG B).
@@ -7484,14 +7483,12 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                     <div className="flex items-center gap-3">
                       <div className="p-2 bg-indigo-600 rounded-xl text-white shadow-lg"><Wrench className="w-4 h-4" /></div>
                       <div>
-                        <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Mantenimientos Preventivos (ListarMantenimientosPreventivos)</h3>
-                        <p className="text-[10px] font-bold text-slate-600">
-                          Todo lo planificado, sin caché{mttoVerTodasAreas ? ' · todas las áreas' : ' · áreas Corte y Laminado / Espuma'}
-                          {mttoCrudo && <> · {filas.length} de {todas.length} filas · recuperado {format(mttoCrudo.recuperadoEn, 'dd/MM/yyyy HH:mm')}</>}
-                          {q && <> · {visibles.length} con «{mttoCrudoFiltro.trim()}»</>}
-                          {mttoCrudo && <> · resta a la capacidad: {totalResta.toFixed(2)} h</>}
-                        </p>
-                        <p className="text-[10px] text-slate-600">Solo restan las máquinas operativas del flujo (cruce por MaquinaSismac): UIO {MACHINES_BY_PLANTA.UIO.map(m => m.id).join(' / ')} · GYE {MACHINES_BY_PLANTA.GYE.map(m => m.id).join(' / ')}. Las horas son para la fecha elegida en Capacidad Operativa.</p>
+                        <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Mantenimientos Preventivos SAP</h3>
+                        {mttoCrudo && (
+                          <p className="text-[10px] font-bold text-slate-600">
+                            {q ? visibles.length : filas.length} OT · {format(mttoCrudo.recuperadoEn, 'dd/MM HH:mm')} · resta {totalResta.toFixed(2)} h
+                          </p>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -7512,7 +7509,7 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                         <thead className="bg-gray-50 sticky top-0 z-10 text-[10px] font-black uppercase text-slate-700">
                           <tr>
                             <th className="px-3 py-3 border-r border-gray-100 text-right">#</th>
-                            <th className="px-3 py-3 border-r border-gray-100 text-left whitespace-nowrap bg-emerald-50 text-emerald-800">Máquina vinculada</th>
+                            <th className="px-3 py-3 border-r border-gray-100 text-left whitespace-nowrap bg-emerald-50 text-emerald-800" title={`Cruce por MaquinaSismac. Restan en Corte Espuma: UIO ${MACHINES_BY_PLANTA.UIO.map(m => m.id).join(' / ')} · GYE ${MACHINES_BY_PLANTA.GYE.map(m => m.id).join(' / ')}`}>Máquina vinculada</th>
                             <th className="px-3 py-3 border-r border-gray-100 text-right whitespace-nowrap bg-indigo-50 text-indigo-800">Resta al plan (h)</th>
                             {columnas.map(c => <th key={c} className="px-3 py-3 border-r border-gray-100 text-left whitespace-nowrap normal-case font-mono">{c}</th>)}
                           </tr>
