@@ -5,6 +5,7 @@ import * as XLSX from 'xlsx';
 import { serviciosService } from '@/services/servicios.service';
 import { formatMaterialSap, SAP_ESTATUS_REG_ORD_CARGADO, usuarioProcesoSap } from '@/lib/sap-material';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
+import { cargarDiasNoLaborables, feriadosNacionales } from '@/lib/dias-laborables';
 import { useAppContext } from '@/context/AppProvider';
 import { Loader2, PlayCircle, LayoutGrid, Gauge, Clock, Sun, Moon, RefreshCw, TriangleAlert, Scissors, FileSpreadsheet, Download, BedDouble, Send, Save, CheckCircle2 } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell } from '@/components/ui/table';
@@ -438,8 +439,19 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                 const start = new Date();
                 const end = new Date(start);
                 end.setDate(end.getDate() + 14);
-                const holidays = await ecuadorHolidaysService.getHolidaysForRange(start, end);
-                setHolidaysSet(new Set(holidays.map(h => h.date)));
+                // API externa (nager.at) UNIDA a los feriados nacionales por ley + calendario de la app (mismo
+                // criterio que Plan Táctico Muebles, 2026-10-28): la API pasó la "Independencia de Cuenca" 2026
+                // al 02-nov y dejaba el 03-nov como hábil, corriendo las fechas de ENVIAR A SAP / Excel / .txt.
+                // Las fechas "Jornada" del calendario anulan el feriado.
+                const [holidays, calendario] = await Promise.all([
+                    ecuadorHolidaysService.getHolidaysForRange(start, end).catch(() => []),
+                    cargarDiasNoLaborables().catch(() => null),
+                ]);
+                const set = new Set<string>(holidays.map(h => h.date));
+                const nacionales = [...feriadosNacionales(start.getFullYear()), ...feriadosNacionales(end.getFullYear())];
+                (calendario?.noLaborables ?? new Set(nacionales)).forEach(fecha => set.add(fecha));
+                calendario?.laborablesExtra.forEach(fecha => set.delete(fecha));
+                setHolidaysSet(set);
             } catch (error) {
                 console.error('Error al cargar feriados para Taller de Corte:', error);
             }
