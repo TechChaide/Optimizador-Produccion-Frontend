@@ -178,6 +178,9 @@ const VistaPreparacion: React.FC<{ prep: PreparacionFecha }> = ({ prep }) => {
   const [fecha, setFecha] = useState(prep.fechaInicial);
   const [hasta, setHasta] = useState(prep.hastaInicial ?? prep.fechaInicial);
   const [sinFecha, setSinFecha] = useState(false);
+  // Mismo formato en todos los módulos: la fecha se muestra como en Corte Espuma y, si el módulo
+  // permite otra fecha, el selector queda detrás de "Cambiar".
+  const [cambiando, setCambiando] = useState(false);
   const esRango = prep.hastaInicial !== undefined;
   const elegida = sinFecha ? null : fecha;
   const hastaElegida = esRango && !sinFecha ? hasta : undefined;
@@ -189,10 +192,19 @@ const VistaPreparacion: React.FC<{ prep: PreparacionFecha }> = ({ prep }) => {
     <div className="px-4 py-3 space-y-3">
       <div className="space-y-1.5">
         <p className="text-[11px] font-black text-slate-700">
-          {prep.fija ? 'Fecha a evaluar' : esRango ? '¿Qué fechas vas a evaluar?' : '¿Qué fecha vas a evaluar?'}
+          {esRango ? '¿Qué fechas vas a evaluar?' : 'Fecha a evaluar'}
         </p>
-        {prep.fija ? (
-          <p className="text-[12px] font-black text-blue-700 capitalize">{fechaLarga(fecha)}</p>
+        {!esRango && (prep.fija || !cambiando) ? (
+          <div className="flex items-baseline justify-between gap-2">
+            <p className="text-[12px] font-black text-blue-700 capitalize">
+              {sinFecha ? (prep.sinFecha ?? 'Todas las fechas') : valida ? fechaLarga(fecha) : fecha}
+            </p>
+            {!prep.fija && (
+              <button type="button" onClick={() => setCambiando(true)} className="text-[10px] font-bold text-slate-400 hover:text-blue-700 underline">
+                Cambiar
+              </button>
+            )}
+          </div>
         ) : esRango ? (
           <div className="grid grid-cols-2 gap-2">
             {([['Desde', fecha, setFecha], ['Hasta', hasta, setHasta]] as const).map(([etq, val, set]) => (
@@ -220,7 +232,7 @@ const VistaPreparacion: React.FC<{ prep: PreparacionFecha }> = ({ prep }) => {
             {!sinFecha && valida && <p className="text-[10px] font-bold text-slate-500 capitalize">{fechaLarga(fecha)}</p>}
           </>
         )}
-        {prep.sinFecha && (
+        {prep.sinFecha && (esRango || cambiando) && (
           <label className="flex items-center gap-2 text-[10px] font-bold text-slate-500 cursor-pointer">
             <input type="checkbox" checked={sinFecha} onChange={e => setSinFecha(e.target.checked)} />
             {prep.sinFecha}

@@ -1731,8 +1731,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       detalle: fecha => {
         const p2 = format(nextBusinessDayCal(fecha ? parseISO(fecha) : new Date(), noLaborables, laborablesHorizonte(laborablesExtra)), 'yyyy-MM-dd');
         const lineas = [
-          { etiqueta: 'Órdenes FERT del', valor: fecha ? fmt(fecha) : 'Todas las fechas' },
           { etiqueta: 'P2 (necesidad planta) del', valor: fmt(p2) },
+          { etiqueta: 'Órdenes FERT del', valor: fecha ? fmt(fecha) : 'Todas las fechas' },
         ];
         // Ventana del plan con los turnos elegidos hoy en Gestión de Tiempos (ver ventanaPlan).
         const noche = fecha && selectedNocheShift !== 'EMPTY' ? intervaloDeHorario(parseISO(fecha), nocheShiftOptions.find(o => o.v === selectedNocheShift)?.l ?? '') : null;

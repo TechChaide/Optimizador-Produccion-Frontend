@@ -838,14 +838,15 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     const ptPlan = pt;
     const extra = laborablesHorizonte(laborablesExtra);
     const larga = (f: string) => format(parseISO(f), 'EEE dd/MM/yyyy', { locale: es });
+    // Mismo formato que Corte Espuma / Laminado: la fecha a evaluar es hoy; P2 y PT van en el detalle.
     return {
-      fechaInicial: ptPlan,
+      ptPlan,
+      fechaInicial: format(new Date(), 'yyyy-MM-dd'),
       fija: true,
       detalle: () => [
-        { etiqueta: 'Se planifica', valor: larga(format(new Date(), 'yyyy-MM-dd')) },
-        { etiqueta: 'Recuperación Corte / Laminado (P2)', valor: larga(format(addBusinessDaysCal(parseISO(ptPlan), -1, noLaborables, extra), 'yyyy-MM-dd')) },
-        { etiqueta: 'Producción PT · Órdenes FERT del', valor: larga(ptPlan) },
-        { etiqueta: 'Empaque (reporte)', valor: larga(pt) },
+        { etiqueta: 'P2 (recuperación Corte / Laminado) del', valor: larga(format(addBusinessDaysCal(parseISO(ptPlan), -1, noLaborables, extra), 'yyyy-MM-dd')) },
+        { etiqueta: 'PT · Órdenes FERT del', valor: larga(ptPlan) },
+        { etiqueta: 'Empaque (reporte) del', valor: larga(pt) },
       ],
       aviso: () => esDiaNoLaborable(parseISO(ptPlan), noLaborables, laborablesExtra) ? 'El PT cae en día no laborable; puede no haber órdenes.' : null,
     };
@@ -860,12 +861,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       addNotification('error', `No se pudo cargar el calendario laboral: ${(e as Error).message}`);
       return;
     }
+    const { ptPlan, ...prep } = preparacionVentana(noLaborables, laborablesExtra);
     panelProgreso.pedirFecha({
-      titulo: 'Venta Externa — Sincronizar',
-      ...preparacionVentana(noLaborables, laborablesExtra),
-      onConfirmar: (pt) => {
-        if (pt) void ejecutarSincronizacion(pt, pt, noLaborables, laborablesExtra);
-      },
+      titulo: 'Venta Externa — Sincronizar y generar',
+      ...prep,
+      onConfirmar: () => { void ejecutarSincronizacion(ptPlan, ptPlan, noLaborables, laborablesExtra); },
     });
   }, [preparacionVentana, panelProgreso, ejecutarSincronizacion, addNotification]);
 
