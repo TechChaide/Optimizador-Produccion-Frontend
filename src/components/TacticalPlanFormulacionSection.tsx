@@ -243,6 +243,23 @@ const fetchMovimientosConsumo = async (material: string): Promise<MovimientoCons
     return [];
   }
 };
+// Tiempos de curado completos: el servicio es paginado; antes se leía solo la página 1 y el usuario vio
+// datos hasta el 12/10 mientras su Excel tenía bloques del 29–30/10 (2026-10-31). Sigue pidiendo páginas
+// mientras el servicio informe más registros de los leídos (tope de seguridad: 20 páginas).
+const fetchCuradoCompleto = async (): Promise<{ data: RawApiRow[]; total: number }> => {
+  const POR_PAGINA = 5000;
+  const filas: RawApiRow[] = [];
+  let total = 0;
+  for (let page = 1; page <= 20; page++) {
+    const res = await serviciosService.getTiemposCuradoBloqueFormulado(page, POR_PAGINA);
+    const lote: RawApiRow[] = (res as { data?: { data?: RawApiRow[] } }).data?.data || (Array.isArray(res.data) ? res.data : []);
+    total = Number(res.totalRegistros ?? res.totalRecords ?? res.totalRows ?? 0) || total;
+    filas.push(...lote);
+    if (lote.length < POR_PAGINA || (total > 0 && filas.length >= total)) break;
+  }
+  return { data: filas, total };
+};
+
 // Kg consumidos en los `dias` corridos que terminan hoy (incluido).
 const consumoUltimosDiasKg = (movs: MovimientoConsumo[], dias: number, hasta = new Date()): number => {
   const fin = new Date(hasta);
@@ -559,6 +576,8 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   const [ordenesFert, setOrdersFert] = useState<RawApiRow[]>([]);
   const [cuboInventarios, setCuboInventarios] = useState<CuboInventariosItem[]>([]);
   const [curadoData, setCuradoData] = useState<RawApiRow[]>([]);
+  // Total de registros que informa el servicio de curado (0 = no lo informa), para el diagnóstico del paso 2.
+  const [curadoTotalServicio, setCuradoTotalServicio] = useState(0);
   // Día de corte D (misma ventana que Sub-Bloques-T8 de Corte, ver @/lib/ventana-corte) con el
   // calendario de feriados / días no trabajados; '' = hoy + 1 hábil. Se elige al sincronizar.
   const [diaCorte, setDiaCorte] = useState('');
@@ -1104,7 +1123,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       const groupsIds = filteredGroups.map(g => g.codigo_grupo);
       const [restrsRes, curadoRes, fertsRes, cuboRes] = await Promise.all([
         seguir('Restricciones', restriccionService.getAll()),
-        seguir('Tiempos de curado', serviciosService.getTiemposCuradoBloqueFormulado(1, 10000)).catch(() => ({ data: [] })),
+        seguir('Tiempos de curado', fetchCuradoCompleto()).catch(() => ({ data: [] as RawApiRow[], total: 0 })),
         seguir('Órdenes FERT', sapCompartido.ordenesFert()).catch(() => ({ data: [] })),
         seguir('Cubo de inventarios', sapCompartido.cuboInventarios()).catch(() => ({ data: [] }))
       ]);
@@ -1118,6 +1137,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
 
       const rawCurado: RawApiRow[] = curadoRes.data || [];
       setCuradoData(rawCurado);
+      setCuradoTotalServicio(curadoRes.total);
 
       const uniqueStatuses = [...new Set(rawCurado.map((r) => String(getProp(r, ['estadoTras', 'ESTADOTRAS']) || 'EMPTY').trim()))];
       inspector.captureVariable('unique_estadoTras_statuses', uniqueStatuses, { description: 'Lista global de estatus detectados en columna estadoTras' });
@@ -1469,7 +1489,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
               <tbody className="divide-y divide-gray-50 font-bold">
                 {data.length === 0 ? (
                   <tr><td colSpan={9} className="py-6 px-4 text-left text-[10px] text-slate-500">
-                    <p className="font-black uppercase text-slate-400 mb-1">Sin bloques · {formatNum(curadoData.length, 0)} registros de curado · fechas {diagnosticoCurado.fechas}</p>
+                    <p className="font-black uppercase text-slate-400 mb-1">Sin bloques · {formatNum(curadoData.length, 0)} registros de curado{curadoTotalServicio > 0 ? ` (servicio informa ${formatNum(curadoTotalServicio, 0)})` : ''} · fechas {diagnosticoCurado.fechas}</p>
                     {diagnosticoCurado.combos.map(([k, n]) => <p key={k} className="font-mono">{n}× {k}</p>)}
                   </td></tr>
                 ) : data.map((row, idx) => {
