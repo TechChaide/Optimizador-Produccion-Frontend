@@ -1451,7 +1451,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
   // componente / material / orden, Kg de consumo pendiente por orden, con total por bloque cortado y
   // subtotal por Formulado (pendiente / planificado). Las filas que no trazan a un Bloque Formulado van
   // en UN y no suman a los Kg.
-  const renderNecesidadTable = (data: ConsumoBloqueRow[], titulo: string) => {
+  const renderNecesidadTable = (data: ConsumoBloqueRow[]) => {
     const kg = (rows: ConsumoBloqueRow[], tramo?: TramoNecesidad) => rows.reduce((s, r) => (r.un === 'KG' && (!tramo || r.tramo === tramo) ? s + r.total : s), 0);
     const grouped = new Map<string, { nombreFormulado: string; cortados: Map<string, ConsumoBloqueRow[]> }>();
     data.forEach(row => {
@@ -1464,8 +1464,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     const columnas = 12;
     const fecha = (f?: string) => f ? f.split('-').reverse().slice(0, 2).join('/') : '—';
     return (
-      <div className="space-y-2">
-        <h3 className="px-2 text-[11px] font-black uppercase tracking-widest text-slate-700">{titulo} · {formatNum(kg(data), 1)} Kg</h3>
       <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
         <div className="overflow-x-auto max-h-[600px]">
           <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
@@ -1530,7 +1528,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             </tbody>
           </table>
         </div>
-      </div>
       </div>
     );
   };
@@ -1939,11 +1936,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
               </tbody>
             </table>
           </div>
-          {(['1000', '2000', 'VE'] as const).map(dst => {
-            const filas = fertConsumoResponsable.filter(r => r.destino === dst);
-            return filas.length > 0 && <React.Fragment key={dst}>{renderNecesidadTable(filas, `Consumos ${ETIQUETA_DESTINO[dst]}`)}</React.Fragment>;
-          })}
-          {fertConsumoResponsable.length === 0 && renderNecesidadTable([], 'Consumos')}
+          {renderNecesidadTable(fertConsumoResponsable)}
         </div>
       );
       case 'inventario': return (
