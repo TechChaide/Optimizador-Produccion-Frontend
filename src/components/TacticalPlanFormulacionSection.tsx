@@ -59,9 +59,13 @@ const CURADO_DIAS_ESPERA = 3;
 const DIAS_PENDIENTE_FERT = 3;
 // Venta Externa en Corte = responsable 038 (1 lámina cortada = 1 lámina empacada, se pasa a Kg por BOM).
 const RESP_VENTA_EXTERNA = '038';
+// GYE no tiene formuladora: su consumo de Bloque Formulado son las FERT 041 de UIO (sub-bloques cortados
+// a medida y enviados; cantidad en UN de sub-bloque, Kg por BOM). Las láminas del centro 2000 consumen
+// esos sub-bloques, no el formulado, así que no se cuentan (serían doble conteo).
+const RESP_SUBBLOQUES_GYE = '041';
 type TramoNecesidad = 'pendiente' | 'planificado';
 type DestinoConsumo = '1000' | '2000' | 'VE';
-const ETIQUETA_DESTINO: Record<DestinoConsumo, string> = { '1000': 'UIO', '2000': 'GYE', VE: 'VE' };
+const ETIQUETA_DESTINO: Record<DestinoConsumo, string> = { '1000': 'UIO', '2000': 'GYE (041)', VE: 'VE' };
 
 // Responsables de Control de Producción que consumen el recurso Formulación, por centro — FALLBACK
 // únicamente, para el ratito entre que el módulo se monta y "Sincronizar" trae la restricción real
@@ -544,9 +548,10 @@ const isResponsableAllowed = (centro: string, resp: string, respPorCentro: Recor
   const allowed = respPorCentro[centro];
   return !!allowed && allowed.includes(resp);
 };
-// Venta Externa (038) consume Bloque Formulado aunque no esté en RespCtrlProd_Consumo_{centro}.
+// Solo centro 1000 (único con formuladora). Venta Externa (038) y sub-bloques GYE (041) entran aunque no
+// estén en RespCtrlProd_Consumo_1000.
 const entraEnFormulacion = (centro: string, resp: string, respPorCentro: Record<string, string[]>): boolean =>
-  resp === RESP_VENTA_EXTERNA || isResponsableAllowed(centro, resp, respPorCentro);
+  centro !== '2000' && (resp === RESP_VENTA_EXTERNA || resp === RESP_SUBBLOQUES_GYE || isResponsableAllowed(centro, resp, respPorCentro));
 
 // Una fila de trazabilidad de consumo: desde el material "BLOQUE FORMULADO" (codFormulado) hasta
 // el componente final del que forma parte, pasando por el nivel intermedio del árbol BOM
@@ -900,7 +905,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       const esVenta = resp === RESP_VENTA_EXTERNA;
       const tramo = tramoFert(fechaFinOrden(o), esVenta);
       if (!tramo) return [];
-      const destino: DestinoConsumo = resp === RESP_VENTA_EXTERNA ? 'VE' : centro === '2000' ? '2000' : '1000';
+      const destino: DestinoConsumo = resp === RESP_VENTA_EXTERNA ? 'VE' : resp === RESP_SUBBLOQUES_GYE ? '2000' : '1000';
       return [{ order: o, origin: 'fert' as const, centro, resp, esVenta, tramo, destino }];
     });
     if (allOrders.length === 0) {
@@ -1236,6 +1241,14 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     const m = { '1000': { pendiente: 0, planificado: 0 }, '2000': { pendiente: 0, planificado: 0 }, VE: { pendiente: 0, planificado: 0 } } as Record<DestinoConsumo, Record<TramoNecesidad, number>>;
     fertConsumoResponsable.forEach(r => { if (r.un === 'KG' && r.destino && r.tramo) m[r.destino][r.tramo] += r.total; });
     return m;
+  }, [fertConsumoResponsable]);
+  // Sub-bloques con medida que se envían a GYE (UN de las FERT 041, una vez por orden).
+  const subBloquesGye = useMemo(() => {
+    const porOrden = new Map<string, { tramo: TramoNecesidad; un: number }>();
+    fertConsumoResponsable.forEach(r => { if (r.destino === '2000' && r.tramo) porOrden.set(r.orden, { tramo: r.tramo, un: r.cantidad ?? 0 }); });
+    const t = { pendiente: 0, planificado: 0 } as Record<TramoNecesidad, number>;
+    porOrden.forEach(o => { t[o.tramo] += o.un; });
+    return t;
   }, [fertConsumoResponsable]);
 
   // Evaluación de Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material "BLOQUE
@@ -1902,13 +1915,23 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                 {(['pendiente', 'planificado'] as const).map(tramo => (
                   <tr key={tramo}>
                     <td className={cn("px-4 py-2 text-left font-sans font-black uppercase", tramo === 'pendiente' ? 'text-amber-700' : 'text-emerald-700')}>{tramo}</td>
-                    {(['1000', '2000', 'VE'] as const).map(dst => <td key={dst} className="px-4 py-2">{formatNum(necesidadKg[dst][tramo], 1)}</td>)}
+                    {(['1000', '2000', 'VE'] as const).map(dst => (
+                      <td key={dst} className="px-4 py-2">
+                        {formatNum(necesidadKg[dst][tramo], 1)}
+                        {dst === '2000' && <span className="ml-1 font-sans text-[10px] text-amber-700">· {formatNum(subBloquesGye[tramo], 0)} sub-bloq.</span>}
+                      </td>
+                    ))}
                     <td className="px-4 py-2 text-indigo-800">{formatNum(necesidadKg['1000'][tramo] + necesidadKg['2000'][tramo] + necesidadKg.VE[tramo], 1)}</td>
                   </tr>
                 ))}
                 <tr className="bg-indigo-50/50 font-black">
                   <td className="px-4 py-2 text-left font-sans uppercase text-indigo-800">Total</td>
-                  {(['1000', '2000', 'VE'] as const).map(dst => <td key={dst} className="px-4 py-2">{formatNum(necesidadKg[dst].pendiente + necesidadKg[dst].planificado, 1)}</td>)}
+                  {(['1000', '2000', 'VE'] as const).map(dst => (
+                    <td key={dst} className="px-4 py-2">
+                      {formatNum(necesidadKg[dst].pendiente + necesidadKg[dst].planificado, 1)}
+                      {dst === '2000' && <span className="ml-1 font-sans text-[10px] text-amber-700">· {formatNum(subBloquesGye.pendiente + subBloquesGye.planificado, 0)} sub-bloq.</span>}
+                    </td>
+                  ))}
                   <td className="px-4 py-2 text-indigo-900">{formatNum((['1000', '2000', 'VE'] as const).reduce((s, dst) => s + necesidadKg[dst].pendiente + necesidadKg[dst].planificado, 0), 1)}</td>
                 </tr>
               </tbody>
