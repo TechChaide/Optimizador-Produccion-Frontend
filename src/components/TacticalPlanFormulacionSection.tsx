@@ -303,6 +303,9 @@ const resumenConsumoHistorico = (movs: MovimientoConsumo[]) => {
 // ni en el Resumen). Filtro amplio por "PRUEBA" (singular o plural) sobre la descripción/nombre —
 // nomenclatura humana en SAP, no hay un flag dedicado para esto.
 const esMaterialPrueba = (descripcion: string): boolean => /PRUEBA/i.test(descripcion);
+// Muestras de laboratorio (ej. "MUESTRA LAB CALIDAD D17 BB SEGURO"): su BOM en SAP puede traer Bloque
+// Formulado, pero no es consumo de producción — no entran en la necesidad (usuario 2026-10-31).
+const esMuestraLaboratorio = (descripcion: string): boolean => /MUESTRA/i.test(descripcion);
 
 // Altura real del bloque fabricado (getTiemposCuradoBloqueFormulado, columna CuradoAltura en mm —
 // usuario 2026-10-27): 1174 → 117.4 cm. Útil = altura − cúpula (CUPULA_MAX_CM), misma regla del
@@ -901,6 +904,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       const centro = getProp(o, ['CENTRO', 'Centro']).trim();
       const resp = getProp(o, ['RESPCTRLPROD', 'RESPCONTROLPROD', 'RESP_CONTROL_PROD', 'RESPONSABLE']).trim();
       if (!entraEnFormulacion(centro, resp, respPorCentroDinamico)) return [];
+      if (esMuestraLaboratorio(extractMaterialInfo(o).desc)) return [];
       const esVenta = resp === RESP_VENTA_EXTERNA;
       const tramo = tramoFert(fechaFinOrden(o));
       if (!tramo) return [];
