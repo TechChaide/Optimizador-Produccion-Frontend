@@ -953,29 +953,8 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
           consumoRows.push(...traceBloqueFormuladoConsumption(bomData, info.code, ordenNum, origin, centroOrden, respOrden, qty));
         }
       } catch { console.warn(`Error BOM para ${info.code}`); }
-      // Materiales cuyo BOM no resuelve a ningún "BLOQUE FORMULADO" (13 casos reales verificados:
-      // LAMINA PRENSADA, TACO PRENSADO, LAMINA LATEX, ESPUMA ALM VISCO CONVOLUTE — de responsables
-      // de Formulación, pero sin ese componente en su árbol) quedaban invisibles en "Consumo de
-      // Bloque Formulado" (antes solo se poblaba desde traceBloqueFormuladoConsumption). El usuario
-      // pidió que ESE espacio muestre TODOS los materiales, no solo los que trazan a un bloque — se
-      // agrega una fila auto-referenciada (Formulado = el propio material) para no perder visibilidad
-      // de estas órdenes ahora que el espacio de "órdenes crudas" se retira de estos dos tabs.
-      if (blockCode === '—') {
-        consumoRows.push({
-          codFormulado: info.code,
-          nombreFormulado: info.desc,
-          componente: info.code,
-          nombreComponente: info.desc,
-          material: info.code,
-          nombre: info.desc,
-          orden: String(ordenNum),
-          un: 'UN',
-          total: qty,
-          origin,
-          centro: centroOrden,
-          respCtrlProd: respOrden
-        });
-      }
+      // Sin "BLOQUE FORMULADO" en su BOM (lámina prensada, taco, látex, muestras...) la orden no se
+      // muestra (usuario 2026-10-31): Formulación solo cuenta lo que consume bloque formulado.
       for (let k = consumoDesde; k < consumoRows.length; k++) Object.assign(consumoRows[k], marcaVentana);
 
       // "Salida de Datos" (unifiedSummaryData) SOLO debe reflejar Bloque Formulado real — el usuario
