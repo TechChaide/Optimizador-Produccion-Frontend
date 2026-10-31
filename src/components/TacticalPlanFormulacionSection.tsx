@@ -53,7 +53,7 @@ const BLOCK_LENGTH_METERS = 20;
 const CURADO_DIAS_ESPERA = 3;
 
 // Paso 1 · Necesidad (usuario 2026-10-31): solo FERT (las provisionales varían, no es información real),
-// por FECHAFIN. Planificado = FERT del día de corte D (Venta Externa D+1, ver @/lib/ventana-corte);
+// por FECHAFIN, misma regla para todos (UIO, GYE 041 y Venta Externa 038). Planificado = FERT del día de corte D;
 // Pendiente = FERT con saldo de hasta 3 días hábiles antes — más atrás ya es retraso del PT, y 3 días es
 // lo que toma fabricar y curar un bloque.
 const DIAS_PENDIENTE_FERT = 3;
@@ -775,11 +775,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     [ventana.d, calendario]
   );
   // Tramo de una FERT por su FECHAFIN; null = fuera de la ventana (no entra en la necesidad).
-  const tramoFert = useCallback((fechaFin: string, esVentaExterna: boolean): TramoNecesidad | null => {
-    const plan = esVentaExterna ? ventana.venta : ventana.d;
-    if (fechaFin === plan) return 'planificado';
-    return fechaFin >= pendienteDesde && fechaFin < plan ? 'pendiente' : null;
-  }, [ventana, pendienteDesde]);
+  const tramoFert = useCallback((fechaFin: string): TramoNecesidad | null => {
+    if (fechaFin === ventana.d) return 'planificado';
+    return fechaFin >= pendienteDesde && fechaFin < ventana.d ? 'pendiente' : null;
+  }, [ventana.d, pendienteDesde]);
   // El módulo YA NO sincroniza solo al abrirse — mismo criterio que Corte Espuma/Venta Externa/
   // Laminado (ver [[carga_manual_modulos_tacticos]], antes marcado como pendiente para este módulo).
   const [isLoading, setIsLoading] = useState(false);
@@ -835,9 +834,9 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       const centro = getProp(o, ['CENTRO', 'Centro']).trim();
       if (centro && !['1000', '2000'].includes(centro)) return false;
       const fechaFin = fechaFinOrden(o);
-      return !!fechaFin && fechaFin >= pendienteDesde && fechaFin <= ventana.venta;
+      return !!fechaFin && fechaFin >= pendienteDesde && fechaFin <= ventana.d;
     });
-  }, [ordenesFert, pendienteDesde, ventana.venta]);
+  }, [ordenesFert, pendienteDesde, ventana.d]);
 
   // Inventario SAP (fuente CuboInventarios) filtrado a materiales "BLOQUE FORMULADO". El
   // StockActual de CuboInventarios ya viene en KG para estos materiales HALB (PesoNetoActual/
@@ -903,7 +902,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       const resp = getProp(o, ['RESPCTRLPROD', 'RESPCONTROLPROD', 'RESP_CONTROL_PROD', 'RESPONSABLE']).trim();
       if (!entraEnFormulacion(centro, resp, respPorCentroDinamico)) return [];
       const esVenta = resp === RESP_VENTA_EXTERNA;
-      const tramo = tramoFert(fechaFinOrden(o), esVenta);
+      const tramo = tramoFert(fechaFinOrden(o));
       if (!tramo) return [];
       const destino: DestinoConsumo = resp === RESP_VENTA_EXTERNA ? 'VE' : resp === RESP_SUBBLOQUES_GYE ? '2000' : '1000';
       return [{ order: o, origin: 'fert' as const, centro, resp, esVenta, tramo, destino }];
@@ -911,7 +910,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     if (allOrders.length === 0) {
       setUnifiedSummaryData([]);
       setConsumoBloqueFormulado([]);
-      return { estado: 'aviso', mensaje: `Sin FERT de Formulación / Venta Externa entre ${pendienteDesde} y ${ventana.venta}.` };
+      return { estado: 'aviso', mensaje: `Sin FERT de Formulación / Venta Externa entre ${pendienteDesde} y ${ventana.d}.` };
     }
     setIsProcessingResumen(true);
     const groupsMap = new Map<string, FormuladoSummaryRow>();
@@ -1053,7 +1052,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     });
     setIsProcessingResumen(false);
     return { estado: 'ok', mensaje: `${allOrders.length} orden(es) → ${summaryOrdenado.length} bloque(s) formulado(s) en el resumen.`, progreso: { actual: allOrders.length, total: allOrders.length } };
-  }, [prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico, tramoFert, pendienteDesde, ventana.venta]);
+  }, [prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico, tramoFert, pendienteDesde, ventana.d]);
 
   // Segunda fase de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar): corre
   // handleProcessResumen automáticamente en cuanto el render con los datos recién sincronizados ya
@@ -1141,7 +1140,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
 </table>
 <p style="margin:6px 0 0;font-size:11px;font-weight:700;color:#b45309;">Totales — Stock: ${formatNum(tStockKg, 0)} Kg · Cobertura sección: ${tConsumoKg > 0 ? (tStockUtilKg / tConsumoKg).toFixed(1) : '—'} días · Plan Reposición: ${tReposicion} UN</p>`;
     };
-    const rango = `pendiente ${pendienteDesde} → día de corte ${ventana.d} (Venta Externa ${ventana.venta})`;
+    const rango = `pendiente ${pendienteDesde} → día de corte ${ventana.d}`;
     return `
 <div style="max-width:960px;margin:0 auto;background:#ffffff;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#4f46e5;"><tr><td style="padding:18px 24px;font-size:15px;font-weight:700;color:#ffffff;">CHAIDE Y CHAIDE</td><td align="right" style="padding:18px 24px;font-size:11px;font-weight:600;text-transform:uppercase;color:#c7d2fe;">Planificación de Producción</td></tr></table>
@@ -1422,13 +1421,13 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       titulo: 'Formulación — Sincronizar y generar',
       fechaInicial: ventana.d,
       detalle: (d) => d ? [
-        { etiqueta: 'Planificado (FECHAFIN)', valor: `${larga(d)} · Venta Externa ${larga(format(siguienteDiaHabil(mediodia(d)), 'yyyy-MM-dd'))}` },
+        { etiqueta: 'Planificado (FECHAFIN)', valor: larga(d) },
         { etiqueta: `Pendiente (${DIAS_PENDIENTE_FERT} días hábiles)`, valor: `desde ${larga(format(addBusinessDays(mediodia(d), -DIAS_PENDIENTE_FERT, calendario.noLaborables, laborablesHorizonte(calendario.laborablesExtra)), 'yyyy-MM-dd'))}` },
         { etiqueta: 'Reporte (TXT) con fecha', valor: larga(d) },
       ] : [],
       onConfirmar: (d) => { if (d) void ejecutarSincronizacion(d); },
     });
-  }, [ventana.d, siguienteDiaHabil, calendario, panelProgreso, ejecutarSincronizacion]);
+  }, [ventana.d, calendario, panelProgreso, ejecutarSincronizacion]);
 
   // Rehidratación: si ya se había sincronizado en esta sesión, se recupera lo trabajado (datos crudos
   // Y el resumen ya procesado) en vez de dejar el módulo vacío al volver de otro módulo — mismo
@@ -1900,7 +1899,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-gray-100 bg-white px-4 py-3 text-[11px]">
             <span className="font-black uppercase text-slate-700" title="Se elige al sincronizar">Día de corte {fechaCorta(ventana.d)}</span>
             <span className="font-bold text-amber-700">Pendiente {fechaCorta(pendienteDesde)} → {fechaCorta(ventana.d)}</span>
-            <span className="font-bold text-emerald-700">Planificado {fechaCorta(ventana.d)} · VE {fechaCorta(ventana.venta)}</span>
+            <span className="font-bold text-emerald-700">Planificado {fechaCorta(ventana.d)}</span>
           </div>
           <div className="overflow-x-auto rounded-2xl border border-gray-100 bg-white">
             <table className="w-full border-collapse text-[11px] text-center">
