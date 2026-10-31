@@ -31,7 +31,7 @@ import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { useJornadaGrupo, type JornadaGrupoEditable } from '@/hooks/useJornadaGrupo';
 import { serviciosService } from '@/services/servicios.service';
-import { sapCompartido, refrescarDatosSap, refrescarAlSincronizar, detallesDePlanes } from '@/lib/datos-sap-compartidos';
+import { sapCompartido, refrescarDatosSap, refrescarAlSincronizar } from '@/lib/datos-sap-compartidos';
 import { DatosSapEstado } from '@/components/DatosSapEstado';
 import { useRuntimeInspector } from '@/services/RuntimeInspector';
 import { useAppContext } from '@/context/AppProvider';
@@ -42,7 +42,7 @@ import { useReportePlanTxt, useAutoCargaPlanVigente, useReportePlanTxtGrupo, Rep
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { CUPULA_MAX_CM } from '@/lib/bloques-espuma';
-import { ventanaCorte, fertEnVentanaCorteMaterial, responsablesCorte, motivoFueraDeSubBloques, CODIGO_GRUPO_CORTE_POR_CENTRO } from '@/lib/ventana-corte';
+import { ventanaCorte } from '@/lib/ventana-corte';
 import { nextBusinessDay, addBusinessDays, laborablesHorizonte, cargarDiasNoLaborables, type DiasNoLaborables } from '@/lib/dias-laborables';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -805,10 +805,6 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // Día de corte D (misma ventana que Sub-Bloques-T8 de Corte, ver @/lib/ventana-corte) con el
   // calendario de feriados / días no trabajados; '' = hoy + 1 hábil. Se elige al sincronizar.
   const [diaCorte, setDiaCorte] = useState('');
-  // Sin sincronizar (reporte restaurado) queda vacío y responsablesCorte cae a su respaldo fijo.
-  const [restriccionesCorte, setRestriccionesCorte] = useState<Restriccion[]>([]);
-  // `centro|material` de los P2 de Venta Externa activos, leído al generar (ver handleProcessResumen).
-  const [materialesVenta, setMaterialesVenta] = useState<ReadonlySet<string>>(new Set());
   const [calendario, setCalendario] = useState<{ noLaborables: DiasNoLaborables; laborablesExtra: DiasNoLaborables }>({ noLaborables: new Set(), laborablesExtra: new Set() });
   useEffect(() => {
     cargarDiasNoLaborables().then(c => setCalendario({ noLaborables: c.noLaborables, laborablesExtra: c.laborablesExtra })).catch(() => {});
@@ -943,22 +939,11 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // y de Venta Externa (038), explotadas a Kg de Bloque Formulado. Necesidad neta = esa necesidad −
   // stock útil (stock SAP menos lo que aún está en curado); el plan de reposición cubre el faltante.
   const handleProcessResumen = useCallback(async (): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string; progreso?: { actual: number; total: number } }> => {
-    // Materiales de Venta Externa por centro (`centro|material`) = líneas de los P2 de Venta activos —
-    // mismo cruce con el que Corte reconoce una FERT de Venta (origenArea) para fecharla a D+1.
-    const materialesVenta = new Set<string>();
-    try {
-      const planes = ((await sapCompartido.planGrupos()).data || []).filter(pg => pg.estado === 'A' && /p2\s*-\s*venta/i.test(String(pg.valor || '')));
-      const centroDePlan = new Map(planes.map(pg => [pg.codigo_plan_grupo, String(pg.valor || '').match(/centro\s*(\d{4})/i)?.[1] || '']));
-      (await detallesDePlanes(planes.map(pg => pg.codigo_plan_grupo))).forEach(d => {
-        if (d.estado === 'A') materialesVenta.add(`${centroDePlan.get(d.codigo_plan_grupo)}|${cleanCode(d.codigo_material)}`);
-      });
-    } catch { console.warn('[Formulación] No se pudo leer el P2 de Venta Externa: sus FERT se fechan con D (no D+1).'); }
-    setMaterialesVenta(materialesVenta);
     const allOrders = prodFiltradas.flatMap(o => {
       const centro = getProp(o, ['CENTRO', 'Centro']).trim();
       const resp = getProp(o, ['RESPCTRLPROD', 'RESPCONTROLPROD', 'RESP_CONTROL_PROD', 'RESPONSABLE']).trim();
       if (!entraEnFormulacion(centro, resp, respPorCentroDinamico)) return [];
-      const esVenta = resp === RESP_VENTA_EXTERNA || materialesVenta.has(`${centro}|${extractMaterialInfo(o).code}`);
+      const esVenta = resp === RESP_VENTA_EXTERNA;
       const tramo = tramoFert(fechaFinOrden(o), esVenta);
       if (!tramo) return [];
       const destino: DestinoConsumo = resp === RESP_VENTA_EXTERNA ? 'VE' : centro === '2000' ? '2000' : '1000';
@@ -1299,64 +1284,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     return m;
   }, [fertConsumoResponsable]);
 
-  // Cuadre con Sub-Bloques-T8 de Corte Espuma (usuario 2026-10-28: "es la misma data, deberían cuadrar
-  // los subtotales"). Lado Corte = las FERT crudas del día de corte con el universo de Corte
-  // (responsablesCorte + descartes, sin verticales, solo láminas con espesor) — calculado acá con la
-  // misma regla compartida, sin BOM. Lado Formulación = las órdenes del tab FERT. Se cruza por orden y
-  // se explica cada diferencia; en UN porque es lo que cuenta Corte ("Cantidad láminas UN").
-  type OrdenCuadre = { centro: string; orden: string; material: string; descripcion: string; resp: string; un: number; motivo: string };
-  const cuadreCorte = useMemo(() => {
-    const venta = new Set(materialesVenta);
-    fertConsumoResponsable.forEach(r => { if (r.ventaExterna) venta.add(`${r.centro}|${cleanCode(r.material)}`); });
-    const resp = { '1000': responsablesCorte(restriccionesCorte, '1000'), '2000': responsablesCorte(restriccionesCorte, '2000') } as const;
-    const corte = new Map<string, OrdenCuadre>();
-    const fueraDeCorte = new Map<string, string>();
-    // Diagnóstico (2026-10-28: el panel salía "0 UN · cuadra" sin FERT cargadas): cuántas FERT hay y
-    // cuántas caen en el día de corte, para distinguir "no hay datos" de "no cuadra".
-    let enVentanaCount = 0;
-    const fechasFin = new Map<string, number>();
-    const motivos = new Map<string, number>();
-    ordenesFert.forEach(o => {
-      const centro = getProp(o, ['CENTRO', 'Centro']).trim();
-      if (centro !== '1000' && centro !== '2000') return;
-      const info = extractMaterialInfo(o);
-      const ff = fechaFinOrden(o) || "sin fecha";
-      fechasFin.set(ff, (fechasFin.get(ff) || 0) + 1);
-      if (!fertEnVentanaCorteMaterial(fechaFinOrden(o), venta.has(`${centro}|${info.code}`), ventana)) return;
-      enVentanaCount++;
-      const un = safeNum(getProp(o, ['CANTPEND', 'CANTPENDIENTE', 'CANTPROGRAMADA', 'CANTIDAD', 'CANT_PROG']));
-      if (un <= 0) return;
-      const orden = getProp(o, ['ORDENPREVISIONAL', 'ORDEN', 'ORDEN_PROCESO']) || '—';
-      const r = getProp(o, ['RESPCTRLPROD', 'RESPCONTROLPROD', 'RESP_CONTROL_PROD', 'RESPONSABLE']).trim();
-      const key = `${centro}|${orden}`;
-      const motivo = motivoFueraDeSubBloques(resp[centro], centro, r, info.code, info.desc)
-        ?? ((parseFloat(info.esp) || 0) <= 0 ? 'Sin espesor (no es lámina)' : null);
-      if (motivo) { fueraDeCorte.set(key, motivo); motivos.set(motivo, (motivos.get(motivo) || 0) + 1); return; }
-      corte.set(key, { centro, orden, material: info.code, descripcion: info.desc, resp: r, un, motivo: '' });
-    });
-    const formulacion = new Map<string, OrdenCuadre>();
-    // Solo el tramo planificado (día de corte): Corte no cuenta el pendiente de días anteriores.
-    fertConsumoResponsable.filter(r => r.tramo === 'planificado').forEach(r => {
-      const key = `${r.centro}|${r.orden}`;
-      if (!formulacion.has(key)) formulacion.set(key, { centro: r.centro, orden: r.orden, material: r.material, descripcion: r.nombre, resp: r.respCtrlProd, un: r.cantidad ?? 0, motivo: '' });
-    });
-    const soloCorte = Array.from(corte.entries()).filter(([k]) => !formulacion.has(k)).map(([, o]) => ({
-      ...o,
-      motivo: !entraEnFormulacion(o.centro, o.resp, respPorCentroDinamico)
-        ? `Responsable ${o.resp || '—'} no está en RespCtrlProd_Consumo_${o.centro}`
-        : 'Sin explosión BOM (sincroniza de nuevo)',
-    }));
-    const soloFormulacion = Array.from(formulacion.entries()).filter(([k]) => !corte.has(k)).map(([k, o]) => ({
-      ...o, motivo: fueraDeCorte.get(k) ?? 'No es FERT del día de corte en SAP',
-    }));
-    const porCentro = (['1000', '2000'] as const).map(centro => {
-      const unDe = (m: Map<string, OrdenCuadre>) => Array.from(m.values()).filter(o => o.centro === centro).reduce((s, o) => s + o.un, 0);
-      return { centro, unCorte: unDe(corte), unFormulacion: unDe(formulacion) };
-    });
-    const diagnostico = { cargadas: ordenesFert.length, enVentana: enVentanaCount, deCorte: corte.size, motivos: Array.from(motivos.entries()).sort((a, b) => b[1] - a[1]), fechasFin: Array.from(fechasFin.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6) };
-    return { porCentro, diagnostico, diferencias: [...soloCorte.map(o => ({ ...o, lado: 'Solo Corte' as const })), ...soloFormulacion.map(o => ({ ...o, lado: 'Solo Formulación' as const }))] };
-  }, [materialesVenta, fertConsumoResponsable, restriccionesCorte, ordenesFert, ventana, respPorCentroDinamico]);
-
   // Evaluación de Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material "BLOQUE
   // FORMULADO", con la misma base de conversión (TamLoteMin) que el Resumen e Inventarios — para
   // que Control Curado permita verificar esos tres números sin cambiar de tab.
@@ -1445,8 +1372,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
         detalle: fallidas.length > 0 ? `Sin respuesta: ${fallidas.join(', ')} — se siguió con datos vacíos.` : undefined,
       });
       setRestricciones((restrsRes.data || []).filter((r) => groupsIds.includes(r.codigo_grupo)));
-      // Responsables de Corte (grupos 8 / 16) para el cuadre del tab FERT con Sub-Bloques-T8.
-      setRestriccionesCorte((restrsRes.data || []).filter((r) => Object.values(CODIGO_GRUPO_CORTE_POR_CENTRO).includes(r.codigo_grupo)));
       setOrdersFert(fertsRes.data?.data || fertsRes.data || []);
       setCuboInventarios(Array.isArray(cuboRes.data) ? cuboRes.data : []);
 
@@ -2037,69 +1962,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             </table>
           </div>
           {renderNecesidadTable(fertConsumoResponsable)}
-          {cuadreCorte && (
-            <div className="rounded-2xl border border-gray-100 bg-white px-4 py-3 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h4 className="text-[11px] font-black uppercase tracking-widest text-slate-700" title="Corte separa por centro; Formulación produce todo en UIO y lo de GYE se envía en bloques.">Cuadre con Corte Espuma · Sub-Bloques-T8 (láminas UN)</h4>
-              </div>
-              {planCargadoDe && (
-                <p className="text-[11px] font-bold text-amber-700">Reporte guardado del {planCargadoDe.fechaObjetivo.split('-').reverse().join('/')}: sin órdenes FERT de SAP.</p>
-              )}
-              {cuadreCorte.diagnostico.cargadas === 0 ? (
-                <p className="text-[11px] font-bold text-amber-700">Sin órdenes FERT cargadas.</p>
-              ) : (
-                <p className="text-[10px] text-slate-500">
-                  FERT cargadas <b>{cuadreCorte.diagnostico.cargadas}</b> · día de corte <b>{cuadreCorte.diagnostico.enVentana}</b> · Corte <b>{cuadreCorte.diagnostico.deCorte}</b>
-                  {cuadreCorte.diagnostico.motivos.length > 0 && <> · fuera: {cuadreCorte.diagnostico.motivos.map(([m, n]) => `${m} (${n})`).join(' · ')}</>}
-                  {cuadreCorte.diagnostico.enVentana === 0 && <b className="text-amber-700"> · ninguna FERT termina el {ventana.d.split('-').reverse().join('/')}</b>}
-                  <br />Fechas fin: {cuadreCorte.diagnostico.fechasFin.map(([f, n]) => `${f.split('-').reverse().join('/')} (${n})`).join(' · ')}
-                </p>
-              )}
-              <div className="flex flex-wrap gap-2">
-                {cuadreCorte.porCentro.map(c => {
-                  const sinDatos = c.unCorte === 0 && c.unFormulacion === 0;
-                  const cuadra = !sinDatos && Math.abs(c.unCorte - c.unFormulacion) < 0.5;
-                  return (
-                    <span key={c.centro} className={cn("rounded-xl border px-3 py-2 text-[11px] font-bold", sinDatos ? 'border-slate-200 bg-slate-50 text-slate-500' : cuadra ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800')}>
-                      {c.centro === '1000' ? 'Quito (1000)' : 'Guayaquil (2000) — destino'}: Corte {formatNum(c.unCorte, 0)} UN · Formulación {formatNum(c.unFormulacion, 0)} UN {sinDatos ? '· sin datos' : cuadra ? '· cuadra' : `· diferencia ${formatNum(c.unFormulacion - c.unCorte, 0)}`}
-                    </span>
-                  );
-                })}
-              </div>
-              {cuadreCorte.diferencias.length > 0 && (
-                <div className="overflow-x-auto max-h-[260px] rounded-xl border border-slate-100">
-                  <table className="w-full border-collapse text-[10px]">
-                    <thead className="bg-gray-50 sticky top-0 text-gray-500 uppercase font-bold">
-                      <tr>
-                        <th className="px-3 py-2 text-left">Dónde está</th>
-                        <th className="px-3 py-2 text-left">Orden</th>
-                        <th className="px-3 py-2 text-left">Material</th>
-                        <th className="px-3 py-2 text-left">Descripción</th>
-                        <th className="px-3 py-2">Centro</th>
-                        <th className="px-3 py-2">Resp.</th>
-                        <th className="px-3 py-2 text-right">UN</th>
-                        <th className="px-3 py-2 text-left">Motivo</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-50 font-mono">
-                      {cuadreCorte.diferencias.map(d => (
-                        <tr key={`${d.lado}|${d.centro}|${d.orden}`}>
-                          <td className={cn("px-3 py-1.5 font-sans font-black", d.lado === 'Solo Corte' ? 'text-red-700' : 'text-indigo-700')}>{d.lado}</td>
-                          <td className="px-3 py-1.5">{d.orden}</td>
-                          <td className="px-3 py-1.5">{d.material}</td>
-                          <td className="px-3 py-1.5 font-sans uppercase truncate max-w-[260px]">{d.descripcion}</td>
-                          <td className="px-3 py-1.5 text-center">{d.centro}</td>
-                          <td className="px-3 py-1.5 text-center">{d.resp || '—'}</td>
-                          <td className="px-3 py-1.5 text-right">{formatNum(d.un, 0)}</td>
-                          <td className="px-3 py-1.5 font-sans text-slate-600">{d.motivo}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       );
       case 'inventario': return (
