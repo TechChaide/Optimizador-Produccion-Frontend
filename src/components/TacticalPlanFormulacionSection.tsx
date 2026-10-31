@@ -46,11 +46,16 @@ import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 
 const BLOCK_LENGTH_METERS = 20;
-// Tiempo de curado/reposo: 3 días TOTALES contando el propio día de fabricación (día 1 = fab, día 2,
-// día 3 = reposo), disponible para consumo recién al día 4 (fab + 3). Antes era 2 (disponible en
-// fab + 2, es decir solo 2 días de reposo sin contar el de fabricación como día 1) — confirmado por
-// el usuario como bug de criterio: le faltaba un día de cobertura real a los bloques.
-const CURADO_DIAS_ESPERA = 3;
+// Curado: disponible desde fabricación + 2 días (usuario 2026-10-31, misma regla que su Excel de Leader:
+// HOY − fecha ≥ 2). Pendiente: los bloques para exportación curan 3 días — regla aún no aplicada.
+const CURADO_DIAS_ESPERA = 2;
+
+// Una fila del paso 2 (stock por Bloque Formulado y espacio de curado, ver stockCuradoPorEspacio).
+interface StockCuradoRow {
+  materialCode: string; descripcion: string; apertura: string; dens: string;
+  curadosUN: number; curadosKg: number; enCuradoUN: number; enCuradoKg: number;
+  pesoProm: number; stockSapKg: number;
+}
 
 // Paso 1 · Necesidad (usuario 2026-10-31): solo FERT (las provisionales varían, no es información real),
 // por FECHAFIN, misma regla para todos (UIO, GYE 041 y Venta Externa 038). Planificado = FERT del día de corte D;
@@ -469,8 +474,8 @@ const CuradoSpaceTable: React.FC<{ data: RawApiRow[]; space: CuradoSpaceConfig }
       <div className="px-2 flex items-baseline justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{space.title} ({filtered.length})</h4>
-          <span className="text-[10px] font-black uppercase tracking-wider bg-emerald-50 text-emerald-700 rounded-full px-3 py-1">Disponible: {formatNum(unidadesDisponible, 1)} UN</span>
-          <span className="text-[10px] font-black uppercase tracking-wider bg-amber-50 text-amber-700 rounded-full px-3 py-1">Pendiente Curado: {formatNum(unidadesPendiente, 1)} UN</span>
+          <span className="text-[10px] font-black uppercase tracking-wider bg-emerald-50 text-emerald-700 rounded-full px-3 py-1">Curado: {formatNum(unidadesDisponible, 1)} Kg</span>
+          <span className="text-[10px] font-black uppercase tracking-wider bg-amber-50 text-amber-700 rounded-full px-3 py-1">En curado: {formatNum(unidadesPendiente, 1)} Kg</span>
         </div>
         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Filtro: {filterLabel}</p>
       </div>
@@ -1233,50 +1238,48 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     return t;
   }, [fertConsumoResponsable]);
 
-  // Evaluación de Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material "BLOQUE
-  // FORMULADO", con la misma base de conversión (TamLoteMin) que el Resumen e Inventarios — para
-  // que Control Curado permita verificar esos tres números sin cambiar de tab.
-  //
-  // "En Curado" se calcula POR SEPARADO para Leader y Cofama (getStockEnCurado con spaceKey) — antes
-  // se sumaban los dos procesos en una sola cifra, sin forma de saber de cuál venía cada Kg (el
-  // usuario lo confirmó como el problema real: "materiales que se están mezclando con el proceso de
-  // Leader y Cofama"). stockUtilUN sigue siendo un solo número (stock disponible real del material),
-  // descontando el total en curado de ambos procesos combinados — eso sí debe ser uno solo, porque
-  // es el mismo stock físico sin importar qué proceso lo está curando.
-  const curadoStockEvaluation = useMemo(() => {
-    return filteredInventario
-      .map(inv => {
-        const materialCode = cleanCode(inv.Material);
-        const stockEnCuradoLeaderKg = getStockEnCurado(materialCode, 'leader');
-        const stockEnCuradoCofamaKg = getStockEnCurado(materialCode, 'cofama');
-        const stockEnCuradoKg = stockEnCuradoLeaderKg + stockEnCuradoCofamaKg;
-        const stockEnCuradoLeaderUN = inv.loteMin > 0 ? stockEnCuradoLeaderKg / inv.loteMin : 0;
-        const stockEnCuradoCofamaUN = inv.loteMin > 0 ? stockEnCuradoCofamaKg / inv.loteMin : 0;
-        const stockEnCuradoUN = stockEnCuradoLeaderUN + stockEnCuradoCofamaUN;
-        const stockUtilUN = Math.max(0, inv.stockUN - stockEnCuradoUN);
-        const info = extractMaterialInfo(inv);
-        return {
-          materialCode,
-          descripcion: inv.Descripcion || '—',
-          apertura: info.apertura,
-          dens: info.dens,
-          loteMin: inv.loteMin,
-          stockKg: inv.stockKg,
-          stockUN: inv.stockUN,
-          stockEnCuradoLeaderKg,
-          stockEnCuradoCofamaKg,
-          stockEnCuradoKg,
-          stockEnCuradoLeaderUN,
-          stockEnCuradoCofamaUN,
-          stockEnCuradoUN,
-          stockUtilUN
+  // Paso 2 · Stock y Curado (usuario 2026-10-31, Excel de Leader): una fila de getTiemposCuradoBloqueFormulado
+  // = un bloque físico (Idbloque); CantidadStock = Kg que le quedan, peso = peso real al fabricarlo.
+  // Curado = fabricación + CURADO_DIAS_ESPERA. Por Bloque Formulado y por espacio (Leader / Cofama): bloques
+  // y Kg curados y en curado, peso real promedio, y el stock del cubo SAP al lado para comparar.
+  const stockCuradoPorEspacio = useMemo(() => {
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const sapKg = new Map<string, number>();
+    filteredInventario.forEach(inv => {
+      if (String(inv.Centro || '').trim() !== '1000') return;
+      const code = cleanCode(inv.Material);
+      sapKg.set(code, (sapKg.get(code) || 0) + inv.stockKg);
+    });
+    const porEspacio: Record<string, StockCuradoRow[]> = {};
+    CURADO_SPACES.forEach(space => {
+      const m = new Map<string, StockCuradoRow & { pesoSuma: number; pesoN: number }>();
+      curadoData.forEach(row => {
+        if (!matchesCuradoSpace(row, space)) return;
+        const code = cleanCode(getProp(row, ['CodMaterial', 'MATERIAL', 'CODMATERIAL']));
+        if (!code) return;
+        const info = extractMaterialInfo(row);
+        const r = m.get(code) ?? {
+          materialCode: code, descripcion: getProp(row, ['NomMaterial', 'NOMMATERIAL']) || '—', apertura: info.apertura, dens: info.dens,
+          curadosUN: 0, curadosKg: 0, enCuradoUN: 0, enCuradoKg: 0, pesoProm: 0, stockSapKg: sapKg.get(code) || 0, pesoSuma: 0, pesoN: 0,
         };
-      })
-      .filter(r => r.stockKg > 0 || r.stockEnCuradoKg > 0)
-      // Mismo orden Apertura -> Densidad que los espacios Leader/Cofama (ver CuradoSpaceTable),
-      // para que los tres espacios de Control Curado se lean con el mismo criterio.
-      .sort(compareAperturaDensidad);
-  }, [filteredInventario, getStockEnCurado]);
+        const peso = safeNum(getProp(row, ['peso', 'PESO']));
+        if (peso > 0) { r.pesoSuma += peso; r.pesoN += 1; }
+        const kg = safeNum(getProp(row, ['CantidadStock', 'CANTIDADSTOCK', 'CANTIDAD_STOCK']));
+        const fab = parseFechaSAP(getProp(row, ['fecha', 'FECHA', 'FECHA_INICIO', 'FECHA_FABRICACION', 'FECHA_OT_PRG_INI']));
+        if (kg > 0 && fab) {
+          const disp = new Date(fab);
+          disp.setDate(disp.getDate() + CURADO_DIAS_ESPERA);
+          if (todayStr >= format(disp, 'yyyy-MM-dd')) { r.curadosUN += 1; r.curadosKg += kg; }
+          else { r.enCuradoUN += 1; r.enCuradoKg += kg; }
+        }
+        m.set(code, r);
+      });
+      porEspacio[space.key] = Array.from(m.values())
+        .map(({ pesoSuma, pesoN, ...r }) => ({ ...r, pesoProm: pesoN > 0 ? pesoSuma / pesoN : 0 }))
+        .sort(compareAperturaDensidad);
+    });
+    return porEspacio;
+  }, [curadoData, filteredInventario]);
 
   // Panel: Rango evaluado → Datos SAP (x/5) → Generando necesidades (fase en el efecto
   // autoGenerarPendiente, que cierra el panel). El rango se elige antes, en handleSincronizarYGenerar.
@@ -1629,86 +1632,70 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     );
   };
 
-  // Evaluación Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material — misma base de
-  // cálculo (TamLoteMin) que Inventarios y Resumen, disponible aquí para no tener que cambiar de
-  // tab a la hora de verificar coherencia entre los tres números.
-  const renderCuradoEvaluation = (data: typeof curadoStockEvaluation) => {
-    const tStockKg = data.reduce((s, r) => s + r.stockKg, 0);
-    const tStockUN = data.reduce((s, r) => s + r.stockUN, 0);
-    const tEnCuradoLeaderUN = data.reduce((s, r) => s + r.stockEnCuradoLeaderUN, 0);
-    const tEnCuradoCofamaUN = data.reduce((s, r) => s + r.stockEnCuradoCofamaUN, 0);
-    const tUtilUN = data.reduce((s, r) => s + r.stockUtilUN, 0);
-
+  const renderStockCurado = (titulo: string, data: StockCuradoRow[]) => {
+    const t = data.reduce((s, r) => ({
+      curadosUN: s.curadosUN + r.curadosUN, curadosKg: s.curadosKg + r.curadosKg,
+      enCuradoUN: s.enCuradoUN + r.enCuradoUN, enCuradoKg: s.enCuradoKg + r.enCuradoKg, stockSapKg: s.stockSapKg + r.stockSapKg,
+    }), { curadosUN: 0, curadosKg: 0, enCuradoUN: 0, enCuradoKg: 0, stockSapKg: 0 });
+    const th = "px-4 py-3 border-r border-gray-100";
+    const td = "px-4 py-2 border-r border-gray-100 font-mono";
     return (
       <div className="space-y-2">
-        <div className="px-2 flex items-center justify-between">
-          <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest" title="Stock (UN) = Stock (KG) ÷ Lote Mínimo · En Curado separado por proceso (Leader / Cofama)">Evaluación Stock / En Curado / Stock Útil por Material</h4>
-        </div>
-        <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left mb-8">
+        <h4 className="px-2 text-[11px] font-black uppercase tracking-widest text-slate-700">{titulo}</h4>
+        <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
               <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-10">
                 <tr>
-                  <th className="px-4 py-4 text-left border-r border-gray-100">Material</th>
-                  <th className="px-6 py-4 text-left border-r border-gray-100">Descripción</th>
-                  <th className="px-4 py-4 border-r border-gray-100">Lote Mín. (KG)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50">Stock (KG)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50 font-black">Stock (UN)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-amber-700 bg-amber-50/50">En Curado Leader (UN)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-orange-700 bg-orange-50/50">En Curado Cofama (UN)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50 font-black">Stock Útil (UN)</th>
-                  <th className="px-4 py-4 text-teal-700 bg-teal-50/50" title="Promedio de CuradoAltura de los bloques de curado del material (mín–máx y cantidad en el tooltip)">Curado Altura (cm)</th>
+                  <th className={cn(th, "text-left")}>Material</th>
+                  <th className={cn(th, "text-left")}>Descripción</th>
+                  <th className={cn(th, "text-emerald-700 bg-emerald-50/50")} title={`Fabricación + ${CURADO_DIAS_ESPERA} días`}>Curados (bloq.)</th>
+                  <th className={cn(th, "text-emerald-700 bg-emerald-50/50")} title="Σ CantidadStock">Curados (Kg)</th>
+                  <th className={cn(th, "text-amber-700 bg-amber-50/50")}>En curado (bloq.)</th>
+                  <th className={cn(th, "text-amber-700 bg-amber-50/50")} title="Σ CantidadStock">En curado (Kg)</th>
+                  <th className={th} title="Promedio de peso de los bloques fabricados">Peso real (Kg/bloq.)</th>
+                  <th className={cn(th, "text-teal-700")} title="Promedio de CuradoAltura">Altura (cm)</th>
+                  <th className="px-4 py-3 text-slate-500" title="StockActual del cubo de inventarios, centro 1000">Stock SAP (Kg)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50 font-bold">
                 {data.length === 0 ? (
-                  <tr><td colSpan={9} className="py-16 text-center text-slate-200 uppercase font-black">Sin stock de &quot;BLOQUE FORMULADO&quot; registrado</td></tr>
-                ) : (
-                  data.map((row, idx) => {
-                    const prevApertura = idx > 0 ? data[idx - 1].apertura : null;
-                    const nuevoGrupo = row.apertura !== prevApertura;
-                    return (
-                      <React.Fragment key={idx}>
-                        {nuevoGrupo && (
-                          <tr className="bg-indigo-50/60">
-                            <td colSpan={9} className="px-4 py-2 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">
-                              {aperturaGroupLabel(row.apertura)}
-                            </td>
-                          </tr>
-                        )}
-                        <tr className="hover:bg-slate-50 transition-colors">
-                          <td className="px-4 py-3 text-left font-mono font-black text-indigo-600 border-r border-gray-100">{row.materialCode}</td>
-                          <td className="px-6 py-3 text-left uppercase text-slate-700 border-r border-gray-100 truncate max-w-[280px]">{row.descripcion}</td>
-                          <td className="px-4 py-3 border-r border-gray-100 font-mono text-slate-500">{row.loteMin > 0 ? formatNum(row.loteMin, 0) : '—'}</td>
-                          <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-emerald-600 bg-emerald-50/10">{formatNum(row.stockKg, 0)}</td>
-                          <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-emerald-800 bg-emerald-50/20">{row.stockUN.toFixed(1)}</td>
-                          <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-amber-700 bg-amber-50/20">{row.stockEnCuradoLeaderUN.toFixed(1)}</td>
-                          <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-orange-700 bg-orange-50/20">{row.stockEnCuradoCofamaUN.toFixed(1)}</td>
-                          <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-emerald-800 bg-emerald-50/30">{row.stockUtilUN.toFixed(1)}</td>
-                          {(() => {
-                            const altura = alturaRealPorBloque.get(row.materialCode);
-                            return (
-                              <td className="px-4 py-3 font-mono font-black text-teal-800 bg-teal-50/20" title={altura ? `${altura.min.toFixed(1)}–${altura.max.toFixed(1)} cm · ${altura.n} bloque(s)` : 'Sin registros de curado con altura'}>
-                                {altura ? (altura.suma / altura.n).toFixed(1) : '—'}
-                              </td>
-                            );
-                          })()}
+                  <tr><td colSpan={9} className="py-12 text-center text-slate-300 uppercase font-black">Sin bloques</td></tr>
+                ) : data.map((row, idx) => {
+                  const nuevoGrupo = idx === 0 || row.apertura !== data[idx - 1].apertura;
+                  const altura = alturaRealPorBloque.get(row.materialCode);
+                  return (
+                    <React.Fragment key={row.materialCode}>
+                      {nuevoGrupo && (
+                        <tr className="bg-indigo-50/60">
+                          <td colSpan={9} className="px-4 py-1.5 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">{aperturaGroupLabel(row.apertura)}</td>
                         </tr>
-                      </React.Fragment>
-                    );
-                  })
-                )}
+                      )}
+                      <tr className="hover:bg-slate-50 transition-colors">
+                        <td className={cn(td, "text-left font-black text-indigo-600")}>{row.materialCode}</td>
+                        <td className="px-4 py-2 border-r border-gray-100 text-left uppercase text-slate-700 truncate max-w-[280px]">{row.descripcion}</td>
+                        <td className={cn(td, "font-black text-emerald-800 bg-emerald-50/20")}>{formatNum(row.curadosUN, 0)}</td>
+                        <td className={cn(td, "text-emerald-700 bg-emerald-50/20")}>{formatNum(row.curadosKg, 1)}</td>
+                        <td className={cn(td, "font-black text-amber-800 bg-amber-50/20")}>{formatNum(row.enCuradoUN, 0)}</td>
+                        <td className={cn(td, "text-amber-700 bg-amber-50/20")}>{formatNum(row.enCuradoKg, 1)}</td>
+                        <td className={cn(td, "text-slate-700")}>{row.pesoProm > 0 ? formatNum(row.pesoProm, 1) : '—'}</td>
+                        <td className={cn(td, "text-teal-800")} title={altura ? `${altura.min.toFixed(1)}–${altura.max.toFixed(1)} cm · ${altura.n} bloque(s)` : undefined}>{altura ? (altura.suma / altura.n).toFixed(1) : '—'}</td>
+                        <td className="px-4 py-2 font-mono text-slate-500">{formatNum(row.stockSapKg, 1)}</td>
+                      </tr>
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
               {data.length > 0 && (
                 <tfoot className="bg-gray-100 text-gray-800 font-black text-[10px] uppercase border-t-2 border-gray-200 sticky bottom-0 z-10">
                   <tr>
-                    <td colSpan={3} className="px-4 py-4 text-right tracking-widest border-r border-gray-200">Totales</td>
-                    <td className="px-4 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{formatNum(tStockKg, 0)}</td>
-                    <td className="px-4 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{tStockUN.toFixed(1)}</td>
-                    <td className="px-4 py-4 border-r border-gray-200 font-mono text-amber-700 bg-amber-50">{tEnCuradoLeaderUN.toFixed(1)}</td>
-                    <td className="px-4 py-4 border-r border-gray-200 font-mono text-orange-700 bg-orange-50">{tEnCuradoCofamaUN.toFixed(1)}</td>
-                    <td className="px-4 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{tUtilUN.toFixed(1)}</td>
-                    <td className="px-4 py-4 bg-teal-50" />
+                    <td colSpan={2} className="px-4 py-3 text-right tracking-widest border-r border-gray-200">Totales</td>
+                    <td className="px-4 py-3 border-r border-gray-200 font-mono text-emerald-800">{formatNum(t.curadosUN, 0)}</td>
+                    <td className="px-4 py-3 border-r border-gray-200 font-mono text-emerald-700">{formatNum(t.curadosKg, 1)}</td>
+                    <td className="px-4 py-3 border-r border-gray-200 font-mono text-amber-800">{formatNum(t.enCuradoUN, 0)}</td>
+                    <td className="px-4 py-3 border-r border-gray-200 font-mono text-amber-700">{formatNum(t.enCuradoKg, 1)}</td>
+                    <td colSpan={2} className="border-r border-gray-200" />
+                    <td className="px-4 py-3 font-mono text-slate-600">{formatNum(t.stockSapKg, 1)}</td>
                   </tr>
                 </tfoot>
               )}
@@ -1865,9 +1852,11 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       );
       case 'curado': return (
         <div className="animate-in fade-in duration-300 text-left space-y-4">
-           {renderCuradoEvaluation(curadoStockEvaluation)}
            {CURADO_SPACES.map(space => (
-             <CuradoSpaceTable key={space.key} data={curadoData} space={space} />
+             <React.Fragment key={space.key}>
+               {renderStockCurado(space.title, stockCuradoPorEspacio[space.key] ?? [])}
+               <CuradoSpaceTable data={curadoData} space={space} />
+             </React.Fragment>
            ))}
            {(!curadoData || curadoData.length === 0) && (
              <div className="py-24 text-center bg-gray-50/30 rounded-3xl border-2 border-dashed border-gray-100">
