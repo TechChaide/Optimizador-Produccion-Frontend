@@ -3,12 +3,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   FlaskConical,
-  Package,
   Loader2,
   LayoutDashboard,
-  Calendar as CalendarIcon,
-  ChevronLeft,
-  ChevronRight,
   Database,
   RefreshCw,
   Minus,
@@ -47,8 +43,8 @@ import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { CUPULA_MAX_CM } from '@/lib/bloques-espuma';
 import { ventanaCorte, fertEnVentanaCorteMaterial, responsablesCorte, motivoFueraDeSubBloques, CODIGO_GRUPO_CORTE_POR_CENTRO } from '@/lib/ventana-corte';
-import { nextBusinessDay, laborablesHorizonte, cargarDiasNoLaborables, type DiasNoLaborables } from '@/lib/dias-laborables';
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths } from 'date-fns';
+import { nextBusinessDay, addBusinessDays, laborablesHorizonte, cargarDiasNoLaborables, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 
 const BLOCK_LENGTH_METERS = 20;
@@ -57,6 +53,17 @@ const BLOCK_LENGTH_METERS = 20;
 // fab + 2, es decir solo 2 días de reposo sin contar el de fabricación como día 1) — confirmado por
 // el usuario como bug de criterio: le faltaba un día de cobertura real a los bloques.
 const CURADO_DIAS_ESPERA = 3;
+
+// Paso 1 · Necesidad (usuario 2026-10-31): solo FERT (las provisionales varían, no es información real),
+// por FECHAFIN. Planificado = FERT del día de corte D (Venta Externa D+1, ver @/lib/ventana-corte);
+// Pendiente = FERT con saldo de hasta 3 días hábiles antes — más atrás ya es retraso del PT, y 3 días es
+// lo que toma fabricar y curar un bloque.
+const DIAS_PENDIENTE_FERT = 3;
+// Venta Externa en Corte = responsable 038 (1 lámina cortada = 1 lámina empacada, se pasa a Kg por BOM).
+const RESP_VENTA_EXTERNA = '038';
+type TramoNecesidad = 'pendiente' | 'planificado';
+type DestinoConsumo = '1000' | '2000' | 'VE';
+const ETIQUETA_DESTINO: Record<DestinoConsumo, string> = { '1000': 'UIO', '2000': 'GYE', VE: 'VE' };
 
 // Responsables de Control de Producción que consumen el recurso Formulación, por centro — FALLBACK
 // únicamente, para el ratito entre que el módulo se monta y "Sincronizar" trae la restricción real
@@ -539,6 +546,9 @@ const isResponsableAllowed = (centro: string, resp: string, respPorCentro: Recor
   const allowed = respPorCentro[centro];
   return !!allowed && allowed.includes(resp);
 };
+// Venta Externa (038) consume Bloque Formulado aunque no esté en RespCtrlProd_Consumo_{centro}.
+const entraEnFormulacion = (centro: string, resp: string, respPorCentro: Record<string, string[]>): boolean =>
+  resp === RESP_VENTA_EXTERNA || isResponsableAllowed(centro, resp, respPorCentro);
 
 // Una fila de trazabilidad de consumo: desde el material "BLOQUE FORMULADO" (codFormulado) hasta
 // el componente final del que forma parte, pasando por el nivel intermedio del árbol BOM
@@ -561,8 +571,8 @@ interface ConsumoBloqueRow {
   // Ausentes en reportes guardados antes de ese cambio.
   fechaFin?: string;
   ventaExterna?: boolean;
-  // false = la orden entró solo por la ventana de corte (FECHA fuera del rango): no alimenta la Salida de Datos.
-  enRango?: boolean;
+  tramo?: TramoNecesidad;
+  destino?: DestinoConsumo;
   // Cantidad pendiente de la orden (láminas, UN) — la misma que cuenta Sub-Bloques-T8 de Corte.
   cantidad?: number;
 }
@@ -589,8 +599,8 @@ interface FormuladoSummaryRow {
   corrida: string;
   dens: string;
   apertura: string;
-  totalBloquesProv: number;
-  totalBloquesFert: number;
+  totalBloquesPendiente: number;
+  totalBloquesPlanificado: number;
   planReposicion: number;
   stockKg: number;
   stockUN: number;
@@ -720,7 +730,7 @@ const aperturaGroupLabel = (apertura: string): string => apertura === '—' ? 'S
 // [[persistencia_resumen_procesado_gap]]).
 const CACHE_FORMULACION = 'tactica-formulacion';
 interface SnapshotFormulacion {
-  ordenes: RawApiRow[];
+  diaCorte?: string;
   ordenesFert: RawApiRow[];
   cuboInventarios: CuboInventariosItem[];
   curadoData: RawApiRow[];
@@ -764,9 +774,8 @@ const JornadaCentroPanel: React.FC<{ titulo: string; jornada: JornadaGrupoEditab
 // Cambiar su forma exige subir `version` (los respaldos viejos dejan de cargarse).
 interface EstadoPlanFormulacion {
   tipo: 'formulacion-salida';
-  version: 1;
-  rangeStart: string | null;
-  rangeEnd: string | null;
+  version: 2;
+  diaCorte: string;
   unifiedSummaryData: FormuladoSummaryRow[];
   consumoBloqueFormulado: ConsumoBloqueRow[];
 }
@@ -776,7 +785,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   useAppContext();
 
   const [mounted, setMounted] = useState(false);
-  const [activeTab, setActiveTab] = useState('resumen');
+  const [activeTab, setActiveTab] = useState('necesidad');
   const [grupos, setGrupos] = useState<Grupo[]>([]);
   const [restricciones, setRestricciones] = useState<Restriccion[]>([]);
   // Grupo de Formulación de cada centro (el de nombre "formulación"; si no hay, el de "espuma" del
@@ -790,12 +799,11 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   const codigoGrupoFormulacion2000 = codigoGrupoFormulacionDe('2000');
   const jornada1000 = useJornadaGrupo(restricciones, codigoGrupoFormulacion1000);
   const jornada2000 = useJornadaGrupo(restricciones, codigoGrupoFormulacion2000);
-  const [ordenes, setOrders] = useState<RawApiRow[]>([]);
   const [ordenesFert, setOrdersFert] = useState<RawApiRow[]>([]);
   const [cuboInventarios, setCuboInventarios] = useState<CuboInventariosItem[]>([]);
   const [curadoData, setCuradoData] = useState<RawApiRow[]>([]);
-  // Día de corte del tab FERT (misma ventana que Sub-Bloques-T8 de Corte, ver @/lib/ventana-corte) con
-  // el calendario de feriados / días no trabajados; '' = hoy + 1 hábil.
+  // Día de corte D (misma ventana que Sub-Bloques-T8 de Corte, ver @/lib/ventana-corte) con el
+  // calendario de feriados / días no trabajados; '' = hoy + 1 hábil. Se elige al sincronizar.
   const [diaCorte, setDiaCorte] = useState('');
   // Sin sincronizar (reporte restaurado) queda vacío y responsablesCorte cae a su respaldo fijo.
   const [restriccionesCorte, setRestriccionesCorte] = useState<Restriccion[]>([]);
@@ -807,6 +815,16 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   }, []);
   const siguienteDiaHabil = useCallback((d: Date) => nextBusinessDay(d, calendario.noLaborables, laborablesHorizonte(calendario.laborablesExtra)), [calendario]);
   const ventana = useMemo(() => ventanaCorte(diaCorte, siguienteDiaHabil), [diaCorte, siguienteDiaHabil]);
+  const pendienteDesde = useMemo(
+    () => format(addBusinessDays(new Date(`${ventana.d}T12:00:00`), -DIAS_PENDIENTE_FERT, calendario.noLaborables, laborablesHorizonte(calendario.laborablesExtra)), 'yyyy-MM-dd'),
+    [ventana.d, calendario]
+  );
+  // Tramo de una FERT por su FECHAFIN; null = fuera de la ventana (no entra en la necesidad).
+  const tramoFert = useCallback((fechaFin: string, esVentaExterna: boolean): TramoNecesidad | null => {
+    const plan = esVentaExterna ? ventana.venta : ventana.d;
+    if (fechaFin === plan) return 'planificado';
+    return fechaFin >= pendienteDesde && fechaFin < plan ? 'pendiente' : null;
+  }, [ventana, pendienteDesde]);
   // El módulo YA NO sincroniza solo al abrirse — mismo criterio que Corte Espuma/Venta Externa/
   // Laminado (ver [[carga_manual_modulos_tacticos]], antes marcado como pendiente para este módulo).
   const [isLoading, setIsLoading] = useState(false);
@@ -831,27 +849,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
   const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
   const [consumoBloqueFormulado, setConsumoBloqueFormulado] = useState<ConsumoBloqueRow[]>([]);
-
-  // Rango de fechas (reemplaza el multi-select de días sueltos que había antes): con ambos extremos
-  // en null equivale a "Plan Maestro" (sin filtro, todas las órdenes cargadas) — el resto del tiempo
-  // acota provFiltradas/prodFiltradas a [rangeStart, rangeEnd] inclusive. Default hoy -> hoy+3 (ver
-  // efecto de montaje más abajo): mismo horizonte que CURADO_DIAS_ESPERA, para que la necesidad ya
-  // incluya de entrada las órdenes que caen dentro de la ventana de reposo/recuperación de bloques
-  // (antes, con un solo día seleccionado, se perdían órdenes futuras dentro de esa ventana — bug de
-  // alcance que reportó el usuario con una fecha_inicio_plan/fecha de recuperación reales).
-  const [rangeStart, setRangeStart] = useState<string | null>(null);
-  const [rangeEnd, setRangeEnd] = useState<string | null>(null);
-  const [viewDate, setViewDate] = useState(new Date());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setMounted(true);
-    const today = new Date();
-    setViewDate(today);
-    const horizonte = new Date(today);
-    horizonte.setDate(horizonte.getDate() + CURADO_DIAS_ESPERA);
-    setRangeStart(format(today, 'yyyy-MM-dd'));
-    setRangeEnd(format(horizonte, 'yyyy-MM-dd'));
   }, []);
 
 
@@ -871,44 +872,17 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     return { '1000': build('1000'), '2000': build('2000') };
   }, [restricciones]);
 
-  // 'yyyy-MM-dd' ordena lexicográficamente igual que cronológicamente, así que comparar como string
-  // basta para el rango — sin rangeStart/rangeEnd (Plan Maestro) no filtra nada.
-  const enRangoFechas = useCallback((itemDate: string): boolean => {
-    if (!rangeStart && !rangeEnd) return true;
-    if (rangeStart && itemDate < rangeStart) return false;
-    if (rangeEnd && itemDate > rangeEnd) return false;
-    return true;
-  }, [rangeStart, rangeEnd]);
-
-  // Base por centro y fecha (1000 = UIO, 2000 = GYE). El filtro por responsable de Control de
-  // Producción (respPorCentroDinamico) se aplica más abajo, en handleProcessResumen, antes de
-  // acumular necesidades — el Resumen ya NO considera la necesidad global de todos los
-  // responsables, solo la de quienes controlan el recurso Formulación.
-  const provFiltradas = useMemo(() => {
-    return ordenes.filter(o => {
-      const centro = getProp(o, ['CENTRO', 'Centro']).trim();
-      if (centro && !['1000', '2000'].includes(centro)) return false;
-      const itemDateFull = getProp(o, ['FECHAINICIO', 'FECHA']).trim();
-      const itemDate = itemDateFull.includes('T') ? itemDateFull.split('T')[0] : itemDateFull;
-      return enRangoFechas(itemDate);
-    });
-  }, [ordenes, enRangoFechas]);
-
-  // FERT que se explotan: las del rango por FECHA (alimentan la Salida de Datos, sin cambios) MÁS las
-  // que se cortan dentro del rango por FECHAFIN (ventana de corte, ver @/lib/ventana-corte): una FERT
-  // liberada días antes tiene FECHA fuera del rango pero se corta en D, y el tab FERT debe mostrarla
-  // igual que Sub-Bloques-T8. +4 días al final del rango para alcanzar la FECHAFIN de Venta Externa (D+1
-  // hábil) aun con fin de semana o feriado de por medio.
+  // FERT candidatas: centro 1000/2000 y FECHAFIN entre el inicio del pendiente y la fecha de Venta
+  // Externa (D+1). El tramo exacto (y el responsable) se resuelve en handleProcessResumen, que ya conoce
+  // los materiales de Venta Externa.
   const prodFiltradas = useMemo(() => {
-    const finVentana = rangeEnd ? format(new Date(new Date(`${rangeEnd}T12:00:00`).getTime() + 4 * 86400000), 'yyyy-MM-dd') : null;
     return ordenesFert.filter(o => {
       const centro = getProp(o, ['CENTRO', 'Centro']).trim();
       if (centro && !['1000', '2000'].includes(centro)) return false;
-      if (enRangoFechas(soloFechaOrden(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']))) return true;
       const fechaFin = fechaFinOrden(o);
-      return !!fechaFin && (!rangeStart || fechaFin >= rangeStart) && (!finVentana || fechaFin <= finVentana);
+      return !!fechaFin && fechaFin >= pendienteDesde && fechaFin <= ventana.venta;
     });
-  }, [ordenesFert, enRangoFechas, rangeStart, rangeEnd]);
+  }, [ordenesFert, pendienteDesde, ventana.venta]);
 
   // Inventario SAP (fuente CuboInventarios) filtrado a materiales "BLOQUE FORMULADO". El
   // StockActual de CuboInventarios ya viene en KG para estos materiales HALB (PesoNetoActual/
@@ -965,28 +939,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     }, 0);
   }, [curadoData]);
 
-  // Necesidad neta = (necesidad de órdenes provisionales por fecha + necesidad en proceso de
-  // órdenes FERT) − stock disponible (stock SAP menos lo que aún está en curado). El plan de
-  // reposición solo cubre el faltante, no la necesidad bruta. Solo se acumulan órdenes cuyo
-  // responsable de Control de Producción está autorizado para el centro (respPorCentroDinamico)
-  // — una orden de un responsable no listado no debe inflar la necesidad de Formulación.
+  // Paso 1 · Necesidad: FERT de la ventana (pendiente + planificado) de los responsables de Formulación
+  // y de Venta Externa (038), explotadas a Kg de Bloque Formulado. Necesidad neta = esa necesidad −
+  // stock útil (stock SAP menos lo que aún está en curado); el plan de reposición cubre el faltante.
   const handleProcessResumen = useCallback(async (): Promise<{ estado: 'ok' | 'aviso' | 'error'; mensaje: string; progreso?: { actual: number; total: number } }> => {
-    const buildEntry = (o: RawApiRow, origin: 'prov' | 'fert') => ({
-      order: o,
-      origin,
-      centro: getProp(o, ['CENTRO', 'Centro']).trim(),
-      resp: getProp(o, ['RESPCTRLPROD', 'RESPCONTROLPROD', 'RESP_CONTROL_PROD', 'RESPONSABLE']).trim()
-    });
-    const allOrders = [
-      ...provFiltradas.map(o => buildEntry(o, 'prov' as const)),
-      ...prodFiltradas.map(o => buildEntry(o, 'fert' as const))
-    ].filter(e => isResponsableAllowed(e.centro, e.resp, respPorCentroDinamico));
-    if (allOrders.length === 0) {
-      setUnifiedSummaryData([]);
-      setConsumoBloqueFormulado([]);
-      return { estado: 'aviso', mensaje: 'Sin órdenes FERT/provisionales de los responsables de Formulación en el rango elegido.' };
-    }
-    setIsProcessingResumen(true);
     // Materiales de Venta Externa por centro (`centro|material`) = líneas de los P2 de Venta activos —
     // mismo cruce con el que Corte reconoce una FERT de Venta (origenArea) para fecharla a D+1.
     const materialesVenta = new Set<string>();
@@ -996,8 +952,24 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       (await detallesDePlanes(planes.map(pg => pg.codigo_plan_grupo))).forEach(d => {
         if (d.estado === 'A') materialesVenta.add(`${centroDePlan.get(d.codigo_plan_grupo)}|${cleanCode(d.codigo_material)}`);
       });
-    } catch { console.warn('[Formulación] No se pudo leer el P2 de Venta Externa: sus FERT se fechan como colchones en el tab FERT.'); }
+    } catch { console.warn('[Formulación] No se pudo leer el P2 de Venta Externa: sus FERT se fechan con D (no D+1).'); }
     setMaterialesVenta(materialesVenta);
+    const allOrders = prodFiltradas.flatMap(o => {
+      const centro = getProp(o, ['CENTRO', 'Centro']).trim();
+      const resp = getProp(o, ['RESPCTRLPROD', 'RESPCONTROLPROD', 'RESP_CONTROL_PROD', 'RESPONSABLE']).trim();
+      if (!entraEnFormulacion(centro, resp, respPorCentroDinamico)) return [];
+      const esVenta = resp === RESP_VENTA_EXTERNA || materialesVenta.has(`${centro}|${extractMaterialInfo(o).code}`);
+      const tramo = tramoFert(fechaFinOrden(o), esVenta);
+      if (!tramo) return [];
+      const destino: DestinoConsumo = resp === RESP_VENTA_EXTERNA ? 'VE' : centro === '2000' ? '2000' : '1000';
+      return [{ order: o, origin: 'fert' as const, centro, resp, esVenta, tramo, destino }];
+    });
+    if (allOrders.length === 0) {
+      setUnifiedSummaryData([]);
+      setConsumoBloqueFormulado([]);
+      return { estado: 'aviso', mensaje: `Sin FERT de Formulación / Venta Externa entre ${pendienteDesde} y ${ventana.venta}.` };
+    }
+    setIsProcessingResumen(true);
     const groupsMap = new Map<string, FormuladoSummaryRow>();
     const consumoRows: ConsumoBloqueRow[] = [];
     // Consumo/D se pide UNA vez por Bloque Formulado (no por orden): varias órdenes distintas
@@ -1007,9 +979,11 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     setResumenProgress({ current: 0, total: allOrders.length });
 
     for (let i = 0; i < allOrders.length; i++) {
-      const { order: o, origin, centro: centroOrden, resp: respOrden } = allOrders[i];
+      const { order: o, origin, centro: centroOrden, resp: respOrden, esVenta, tramo, destino } = allOrders[i];
       const info = extractMaterialInfo(o);
       const qty = safeNum(getProp(o, ['CANTPEND', 'CANTPENDIENTE', 'CANTPROGRAMADA', 'CANTIDAD', 'CANT_PROG']));
+      // Pendiente = lo que falta cortar: una orden ya completa no consume más bloque.
+      if (qty <= 0) continue;
       const anchoVal = parseFloat(info.ancho) || 0;
       const espVal = parseFloat(info.esp) || 0;
       const densVal = parseFloat(String(info.dens)) || 0;
@@ -1019,11 +993,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         : 0;
       const itemKg = (anchoVal * 200 * espVal * densVal * qty) / 10000;
       const ordenNum = getProp(o, ['ORDENPREVISIONAL', 'ORDEN', 'ORDEN_PROCESO']) || '—';
-      // Las provisionales siempre vienen del rango; una FERT puede venir solo por la ventana de corte.
-      const enRango = origin === 'prov' || enRangoFechas(soloFechaOrden(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']));
-      const marcaVentana: Partial<ConsumoBloqueRow> = origin === 'fert'
-        ? { fechaFin: fechaFinOrden(o), ventaExterna: materialesVenta.has(`${centroOrden}|${info.code}`), enRango, cantidad: qty }
-        : {};
+      const marcaVentana: Partial<ConsumoBloqueRow> = { fechaFin: fechaFinOrden(o), ventaExterna: esVenta, tramo, destino, cantidad: qty };
       const consumoDesde = consumoRows.length;
 
       let blockCode = '—';
@@ -1064,11 +1034,6 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         });
       }
       for (let k = consumoDesde; k < consumoRows.length; k++) Object.assign(consumoRows[k], marcaVentana);
-      // Una FERT que entró solo por la ventana de corte no cambia la Salida de Datos (rango por FECHA).
-      if (!enRango) {
-        if (i % 10 === 0) setResumenProgress({ current: i + 1, total: allOrders.length });
-        continue;
-      }
 
       // "Salida de Datos" (unifiedSummaryData) SOLO debe reflejar Bloque Formulado real — el usuario
       // confirmó que ese tab toma sus datos de "Consumo de Bloque Formulado por Componente" (arriba),
@@ -1105,21 +1070,21 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
           groupsMap.set(key, {
             blockCode, blockDesc: blockDesc !== '—' ? blockDesc : info.desc, centro: centroOrden, corrida,
             dens: info.dens, apertura: info.apertura,
-            totalBloquesProv: 0, totalBloquesFert: 0, planReposicion: 0,
+            totalBloquesPendiente: 0, totalBloquesPlanificado: 0, planReposicion: 0,
             stockKg, stockUN, stockEnCuradoUN, stockUtilUN, pesoBloque,
             kgTotal: 0, unidades: 0, consumoDiarioKg,
             ferts: []
           });
         }
         const entry = groupsMap.get(key)!;
-        if (origin === 'prov') {
-          entry.totalBloquesProv += itemBloques;
+        if (tramo === 'pendiente') {
+          entry.totalBloquesPendiente += itemBloques;
         } else {
-          entry.totalBloquesFert += itemBloques;
+          entry.totalBloquesPlanificado += itemBloques;
         }
         entry.kgTotal += itemKg;
         entry.unidades += qty;
-        entry.planReposicion = Math.max(0, Math.ceil(entry.totalBloquesProv + entry.totalBloquesFert - entry.stockUtilUN));
+        entry.planReposicion = Math.max(0, Math.ceil(entry.totalBloquesPendiente + entry.totalBloquesPlanificado - entry.stockUtilUN));
         entry.ferts.push({ code: info.code, desc: info.desc, qty, kg: itemKg, bloques: itemBloques, origin });
       }
       if (i % 10 === 0) setResumenProgress({ current: i + 1, total: allOrders.length });
@@ -1144,7 +1109,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     });
     setIsProcessingResumen(false);
     return { estado: 'ok', mensaje: `${allOrders.length} orden(es) → ${summaryOrdenado.length} bloque(s) formulado(s) en el resumen.`, progreso: { actual: allOrders.length, total: allOrders.length } };
-  }, [provFiltradas, prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico, enRangoFechas]);
+  }, [prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico, tramoFert, pendienteDesde, ventana.venta]);
 
   // Segunda fase de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar): corre
   // handleProcessResumen automáticamente en cuanto el render con los datos recién sincronizados ya
@@ -1224,22 +1189,22 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       return `
 <p style="margin:18px 0 6px;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">${titulo}</p>
 <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #e5e7eb;border-collapse:collapse;">
-  <tr>${th('Bloque')}${th('Corrida')}${th('Descripción')}${th('Dens.')}${th('Apert.')}${th('Nec. Prov (Bloq)', true)}${th('Nec. FERT (Bloq)', true)}${th('Stock (Kg)', true)}${th('Stock (UN)', true)}${th('En Curado (UN)', true)}${th('Stock Útil (UN)', true)}${th('Consumo/D (Kg)', true)}${th('Cobertura (Días)', true)}${th('Plan Reposición (UN)', true)}</tr>
+  <tr>${th('Bloque')}${th('Corrida')}${th('Descripción')}${th('Dens.')}${th('Apert.')}${th('Pendiente (Bloq)', true)}${th('Planificado (Bloq)', true)}${th('Stock (Kg)', true)}${th('Stock (UN)', true)}${th('En Curado (UN)', true)}${th('Stock Útil (UN)', true)}${th('Consumo/D (Kg)', true)}${th('Cobertura (Días)', true)}${th('Plan Reposición (UN)', true)}</tr>
   ${filas.map(r => {
     const cobertura = r.consumoDiarioKg > 0 ? (r.stockUtilUN * r.pesoBloque) / r.consumoDiarioKg : null;
-    return `<tr>${td(esc(r.blockCode))}${td(esc(r.corrida))}${td(esc(r.blockDesc))}${td(esc(r.dens))}${td(esc(r.apertura))}${td(r.totalBloquesProv.toFixed(2), true)}${td(r.totalBloquesFert.toFixed(2), true)}${td(formatNum(r.stockKg, 0), true)}${td(r.stockUN.toFixed(1), true)}${td(r.stockEnCuradoUN.toFixed(1), true)}${td(r.stockUtilUN.toFixed(1), true)}${td(r.consumoDiarioKg.toFixed(1), true)}${td(cobertura === null ? '—' : cobertura.toFixed(1), true)}${td(String(r.planReposicion), true)}</tr>`;
+    return `<tr>${td(esc(r.blockCode))}${td(esc(r.corrida))}${td(esc(r.blockDesc))}${td(esc(r.dens))}${td(esc(r.apertura))}${td(r.totalBloquesPendiente.toFixed(2), true)}${td(r.totalBloquesPlanificado.toFixed(2), true)}${td(formatNum(r.stockKg, 0), true)}${td(r.stockUN.toFixed(1), true)}${td(r.stockEnCuradoUN.toFixed(1), true)}${td(r.stockUtilUN.toFixed(1), true)}${td(r.consumoDiarioKg.toFixed(1), true)}${td(cobertura === null ? '—' : cobertura.toFixed(1), true)}${td(String(r.planReposicion), true)}</tr>`;
   }).join('')}
 </table>
 <p style="margin:6px 0 0;font-size:11px;font-weight:700;color:#b45309;">Totales — Stock: ${formatNum(tStockKg, 0)} Kg · Cobertura sección: ${tConsumoKg > 0 ? (tStockUtilKg / tConsumoKg).toFixed(1) : '—'} días · Plan Reposición: ${tReposicion} UN</p>`;
     };
-    const rango = !rangeStart && !rangeEnd ? 'Plan Maestro (sin filtro de fechas)' : `${rangeStart || '—'} → ${rangeEnd || '—'}`;
+    const rango = `pendiente ${pendienteDesde} → día de corte ${ventana.d} (Venta Externa ${ventana.venta})`;
     return `
 <div style="max-width:960px;margin:0 auto;background:#ffffff;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#4f46e5;"><tr><td style="padding:18px 24px;font-size:15px;font-weight:700;color:#ffffff;">CHAIDE Y CHAIDE</td><td align="right" style="padding:18px 24px;font-size:11px;font-weight:600;text-transform:uppercase;color:#c7d2fe;">Planificación de Producción</td></tr></table>
 <div style="padding:20px 24px 24px;">
 <p style="margin:0;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">Formulación · Centro ${centro} (${centro === '1000' ? 'Quito' : 'Guayaquil'}) · Reporte diario</p>
 <h1 style="margin:4px 0 0;font-size:20px;color:#111827;">Bloque Formulado — necesidad, stock y plan de reposición</h1>
-<p style="margin:6px 0 0;font-size:12px;color:#6b7280;">Fecha objetivo: ${fechaObjetivo} · Rango evaluado: ${rango}</p>
+<p style="margin:6px 0 0;font-size:12px;color:#6b7280;">Fecha objetivo: ${fechaObjetivo} · Ventana FERT: ${rango}</p>
 ${seccion('Bloque Formulado — Apertura', summarySpaces.apertura.filter(r => r.centro === centro))}
 ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySpaces.combinacion.filter(r => r.centro === centro))}
 <p style="margin:20px 0 0;padding-top:14px;border-top:1px solid #e5e7eb;font-size:11px;color:#9ca3af;">Generado automáticamente por el Optimizador de Producción, favor no responder. Para dudas sobre estos datos, contacta a Planificación Táctica.</p>
@@ -1247,29 +1212,27 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
 </div>`;
   };
 
-  const fechaObjetivoReporte = rangeStart || format(new Date(), 'yyyy-MM-dd');
+  const fechaObjetivoReporte = ventana.d;
   const asuntoReporteFormulacion = (centro: '1000' | '2000') => `Reporte de producción — Formulación [Bloque Formulado]-[Centro ${centro}]`;
   // Respaldo de "Salida de Datos" que viaja junto al TXT ({fecha}.estado.json) para volver a cargar
   // lo planificado desde "Recuperar y revisar" (mismo flujo que Corte Laminado). Cubre ambos centros:
   // se guarda una sola vez, en el reporte del Centro 1000.
   const capturarEstadoPlan = (): EstadoPlanFormulacion => ({
     tipo: 'formulacion-salida',
-    version: 1,
-    rangeStart,
-    rangeEnd,
+    version: 2,
+    diaCorte: ventana.d,
     unifiedSummaryData,
     consumoBloqueFormulado,
   });
   const restaurarEstadoPlan = (crudo: unknown, origen: OrigenEstadoPlan): boolean => {
     const e = crudo as Partial<EstadoPlanFormulacion> | null;
-    if (!e || e.tipo !== 'formulacion-salida' || e.version !== 1 || !Array.isArray(e.unifiedSummaryData)) return false;
-    setRangeStart(e.rangeStart ?? null);
-    setRangeEnd(e.rangeEnd ?? null);
-    if (e.rangeStart) setViewDate(new Date(e.rangeStart + 'T00:00:00'));
+    // version 1 (rango de fechas + provisionales) ya no se carga: hay que volver a sincronizar.
+    if (!e || e.tipo !== 'formulacion-salida' || e.version !== 2 || !Array.isArray(e.unifiedSummaryData)) return false;
+    setDiaCorte(e.diaCorte ?? '');
     setUnifiedSummaryData(e.unifiedSummaryData);
     setConsumoBloqueFormulado(e.consumoBloqueFormulado ?? []);
     setPlanCargadoDe(origen);
-    setActiveTab('resumen');
+    setActiveTab('necesidad');
     return true;
   };
 
@@ -1322,37 +1285,19 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     })();
   }, [reportePorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Consumo trazado (COD_FORMULADO -> intermedio -> componente final), acotado por los
-  // responsables de control de producción que corresponden a cada centro — este es el
-  // contenido de las pestañas "Provisionales" y "FERT".
-  const provConsumoResponsable = useMemo(
-    () => consumoBloqueFormulado.filter(r => r.origin === 'prov' && isResponsableAllowed(r.centro, r.respCtrlProd, respPorCentroDinamico)),
-    [consumoBloqueFormulado, respPorCentroDinamico]
-  );
+  // Consumo trazado (COD_FORMULADO -> bloque cortado -> componente final) de la ventana: contenido del
+  // tab "1 · Necesidad". Una sola lista con los tres destinos (UIO / GYE / VE): Formulación produce
+  // solo en UIO.
   const fertConsumoResponsable = useMemo(
-    () => consumoBloqueFormulado.filter(r => r.origin === 'fert' && isResponsableAllowed(r.centro, r.respCtrlProd, respPorCentroDinamico)),
+    () => consumoBloqueFormulado.filter(r => r.origin === 'fert' && entraEnFormulacion(r.centro, r.respCtrlProd, respPorCentroDinamico)),
     [consumoBloqueFormulado, respPorCentroDinamico]
   );
-
-  // Mismas dos colecciones, partidas por centro (1000 = UIO, 2000 = GYE) — contenido del "segundo
-  // espacio" pedido por el usuario para no mezclar Quito y Guayaquil en una sola tabla, ya que cada
-  // centro tiene su propio stock físico e insumos (ver también el Plan de Reposición por centro en
-  // handleProcessResumen/FormuladoSummaryRow.centro).
-  const provConsumoPorCentro = useMemo(() => ({
-    '1000': provConsumoResponsable.filter(r => r.centro === '1000'),
-    '2000': provConsumoResponsable.filter(r => r.centro === '2000'),
-  }), [provConsumoResponsable]);
-  // Tab FERT = mismo día de corte que Sub-Bloques-T8 de Corte (usuario 2026-10-28, ver
-  // @/lib/ventana-corte): FECHAFIN = D (Venta Externa D+1). Un reporte guardado antes del cambio no trae
-  // FECHAFIN: se muestra completo, como antes, con aviso en el tab.
-  const fertSinVentana = fertConsumoResponsable.length > 0 && fertConsumoResponsable.every(r => r.fechaFin === undefined);
-  // Una sola lista con los dos destinos: Formulación produce solo en UIO (ver renderConsumoBloqueTable porDestino).
-  // fertTodoRango: vista anterior (todas las FERT del rango sincronizado, sin filtro de día de corte).
-  const [fertTodoRango, setFertTodoRango] = useState(false);
-  const fertConsumoVentana = useMemo(
-    () => fertSinVentana || fertTodoRango ? fertConsumoResponsable.filter(r => fertSinVentana || r.enRango !== false) : fertConsumoResponsable.filter(r => fertEnVentanaCorteMaterial(r.fechaFin || "", !!r.ventaExterna, ventana)),
-    [fertConsumoResponsable, fertSinVentana, fertTodoRango, ventana]
-  );
+  // Kg por destino y tramo (solo filas en KG: las que no trazan a un Bloque Formulado van en UN).
+  const necesidadKg = useMemo(() => {
+    const m = { '1000': { pendiente: 0, planificado: 0 }, '2000': { pendiente: 0, planificado: 0 }, VE: { pendiente: 0, planificado: 0 } } as Record<DestinoConsumo, Record<TramoNecesidad, number>>;
+    fertConsumoResponsable.forEach(r => { if (r.un === 'KG' && r.destino && r.tramo) m[r.destino][r.tramo] += r.total; });
+    return m;
+  }, [fertConsumoResponsable]);
 
   // Cuadre con Sub-Bloques-T8 de Corte Espuma (usuario 2026-10-28: "es la misma data, deberían cuadrar
   // los subtotales"). Lado Corte = las FERT crudas del día de corte con el universo de Corte
@@ -1361,7 +1306,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
   // se explica cada diferencia; en UN porque es lo que cuenta Corte ("Cantidad láminas UN").
   type OrdenCuadre = { centro: string; orden: string; material: string; descripcion: string; resp: string; un: number; motivo: string };
   const cuadreCorte = useMemo(() => {
-    if (fertSinVentana) return null;
     const venta = new Set(materialesVenta);
     fertConsumoResponsable.forEach(r => { if (r.ventaExterna) venta.add(`${r.centro}|${cleanCode(r.material)}`); });
     const resp = { '1000': responsablesCorte(restriccionesCorte, '1000'), '2000': responsablesCorte(restriccionesCorte, '2000') } as const;
@@ -1391,16 +1335,16 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       corte.set(key, { centro, orden, material: info.code, descripcion: info.desc, resp: r, un, motivo: '' });
     });
     const formulacion = new Map<string, OrdenCuadre>();
-    // Siempre el día de corte, aunque la tabla muestre todo el rango (fertTodoRango).
-    fertConsumoResponsable.filter(r => fertEnVentanaCorteMaterial(r.fechaFin || "", !!r.ventaExterna, ventana)).forEach(r => {
+    // Solo el tramo planificado (día de corte): Corte no cuenta el pendiente de días anteriores.
+    fertConsumoResponsable.filter(r => r.tramo === 'planificado').forEach(r => {
       const key = `${r.centro}|${r.orden}`;
       if (!formulacion.has(key)) formulacion.set(key, { centro: r.centro, orden: r.orden, material: r.material, descripcion: r.nombre, resp: r.respCtrlProd, un: r.cantidad ?? 0, motivo: '' });
     });
     const soloCorte = Array.from(corte.entries()).filter(([k]) => !formulacion.has(k)).map(([, o]) => ({
       ...o,
-      motivo: !isResponsableAllowed(o.centro, o.resp, respPorCentroDinamico)
+      motivo: !entraEnFormulacion(o.centro, o.resp, respPorCentroDinamico)
         ? `Responsable ${o.resp || '—'} no está en RespCtrlProd_Consumo_${o.centro}`
-        : 'No se explotó (fuera del rango sincronizado)',
+        : 'Sin explosión BOM (sincroniza de nuevo)',
     }));
     const soloFormulacion = Array.from(formulacion.entries()).filter(([k]) => !corte.has(k)).map(([k, o]) => ({
       ...o, motivo: fueraDeCorte.get(k) ?? 'No es FERT del día de corte en SAP',
@@ -1411,7 +1355,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     });
     const diagnostico = { cargadas: ordenesFert.length, enVentana: enVentanaCount, deCorte: corte.size, motivos: Array.from(motivos.entries()).sort((a, b) => b[1] - a[1]), fechasFin: Array.from(fechasFin.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6) };
     return { porCentro, diagnostico, diferencias: [...soloCorte.map(o => ({ ...o, lado: 'Solo Corte' as const })), ...soloFormulacion.map(o => ({ ...o, lado: 'Solo Formulación' as const }))] };
-  }, [fertSinVentana, materialesVenta, fertConsumoResponsable, restriccionesCorte, ordenesFert, ventana, respPorCentroDinamico]);
+  }, [materialesVenta, fertConsumoResponsable, restriccionesCorte, ordenesFert, ventana, respPorCentroDinamico]);
 
   // Evaluación de Stock (KG/UN) / En Curado (UN) / Stock Útil (UN) por material "BLOQUE
   // FORMULADO", con la misma base de conversión (TamLoteMin) que el Resumen e Inventarios — para
@@ -1460,24 +1404,21 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
 
   // Panel: Rango evaluado → Datos SAP (x/5) → Generando necesidades (fase en el efecto
   // autoGenerarPendiente, que cierra el panel). El rango se elige antes, en handleSincronizarYGenerar.
-  const ejecutarSincronizacion = useCallback(async (desde: string | null, hasta: string | null) => {
-    refrescarAlSincronizar(); // FERT y provisionales siempre frescas; cubo (día) y MTTO (semana) se reusan
+  const ejecutarSincronizacion = useCallback(async (d: string) => {
+    refrescarAlSincronizar(); // FERT siempre frescas; cubo (día) y MTTO (semana) se reusan
     setIsLoading(true);
     setSyncStep('sincronizando');
-    // El rango escogido ES el filtro de fechas del resumen (sin rango = Plan Maestro).
-    setRangeStart(desde);
+    setDiaCorte(d);
     setPlanCargadoDe(null);
-    setRangeEnd(hasta);
-    if (desde) setViewDate(new Date(desde + 'T00:00:00'));
     const corta = (f: string) => format(new Date(f + 'T00:00:00'), 'EEE dd/MM', { locale: es });
     panelProgreso.iniciar('Formulación — Sincronizar y generar', [
-      { id: 'fecha', etiqueta: !desde ? 'Plan Maestro (todas las fechas)' : desde === hasta ? `Fecha evaluada: ${corta(desde)}` : `Rango evaluado: ${corta(desde)} → ${corta(hasta || desde)}` },
+      { id: 'fecha', etiqueta: `Día de corte: ${corta(d)}` },
       { id: 'sap', etiqueta: 'Sincronizando datos SAP' },
       { id: 'resumen', etiqueta: 'Generando necesidades' },
       { id: 'rep', etiqueta: 'Guardando reporte (1000 y 2000)' },
     ]);
     panelProgreso.actualizar('fecha', { estado: 'ok' });
-    const TOTAL_CONSULTAS_SAP = 5;
+    const TOTAL_CONSULTAS_SAP = 4;
     let hechas = 0;
     const fallidas: string[] = [];
     const seguir = <T,>(nombre: string, promesa: Promise<T>): Promise<T> => promesa.then(
@@ -1493,9 +1434,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       });
       setGrupos(filteredGroups);
       const groupsIds = filteredGroups.map(g => g.codigo_grupo);
-      const [restrsRes, provsRes, curadoRes, fertsRes, cuboRes] = await Promise.all([
+      const [restrsRes, curadoRes, fertsRes, cuboRes] = await Promise.all([
         seguir('Restricciones', restriccionService.getAll()),
-        seguir('Órdenes provisionales', sapCompartido.ordenesProvisionales()).catch(() => ({ data: [] })),
         seguir('Tiempos de curado', serviciosService.getTiemposCuradoBloqueFormulado(1, 10000)).catch(() => ({ data: [] })),
         seguir('Órdenes FERT', sapCompartido.ordenesFert()).catch(() => ({ data: [] })),
         seguir('Cubo de inventarios', sapCompartido.cuboInventarios()).catch(() => ({ data: [] }))
@@ -1507,7 +1447,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       setRestricciones((restrsRes.data || []).filter((r) => groupsIds.includes(r.codigo_grupo)));
       // Responsables de Corte (grupos 8 / 16) para el cuadre del tab FERT con Sub-Bloques-T8.
       setRestriccionesCorte((restrsRes.data || []).filter((r) => Object.values(CODIGO_GRUPO_CORTE_POR_CENTRO).includes(r.codigo_grupo)));
-      setOrders(provsRes.data?.data || provsRes.data || []);
       setOrdersFert(fertsRes.data?.data || fertsRes.data || []);
       setCuboInventarios(Array.isArray(cuboRes.data) ? cuboRes.data : []);
 
@@ -1559,14 +1498,14 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       // vuelve a pulsar "Sincronizar" sin haber navegado fuera del módulo.
       const previo = leerDeCache<SnapshotFormulacion>(CACHE_FORMULACION);
       guardarEnCache<SnapshotFormulacion>(CACHE_FORMULACION, {
-        ordenes: provsRes.data?.data || provsRes.data || [],
+        diaCorte: d,
         ordenesFert: fertsRes.data?.data || fertsRes.data || [],
         cuboInventarios: Array.isArray(cuboRes.data) ? cuboRes.data : [],
         curadoData: rawCurado,
         unifiedSummaryData: previo?.unifiedSummaryData || [],
         consumoBloqueFormulado: previo?.consumoBloqueFormulado || [],
       });
-      // No se llama handleProcessResumen() directo acá: leería provFiltradas/prodFiltradas (useMemo
+      // No se llama handleProcessResumen() directo acá: leería prodFiltradas (useMemo
       // derivados del estado que se acaba de actualizar arriba) por closure vieja. Se dispara desde
       // el efecto de más abajo, que ve la versión fresca una vez que el siguiente render ya ocurrió
       // (mismo criterio que Corte Espuma/Venta Externa/Laminado).
@@ -1583,26 +1522,22 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     }
   }, [panelProgreso]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Botón "Sincronizar y Generar Necesidades": antes de tocar SAP, el panel pide el rango a evaluar
-  // (por defecto el del filtro actual, hoy → hoy+CURADO_DIAS_ESPERA) o Plan Maestro, y muestra qué
-  // fecha llevará el reporte — pedido del usuario: al sincronizar no quedaba claro sobre qué fechas.
+  // Botón "Sincronizar y Generar Necesidades": antes de tocar SAP, el panel pide el día de corte D y
+  // muestra la ventana de FERT que se evaluará (pendiente + planificado) y la fecha del reporte.
   const handleSincronizarYGenerar = useCallback(() => {
-    const hoy = new Date();
-    const horizonte = new Date(hoy);
-    horizonte.setDate(horizonte.getDate() + CURADO_DIAS_ESPERA);
     const larga = (f: string) => format(new Date(f + 'T00:00:00'), 'EEE dd/MM/yyyy', { locale: es });
+    const mediodia = (f: string) => new Date(`${f}T12:00:00`);
     panelProgreso.pedirFecha({
       titulo: 'Formulación — Sincronizar y generar',
-      fechaInicial: rangeStart || format(hoy, 'yyyy-MM-dd'),
-      hastaInicial: rangeEnd || rangeStart || format(horizonte, 'yyyy-MM-dd'),
-      sinFecha: 'Plan Maestro (todas las fechas)',
-      detalle: (desde, hasta) => [
-        { etiqueta: 'Órdenes FERT / provisionales', valor: !desde ? 'Todas las fechas' : desde === hasta ? larga(desde) : `${larga(desde)} → ${larga(hasta || desde)}` },
-        { etiqueta: 'Reporte (TXT) con fecha', valor: larga(desde || format(hoy, 'yyyy-MM-dd')) },
-      ],
-      onConfirmar: (desde, hasta) => { void ejecutarSincronizacion(desde, desde ? (hasta ?? desde) : null); },
+      fechaInicial: ventana.d,
+      detalle: (d) => d ? [
+        { etiqueta: 'Planificado (FECHAFIN)', valor: `${larga(d)} · Venta Externa ${larga(format(siguienteDiaHabil(mediodia(d)), 'yyyy-MM-dd'))}` },
+        { etiqueta: `Pendiente (${DIAS_PENDIENTE_FERT} días hábiles)`, valor: `desde ${larga(format(addBusinessDays(mediodia(d), -DIAS_PENDIENTE_FERT, calendario.noLaborables, laborablesHorizonte(calendario.laborablesExtra)), 'yyyy-MM-dd'))}` },
+        { etiqueta: 'Reporte (TXT) con fecha', valor: larga(d) },
+      ] : [],
+      onConfirmar: (d) => { if (d) void ejecutarSincronizacion(d); },
     });
-  }, [rangeStart, rangeEnd, panelProgreso, ejecutarSincronizacion]);
+  }, [ventana.d, siguienteDiaHabil, calendario, panelProgreso, ejecutarSincronizacion]);
 
   // Rehidratación: si ya se había sincronizado en esta sesión, se recupera lo trabajado (datos crudos
   // Y el resumen ya procesado) en vez de dejar el módulo vacío al volver de otro módulo — mismo
@@ -1611,7 +1546,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     if (!mounted) return;
     const snap = leerDeCache<SnapshotFormulacion>(CACHE_FORMULACION);
     if (snap) {
-      setOrders(snap.ordenes);
+      if (snap.diaCorte) setDiaCorte(snap.diaCorte);
       setOrdersFert(snap.ordenesFert);
       setCuboInventarios(snap.cuboInventarios);
       setCuradoData(snap.curadoData);
@@ -1621,103 +1556,87 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     }
   }, [mounted]);
 
-  const calendarDaysList = useMemo(() => {
-    const start = startOfMonth(viewDate);
-    const end = endOfMonth(viewDate);
-    const days = eachDayOfInterval({ start, end });
-    const startDay = getDay(start);
-    const padding = startDay === 0 ? 6 : startDay - 1;
-    return [...Array(padding).fill(null), ...days];
-  }, [viewDate]);
 
-  // Resumen compacto de trazabilidad: qué componentes finales (ej. láminas) consumen cada
-  // Bloque Formulado, a través del nivel intermedio (bloque cortado), por orden.
-  // porDestino (tab FERT, usuario 2026-10-28): Formulación produce en UN solo centro (UIO) y el 2000 solo
-  // recibe bloques — una sola tabla con columna Destino y Cant. (UN) de la orden, en vez de una por centro.
-  const renderConsumoBloqueTable = (data: ConsumoBloqueRow[], title: string = "Consumo de Bloque Formulado por Componente (Trazabilidad)", porDestino = false) => {
-    // UN por orden una sola vez (una orden puede trazar a más de una fila del BOM).
-    const unDe = (rows: ConsumoBloqueRow[]) => Array.from(new Map(rows.map(r => [`${r.centro}|${r.orden}`, r.cantidad ?? 0])).values()).reduce((s, v) => s + v, 0);
-    const kgDestino = (rows: ConsumoBloqueRow[], centro: string) => rows.filter(r => r.centro === centro).reduce((s, r) => s + r.total, 0);
-    const columnas = porDestino ? 10 : 8;
-    const grouped: Record<string, { nombreFormulado: string; items: ConsumoBloqueRow[] }> = {};
+  // Paso 1 · Necesidad: misma estructura que el Excel "CONSUMOS UIO" — Formulado → Bloque cortado →
+  // componente / material / orden, Kg de consumo pendiente por orden, con total por bloque cortado y
+  // subtotal por Formulado (pendiente / planificado). Las filas que no trazan a un Bloque Formulado van
+  // en UN y no suman a los Kg.
+  const renderNecesidadTable = (data: ConsumoBloqueRow[]) => {
+    const kg = (rows: ConsumoBloqueRow[], tramo?: TramoNecesidad) => rows.reduce((s, r) => (r.un === 'KG' && (!tramo || r.tramo === tramo) ? s + r.total : s), 0);
+    const grouped = new Map<string, { nombreFormulado: string; cortados: Map<string, ConsumoBloqueRow[]> }>();
     data.forEach(row => {
-      if (!grouped[row.codFormulado]) grouped[row.codFormulado] = { nombreFormulado: row.nombreFormulado, items: [] };
-      grouped[row.codFormulado].items.push(row);
+      if (!grouped.has(row.codFormulado)) grouped.set(row.codFormulado, { nombreFormulado: row.nombreFormulado, cortados: new Map() });
+      const cortados = grouped.get(row.codFormulado)!.cortados;
+      if (!cortados.has(row.componente)) cortados.set(row.componente, []);
+      cortados.get(row.componente)!.push(row);
     });
-    const codes = Object.keys(grouped).sort();
-    const total = data.reduce((s, r) => s + r.total, 0);
-
+    const codes = Array.from(grouped.keys()).sort();
+    const columnas = 12;
+    const fecha = (f?: string) => f ? f.split('-').reverse().slice(0, 2).join('/') : '—';
     return (
-      <div className="space-y-4">
-        <div className="flex items-center justify-between px-2">
-          <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest flex items-center gap-2">
-            <FlaskConical className="w-4 h-4 text-indigo-600" />
-            {title}
-          </h3>
-          <div className="flex items-center gap-2">
-            {porDestino && (
-              <Badge variant="outline" className="text-[10px] font-black border-slate-200 bg-white">UIO {formatNum(kgDestino(data, '1000'), 1)} · GYE {formatNum(kgDestino(data, '2000'), 1)} · {formatNum(unDe(data), 0)} UN</Badge>
-            )}
-            <Badge variant="outline" className="text-[10px] font-black border-slate-200 bg-slate-50">T. CONSUMO: {formatNum(total, 1)}</Badge>
-          </div>
-        </div>
-        <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
-          <div className="overflow-x-auto max-h-[500px]">
-            <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-              <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-20">
-                <tr>
-                  <th className="px-4 py-4 text-left border-r border-gray-100">FORMULADO</th>
-                  <th className="px-6 py-4 text-left border-r border-gray-100">NOMBRECOMPONENTE</th>
-                  <th className="px-4 py-4 border-r border-gray-100">COMPONENTE</th>
-                  <th className="px-6 py-4 text-left border-r border-gray-100">NOMBRE</th>
-                  <th className="px-4 py-4 border-r border-gray-100">MATERIAL</th>
-                  <th className="px-4 py-4 border-r border-gray-100">ORDEN</th>
-                  {porDestino && <th className="px-3 py-4 border-r border-gray-100" title="Centro de la orden: 1000 se corta en UIO; 2000 recibe los bloques desde UIO">DESTINO</th>}
-                  {porDestino && <th className="px-3 py-4 border-r border-gray-100" title="Cantidad pendiente de la orden FERT (láminas)">CANT. (UN)</th>}
-                  <th className="px-3 py-4 border-r border-gray-100">UN</th>
-                  <th className="px-4 py-4 bg-indigo-50 text-indigo-700 font-black">Total</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50 font-bold">
-                {codes.length === 0 ? (
-                  <tr><td colSpan={columnas} className="py-20 text-center text-slate-200 uppercase font-black">Sin consumo de Bloque Formulado detectado</td></tr>
-                ) : (
-                  codes.map(code => {
-                    const group = grouped[code];
-                    const subtotal = group.items.reduce((s, r) => s + r.total, 0);
-                    return (
-                      <React.Fragment key={code}>
-                        <tr className="bg-slate-50">
-                          <td className="px-4 py-2 text-left font-mono font-black text-indigo-600 border-r border-gray-100">{code}</td>
-                          <td colSpan={5} className="px-6 py-2 text-left uppercase font-black text-slate-700 border-r border-gray-100 truncate max-w-[300px]">{group.nombreFormulado}</td>
-                          {porDestino && (
-                            <td className="px-3 py-2 border-r border-gray-100 text-[9px] text-slate-500 whitespace-nowrap">UIO {formatNum(kgDestino(group.items, '1000'), 1)} · GYE {formatNum(kgDestino(group.items, '2000'), 1)}</td>
-                          )}
-                          {porDestino && <td className="px-3 py-2 border-r border-gray-100 font-mono font-black text-slate-700">{formatNum(unDe(group.items), 0)}</td>}
-                          <td className="px-3 py-2 border-r border-gray-100 opacity-40 uppercase">Subtotal</td>
-                          <td className="px-4 py-2 bg-indigo-50 text-indigo-800 font-black">{formatNum(subtotal, 1)}</td>
-                        </tr>
-                        {group.items.map((row, idx) => (
+      <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
+        <div className="overflow-x-auto max-h-[600px]">
+          <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
+            <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-20">
+              <tr>
+                <th className="px-4 py-3 text-left border-r border-gray-100">Formulado</th>
+                <th className="px-4 py-3 text-left border-r border-gray-100">Bloque cortado</th>
+                <th className="px-3 py-3 border-r border-gray-100">Componente</th>
+                <th className="px-4 py-3 text-left border-r border-gray-100">Nombre</th>
+                <th className="px-3 py-3 border-r border-gray-100">Material</th>
+                <th className="px-3 py-3 border-r border-gray-100">Orden</th>
+                <th className="px-3 py-3 border-r border-gray-100">Fecha fin</th>
+                <th className="px-3 py-3 border-r border-gray-100">Tramo</th>
+                <th className="px-3 py-3 border-r border-gray-100">Destino</th>
+                <th className="px-3 py-3 border-r border-gray-100" title="Cantidad pendiente de la orden FERT">Cant. (UN)</th>
+                <th className="px-3 py-3 border-r border-gray-100">UN</th>
+                <th className="px-4 py-3 bg-indigo-50 text-indigo-700 font-black">Total</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50 font-bold">
+              {codes.length === 0 ? (
+                <tr><td colSpan={columnas} className="py-20 text-center text-slate-300 uppercase font-black">Sin FERT en la ventana</td></tr>
+              ) : codes.map(code => {
+                const group = grouped.get(code)!;
+                const items = Array.from(group.cortados.values()).flat();
+                return (
+                  <React.Fragment key={code}>
+                    <tr className="bg-slate-100">
+                      <td className="px-4 py-2 text-left font-mono font-black text-indigo-600 border-r border-gray-100">{code}</td>
+                      <td colSpan={7} className="px-4 py-2 text-left uppercase font-black text-slate-700 border-r border-gray-100">{group.nombreFormulado}</td>
+                      <td colSpan={3} className="px-3 py-2 border-r border-gray-100 text-[9px] text-slate-500 whitespace-nowrap">Pend. {formatNum(kg(items, 'pendiente'), 1)} · Plan. {formatNum(kg(items, 'planificado'), 1)}</td>
+                      <td className="px-4 py-2 bg-indigo-50 text-indigo-800 font-black">{formatNum(kg(items), 3)}</td>
+                    </tr>
+                    {Array.from(group.cortados.entries()).map(([componente, rows]) => (
+                      <React.Fragment key={componente}>
+                        {rows.map((row, idx) => (
                           <tr key={idx} className="hover:bg-slate-50 transition-colors font-mono text-[10px]">
-                            <td className="px-4 py-2 border-r border-gray-100 text-slate-400 pl-8 text-left">{row.codFormulado}</td>
-                            <td className="px-6 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[220px]">{row.nombreComponente}</td>
-                            <td className="px-4 py-2 border-r border-gray-100 text-indigo-600 font-black">{row.componente}</td>
-                            <td className="px-6 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[220px]">{row.nombre}</td>
-                            <td className="px-4 py-2 border-r border-gray-100 text-slate-500">{row.material}</td>
-                            <td className="px-4 py-2 border-r border-gray-100 text-slate-500">{row.orden}</td>
-                            {porDestino && <td className={cn("px-3 py-2 border-r border-gray-100 font-black", row.centro === '2000' ? 'text-amber-700' : 'text-slate-500')}>{row.centro === '2000' ? 'GYE' : 'UIO'}</td>}
-                            {porDestino && <td className="px-3 py-2 border-r border-gray-100 text-slate-600">{row.cantidad !== undefined ? formatNum(row.cantidad, 0) : '—'}</td>}
-                            <td className="px-3 py-2 border-r border-gray-100 uppercase">{row.un}</td>
-                            <td className="px-4 py-2 font-black text-slate-900">{formatNum(row.total, 3)}</td>
+                            <td className="px-4 py-1.5 border-r border-gray-100 text-slate-400 text-left">{row.codFormulado}</td>
+                            <td className="px-4 py-1.5 border-r border-gray-100 text-left uppercase truncate max-w-[220px]">{idx === 0 ? row.nombreComponente : ''}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-100 text-indigo-600 font-black">{row.componente}</td>
+                            <td className="px-4 py-1.5 border-r border-gray-100 text-left uppercase truncate max-w-[240px]">{row.nombre}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-100 text-slate-500">{row.material}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-100 text-slate-500">{row.orden}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-100 text-slate-500">{fecha(row.fechaFin)}</td>
+                            <td className={cn("px-3 py-1.5 border-r border-gray-100 font-sans font-black uppercase", row.tramo === 'pendiente' ? 'text-amber-700' : 'text-emerald-700')}>{row.tramo === 'pendiente' ? 'Pend.' : 'Plan.'}</td>
+                            <td className={cn("px-3 py-1.5 border-r border-gray-100 font-sans font-black", row.destino === 'VE' ? 'text-purple-700' : row.destino === '2000' ? 'text-amber-700' : 'text-slate-500')}>{row.destino ? ETIQUETA_DESTINO[row.destino] : '—'}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-100 text-slate-600">{row.cantidad !== undefined ? formatNum(row.cantidad, 0) : '—'}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-100 uppercase">{row.un}</td>
+                            <td className="px-4 py-1.5 font-black text-slate-900">{formatNum(row.total, 3)}</td>
                           </tr>
                         ))}
+                        <tr className="bg-emerald-50/60">
+                          <td />
+                          <td colSpan={columnas - 2} className="px-4 py-1.5 text-left uppercase font-black text-emerald-800">Total {rows[0].nombreComponente}</td>
+                          <td className="px-4 py-1.5 font-black text-emerald-900">{formatNum(kg(rows), 3)}</td>
+                        </tr>
                       </React.Fragment>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                    ))}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
     );
@@ -1756,8 +1675,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                   <th className="px-6 py-4 text-left border-r border-gray-100">Descripción Técnica SAP</th>
                   <th className="px-3 py-4 border-r border-gray-100">Dens.</th>
                   <th className="px-3 py-4 border-r border-gray-100">Apert.</th>
-                  <th className="px-4 py-4 border-r border-gray-100">Nec. Prov (Bloq)</th>
-                  <th className="px-4 py-4 border-r border-gray-100">Nec. Proceso/FERT (Bloq)</th>
+                  <th className="px-4 py-4 border-r border-gray-100">Pendiente (Bloq)</th>
+                  <th className="px-4 py-4 border-r border-gray-100">Planificado (Bloq)</th>
                   <th className="px-6 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50">Stock (Kg)</th>
                   <th className="px-4 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50 font-black">Stock (UN)</th>
                   <th className="px-4 py-4 border-r border-gray-100 text-amber-700 bg-amber-50/50">En Curado (UN)</th>
@@ -1791,8 +1710,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         <td className="px-6 py-3 text-left uppercase text-slate-900 font-black text-[10px] border-r border-gray-100 truncate max-w-[300px]">{row.blockDesc}</td>
                         <td className="px-3 py-3 border-r border-gray-100 font-mono text-slate-500">{row.dens}</td>
                         <td className="px-3 py-3 border-r border-gray-100 font-black text-blue-700 bg-blue-50/10">{row.apertura}</td>
-                        <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-slate-700 bg-slate-50/10">{row.totalBloquesProv.toFixed(2)}</td>
-                        <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-purple-700 bg-purple-50/10">{row.totalBloquesFert.toFixed(2)}</td>
+                        <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-slate-700 bg-slate-50/10">{row.totalBloquesPendiente.toFixed(2)}</td>
+                        <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-purple-700 bg-purple-50/10">{row.totalBloquesPlanificado.toFixed(2)}</td>
                         <td className="px-6 py-3 border-r border-gray-100 text-right font-mono font-black text-emerald-600 bg-emerald-50/10">{row.stockKg.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                         <td className="px-4 py-3 border-r border-gray-100 text-right font-mono font-black text-emerald-800 bg-emerald-50/20">{row.stockUN.toFixed(1)}</td>
                         <td className="px-4 py-3 border-r border-gray-100 text-right font-mono font-black text-amber-700 bg-amber-50/20">{row.stockEnCuradoUN.toFixed(1)}</td>
@@ -2040,6 +1959,8 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     );
   };
 
+  const fechaCorta = (f: string) => f.split('-').reverse().slice(0, 2).join('/');
+
   const renderContent = () => {
     if (isLoading) {
       return (
@@ -2083,38 +2004,39 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
            )}
         </div>
       );
-      case 'ordenes': return (
-        <div className="animate-in fade-in duration-300 text-left space-y-10">
-           {/* El espacio de órdenes crudas (Provisionales tal cual las devuelve SAP, una fila por
-               orden) se retiró a pedido del usuario: para captura y trazabilidad es más útil este
-               único espacio, ya agrupado por material/componente con cantidades unificadas. Incluye
-               TODOS los materiales de responsables de Formulación, no solo los que trazan a un
-               "BLOQUE FORMULADO" — los que no trazan aparecen auto-referenciados (Formulado =
-               el propio material) para no perder visibilidad de ninguna orden.
-               Partido por centro (1000 Quito / 2000 Guayaquil): cada centro tiene su propio stock e
-               insumos de Formulación, mezclarlos en una sola tabla ocultaba de qué centro salía cada
-               necesidad — mismo criterio que "FERT" más abajo. */}
-           {renderConsumoBloqueTable(provConsumoPorCentro['1000'], "Consumo de Bloque Formulado por Componente — Provisionales (Centro 1000, Quito)")}
-           {renderConsumoBloqueTable(provConsumoPorCentro['2000'], "Consumo de Bloque Formulado por Componente — Provisionales (Centro 2000, Guayaquil)")}
-        </div>
-      );
-      case 'ordenesProd': return (
-        <div className="animate-in fade-in duration-300 text-left space-y-10">
-          {/* Mismo selector y regla que "Día de corte" en Sub-Bloques-T8 de Corte Espuma. */}
-          <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-100 bg-white px-4 py-3 text-xs">
-            <label className="flex items-center gap-2 font-black uppercase text-slate-700">
-              Día de corte
-              <input type="date" value={ventana.d} onChange={e => setDiaCorte(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1 font-mono text-slate-900" />
-            </label>
-            <span className="text-slate-500">Venta Externa: fecha fin {ventana.venta.split('-').reverse().join('/')}</span>
-            <label className="flex items-center gap-1.5 font-bold text-slate-600">
-              <input type="checkbox" checked={fertTodoRango} onChange={e => setFertTodoRango(e.target.checked)} />
-              Ver todas las FERT del rango (sin filtro de día de corte)
-            </label>
-            {fertSinVentana && (
-              <span className="w-full font-bold text-amber-700">Reporte sin ventana de corte: se muestran todas las FERT del rango.</span>
-            )}
+      case 'necesidad': return (
+        <div className="animate-in fade-in duration-300 text-left space-y-6">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-gray-100 bg-white px-4 py-3 text-[11px]">
+            <span className="font-black uppercase text-slate-700" title="Se elige al sincronizar">Día de corte {fechaCorta(ventana.d)}</span>
+            <span className="font-bold text-amber-700">Pendiente {fechaCorta(pendienteDesde)} → {fechaCorta(ventana.d)}</span>
+            <span className="font-bold text-emerald-700">Planificado {fechaCorta(ventana.d)} · VE {fechaCorta(ventana.venta)}</span>
           </div>
+          <div className="overflow-x-auto rounded-2xl border border-gray-100 bg-white">
+            <table className="w-full border-collapse text-[11px] text-center">
+              <thead className="bg-gray-50 text-[10px] font-bold uppercase text-gray-500 tracking-widest">
+                <tr>
+                  <th className="px-4 py-2 text-left">Kg Bloque Formulado</th>
+                  {(['1000', '2000', 'VE'] as const).map(dst => <th key={dst} className="px-4 py-2">{ETIQUETA_DESTINO[dst]}</th>)}
+                  <th className="px-4 py-2 text-indigo-700">Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50 font-mono font-bold">
+                {(['pendiente', 'planificado'] as const).map(tramo => (
+                  <tr key={tramo}>
+                    <td className={cn("px-4 py-2 text-left font-sans font-black uppercase", tramo === 'pendiente' ? 'text-amber-700' : 'text-emerald-700')}>{tramo}</td>
+                    {(['1000', '2000', 'VE'] as const).map(dst => <td key={dst} className="px-4 py-2">{formatNum(necesidadKg[dst][tramo], 1)}</td>)}
+                    <td className="px-4 py-2 text-indigo-800">{formatNum(necesidadKg['1000'][tramo] + necesidadKg['2000'][tramo] + necesidadKg.VE[tramo], 1)}</td>
+                  </tr>
+                ))}
+                <tr className="bg-indigo-50/50 font-black">
+                  <td className="px-4 py-2 text-left font-sans uppercase text-indigo-800">Total</td>
+                  {(['1000', '2000', 'VE'] as const).map(dst => <td key={dst} className="px-4 py-2">{formatNum(necesidadKg[dst].pendiente + necesidadKg[dst].planificado, 1)}</td>)}
+                  <td className="px-4 py-2 text-indigo-900">{formatNum((['1000', '2000', 'VE'] as const).reduce((s, dst) => s + necesidadKg[dst].pendiente + necesidadKg[dst].planificado, 0), 1)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          {renderNecesidadTable(fertConsumoResponsable)}
           {cuadreCorte && (
             <div className="rounded-2xl border border-gray-100 bg-white px-4 py-3 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2178,7 +2100,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
               )}
             </div>
           )}
-          {renderConsumoBloqueTable(fertConsumoVentana, "Consumo de Bloque Formulado por Componente — FERT (producción UIO · destinos Quito y Guayaquil)", true)}
         </div>
       );
       case 'inventario': return (
@@ -2303,68 +2224,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             destinatarios={destinatariosReporte}
             onDestinatariosChange={setDestinatariosReporte}
           />
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button variant="outline" className="h-9 px-5 rounded-xl border-gray-200 gap-2 font-black text-[10px] uppercase shadow-sm transition-all hover:border-primary/50">
-                <CalendarIcon className="w-4 h-4 text-primary" />
-                {!rangeStart && !rangeEnd
-                  ? 'Plan Maestro'
-                  : rangeStart && rangeEnd
-                    ? `${format(new Date(rangeStart + 'T00:00:00'), 'd/MM')} → ${format(new Date(rangeEnd + 'T00:00:00'), 'd/MM')}`
-                    : `Desde ${format(new Date(rangeStart! + 'T00:00:00'), 'd/MM')}...`}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-72 p-0 border-none shadow-2xl rounded-2xl overflow-hidden mt-2" align="end">
-              <div className="bg-white p-5 font-sans text-left text-[11px]">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-black text-slate-800 capitalize">{format(viewDate, 'MMMM yyyy', { locale: es })}</h3>
-                  <div className="flex gap-1 bg-gray-50 p-1 rounded-xl">
-                    <Button variant="ghost" size="icon" onClick={() => setViewDate(prev => subMonths(prev, 1))} className="h-8 w-8 hover:bg-white"><ChevronLeft className="w-4 h-4" /></Button>
-                    <Button variant="ghost" size="icon" onClick={() => setViewDate(prev => addMonths(prev, 1))} className="h-8 w-8 hover:bg-white"><ChevronRight className="w-4 h-4" /></Button>
-                  </div>
-                </div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">
-                  {!rangeStart ? 'Elige la fecha de inicio' : !rangeEnd ? 'Elige la fecha de fin' : 'Rango seleccionado — click reinicia'}
-                </p>
-                <div className="grid grid-cols-7 gap-y-1 text-center mb-4">
-                  {['LU', 'MA', 'MI', 'JU', 'VI', 'SA', 'DO'].map(d => <div key={d} className="text-[10px] font-black text-slate-400 uppercase py-1">{d}</div>)}
-                  {calendarDaysList.map((day, idx) => {
-                    if (!day) return <div key={idx} />;
-                    const dStr = format(day, 'yyyy-MM-dd');
-                    // Extremo del rango (inicio o fin exacto) resaltado sólido; los días intermedios,
-                    // resaltado suave — mismo patrón visual de cualquier range-picker.
-                    const isEdge = dStr === rangeStart || dStr === rangeEnd;
-                    const isInRange = !!rangeStart && !!rangeEnd && dStr > rangeStart && dStr < rangeEnd;
-                    return (
-                      <button
-                        key={dStr}
-                        onClick={() => {
-                          // Click 1: fija inicio. Click 2 (>= inicio): fija fin, ya con rango completo.
-                          // Click 2 (< inicio): reinicia el inicio en el nuevo día. Con el rango ya
-                          // completo, cualquier click siguiente empieza una selección nueva.
-                          if (!rangeStart || (rangeStart && rangeEnd)) {
-                            setRangeStart(dStr);
-                            setRangeEnd(null);
-                          } else if (dStr < rangeStart) {
-                            setRangeStart(dStr);
-                          } else {
-                            setRangeEnd(dStr);
-                          }
-                        }}
-                        className={cn(
-                          "relative h-8 w-8 mx-auto flex items-center justify-center transition-all",
-                          isEdge ? "rounded-xl bg-primary text-white shadow-md" : isInRange ? "bg-primary/10" : "rounded-xl hover:bg-slate-50"
-                        )}
-                      >
-                        <span className={cn("text-xs font-black", isEdge ? "text-white" : "text-slate-700")}>{format(day, 'd')}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <Button variant="ghost" size="sm" className="w-full text-[10px] font-black uppercase text-primary h-9 rounded-xl hover:bg-primary/5 tracking-widest" onClick={() => { setRangeStart(null); setRangeEnd(null); }}>Ver Todo (Plan Maestro)</Button>
-              </div>
-            </PopoverContent>
-          </Popover>
         </div>
       </div>
 
@@ -2402,7 +2261,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       {!datosCargados && !isLoading && !planCargadoDe && (
         <div
           className="flex items-center gap-2.5 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-4 py-2.5 text-left"
-          title="Este módulo no consulta SAP al abrirse. Sincronizar y Generar Necesidades trae Provisionales, FERT, Curado e Inventarios, y calcula el resumen automáticamente al terminar."
+          title="Este módulo no consulta SAP al abrirse. Sincronizar y Generar Necesidades trae FERT, Curado e Inventarios y calcula la necesidad al terminar."
         >
           <RefreshCw className="w-4 h-4 text-blue-500 shrink-0" />
           <p className="text-[11px] font-bold text-slate-600">
@@ -2412,13 +2271,12 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid grid-cols-6 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
+        <TabsList className="grid grid-cols-5 h-11 bg-gray-100/50 p-1.5 rounded-2xl border border-gray-200 mb-8">
           {[
-            { v: 'resumen', l: 'Salida de Datos', i: LayoutDashboard },
+            { v: 'necesidad', l: '1 · Necesidad', i: ShoppingCart },
+            { v: 'curado', l: '2 · Stock y Curado', i: TableIcon },
+            { v: 'resumen', l: '3 · Plan de Reposición', i: LayoutDashboard },
             { v: 'consumo', l: 'Consumo Histórico', i: TrendingUp },
-            { v: 'curado', l: 'Control Curado', i: TableIcon },
-            { v: 'ordenes', l: 'Provisionales', i: Package }, 
-            { v: 'ordenesProd', l: 'FERT', i: ShoppingCart },
             { v: 'inventario', l: 'Inventarios SAP', i: Database }
           ].map(tab => (
             <TabsTrigger key={tab.v} value={tab.v} className="gap-2 text-[10px] font-black uppercase transition-all data-[state=active]:bg-white data-[state=active]:shadow-lg data-[state=active]:text-primary rounded-xl">
