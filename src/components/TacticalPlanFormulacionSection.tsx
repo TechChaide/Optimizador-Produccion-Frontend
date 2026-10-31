@@ -312,9 +312,10 @@ const matchesCuradoSpace = (row: RawApiRow, space: CuradoSpaceConfig): boolean =
   // distintos, usar "ESTADO" como fallback de estadoTras podía terminar comparando el valor
   // equivocado si alguna fila llegara sin estadoTras.
   const estadoTras = getProp(row, ['estadoTras', 'ESTADOTRAS']).trim().toUpperCase();
-  const estado = getProp(row, ['estado', 'ESTADO']).trim().toUpperCase();
+  // En el Excel del usuario la columna CR/BCFR se llama "estado2" (2026-10-31): se aceptan las dos.
+  const estados = [getProp(row, ['estado', 'ESTADO']), getProp(row, ['estado2', 'ESTADO2'])].map(v => v.trim().toUpperCase());
   const maquina = getProp(row, ['Maquina', 'MAQUINA']).trim().toUpperCase();
-  if (estadoTras !== space.estadoTras || estado !== space.estado || maquina !== space.maquina) return false;
+  if (estadoTras !== space.estadoTras || !estados.includes(space.estado) || maquina !== space.maquina) return false;
   if (space.corridaproceso.length === 0) return true;
   const corrida = getProp(row, ['corridaproceso', 'CORRIDAPROCESO']).trim().toUpperCase();
   return space.corridaproceso.includes(corrida);
@@ -1421,6 +1422,24 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     );
   };
 
+  // Qué trae el servicio de curado cuando un espacio queda vacío: combinaciones más frecuentes de
+  // máquina / estados / corrida y rango de fechas, para ajustar CURADO_SPACES con datos reales.
+  const diagnosticoCurado = useMemo(() => {
+    const combos = new Map<string, number>();
+    const fechas: string[] = [];
+    curadoData.forEach(r => {
+      const k = Object.entries(r).filter(([c]) => /maquina|estado|corrida/i.test(c)).map(([c, v]) => `${c}=${String(v ?? '').trim()}`).join(' · ');
+      combos.set(k, (combos.get(k) || 0) + 1);
+      const fab = parseFechaSAP(getProp(r, ['fecha', 'FECHA']));
+      if (fab) fechas.push(format(fab, 'yyyy-MM-dd'));
+    });
+    fechas.sort();
+    return {
+      combos: Array.from(combos.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8),
+      fechas: fechas.length ? `${fechas[0]} → ${fechas[fechas.length - 1]}` : '—',
+    };
+  }, [curadoData]);
+
   const renderStockCurado = (titulo: string, data: StockCuradoRow[]) => {
     const t = data.reduce((s, r) => ({
       curadosUN: s.curadosUN + r.curadosUN, curadosKg: s.curadosKg + r.curadosKg,
@@ -1449,7 +1468,10 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
               </thead>
               <tbody className="divide-y divide-gray-50 font-bold">
                 {data.length === 0 ? (
-                  <tr><td colSpan={9} className="py-12 text-center text-slate-300 uppercase font-black">Sin bloques</td></tr>
+                  <tr><td colSpan={9} className="py-6 px-4 text-left text-[10px] text-slate-500">
+                    <p className="font-black uppercase text-slate-400 mb-1">Sin bloques · {formatNum(curadoData.length, 0)} registros de curado · fechas {diagnosticoCurado.fechas}</p>
+                    {diagnosticoCurado.combos.map(([k, n]) => <p key={k} className="font-mono">{n}× {k}</p>)}
+                  </td></tr>
                 ) : data.map((row, idx) => {
                   const nuevoGrupo = idx === 0 || row.apertura !== data[idx - 1].apertura;
                   const altura = alturaRealPorBloque.get(row.materialCode);
