@@ -2643,7 +2643,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     <td style="padding:10px 28px 4px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:8px;">
         <tr>
-          <td style="padding:7px 10px;font-size:11px;color:#374151;">Setup (1 al día × ${SETUP_EMPAQUE_H} h)</td>
+          <td style="padding:7px 10px;font-size:11px;color:#374151;">Setup (${cambios.turnos.length} turno${cambios.turnos.length === 1 ? '' : 's'}${cambios.turnos.length ? `: ${cambios.turnos.join(', ')}` : ''} × ${SETUP_EMPAQUE_H} h)</td>
           <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;font-variant-numeric:tabular-nums;">${cambios.setup.toFixed(2)} h</td>
         </tr>
         <tr>
@@ -2903,23 +2903,24 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   const groupedSummary1000 = useMemo(() => groupByCategoria(summaryData1000), [summaryData1000]);
   const groupedSummary2000 = useMemo(() => groupByCategoria(summaryData2000), [summaryData2000]);
 
-  // Setup y cambio de referencia de Empaque (usuario 2026-11-04), sobre la carga operativa: el setup
-  // es uno solo al arrancar el día del plan (1ª variante) y cada variante siguiente (medida + espesor,
-  // en el orden de la vista) es un cambio de referencia. Suman a las Horas Necesarias.
+  // Setup y cambio de referencia de Empaque (usuario 2026-11-04), sobre la carga operativa: un setup
+  // al inicio de cada turno activo de la ventana (Noche / Sábado / Día, por máquina en servicio) y un
+  // cambio de referencia por cada variante después de la primera (medida + espesor): variantes − 1,
+  // sin importar el orden en que se empaquen. Suman a las Horas Necesarias.
   const cambiosEmpaque = useMemo(() => {
-    const calcular = (grupos: typeof groupedSummary1000) => {
+    const calcular = (centro: '1000' | '2000', grupos: typeof groupedSummary1000) => {
       const variantes = grupos.reduce((s, g) => s + g.rows.length, 0);
       const cambios = Math.max(0, variantes - 1);
+      const turnos = variantes > 0 ? EMPAQUE_MACHINES_BY_CENTRO[centro].flatMap(m => ventanaEmpaque.turnosDe(m.id)).map(t => t.turno) : [];
       const porCategoria = new Map(grupos.map((g, i) => [g.categoria, {
-        setup: i === 0 && g.rows.length > 0 ? SETUP_EMPAQUE_H : 0,
         cambio: (i === 0 ? Math.max(0, g.rows.length - 1) : g.rows.length) * CAMBIO_REFERENCIA_EMPAQUE_H,
       }]));
-      const setup = variantes > 0 ? SETUP_EMPAQUE_H : 0;
+      const setup = turnos.length * SETUP_EMPAQUE_H;
       const cambio = cambios * CAMBIO_REFERENCIA_EMPAQUE_H;
-      return { porCategoria, cambios, primera: grupos[0]?.categoria, setup, cambio, total: setup + cambio };
+      return { porCategoria, cambios, turnos, primera: grupos[0]?.categoria, setup, cambio, total: setup + cambio };
     };
-    return { '1000': calcular(groupedSummary1000), '2000': calcular(groupedSummary2000) };
-  }, [groupedSummary1000, groupedSummary2000]);
+    return { '1000': calcular('1000', groupedSummary1000), '2000': calcular('2000', groupedSummary2000) };
+  }, [groupedSummary1000, groupedSummary2000, ventanaEmpaque]);
 
   // Resumen reactivo para el DASHBOARD en pantalla — usa lo que ya haya en `pfdVentaPreview` (última
   // vez que se generó, en esta sesión o antes); no dispara la explosión BOM en cada render, eso solo
@@ -3366,9 +3367,11 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       ? { t: 'Carga operativa (FERT) · Centro 1000', d: groupedSummary1000, c: 'text-green-700', b: 'bg-green-600', expanded: expandedCategorias1000, setExpanded: setExpandedCategorias1000 }
       : { t: 'Carga operativa (FERT) · Centro 2000', d: groupedSummary2000, c: 'text-indigo-700', b: 'bg-indigo-600', expanded: expandedCategorias2000, setExpanded: setExpandedCategorias2000 };
     const idx = centroId === '1000' ? 0 : 1;
-    // Setup y cambio de referencia por categoría (ver cambiosEmpaque): setup en la 1ª fila del día.
+    // Setup y cambio de referencia por categoría (ver cambiosEmpaque): el setup (uno por turno) se
+    // muestra en la 1ª fila, que no lleva cambio de referencia.
     const cambios = cambiosEmpaque[centroId];
-    const setupDe = (g: (typeof center.d)[number]) => cambios.porCategoria.get(g.categoria)?.setup ?? 0;
+    const setupTitulo = `${cambios.turnos.length} turno(s) activo(s)${cambios.turnos.length ? ` (${cambios.turnos.join(', ')})` : ''} × ${SETUP_EMPAQUE_H} h`;
+    const setupDe = (g: (typeof center.d)[number]) => g.categoria === cambios.primera ? cambios.setup : 0;
     const cambioDe = (g: (typeof center.d)[number]) => cambios.porCategoria.get(g.categoria)?.cambio ?? 0;
     return (
         <div key={idx} className="space-y-4">
@@ -3421,7 +3424,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                               <p className="text-[9px] font-black uppercase text-amber-500 tracking-wider">Tiempo Planchas (H)</p>
                               <p className="text-xs font-mono font-black text-amber-600">{group.totalTiempoEmpaque.toFixed(2)}</p>
                             </div>
-                            <div title={`Uno solo al día: ${SETUP_EMPAQUE_H} h al arrancar con la primera variante.`}>
+                            <div title={setupTitulo}>
                               <p className="text-[9px] font-black uppercase text-slate-500 tracking-wider">Setup (H)</p>
                               <p className="text-xs font-mono font-black text-slate-600">{setupDe(group) > 0 ? setupDe(group).toFixed(3) : '—'}</p>
                             </div>
@@ -3461,7 +3464,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                                 <td className="px-3 py-2 font-mono font-black text-teal-700 border-r border-gray-100">{row.paquetes ? row.paquetes : '—'}</td>
                                 <td className="px-3 py-2 font-mono font-black text-purple-700 border-r border-gray-100">{row.paquetesEnrollar ? row.paquetesEnrollar : '—'}</td>
                                 <td className="px-4 py-2 font-mono font-black text-amber-600 text-center border-r border-gray-100 bg-amber-50/5">{row.totalTiempoEmpaque.toFixed(2)}</td>
-                                <td className="px-3 py-2 font-mono font-black text-slate-600 border-r border-gray-100">{arranque ? SETUP_EMPAQUE_H.toFixed(3) : '—'}</td>
+                                <td className="px-3 py-2 font-mono font-black text-slate-600 border-r border-gray-100"><span title={arranque ? setupTitulo : undefined}>{arranque ? cambios.setup.toFixed(3) : '—'}</span></td>
                                 <td className="px-3 py-2 font-mono font-black text-slate-600">{arranque ? '—' : CAMBIO_REFERENCIA_EMPAQUE_H.toFixed(3)}</td>
                               </tr>
                               );
