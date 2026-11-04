@@ -125,6 +125,10 @@ const EMPAQUE_MACHINES_BY_CENTRO: Record<'1000' | '2000', { id: string; nombre: 
   '2000': [],
 };
 
+// Tiempos de Empaque por actividad (usuario 2026-11-04), en horas.
+const SETUP_EMPAQUE_H = 0.027;
+const CAMBIO_REFERENCIA_EMPAQUE_H = 0.031;
+
 interface NecesidadMaterial {
   material: string;
   descripcion: string;
@@ -2380,12 +2384,19 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         .filter(Boolean))];
       EMPAQUE_MACHINES_BY_CENTRO[centro].forEach(m => {
         const turnos = ventanaEmpaque.turnosDe(m.id);
+        // La misma ventana de MTTO se repite una vez por línea/responsable (fan-out del SP, sin ID de
+        // OT): una sola por máquina + centro + inicio + fin, como Corte Espuma (usuario 2026-11-04:
+        // MEE01 sumaba 14 h por duplicados).
+        const vistos = new Set<string>();
         const ordenes = maquinasSAP.length === 0 ? [] : mantenimientosSAP.flatMap(row => {
           // 2026-10-28 (nueva captura del SP): áreas Corte y Laminado / Espuma y máquina por MaquinaSismac
           // (MEE01 = Empacadora Elektroteks), mismo criterio de los 3 módulos (ver @/lib/mantenimiento-sap).
           if (!esAreaMtto(row)) return [];
           const maquina = norm(maquinaSismacDe(row) || getProp(row, ['MAQUINA']));
           if (!maquinasSAP.includes(maquina)) return [];
+          const clave = [maquina, getProp(row, ['Centro', 'CENTRO']), getProp(row, ['FECHA_OT_PRG_INI']), getProp(row, ['FECHA_OT_PRG_FIN'])].map(norm).join('|');
+          if (vistos.has(clave)) return [];
+          vistos.add(clave);
           // Regla única de los 3 módulos (ver mttoEnVentana): con hora real, el turno donde cae
           // (también la Noche); solo con fecha (SISMAC, 0:00), completo en el turno Día de ese día.
           const iniStr = String(getProp(row, ['FECHA_OT_PRG_INI']) || getProp(row, ['FECHA_PRO']));
@@ -2409,8 +2420,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     return c.mttoManual ? c.mttoPreventivoHoras : (mttoSAPEmpaque[id]?.horas ?? 0);
   }, [empaqueConfig, mttoSAPEmpaque]);
 
-  // Horas de UNA máquina de empaque: bruto (Día+Noche+Sábado, sin paros ni rendimiento — "Tiempo
-  // Máquina" de la columna, como Corte Espuma) y neto (con paros y rendimiento, menos mantenimiento).
+  // Horas de UNA máquina de empaque: bruto (Día+Noche+Sábado, sin paros ni rendimiento) y neto (con
+  // paros y rendimiento, menos mantenimiento — "Tiempo Máquina" del resumen, igual que el correo).
   const horasMaquinaEmpaque = useCallback((id: string) => {
     const c = empaqueConfig[id];
     if (!c || !c.activa) return { bruto: 0, neto: 0 };
@@ -3313,6 +3324,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       ? { t: 'Carga operativa (FERT) · Centro 1000', d: groupedSummary1000, c: 'text-green-700', b: 'bg-green-600', expanded: expandedCategorias1000, setExpanded: setExpandedCategorias1000 }
       : { t: 'Carga operativa (FERT) · Centro 2000', d: groupedSummary2000, c: 'text-indigo-700', b: 'bg-indigo-600', expanded: expandedCategorias2000, setExpanded: setExpandedCategorias2000 };
     const idx = centroId === '1000' ? 0 : 1;
+    // Setup y cambio de referencia (usuario 2026-11-04), solo visual: no entran a Horas Necesarias ni
+    // al correo. Setup por variante de la categoría; cambio de referencia al pasar de una densidad a
+    // otra (D17 → D20), cargado a la primera categoría de cada densidad salvo la primera.
+    const densidades = [...new Set(center.d.map(g => g.densidad))].sort((a, b) => (Number(a) || 0) - (Number(b) || 0));
+    const abreDensidad = new Set(densidades.slice(1).map(d => center.d.find(g => g.densidad === d)!.categoria));
+    const setupDe = (g: (typeof center.d)[number]) => g.rows.length * SETUP_EMPAQUE_H;
+    const cambioDe = (g: (typeof center.d)[number]) => abreDensidad.has(g.categoria) ? CAMBIO_REFERENCIA_EMPAQUE_H : 0;
     return (
         <div key={idx} className="space-y-4">
           <div className="flex items-center justify-between px-1">
@@ -3364,6 +3382,14 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                               <p className="text-[9px] font-black uppercase text-amber-500 tracking-wider">Tiempo Planchas (H)</p>
                               <p className="text-xs font-mono font-black text-amber-600">{group.totalTiempoEmpaque.toFixed(2)}</p>
                             </div>
+                            <div title={`${group.rows.length} variante(s) × ${SETUP_EMPAQUE_H} h`}>
+                              <p className="text-[9px] font-black uppercase text-slate-500 tracking-wider">Setup (H)</p>
+                              <p className="text-xs font-mono font-black text-slate-600">{setupDe(group).toFixed(3)}</p>
+                            </div>
+                            <div title={`Cambio de densidad × ${CAMBIO_REFERENCIA_EMPAQUE_H} h`}>
+                              <p className="text-[9px] font-black uppercase text-slate-500 tracking-wider">Cambio Ref. (H)</p>
+                              <p className="text-xs font-mono font-black text-slate-600">{cambioDe(group) > 0 ? cambioDe(group).toFixed(3) : '—'}</p>
+                            </div>
                           </div>
                         </div>
                       </AccordionTrigger>
@@ -3413,6 +3439,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                     {center.d.some(r => r.paquetesEnrollar > 0) && ` (${center.d.reduce((s, r) => s + r.paquetesEnrollar, 0)} a enrollar)`}
                   </span>
                   <span className="text-amber-600">{center.d.reduce((s, r) => s + r.totalTiempoEmpaque, 0).toFixed(1)}h empaque</span>
+                  <span className="text-slate-600">{center.d.reduce((s, g) => s + setupDe(g), 0).toFixed(2)}h setup</span>
+                  <span className="text-slate-600">{center.d.reduce((s, g) => s + cambioDe(g), 0).toFixed(2)}h cambio ref.</span>
                 </div>
               </div>
             )}
@@ -3805,9 +3833,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                                       <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Tiempo Proceso</span>
                                       <span className="text-[10px] font-black text-slate-700">{tiempoProceso !== null ? `${tiempoProceso.toFixed(1)}h` : '—'}</span>
                                     </div>
-                                    <div className="flex items-center justify-between gap-2" title="Horas programadas (Día+Noche+Sábado) de este recurso, sin descontar paros ni rendimiento.">
+                                    <div className="flex items-center justify-between gap-2" title={`Horas efectivas (con paros, rendimiento y MTTO), igual que el correo. Brutas: ${h.bruto.toFixed(2)}h.`}>
                                       <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Tiempo Máquina</span>
-                                      <span className="text-[10px] font-black text-slate-700">{h.bruto.toFixed(1)}h</span>
+                                      <span className="text-[10px] font-black text-slate-700">{h.neto.toFixed(2)}h</span>
                                     </div>
                                     <div
                                       className={cn("flex items-center justify-between gap-2 rounded p-1 -mx-1", pct !== null && pct > 100 ? "bg-red-50" : "bg-emerald-50")}
