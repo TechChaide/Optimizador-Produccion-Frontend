@@ -2518,19 +2518,6 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // vez que se generó, en esta sesión o antes); no dispara la explosión BOM en cada render, eso solo
   // ocurre al pulsar "Generar" o "Enviar Reporte" (ver reporteFlujoEmpaque, que al guardar refresca la
   // trazabilidad justo antes de armar el correo para no depender de un preview desactualizado).
-  const resumenEmpaquePorCentro = useMemo(() => {
-    const calcularCentro = (centro: '1000' | '2000') => {
-      const espumas = bloqueEspumasEmpaque(pfdVentaPreview[centro]);
-      const rollos = bloqueRollosEmpaque(centro, pfdVentaPreview[centro]);
-      const totalHoras = (espumas?.totalHoras || 0) + (rollos?.totalHoras || 0);
-      const capacidadHoras = capacidadEmpaquePorCentro[centro];
-      const ocupacionPct = capacidadHoras > 0 ? (totalHoras / capacidadHoras) * 100 : null;
-      return { espumas, rollos, totalHoras, capacidadHoras, ocupacionPct };
-    };
-    return { '1000': calcularCentro('1000'), '2000': calcularCentro('2000') };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pfdVentaPreview, dataAprobada, tiempoLookup1000, tiempoLookup2000, capacidadEmpaquePorCentro, resultadoRestaurado]);
-
   // Cuerpo del correo — mismo formato ya aprobado en Corte Espuma/Corte y Laminado (banner CHAIDE Y
   // CHAIDE, tarjetas de totales, tabla de detalle, nota final). `previewEspumas` se recibe como
   // parámetro (no se lee de `pfdVentaPreview`/resumenEmpaquePorCentro acá dentro) porque
@@ -2541,7 +2528,8 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     const fechaLabel = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
     const espumas = bloqueEspumasEmpaque(previewEspumas);
     const rollos = bloqueRollosEmpaque(centro, previewEspumas);
-    const totalHoras = (espumas?.totalHoras || 0) + (rollos?.totalHoras || 0);
+    const cambios = cambiosEmpaque[centro];
+    const totalHoras = (espumas?.totalHoras || 0) + (rollos?.totalHoras || 0) + cambios.total;
     const capacidadHoras = capacidadEmpaquePorCentro[centro];
     const ocupacionPct = capacidadHoras > 0 ? (totalHoras / capacidadHoras) * 100 : null;
     const ocupacionColor = ocupacionPct !== null && ocupacionPct > 100 ? '#b91c1c' : '#047857';
@@ -2648,6 +2636,21 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   <tr>
     <td style="padding:10px 28px 4px;">
       <p style="margin:0;font-size:11px;color:#b45309;">Sin materiales verificados en Data Aprobada para este centro todavía.</p>
+    </td>
+  </tr>` : ''}
+  ${cambios.total > 0 ? `
+  <tr>
+    <td style="padding:10px 28px 4px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:8px;">
+        <tr>
+          <td style="padding:7px 10px;font-size:11px;color:#374151;">Setup (${cambios.variantes} × ${SETUP_EMPAQUE_H} h)</td>
+          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;font-variant-numeric:tabular-nums;">${cambios.setup.toFixed(2)} h</td>
+        </tr>
+        <tr>
+          <td style="padding:7px 10px;font-size:11px;color:#374151;border-top:1px solid #f3f4f6;">Cambio de referencia (${cambios.cambiosDensidad} × ${CAMBIO_REFERENCIA_EMPAQUE_H} h)</td>
+          <td align="right" style="padding:7px 10px;font-size:11px;font-weight:700;color:#b45309;border-top:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${cambios.cambio.toFixed(2)} h</td>
+        </tr>
+      </table>
     </td>
   </tr>` : ''}
   <tr>
@@ -2797,7 +2800,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
   const calculateSummary = (data: Record<string, unknown>[], centroId: string) => {
     const lookup = centroId === '1000' ? tiempoLookup1000 : tiempoLookup2000;
-    const map = new Map<string, { centro: string; maquina: string; categoria: string; densidad: string; espesor: string; tipo: string; totalOrdenes: number; totalCantidad: number; totalTiempoEmpaque: number; paquetes: number; paquetesEnrollar: number }>();
+    const map = new Map<string, { centro: string; maquina: string; categoria: string; densidad: string; espesor: string; tipo: string; medida?: string; totalOrdenes: number; totalCantidad: number; totalTiempoEmpaque: number; paquetes: number; paquetesEnrollar: number }>();
     // Diagnóstico (2026-10-08): materiales que no encuentran tiempo en el servicio y usan 15 s/und.
     const sinTiempo = new Set<string>();
     // Unidades de PLANCHA por material dentro de cada fila (los paquetes se arman por material).
@@ -2811,7 +2814,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       const espesor = info.esp || '—';
       const tipo = info.tipo || '—';
       const densidad = info.dens || '—';
-      const key = `${maquina}|${categoria}|${espesor}|${tipo}`;
+      // Medida (ancho × largo, ej. 100X140): cada medida+espesor es una referencia distinta en Empaque
+      // (usuario 2026-11-04: la columna Tipo salía "—" en categorías sin patrón D##XX).
+      const medida = info.ancho !== '—' && info.largo !== '—' ? `${info.ancho}X${info.largo}` : '—';
+      const key = `${maquina}|${categoria}|${medida}|${espesor}|${tipo}`;
 
       const qty = Number(o.CANTPROGRAMADA || o.CANTIDAD || 0);
       // Tiempo real de SAP (mismo cruce material+máquina que ya usa "T. Estándar (Min)" en las
@@ -2825,7 +2831,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       if (tiempoEstandarMin === null) sinTiempo.add(info.code);
 
       if (!map.has(key)) {
-        map.set(key, { centro: centroId, maquina, categoria, densidad, espesor, tipo, totalOrdenes: 0, totalCantidad: 0, totalTiempoEmpaque: 0, paquetes: 0, paquetesEnrollar: 0 });
+        map.set(key, { centro: centroId, maquina, categoria, densidad, espesor, tipo, medida, totalOrdenes: 0, totalCantidad: 0, totalTiempoEmpaque: 0, paquetes: 0, paquetesEnrollar: 0 });
       }
       const entry = map.get(key)!;
       entry.totalOrdenes += 1;
@@ -2865,7 +2871,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
     }
     if (data.length > 0) console.info(`[Empaque ${centroId}] tiempos del servicio:${lookup.size} materiales; sin tiempo (15 s/und): ${sinTiempo.size}${sinTiempo.size ? ` — ${[...sinTiempo].slice(0, 15).join(', ')}` : ''}`);
     return Array.from(map.values()).sort((a, b) =>
-      a.maquina.localeCompare(b.maquina) || a.categoria.localeCompare(b.categoria) || a.espesor.localeCompare(b.espesor)
+      a.maquina.localeCompare(b.maquina) || a.categoria.localeCompare(b.categoria) || (a.medida ?? '').localeCompare(b.medida ?? '', undefined, { numeric: true }) || a.espesor.localeCompare(b.espesor, undefined, { numeric: true })
     );
   };
 
@@ -2896,6 +2902,40 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
   const groupedSummary1000 = useMemo(() => groupByCategoria(summaryData1000), [summaryData1000]);
   const groupedSummary2000 = useMemo(() => groupByCategoria(summaryData2000), [summaryData2000]);
+
+  // Setup y cambio de referencia de Empaque (usuario 2026-11-04), sobre la carga operativa: setup por
+  // variante (medida + espesor) y cambio de referencia al pasar de una densidad a otra (D17 → D20),
+  // cargado a la primera categoría de cada densidad salvo la primera. Suman a las Horas Necesarias.
+  const cambiosEmpaque = useMemo(() => {
+    const calcular = (grupos: typeof groupedSummary1000) => {
+      const densidades = [...new Set(grupos.map(g => g.densidad))].sort((a, b) => (Number(a) || 0) - (Number(b) || 0));
+      const abreDensidad = new Set(densidades.slice(1).map(d => grupos.find(g => g.densidad === d)!.categoria));
+      const porCategoria = new Map(grupos.map(g => [g.categoria, { setup: g.rows.length * SETUP_EMPAQUE_H, cambio: abreDensidad.has(g.categoria) ? CAMBIO_REFERENCIA_EMPAQUE_H : 0 }]));
+      const variantes = grupos.reduce((s, g) => s + g.rows.length, 0);
+      const setup = variantes * SETUP_EMPAQUE_H;
+      const cambio = abreDensidad.size * CAMBIO_REFERENCIA_EMPAQUE_H;
+      return { porCategoria, variantes, cambiosDensidad: abreDensidad.size, setup, cambio, total: setup + cambio };
+    };
+    return { '1000': calcular(groupedSummary1000), '2000': calcular(groupedSummary2000) };
+  }, [groupedSummary1000, groupedSummary2000]);
+
+  // Resumen reactivo para el DASHBOARD en pantalla — usa lo que ya haya en `pfdVentaPreview` (última
+  // vez que se generó, en esta sesión o antes); no dispara la explosión BOM en cada render, eso solo
+  // ocurre al pulsar "Generar" o "Enviar Reporte" (ver reporteFlujoEmpaque, que al guardar refresca la
+  // trazabilidad justo antes de armar el correo para no depender de un preview desactualizado).
+  const resumenEmpaquePorCentro = useMemo(() => {
+    const calcularCentro = (centro: '1000' | '2000') => {
+      const espumas = bloqueEspumasEmpaque(pfdVentaPreview[centro]);
+      const rollos = bloqueRollosEmpaque(centro, pfdVentaPreview[centro]);
+      const cambios = cambiosEmpaque[centro];
+      const totalHoras = (espumas?.totalHoras || 0) + (rollos?.totalHoras || 0) + cambios.total;
+      const capacidadHoras = capacidadEmpaquePorCentro[centro];
+      const ocupacionPct = capacidadHoras > 0 ? (totalHoras / capacidadHoras) * 100 : null;
+      return { espumas, rollos, cambios, totalHoras, capacidadHoras, ocupacionPct };
+    };
+    return { '1000': calcularCentro('1000'), '2000': calcularCentro('2000') };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pfdVentaPreview, dataAprobada, tiempoLookup1000, tiempoLookup2000, capacidadEmpaquePorCentro, resultadoRestaurado, cambiosEmpaque]);
 
   // "PFD - VENTA": dirección OPUESTA a explodeNecesidadesFert — en vez de bajar de FERT/PT a
   // componente, sube desde el componente YA RESPONDIDO (Data Aprobada, estado 'completo') hacia su(s)
@@ -3324,13 +3364,10 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       ? { t: 'Carga operativa (FERT) · Centro 1000', d: groupedSummary1000, c: 'text-green-700', b: 'bg-green-600', expanded: expandedCategorias1000, setExpanded: setExpandedCategorias1000 }
       : { t: 'Carga operativa (FERT) · Centro 2000', d: groupedSummary2000, c: 'text-indigo-700', b: 'bg-indigo-600', expanded: expandedCategorias2000, setExpanded: setExpandedCategorias2000 };
     const idx = centroId === '1000' ? 0 : 1;
-    // Setup y cambio de referencia (usuario 2026-11-04), solo visual: no entran a Horas Necesarias ni
-    // al correo. Setup por variante de la categoría; cambio de referencia al pasar de una densidad a
-    // otra (D17 → D20), cargado a la primera categoría de cada densidad salvo la primera.
-    const densidades = [...new Set(center.d.map(g => g.densidad))].sort((a, b) => (Number(a) || 0) - (Number(b) || 0));
-    const abreDensidad = new Set(densidades.slice(1).map(d => center.d.find(g => g.densidad === d)!.categoria));
-    const setupDe = (g: (typeof center.d)[number]) => g.rows.length * SETUP_EMPAQUE_H;
-    const cambioDe = (g: (typeof center.d)[number]) => abreDensidad.has(g.categoria) ? CAMBIO_REFERENCIA_EMPAQUE_H : 0;
+    // Setup y cambio de referencia por categoría (ver cambiosEmpaque); el cambio va en la 1ª fila.
+    const cambios = cambiosEmpaque[centroId];
+    const setupDe = (g: (typeof center.d)[number]) => cambios.porCategoria.get(g.categoria)?.setup ?? 0;
+    const cambioDe = (g: (typeof center.d)[number]) => cambios.porCategoria.get(g.categoria)?.cambio ?? 0;
     return (
         <div key={idx} className="space-y-4">
           <div className="flex items-center justify-between px-1">
@@ -3358,7 +3395,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                             <Badge className="bg-blue-50 text-blue-800 font-bold text-[10px] uppercase border-blue-200">D{group.densidad}</Badge>
                             <div>
                               <p className="text-xs font-black text-gray-700 uppercase">{group.categoria}</p>
-                              <p className="text-[10px] font-bold text-gray-500 uppercase">{group.tipo} · {group.rows.length} variante(s)</p>
+                              <p className="text-[10px] font-bold text-gray-500 uppercase">{group.tipo !== '—' ? `${group.tipo} · ` : ''}{group.rows.length} variante(s)</p>
                             </div>
                           </div>
                           <div className="flex items-center gap-6 text-right">
@@ -3398,26 +3435,30 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                           <thead className="bg-gray-50 text-[10px] font-black uppercase text-gray-500 border-b border-gray-100">
                             <tr>
                               <th className="px-4 py-2 border-r border-gray-100 text-left">Máquina / Recurso</th>
-                              <th className="px-3 py-2 border-r border-gray-100 text-primary">Tipo</th>
+                              <th className="px-3 py-2 border-r border-gray-100 text-primary">Medida</th>
                               <th className="px-3 py-2 border-r border-gray-100 bg-blue-50/50 text-blue-800">Espesor</th>
                               <th className="px-3 py-2 border-r border-gray-100">Órdenes</th>
                               <th className="px-3 py-2 border-r border-gray-100 font-black">Unidades</th>
                               <th className="px-3 py-2 border-r border-gray-100 text-teal-700">Paquetes ({ALTURA_PAQUETE_CM} cm)</th>
                               <th className="px-3 py-2 border-r border-gray-100 text-purple-700">Enrollar (C-Plancha)</th>
-                              <th className="px-4 py-2 text-center text-amber-700 bg-amber-50/30">Tiempo Planchas (H)</th>
+                              <th className="px-4 py-2 border-r border-gray-100 text-center text-amber-700 bg-amber-50/30">Tiempo Planchas (H)</th>
+                              <th className="px-3 py-2 border-r border-gray-100 text-slate-600">Setup (H)</th>
+                              <th className="px-3 py-2 text-slate-600">Cambio Ref. (H)</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-50 text-[11px]">
                             {group.rows.map((row, i) => (
                               <tr key={i} className="hover:bg-gray-50/50 transition-colors">
                                 <td className="px-4 py-2 font-black text-gray-700 border-r border-gray-100 uppercase text-left">{row.maquina}</td>
-                                <td className="px-3 py-2 font-black text-primary border-r border-gray-100 uppercase">{row.tipo}</td>
+                                <td className="px-3 py-2 font-black text-primary border-r border-gray-100 uppercase">{row.medida ?? row.tipo}</td>
                                 <td className="px-3 py-2 font-black text-blue-700 border-r border-gray-100 bg-blue-50/5">{row.espesor}</td>
                                 <td className="px-3 py-2 font-mono border-r border-gray-100 text-gray-500">{row.totalOrdenes}</td>
                                 <td className="px-3 py-2 font-mono font-black text-gray-900 border-r border-gray-100">{row.totalCantidad.toLocaleString()}</td>
                                 <td className="px-3 py-2 font-mono font-black text-teal-700 border-r border-gray-100">{row.paquetes ? row.paquetes : '—'}</td>
                                 <td className="px-3 py-2 font-mono font-black text-purple-700 border-r border-gray-100">{row.paquetesEnrollar ? row.paquetesEnrollar : '—'}</td>
-                                <td className="px-4 py-2 font-mono font-black text-amber-600 text-center bg-amber-50/5">{row.totalTiempoEmpaque.toFixed(2)}</td>
+                                <td className="px-4 py-2 font-mono font-black text-amber-600 text-center border-r border-gray-100 bg-amber-50/5">{row.totalTiempoEmpaque.toFixed(2)}</td>
+                                <td className="px-3 py-2 font-mono font-black text-slate-600 border-r border-gray-100">{SETUP_EMPAQUE_H.toFixed(3)}</td>
+                                <td className="px-3 py-2 font-mono font-black text-slate-600">{i === 0 && cambioDe(group) > 0 ? cambioDe(group).toFixed(3) : '—'}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -3893,7 +3934,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
                               )}
                             </div>
                           </div>
-                          <div className="flex items-center justify-between gap-2" title="Espumas (FERT/PT) + Rollos — mismo dato que sale en el correo.">
+                          <div className="flex items-center justify-between gap-2" title={`Espumas (FERT/PT) + Rollos + setup ${r.cambios.setup.toFixed(2)}h + cambio ref. ${r.cambios.cambio.toFixed(2)}h — mismo dato que sale en el correo.`}>
                             <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Horas Necesarias</span>
                             <span className="text-sm font-black text-slate-800 tabular-nums">{r.totalHoras.toFixed(2)}h</span>
                           </div>
