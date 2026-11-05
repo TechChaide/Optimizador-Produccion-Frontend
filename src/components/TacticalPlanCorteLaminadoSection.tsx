@@ -92,7 +92,9 @@ const SETUP_TIME_PER_RUN = (TIEMPO_PREPARACION_CORRIDA_H + TIEMPO_TRASLADO_CALLE
 // orden se usa una sola vez. null = SAP todavía no la creó. Lo usan el correo (completarOrdenesSap) y
 // la tabla de pantalla.
 const emparejarOrdenesSap = (
-  lineas: { material: string; un: number; kg: number; fecha: string }[],
+  // fechaInicio (2026-11-05): fecha de inicio enviada a SAP; con la ventana real las órdenes de la Noche
+  // arrancan el día anterior al plan y SAP las guarda con esa FECHA.
+  lineas: { material: string; un: number; kg: number; fecha: string; fechaInicio?: string }[],
   ordenesFert: RawApiRow[],
 ): (string | null)[] => {
   const libres = ordenesFert.flatMap(o => {
@@ -116,7 +118,7 @@ const emparejarOrdenesSap = (
     let mejor: (typeof libres)[number] | undefined;
     let dif = Infinity;
     for (const o of libres) {
-      if (o.usada || o.material !== material || o.fecha !== l.fecha) continue;
+      if (o.usada || o.material !== material || (o.fecha !== l.fecha && o.fecha !== l.fechaInicio)) continue;
       const d = Math.abs(o.cantidad - (o.enUn ? l.un : l.kg));
       if (d < dif) { dif = d; mejor = o; }
     }
@@ -486,6 +488,37 @@ const minutosAHoraSap = (totalMin: number): string => {
   const h = Math.floor(minutosEnDia / 60);
   const m = minutosEnDia % 60;
   return `${String(h).padStart(2, '0')}${String(m).padStart(2, '0')}00`;
+};
+
+// Reloj de la ventana del plan para el horario SAP (2026-11-05): tramos libres = turnos menos bloques
+// (MTTO). avanzarEnTramos camina `minutos` de reloj por esos tramos, saltando los huecos entre turnos
+// (ej. 05:30 → 07:00); si se acaba la ventana, sigue de corrido después del último tramo.
+type Tramo = { ini: number; fin: number };
+const restarBloques = (tramos: Tramo[], bloques: Tramo[]): Tramo[] =>
+  bloques.reduce<Tramo[]>((acc, b) => acc.flatMap(t => {
+    if (b.fin <= t.ini || b.ini >= t.fin) return [t];
+    const partes: Tramo[] = [];
+    if (b.ini > t.ini) partes.push({ ini: t.ini, fin: b.ini });
+    if (b.fin < t.fin) partes.push({ ini: b.fin, fin: t.fin });
+    return partes;
+  }), [...tramos].sort((a, b) => a.ini - b.ini));
+const avanzarEnTramos = (tramos: Tramo[], desde: number, minutos: number): number => {
+  let t = desde;
+  let resta = minutos * 60000;
+  for (const tr of tramos) {
+    if (tr.fin <= t) continue;
+    if (t < tr.ini) t = tr.ini;
+    const cabe = tr.fin - t;
+    if (resta <= cabe) return t + resta;
+    resta -= cabe;
+    t = tr.fin;
+  }
+  return t + resta;
+};
+// Primer instante libre desde `t` (si cae en un hueco, salta al inicio del siguiente tramo).
+const primerLibre = (tramos: Tramo[], t: number): number => {
+  for (const tr of tramos) if (tr.fin > t) return Math.max(t, tr.ini);
+  return t;
 };
 
 const getProp = (obj: Record<string, unknown> | null | undefined, keys: string[]): string => {
@@ -3865,6 +3898,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const fechaRaw = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']).trim();
       const fecha = fechaRaw.includes('T') ? fechaRaw.split('T')[0] : fechaRaw;
       if (!fecha || fecha > ventanaPlan.baseStr) return [];
+      // 2026-11-05: las órdenes de la Noche de ESTA ventana salen a SAP con la fecha evaluada (ver el
+      // reloj de outputPlanRows); si SAP trae la hora de inicio y cae dentro de la ventana, son de este
+      // plan, no pendiente del anterior.
+      if (fecha === ventanaPlan.baseStr && ventanaPlan.inicio && /T\d{2}:\d{2}/.test(fechaRaw) && !/T00:00/.test(fechaRaw)) {
+        const ini = new Date(fechaRaw);
+        if (isValid(ini) && ini.getTime() >= ventanaPlan.inicio.getTime()) return [];
+      }
       const pendiente = safeNum(getProp(o, ['CANTPENDIENTE']));
       if (pendiente <= 0) return [];
       const material = String(Number(getProp(o, ['MATERIAL', 'CodMaterial'])));
@@ -3991,7 +4031,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // que queda una marca que completarOrdenesSap reemplaza al revisar el reporte. Los comentarios HTML
   // no se ven en el correo ni pasan al TXT.
   const marcaOrdenSap = (row: CorridaOutputRow) =>
-    `<!--OF:${row.material}|${Math.round(row.planUn)}|${row.planKg.toFixed(1)}-->pendiente SAP<!--/OF-->`;
+    `<!--OF:${row.material}|${Math.round(row.planUn)}|${row.planKg.toFixed(1)}|${row.fechaInicioProgramada}-->pendiente SAP<!--/OF-->`;
 
   // Al revisar el reporte guardado: busca en SAP las órdenes FERT de Laminado (Centro 1000,
   // responsables 014/031) con la fecha del plan y llena cada marca por material. Si un material tiene
@@ -4000,13 +4040,14 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   const completarOrdenesSap = async (html: string, fechaPlan: string): Promise<string> => {
     if (!html.includes('<!--OF:')) return html;
     const res = await serviciosService.getOrdenesFert(1, 20000);
-    const marca = /<!--OF:([^|]*)\|([^|]*)\|([^>]*?)-->[\s\S]*?<!--\/OF-->/g;
-    const lineas = Array.from(html.matchAll(marca)).map(m => ({ material: m[1], un: Number(m[2]), kg: Number(m[3]), fecha: fechaPlan }));
+    // 4o campo (desde 2026-11-05, opcional en reportes anteriores): fecha de inicio enviada a SAP.
+    const marca = /(<!--OF:([^|]*)\|([^|]*)\|([^|>]*?)(?:\|([^>]*?))?-->)[\s\S]*?<!--\/OF-->/g;
+    const lineas = Array.from(html.matchAll(marca)).map(m => ({ material: m[2], un: Number(m[3]), kg: Number(m[4]), fecha: fechaPlan, fechaInicio: m[5] || undefined }));
     const ordenes = emparejarOrdenesSap(lineas, (res.data || []) as RawApiRow[]);
     let i = 0;
-    return html.replace(marca, (todo, mat: string, un: string, kg: string) => {
+    return html.replace(marca, (todo, apertura: string) => {
       const orden = ordenes[i++];
-      return orden ? `<!--OF:${mat}|${un}|${kg}-->${orden}<!--/OF-->` : todo;
+      return orden ? `${apertura}${orden}<!--/OF-->` : todo;
     });
   };
 
@@ -4347,6 +4388,39 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // heredan el horario de la fila base bajo la que aparecen anidadas (ver isConvNested arriba).
     const minutosAcumuladosPorFecha = new Map<string, number>();
     let horarioUltimaBase: { fechaInicioProgramada: string; horaInicioProgramada: string; fechaFinProgramada: string; horaFinProgramada: string } | null = null;
+
+    // 2026-11-05 (usuario): las filas del día del plan siguen la VENTANA real (ej. Noche jue 05/11
+    // 19:00 → Día vie 06/11 18:00) en vez de arrancar 07:00 con tiempo de rollo puro (las 6 corridas
+    // terminaban 13:52 con 17.79 h operativas). Mismo tiempo que Tiempo Operativo: rollo × UN + setup
+    // por corrida (en la 1a fila de cada corrida), pasado a reloj con paros/rendimiento; la corrida
+    // pendiente ocupa el arranque y el MTTO bloquea su horario. Las filas nocturnas salen a SAP con la
+    // fecha de la Noche (FechaInicioProgramada 05/11); `fecha` (P3) sigue siendo la del plan.
+    const diaPlanStr = ventanaPlan ? format(ventanaPlan.diaPlan, 'yyyy-MM-dd') : '';
+    const relojVentana = (() => {
+      if (!ventanaPlan?.inicio || ventanaPlan.turnos.length === 0) return null;
+      const factor = factorEfectivoLooper > 0 ? factorEfectivoLooper : 1;
+      const turnos = ventanaPlan.turnos.map(t => ({ ini: t.ini.getTime(), fin: t.fin.getTime() }));
+      const bloques = mttoPreventivoTasks.flatMap(m => {
+        let ini: number | null = null;
+        if (m.fecha.length > 10) {
+          const d = parseISO(m.fecha.replace(' ', 'T'));
+          ini = isValid(d) ? d.getTime() : null;
+        } else {
+          const delDia = ventanaPlan.turnos.filter(t => format(t.ini, 'yyyy-MM-dd') === m.fecha);
+          const t = delDia.find(x => x.turno !== 'Noche') ?? delDia[0];
+          ini = t ? t.ini.getTime() : null;
+        }
+        return ini !== null && m.horas > 0 ? [{ ini, fin: ini + m.horas * 3600000 }] : [];
+      });
+      const tramos = restarBloques(turnos, bloques);
+      const arranque = avanzarEnTramos(tramos, primerLibre(tramos, ventanaPlan.inicio.getTime()), (corridaPendienteHoras * 60) / factor);
+      return { factor, tramos, t: primerLibre(tramos, arranque), ultimaCorrida: '' };
+    })();
+    const aSap = (ms: number) => {
+      const d = new Date(Math.round(ms / 60000) * 60000);
+      return { fecha: format(d, 'yyyy-MM-dd'), hora: `${format(d, 'HHmm')}00` };
+    };
+
     rows.forEach(row => {
       if (row.isConvNested) {
         if (horarioUltimaBase) {
@@ -4355,6 +4429,27 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
           row.fechaFinProgramada = horarioUltimaBase.fechaFinProgramada;
           row.horaFinProgramada = horarioUltimaBase.horaFinProgramada;
         }
+        return;
+      }
+
+      if (relojVentana && row.fecha === diaPlanStr) {
+        const setupMin = row.corridaId !== relojVentana.ultimaCorrida ? SETUP_TIME_PER_RUN : 0;
+        relojVentana.ultimaCorrida = row.corridaId;
+        const ini = primerLibre(relojVentana.tramos, relojVentana.t);
+        const fin = avanzarEnTramos(relojVentana.tramos, ini, ((row.looperTRolloMin || 0) * row.planUn + setupMin) / relojVentana.factor);
+        relojVentana.t = fin;
+        const a = aSap(ini);
+        const b = aSap(fin);
+        row.fechaInicioProgramada = a.fecha;
+        row.horaInicioProgramada = a.hora;
+        row.fechaFinProgramada = b.fecha;
+        row.horaFinProgramada = b.hora;
+        horarioUltimaBase = {
+          fechaInicioProgramada: row.fechaInicioProgramada,
+          horaInicioProgramada: row.horaInicioProgramada,
+          fechaFinProgramada: row.fechaFinProgramada,
+          horaFinProgramada: row.horaFinProgramada,
+        };
         return;
       }
 
@@ -4378,7 +4473,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     });
 
     return rows;
-  }, [groupedNeeds, corridaFechas, ordenCorridas, siguienteDiaHabil]);
+  }, [groupedNeeds, corridaFechas, ordenCorridas, siguienteDiaHabil, ventanaPlan, factorEfectivoLooper, mttoPreventivoTasks, corridaPendienteHoras]);
 
   // Corridas de Laminado YA EN SAP para el tab Consumo Acolchadoras — órdenes FERT de Laminado
   // (responsables 014/031, centro ≠ 2000, mismo criterio que emparejarOrdenesSap), en rollos por
@@ -4420,7 +4515,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // Mismas columnas en la tabla de pantalla del Plan de Salida: la orden sale de las FERT ya cargadas
   // al sincronizar (aparece al volver a sincronizar después de que SAP la cree).
   const ordenesSapPantalla = useMemo(
-    () => emparejarOrdenesSap(outputPlanRows.map(r => ({ material: r.material, un: Math.round(r.planUn), kg: Number(r.planKg.toFixed(1)), fecha: r.fecha })), ordenesFert),
+    () => emparejarOrdenesSap(outputPlanRows.map(r => ({ material: r.material, un: Math.round(r.planUn), kg: Number(r.planKg.toFixed(1)), fecha: r.fecha, fechaInicio: r.fechaInicioProgramada })), ordenesFert),
     [outputPlanRows, ordenesFert]
   );
   const destinosPantalla = destinosPlanSalida();
