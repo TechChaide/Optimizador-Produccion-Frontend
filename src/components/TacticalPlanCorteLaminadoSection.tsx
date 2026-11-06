@@ -3809,10 +3809,20 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // lunes, como la pestaña Mantenimiento); una OT con hora real cuenta solo lo que solapa los turnos.
   // Regla única de los 3 módulos (ver mttoEnVentana): con hora real, el turno donde cae (también la
   // Noche); solo con fecha (SISMAC, 0:00), completo en el turno Día de ese día.
-  const horasMttoEnTurnos = (m: RawApiRow, turnos: { turno: string; ini: Date; fin: Date }[]): { horas: number; inicio: Date; porDia: boolean } | null => {
+  const horasMttoEnTurnos = (m: RawApiRow, turnos: { turno: string; ini: Date; fin: Date }[]): { horas: number; inicio: Date; fin: Date | null; turno: string; porDia: boolean } | null => {
     const iniStr = getProp(m, ['FECHA_OT_PRG_INI']) || getProp(m, ['FECHA_PRO']);
-    const r = mttoEnVentana({ inicio: iniStr, fin: getProp(m, ['FECHA_OT_PRG_FIN']), fecha: getProp(m, ['FECHA_PRO']) || iniStr, duracionH: duracionMttoH(m) }, turnos);
-    return r ? { horas: r.horas, inicio: r.conHora ? new Date(iniStr) : r.turno.ini, porDia: !r.conHora } : null;
+    const finStr = getProp(m, ['FECHA_OT_PRG_FIN']);
+    const r = mttoEnVentana({ inicio: iniStr, fin: finStr, fecha: getProp(m, ['FECHA_PRO']) || iniStr, duracionH: duracionMttoH(m) }, turnos);
+    if (!r) return null;
+    const fin = r.conHora && finStr ? new Date(finStr) : null;
+    return { horas: r.horas, inicio: r.conHora ? new Date(iniStr) : r.turno.ini, fin: fin && isValid(fin) ? fin : null, turno: r.turno.turno, porDia: !r.conHora };
+  };
+
+  // "LUN 09/11 11:00–16:00 · DÍA" (hora Ecuador; la Z del SP se convierte a local). Solo fecha → "LUN 09/11 · DÍA".
+  const detalleMtto = (ini: Date, fin: Date | null, turno: string | null, porDia: boolean): string => {
+    const dia = format(ini, 'EEE dd/MM', { locale: es }).toUpperCase();
+    const horas = porDia ? '' : ` ${format(ini, 'HH:mm')}${fin ? `–${format(fin, 'HH:mm')}` : ''}`;
+    return `${dia}${horas}${turno ? ` · ${turno.toUpperCase()}` : ''}`;
   };
 
   // Operación Adicional: tareas de MTTO preventivo del Looper (ver mantenimientosLooper).
@@ -3840,10 +3850,10 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const diaPlanStr = format(ventanaPlan.diaPlan, 'yyyy-MM-dd');
       return mantenimientosLooper.flatMap(m => {
         const r = horasMttoEnTurnos(m, ventanaPlan.turnos);
-        if (r) return [{ maquina: getProp(m, ['MAQUINA']), fecha: format(r.inicio, r.porDia ? 'yyyy-MM-dd' : 'yyyy-MM-dd HH:mm'), horas: r.horas }];
+        if (r) return [{ maquina: getProp(m, ['MAQUINA']), fecha: format(r.inicio, r.porDia ? 'yyyy-MM-dd' : 'yyyy-MM-dd HH:mm'), detalle: detalleMtto(r.inicio, r.fin, r.turno, r.porDia), horas: r.horas }];
         // Sin turno que la cubra (ej. Turno Día vacío): igual cuenta si es del día del plan.
         const horas = duracionMttoH(m);
-        return diaProgramado(m) === diaPlanStr && horas > 0 ? [{ maquina: getProp(m, ['MAQUINA']), fecha: diaPlanStr, horas }] : [];
+        return diaProgramado(m) === diaPlanStr && horas > 0 ? [{ maquina: getProp(m, ['MAQUINA']), fecha: diaPlanStr, detalle: detalleMtto(parseISO(diaPlanStr), null, null, true), horas }] : [];
       });
     }
     const diasPlan = new Set(Array.from(selectedDates).map(d => format(siguienteDiaHabil(parseISO(d)), 'yyyy-MM-dd')));
@@ -3852,6 +3862,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       .map(m => ({
         maquina: getProp(m, ['MAQUINA']),
         fecha: diaProgramado(m),
+        detalle: diaProgramado(m) ? detalleMtto(parseISO(diaProgramado(m)), null, null, true) : '',
         horas: duracionMttoH(m),
       }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5002,7 +5013,7 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                       <span className="text-[10px] font-black text-indigo-700">{mttoPreventivoHoras.toFixed(2)} H</span>
                     </button>
                   </PopoverTrigger>
-                  <PopoverContent className="w-[300px] p-4 bg-white border border-gray-100 rounded-2xl shadow-xl text-slate-800" align="start">
+                  <PopoverContent className="w-[340px] p-4 bg-white border border-gray-100 rounded-2xl shadow-xl text-slate-800" align="start">
                     <p className="text-[9px] font-black uppercase text-indigo-700 tracking-widest mb-1">Operación Adicional — Looper</p>
                     <p className="text-[8px] text-slate-500 font-bold uppercase mb-3">Tareas de mantenimiento preventivo programadas</p>
                     {mttoPreventivoTasks.length === 0 ? (
@@ -5011,8 +5022,8 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                       <div className="space-y-2">
                         {mttoPreventivoTasks.map((t, i) => (
                           <div key={i} className="flex items-center justify-between gap-2 text-[9px] border-b border-gray-100 pb-1.5">
-                            <span className="font-bold uppercase text-slate-600 truncate max-w-[140px]" title={t.maquina}>{t.maquina}</span>
-                            <span className="text-slate-500 font-mono">{t.fecha || '—'}</span>
+                            <span className="font-bold uppercase text-slate-600 truncate max-w-[90px]" title={t.maquina}>{t.maquina}</span>
+                            <span className="text-slate-500 font-mono whitespace-nowrap">{t.detalle || t.fecha || '—'}</span>
                             <span className="font-black text-indigo-700 whitespace-nowrap">{t.horas.toFixed(2)}h</span>
                           </div>
                         ))}
