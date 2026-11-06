@@ -29,7 +29,7 @@ import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { leerVersionTablasPropias } from '@/lib/tablas-propias-version';
 import type { DetalleTactico } from '@/types/interfaces';
-import { leerDiario, guardarDiario, periodoDesdeJueves, esJuevesHoy } from '@/lib/cache-diaria';
+import { leerDiario, guardarDiario, periodoDesdeJueves } from '@/lib/cache-diaria';
 
 export type ClaveDatoSap =
   | 'provisionales'
@@ -154,13 +154,23 @@ export const sapCompartido = {
   cuboHabilidadesOP: () => compartir('habilidades', () => serviciosService.getCuboHabilidadesOP()),
   mantenimientosPreventivos: () => compartir('mantenimientos', async () => {
     const periodo = periodoDesdeJueves();
-    // El jueves la carga semanal puede llegar en cualquier momento: se consulta siempre y se guarda la
-    // última; de viernes a miércoles se usa esa copia.
-    const guardado = esJuevesHoy() ? null : await leerDiario<Awaited<ReturnType<typeof serviciosService.ListarMantenimientoPreventivosProgramados>>>(CLAVE_MTTO_SEMANAL, periodo);
-    if (guardado) return guardado.valor;
-    const r = await serviciosService.ListarMantenimientoPreventivosProgramados();
-    if (!respuestaVacia(r)) void guardarDiario(CLAVE_MTTO_SEMANAL, r, periodo);
-    return r;
+    type RespuestaMtto = Awaited<ReturnType<typeof serviciosService.ListarMantenimientoPreventivosProgramados>>;
+    // 2026-11-06: SISMAC crea y reprograma OTs fuera de la carga del jueves (ej. LO00 lun 09/11
+    // 16:00-21:00 no restaba en Laminado porque se usaba la copia del jueves). Se consulta SIEMPRE en
+    // fresco; la copia guardada queda solo de respaldo si SAP no responde o viene vacío.
+    try {
+      const r = await serviciosService.ListarMantenimientoPreventivosProgramados();
+      if (!respuestaVacia(r)) {
+        void guardarDiario(CLAVE_MTTO_SEMANAL, r, periodo);
+        return r;
+      }
+      const guardado = await leerDiario<RespuestaMtto>(CLAVE_MTTO_SEMANAL, periodo);
+      return guardado ? guardado.valor : r;
+    } catch (e) {
+      const guardado = await leerDiario<RespuestaMtto>(CLAVE_MTTO_SEMANAL, periodo);
+      if (guardado) return guardado.valor;
+      throw e;
+    }
   }),
   kpiMaestroLooper: () => compartir('kpiLooper', () => serviciosService.getKPIMaestroLooper()),
   kpiMaestroCarruseles: () => compartir('kpiCarruseles', () => serviciosService.getKPIMaestroCarruseles()),
@@ -205,8 +215,8 @@ export const refrescarDatosSap = (claves?: ClaveDatoSap[]): void => {
  * Al iniciar CADA sincronización de un módulo (usuario 2026-10-12): FERT y provisionales son las únicas
  * consultas que cambian durante el día, así que siempre se vuelven a pedir; el resto se reusa.
  */
-// El jueves también el mantenimiento: su carga semanal puede llegar ese día (ver mantenimientosPreventivos).
-export const refrescarAlSincronizar = (): void => refrescarDatosSap(esJuevesHoy() ? ['fert', 'provisionales', 'mantenimientos'] : ['fert', 'provisionales']);
+// También el mantenimiento: SISMAC agrega y reprograma OTs cualquier día (ver mantenimientosPreventivos).
+export const refrescarAlSincronizar = (): void => refrescarDatosSap(['fert', 'provisionales', 'mantenimientos']);
 
 /** Hora del dato SAP más antiguo en uso (null si no hay nada descargado). */
 export const momentoDatosSap = (): Date | null => {
