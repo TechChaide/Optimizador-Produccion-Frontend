@@ -26,10 +26,10 @@ export const environment = {
 
     tituloSistema: 'SISTEMA INTEGRADO DE SEGURIDADES',
 
-    ////////////////////////////////////////Carpeta compartida de planes TXT (ver src/lib/planes-txt.ts)
+    ////////////////////////////////////////Carpeta compartida de planes TXT (ver src/lib/planes-txt.ts
+    // y src/services/planesTxt.service.ts para el respaldo propio de Forros)
     // Cada "\" va escapado ("\\"): sin escapar, JS descarta la barra ("\A" -> "A") y la ruta queda
     // rota sin error. En el contenedor Docker (Linux) una ruta UNC no se puede abrir: ahí se monta el
     // recurso SMB como volumen y se sobreescribe con la variable de entorno RUTA_PLANES.
     ruta_planes: '\\\\192.168.7.51\\Archivos Compartidos\\Aplicativos\\Planificacion\\Optimizador-Produccion'
-
 };

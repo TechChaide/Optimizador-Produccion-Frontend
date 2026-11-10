@@ -65,7 +65,7 @@ function diasHastaSiguienteDiaHabil(fechaISO: string): number {
 // Marca cada fila reprogramada con `_fueReprogramado` (en vez de devolver un set de índices
 // separado) para que el indicador sobreviva a cualquier filtrado posterior del arreglo (por
 // restricciones de responsable, búsqueda, etc.) sin desalinearse.
-function recorrerFinDeSemana(dataArray: MantenimientoProgramado[]): MantenimientoProgramado[] {
+export function recorrerFinDeSemana(dataArray: MantenimientoProgramado[]): MantenimientoProgramado[] {
   return dataArray.map((row) => {
     const fechaPro = row['FECHA_PRO'];
     if (!fechaPro) return row;

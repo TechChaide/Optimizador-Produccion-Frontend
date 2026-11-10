@@ -33,6 +33,8 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  ChevronUp,
+  ChevronDown,
   CheckCircle2,
   AlertTriangle,
   Lock,
@@ -48,10 +50,17 @@ import {
   Gauge,
   Mail,
   Send,
-  Eye
+  Eye,
+  ShieldCheck,
+  ShieldAlert,
+  Truck,
+  Trash2,
+  ClipboardPaste,
+  Stethoscope
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
@@ -79,6 +88,7 @@ import {
 import { grupoService } from '@/services/grupo.service';
 import { restriccionService } from '@/services/restriccion.service';
 import { serviciosService } from '@/services/servicios.service';
+import { planesTxtService } from '@/services/planesTxt.service';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { maestroMaterialCentroService } from '@/services/MaestroMaterialCentro.service';
@@ -89,7 +99,7 @@ import type { Grupo, Restriccion, PlanGrupo, DetalleTactico, MaterialesBalanceo,
 import type { MaestroMaterialCentro } from '@/types/types';
 import { cn } from '@/lib/utils';
 import { useAppContext } from '@/context/AppProvider';
-import { calcularTiempoMantenimiento } from '@/components/MantenimientoProgramadoSection';
+import { recorrerFinDeSemana } from '@/components/MantenimientoProgramadoSection';
 import { fetchAllPages } from '@/lib/paginacion';
 
 // Constantes de configuración de jornada
@@ -111,6 +121,7 @@ const FIN_DE_SEMANA_OPTIONS = [
   { value: "0", label: "Sin jornada" },
   { value: "6", label: "7:00 - 13:00 (6h)" },
   { value: "8.75", label: "7:00 - 15:45 (8.75h)" },
+  { value: "11", label: "7:00 - 18:00 (11h)" },
 ];
 
 // Jornada de un día FERIADO: en feriado la planta o no trabaja, o trabaja con jornada reducida
@@ -166,9 +177,64 @@ const FRAGMENTO_MINIMO_HORAS = 0.5;
 // semana distinta (ver `getLunesDeSemanaActual`).
 const PERSONAL_TURNOS_STORAGE_KEY = 'optimizador_personal_turnos_v1';
 
+// Clave de localStorage para el BORRADOR del progreso de "Aceptar Plan" (Ajuste de Producción) —
+// a diferencia de `PlanTxtSnapshot` (respaldo .txt en el backend, que se guarda solo al presionar
+// "Guardar Plan" y a propósito NO incluye los "Aceptado" de la sesión), esto es un respaldo local
+// de SOLO este navegador para no perder el progreso si se refresca la página por accidente antes
+// de guardar. Se borra al guardar el Plan Final con éxito o al restaurar un plan .txt explícito.
+// v2: antes no llevaba fecha, así que un borrador viejo (de cualquier día) se restauraba siempre
+// — un usuario reportó ver producción manual agregada en otro día. Cambiar de clave invalida de
+// una vez cualquier borrador viejo sin `fechaGuardado` que haya quedado en el navegador, sin
+// depender de que el chequeo de fecha (ver más abajo) alcance a correr con el código nuevo.
+const ACEPTAR_PLAN_DRAFT_STORAGE_KEY = 'optimizador_plan_forros_aceptar_draft_v2';
+
+// Interruptor de Traslado a GYE en Resumen y el correo — confirmado por el usuario tras probar la
+// carga manual de la tabla: se reactivan las tarjetas-resumen en ambos lugares.
+const TRASLADO_GYE_MOSTRAR_EN_RESUMEN_Y_CORREO = true;
+
 // `toFechaEcuador` vive en @/lib/fecha-ecuador (helper único para toda la app): fecha calendario
 // en hora de Ecuador, nunca UTC. Ver ahí el detalle del desfase que evita.
 const getFechaLocalHoy = (): string => toFechaEcuador(new Date());
+
+// Estado del plan que viaja embebido en el respaldo .txt (ver construirTxtPlan) y se usa para la
+// función inversa "Restaurar en pantalla" (restaurarPlanDesdeSnapshot).
+interface PlanTxtSnapshot {
+  version: 1;
+  fechaObjetivo: string;
+  grupo: string;
+  centro: string;
+  recuperacionPasoFecha: string;
+  techStartDate: string;
+  techEndDate: string;
+  // Un rango de fechas independiente POR PUESTO (no uno solo compartido entre todos los FBASE/
+  // HR-FORRO) — confirmado con el usuario: cada máquina de este grupo necesita su propia fecha,
+  // no la misma para todas. Serializado como pares [puesto, {desde, hasta}] (Map no es JSON-nativo).
+  rangoFbaseForroPorPuesto?: [string, { desde: string; hasta: string }][];
+  jornadaDiurnaSel: string;
+  jornadaNocturnaSel: string;
+  jornadaFinSemanaSel: string;
+  esDiaFeriado: boolean;
+  jornadaFeriadoSel: string;
+  feriadoFechasManuales?: string[];
+  citasMedicasPorPersona?: Record<string, number>;
+  workstationConfigs: Record<string, any>;
+  planFinalOrders: any[];
+  // VALIDAR PLAN: se guarda junto con el resto del día porque el traslado de GYE y las
+  // confirmaciones de stock SAP se cargan a diario y deben recuperarse si se vuelve a abrir el
+  // plan de ESE mismo día (un día nuevo arranca en blanco — no hay "snapshot" todavía). Mapas y
+  // Sets no son serializables en JSON tal cual, van como arreglos de pares.
+  trasladoGyePorForro?: [string, number][];
+  trasladoGyeBloqueado?: string[];
+  reparacionTrasladoPorForro?: [string, number][];
+  stockConfirmadoPorClave?: [string, { confirmado: boolean; bloqueado: boolean }][];
+  // Pestaña "Traslado a GYE": dos totales cargados a mano (CHN/almacén 2008 y BASES/almacén
+  // 2011) — informativo (no alimenta ningún cálculo de capacidad), pero se guarda igual para no
+  // perder la carga manual del día. Antes era una tabla de detalle pegada de SAP/Excel fila por
+  // fila; se simplificó a solo el total por almacén a pedido del usuario (el pegado de detalle
+  // fallaba seguido por no coincidir exacto el número de columnas tabuladas).
+  trasladoGyeChn?: number;
+  trasladoGyeBase?: number;
+}
 
 // Lunes (YYYY-MM-DD) de la semana que contiene hoy — base de la persistencia SEMANAL de Personal y
 // Turnos: lo que se define el lunes rige toda la semana; si se edita a mitad de semana, el cambio
@@ -228,12 +294,37 @@ const workstationGroups = [
   }
 ];
 
+// Duración de la OT de Mantenimiento SIN forzar ningún mínimo — a diferencia de
+// `calcularTiempoMantenimiento` (que estima 60 min cuando no hay dato, pensado para la pestaña
+// "Mantenimientos Preventivos"), acá se muestra EXACTAMENTE lo que trae el servicio
+// `/ListarMantenimientosPreventivos` (sp_Get_MantenimientosPreventivosAgendados): `Duracion_Minutos`
+// tal cual (incluso si es 0), o si no viene, `FECHA_OT_PRG_FIN − FECHA_OT_PRG_INI`. Si ninguno de
+// los dos trae dato real, queda en 0 — no se inventa un estimado (a pedido explícito del usuario:
+// "no debe forzar nada, debes solo recuperar del método").
+// El backend YA trae la duración resuelta en `Duracion_Minutos` — no hay que calcularla a partir
+// de FECHA_OT_PRG_INI/FIN (esos vienen `null` en varias filas reales, ej. Duracion_Minutos: 60 con
+// ambas fechas en null), así que cualquier fallback FIN-INI era trabajo de más sobre un dato que de
+// todos modos no está. Se usa el campo tal cual (a pedido explícito del usuario: "no debe forzar
+// nada, debes solo recuperar del método").
+function duracionMantenimientoSismac(m: any): { minutos: number; origen: 'sismac' | 'sin_dato' } {
+  const dur = m['Duracion_Minutos'];
+  if (dur !== '' && dur !== null && dur !== undefined) {
+    const n = Number(dur);
+    if (!isNaN(n)) return { minutos: Math.max(0, n), origen: 'sismac' };
+  }
+  return { minutos: 0, origen: 'sin_dato' };
+}
+
 // Puestos de "Interiores, Bases y Corte": la capacidad se calcula por PERSONAS asignadas, no por
 // máquinas (el dato de máquinas ahí es solo informativo) — a diferencia de Acolchado, Bordadora,
 // Encintado y el resto de categorías, que siguen calculando su capacidad por número de máquinas.
-const PUESTOS_CAPACIDAD_POR_PERSONAS = new Set(
-  workstationGroups.find(g => g.title === 'Interiores, Bases y Corte')?.items ?? []
-);
+// COSEDORA-RMTBM (dentro de "Procesos de Bandas y Bordado") se suma a la misma lista a pedido del
+// usuario: igual que Interiores, su capacidad real depende de cuánta gente tiene asignada, no de
+// un número fijo de máquinas — sigue agrupada visualmente en "Procesos de Bandas y Bordado".
+const PUESTOS_CAPACIDAD_POR_PERSONAS = new Set([
+  ...(workstationGroups.find(g => g.title === 'Interiores, Bases y Corte')?.items ?? []),
+  'COSEDORA-RMTBM',
+]);
 // Factor "por turno" — para puestos de personas, la cantidad de gente puede ser distinta en el
 // turno diurno y en el nocturno (ej. 3 personas de día, 1 de noche); para puestos por máquinas,
 // el número de máquinas es el mismo sin importar el turno. Se mantiene por compatibilidad con los
@@ -317,19 +408,48 @@ const capacidadPuesto = (
     isDayActive?: boolean; isNightActive?: boolean; isSaturdayActive?: boolean;
     capacitacionPersonas?: number; capacitacionHoras?: number;
     horarioPersonalizadoActivo?: boolean; turnosPersonalizados?: TurnoPersonalizado[];
+    equipoCompartidoCon?: string; equipoCompartidoModo?: 'reparto' | 'prestamo';
+    equipoCompartidoHoras?: number; equipoCompartidoPersonas?: number;
+    equipoCompartidoHorasPrestadas?: number; equipoCompartidoEsPrestamista?: boolean;
     disponibilidad?: number;
   },
   horasNetasDiurnas: number,
   horasNetasNocturnas: number,
   horasNetasFinSemana: number = 0,
-): number => Math.max(0,
-  ((cfg.horarioPersonalizadoActivo && (cfg.turnosPersonalizados || []).length > 0
+): number => {
+  // Dos modos de Equipo Compartido, situaciones distintas (confirmado con el usuario):
+  // "reparto" — UN equipo insuficiente para las dos máquinas reparte SU jornada entre ambas (ej.
+  // ACH07/ACH10): reemplaza por completo los 3 turnos fijos, no hay equipo propio independiente en
+  // ninguno de los dos lados.
+  // "prestamo" — cada puesto mantiene su PROPIA capacidad normal (turnos/personas, sin tocar); uno
+  // presta un número fijo de horas de capacidad al otro como EXTRA, sin reemplazar nada (ej. la
+  // persona de HR-TTSUP con tiempo libre ayuda a HR-INTPF, que conserva su propio equipo completo
+  // — reportado por el usuario: "me estás quitando disponibilidad... debería sumarse a la
+  // capacidad, no reemplazarla").
+  const esPrestamo = cfg.equipoCompartidoCon && cfg.equipoCompartidoModo === 'prestamo';
+  const base = cfg.horarioPersonalizadoActivo && (cfg.turnosPersonalizados || []).length > 0
     ? capacidadTurnosPersonalizados(puesto, cfg)
+    // "reparto": mismo criterio que Horario Personalizado (reemplaza los 3 turnos fijos), pero con
+    // una cantidad de horas directa en vez de una lista de horarios. Ya no es exclusivo de
+    // Acolchadoras (a pedido del usuario: la pareja puede ser cualquier puesto, según la habilidad
+    // real de la persona) — el multiplicador sigue el MISMO criterio que el resto de
+    // `capacidadPuesto`: para un puesto que mide capacidad por PERSONAS
+    // (`PUESTOS_CAPACIDAD_POR_PERSONAS`, ej. INTPR/INTPT/INTPF) son las personas del equipo
+    // compartido, no las máquinas — de lo contrario un puesto de Interiores con equipo compartido
+    // activo saldría con una capacidad sin sentido (horas × máquinas, cuando ese puesto no mide por
+    // máquinas).
+    : (cfg.equipoCompartidoCon && cfg.equipoCompartidoModo !== 'prestamo' && cfg.equipoCompartidoHoras !== undefined)
+    ? Math.max(0, cfg.equipoCompartidoHoras) * (PUESTOS_CAPACIDAD_POR_PERSONAS.has(puesto) ? (cfg.equipoCompartidoPersonas || 0) : (cfg.machines || 1))
     : (cfg.isDayActive ? horasNetasDiurnas * factorCapacidadPuestoPorTurno(puesto, cfg, 'dia') : 0) +
       (cfg.isNightActive ? horasNetasNocturnas * factorCapacidadPuestoPorTurno(puesto, cfg, 'noche') : 0) +
-      (cfg.isSaturdayActive ? horasNetasFinSemana * factorCapacidadPuestoPorTurno(puesto, cfg, 'sabado') : 0))
-  - horasCapacitacionPuesto(puesto, cfg)) * (cfg.disponibilidad ?? 1)
-);
+      (cfg.isSaturdayActive ? horasNetasFinSemana * factorCapacidadPuestoPorTurno(puesto, cfg, 'sabado') : 0);
+  // "prestamo": se SUMA a la base si este puesto RECIBE, se RESTA si este puesto PRESTA — nunca
+  // reemplaza la base, que siempre es la normal del puesto (turnos/personas propios).
+  const ajustePrestamo = esPrestamo
+    ? (cfg.equipoCompartidoEsPrestamista ? -1 : 1) * Math.max(0, cfg.equipoCompartidoHorasPrestadas || 0)
+    : 0;
+  return Math.max(0, (base + ajustePrestamo - horasCapacitacionPuesto(puesto, cfg)) * (cfg.disponibilidad ?? 1));
+};
 
 interface WorkstationConfig {
   machine: string;
@@ -353,6 +473,47 @@ interface WorkstationConfig {
   // turnos con horario libre, solo para este puesto puntual.
   horarioPersonalizadoActivo?: boolean;
   turnosPersonalizados?: TurnoPersonalizado[];
+  // Equipo Compartido: UN mismo equipo de personas reparte la jornada entre este puesto y OTRO
+  // (máximo 2, ej. 2h en ACH07 + 6h en ACH10 por falta de personal) — reemplaza igual que Horario
+  // Personalizado los 3 turnos fijos, pero solo con una cantidad de horas (sin reloj). Ya no está
+  // limitado a Acolchadoras: la pareja puede ser cualquier puesto, según la habilidad real de la
+  // persona (sin validación automática — queda en manos de quien planifica).
+  // `equipoCompartidoHoras` son SIEMPRE las horas de ESTE puesto; la pareja guarda su propio valor
+  // por separado (jornada total − lo de aquí), sincronizado en `handleSetEquipoCompartido`.
+  equipoCompartidoCon?: string;
+  // Qué modelo de Equipo Compartido aplica a este par — dos situaciones distintas, confirmado por
+  // el usuario ("deben ser ambos modos, porque son situaciones diferentes"):
+  // "reparto" (el único que existía antes): UN equipo insuficiente para las dos máquinas reparte SU
+  // jornada entre ambas (ej. ACH07/ACH10, "por falta de personal") — ninguno de los dos lados tiene
+  // equipo propio independiente, así que reemplaza por completo los turnos fijos de ambos.
+  // "prestamo" (nuevo): cada puesto mantiene su PROPIA capacidad normal sin tocar; uno presta un
+  // número fijo de horas de capacidad al otro como EXTRA — ej. HR-TTSUP (con tiempo libre) ayuda a
+  // HR-INTPF, que conserva su propio equipo completo (ver `equipoCompartidoHorasPrestadas`/
+  // `equipoCompartidoEsPrestamista` más abajo).
+  equipoCompartidoModo?: 'reparto' | 'prestamo';
+  equipoCompartidoHoras?: number;
+  // Personas del equipo compartido — para un puesto por MÁQUINAS (Acolchadoras) sigue siendo
+  // informativo (la capacidad usa `machines`), pero para un puesto por PERSONAS
+  // (`PUESTOS_CAPACIDAD_POR_PERSONAS`, ej. INTPR/INTPT/INTPF) es el multiplicador real de la
+  // capacidad (`horas × personas`, ver `capacidadPuesto`) — en ambos casos también evita contar
+  // a la misma gente dos veces (una por cada puesto) en el total de personas por turno de Resumen.
+  // Solo aplica al modo "reparto" — en "prestamo" cada lado sigue contando su propia gente normal.
+  equipoCompartidoPersonas?: number;
+  // Modo "prestamo" únicamente: cuántas horas de capacidad se transfieren entre los dos puestos —
+  // mismo valor guardado en AMBOS lados (como `equipoCompartidoHoras`), pero cada lado lo SUMA o lo
+  // RESTA de su propia capacidad normal según `equipoCompartidoEsPrestamista` (true del lado que
+  // presta, false/undefined del lado que recibe). Nunca reemplaza la capacidad propia del puesto,
+  // solo la ajusta — ver `capacidadPuesto`.
+  equipoCompartidoHorasPrestadas?: number;
+  equipoCompartidoEsPrestamista?: boolean;
+  // Código de empleado por posición de cada turno (índice = posición dentro del turno, no un ID
+  // estable) — se cruza contra Habilidades por Estación (`getMaestroCuboHabilidadesCrudos`,
+  // cruce EXACTO por PuestoTrabajo) para mostrar nombre y calificación. El tamaño de cada arreglo
+  // se mantiene igual a peopleDay/peopleNight/peopleWeekend (se rellena/recorta solo cuando
+  // cambia el contador de personas del turno).
+  empleadosDia?: string[];
+  empleadosNoche?: string[];
+  empleadosSabado?: string[];
 }
 
 const MachineCard = React.memo(({
@@ -376,6 +537,16 @@ const MachineCard = React.memo(({
   qtyOverrideByKey,
   qtyEditable = false,
   onQtyEdit,
+  manualOrders = [],
+  onAgregarManual,
+  onEliminarManual,
+  resolverEmpleado,
+  mantenimientoHorasPorPuesto,
+  mantenimientoDetallePorPuesto,
+  citasMedicasPorPersona,
+  fertDelDiaPorMaquina,
+  workstationConfigsCompletas,
+  equipoCompartidoResumen,
 }: {
   puestoName: string;
   small?: boolean;
@@ -405,13 +576,103 @@ const MachineCard = React.memo(({
   // la cantidad nueva.
   qtyEditable?: boolean;
   onQtyEdit?: (order: any, nuevaCantidad: number) => void;
+  // Producción agregada manualmente (botón "+") — mismo patrón que `adjustedInOrders`: se suman a
+  // las horas/cantidad de ESTA tarjeta sin tocar `orders`. `onAgregarManual` valida contra SAP
+  // (Versión de Fabricación) antes de confirmar; si no se pasa, el botón "+" no aparece.
+  manualOrders?: any[];
+  onAgregarManual?: (material: string, cantidad: number, motivo: string) => Promise<{ ok: boolean; error?: string }>;
+  onEliminarManual?: (id: string) => void;
+  // Personal asignado por turno (Habilidades por Estación) — mismo resolver que ya usa Personal y
+  // Turnos (`resolverEmpleadoParaPuesto`), para mostrar nombre + calificación también en las
+  // tarjetas de Ajuste de Producción, no solo en Personal y Turnos y en Resumen.
+  resolverEmpleado?: (codigo: string, puesto: string, indice?: number) => { encontrado: boolean; nombre: string; calificacion: number; coincideExacto: boolean; etiqueta: string } | null;
+  // Horas de mantenimiento preventivo AGENDADO por Hoja de Ruta (mismo dato que ya usa Resumen,
+  // ver `mantenimientoHorasPorPuesto` en el componente padre) — se descuenta de la capacidad BRUTA
+  // de esta tarjeta para mostrar el tiempo REALMENTE disponible y que la barra de % Ocupación lo
+  // refleje. Solo es un ajuste de VISUALIZACIÓN de esta tarjeta: no toca `capacidadPuesto` (la
+  // función que usan los motores de ajuste/redistribución en el resto de la app).
+  mantenimientoHorasPorPuesto?: Record<string, number>;
+  // Detalle por OT del mantenimiento (fecha/horas/origen) — mismo dato que ya usa Personal y
+  // Turnos en su tooltip, para poder validar el total de arriba contra SISMAC OT por OT desde esta
+  // misma tarjeta, en vez de confiar a ciegas en el número ya sumado (a pedido del usuario: "me
+  // indicas 5h en la ACH07 pero son solo 2h" — sin el detalle no hay forma de saber si son varias
+  // OT reales o si alguna cayó al estimado por defecto de 60 min por no traer duración de SISMAC).
+  mantenimientoDetallePorPuesto?: Record<string, { fecha: string; horas: number; origen: string; idMaquina: string }[]>;
+  // Horas de cita médica por persona (código de empleado normalizado → horas), la "base" que
+  // llena el usuario en Personal Asignado — se descuentan de la capacidad BRUTA de esta tarjeta
+  // igual que Mantenimiento, pero según QUIÉN esté asignado acá (`config.empleadosDia/Noche/
+  // Sabado`) en vez de ser un dato fijo por puesto (a pedido del usuario: "que vayas descontando
+  // ese tiempo por puesto de trabajo dependiendo en dónde esté asignada la persona").
+  citasMedicasPorPersona?: Record<string, number>;
+  // Órdenes FERT ya comprometidas en SAP para esta Hoja de Ruta en la fecha de planificación del
+  // plan (ver `fertDelDiaPorMaquina` en el componente padre) — se muestran como filas de SOLO
+  // LECTURA dentro de la tabla de esta tarjeta (sin candado, sin edición de cantidad) y SÍ suman a
+  // las horas/% de Ocupación, para reflejar que esa capacidad ya está tomada.
+  fertDelDiaPorMaquina?: Map<string, any[]>;
+  // Mapa completo de configuraciones de TODOS los puestos — hoy solo se usa para leer las horas
+  // REALES de la pareja de Equipo Compartido (`workstationConfigsCompletas[config.equipoCompartidoCon]
+  // ?.equipoCompartidoHoras`), en vez de aproximarlas asumiendo una jornada fija: esta tarjeta solo
+  // conoce `config` (la SUYA propia), nunca supo cuánto le tocaba exactamente a la pareja.
+  workstationConfigsCompletas?: Record<string, { equipoCompartidoHoras?: number }>;
+  // % de ocupación combinado del par de Equipo Compartido (demanda de las dos máquinas ÷
+  // capacidad de las dos máquinas) — ver `equipoCompartidoResumenPorPuesto` en el componente padre.
+  equipoCompartidoResumen?: { horasRequeridas: number; capacidad: number; utilizacion: number };
 }) => {
   const hrCode = mapToHojaRuta(puestoName).trim().toUpperCase();
+  // Botón "+" — agregar producción manual (ver `onAgregarManual` en el padre: valida Versión de
+  // Fabricación en SAP antes de confirmar).
+  const [manualPanelOpen, setManualPanelOpen] = useState(false);
+  const [manualMaterial, setManualMaterial] = useState('');
+  const [manualCantidad, setManualCantidad] = useState('');
+  const [manualMotivo, setManualMotivo] = useState('');
+  const [manualError, setManualError] = useState<string | null>(null);
+  const [manualLoading, setManualLoading] = useState(false);
+  const handleConfirmarManual = async () => {
+    if (!onAgregarManual) return;
+    const cantidad = Number(manualCantidad);
+    if (!manualMaterial.trim()) { setManualError('Ingresa el código del material.'); return; }
+    if (!(cantidad > 0)) { setManualError('La cantidad debe ser mayor a 0.'); return; }
+    if (!manualMotivo.trim()) { setManualError('Ingresa el motivo.'); return; }
+    setManualLoading(true);
+    setManualError(null);
+    const resultado = await onAgregarManual(manualMaterial.trim(), cantidad, manualMotivo.trim());
+    setManualLoading(false);
+    if (!resultado.ok) { setManualError(resultado.error || 'No se pudo agregar.'); return; }
+    setManualMaterial(''); setManualCantidad(''); setManualMotivo('');
+    setManualPanelOpen(false);
+  };
   // El sábado aporta capacidad solo si el puesto lo tiene marcado Y la Jornada Fin de Semana está
   // habilitada en Jornada Global (si está en "Sin jornada", horasNetasFinSemana llega en 0).
   const sabadoAporta = !!config.isSaturdayActive && horasNetasFinSemana > 0;
 
-  const { filteredOrders, totalTimeHours, utilization, capacityHours, utilizationSinDescuento, horasDescontadas, horasSinUbicar, horasLibres } = useMemo(() => {
+  // Personal asignado por turno, resuelto a nombre + calificación — mismos códigos que ya se
+  // cargan en Personal y Turnos (`config.empleadosDia/Noche/Sabado`). Solo se calcula si el padre
+  // pasó `resolverEmpleado`; si no, la tarjeta sigue funcionando igual que antes (sin esta sección).
+  const personalPorTurno = useMemo(() => {
+    if (!resolverEmpleado) return null;
+    // El índice se calcula ANTES de descartar los vacíos: si el titular (posición 0) se deja sin
+    // llenar y solo se llena el ayudante (posición 1), debe seguir resolviendo como ayudante
+    // (PT-ACHxx), no recorrerse a la posición 0 (HR-ACHxx) por quedar primero tras el filtro.
+    const resolverLista = (codigos: string[] | undefined) =>
+      (codigos || [])
+        .map((c, idx) => ({ codigo: (c || '').trim(), idx }))
+        .filter(x => x.codigo)
+        .map(({ codigo, idx }) => {
+          const r = resolverEmpleado(codigo, puestoName, idx);
+          return { codigo, nombre: r?.nombre || '', calificacion: r?.calificacion || 0, encontrado: !!r?.encontrado };
+        });
+    const dia = resolverLista(config.empleadosDia);
+    const noche = resolverLista(config.empleadosNoche);
+    const sabado = resolverLista(config.empleadosSabado);
+    if (dia.length === 0 && noche.length === 0 && sabado.length === 0) return null;
+    return [
+      { label: 'Día', lista: dia, color: 'text-amber-600' },
+      { label: 'Noche', lista: noche, color: 'text-indigo-600' },
+      { label: 'Sáb', lista: sabado, color: 'text-emerald-600' },
+    ].filter(t => t.lista.length > 0);
+  }, [resolverEmpleado, puestoName, config.empleadosDia, config.empleadosNoche, config.empleadosSabado]);
+
+  const { filteredOrders, totalTimeHours, utilization, capacityHours, capacidadBruta, mantenimientoHoras, citasMedicasHoras, esAcolchado, utilizationSinDescuento, horasDescontadas, horasSinUbicar, horasLibres, totalQty } = useMemo(() => {
     const makeKey = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
 
     let filtered = orders.filter(o => {
@@ -426,10 +687,19 @@ const MachineCard = React.memo(({
 
     const adjustedTagged = adjustedInOrders.map(o => ({ ...o, _isAdjusted: true }));
     const remainderTagged = splitRemainderOrders.map(o => ({ ...o, _isSplitRemainder: true }));
+    // Producción manual (botón "+"): ya vienen con forma de orden desde el padre, solo se marcan
+    // para distinguirlas en la tabla — cuentan en horas/cantidad igual que cualquier otra.
+    const manualTagged = manualOrders;
 
     if (isConsolidated) {
       const grouped = new Map<string, any>();
-      filtered.forEach(o => {
+      // La producción manual (botón "+") entra a la MISMA agrupación por material que las órdenes
+      // reales — igual que ya hace Plan Final al "Aceptar Plan" (ver el mismo criterio en
+      // `manualOrdersPorPuesto`/consolidación de Plan Final). Antes se sumaba aparte, después de
+      // consolidar: si ya había una orden real de ese material, quedaban DOS filas para el mismo
+      // material (una consolidada y otra manual), en vez de garantizar una sola orden por material
+      // en cada acolchadora (reportado por el usuario).
+      [...filtered, ...manualTagged].forEach(o => {
         const materialCode = normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || '');
         const qtyOriginal = Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0);
         // La cantidad que se consolida es la EFECTIVA (ya descontada por Tapa bloqueada). Antes se
@@ -452,7 +722,15 @@ const MachineCard = React.memo(({
       filtered = Array.from(grouped.values());
     }
 
-    const allOrders = [...filtered, ...adjustedTagged, ...remainderTagged];
+    // Órdenes FERT ya comprometidas para esta Hoja de Ruta en la fecha de planificación — de solo
+    // lectura (ver `_isFertDelDia` en el render: sin candado, cantidad no editable), pero SÍ cuentan
+    // para las horas/% de Ocupación, así que se suman al resto igual que cualquier otra orden.
+    const fertTagged = (fertDelDiaPorMaquina?.get(hrCode) || []).map(o => ({ ...o, _isFertDelDia: true }));
+
+    // En vista consolidada la producción manual ya quedó incluida arriba, dentro de `filtered`
+    // (agrupada con las órdenes reales del mismo material) — agregarla otra vez acá duplicaría su
+    // cantidad.
+    const allOrders = [...filtered, ...adjustedTagged, ...remainderTagged, ...(isConsolidated ? [] : manualTagged), ...fertTagged];
 
     // Las órdenes en exceso (no caben en la capacidad tras el ajuste) se siguen listando en la
     // tabla, pero NO cuentan para el % de Ocupación mostrado — ese % debe reflejar solo lo
@@ -490,13 +768,47 @@ const MachineCard = React.memo(({
       return sum + calculateProductionTime(o['MATERIAL'] || o['CodMaterial'] || '', qty, o);
     }, 0);
 
+    // Cantidad total EFECTIVA — mismo criterio que `totalSeconds` (descuenta lo bloqueado con
+    // candado y aplica `qtyOverrideByKey`, el input editable de CANTIDAD): se recalcula solo con
+    // que cambie el candado o la cantidad editada, para que el número de la tarjeta baje al
+    // instante, sin tener que volver a "Aceptar Plan".
+    const totalQty = allOrders.reduce((sum, o) => {
+      if (excessOrderKeys?.has(makeKey(o))) return sum;
+      if (blockedOrderKeys?.has(makeKey(o))) return sum;
+      const qty = isConsolidated && o._isConsolidated
+        ? o._totalQty
+        : (qtyOverrideByKey?.get(makeKey(o)) ?? Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0));
+      return sum + qty;
+    }, 0);
+
     const totalHours = totalSeconds / 3600;
     // Se usa el MISMO `capacidadPuesto` que el resto de la app (motores de ajuste, Personal &
     // Turnos): incluye el turno de SÁBADO (`isSaturdayActive` × Jornada Fin de Semana), que antes
     // esta tarjeta ignoraba, y respeta que los puestos de "Interiores, Bases y Corte" midan su
     // capacidad por PERSONAS y no por máquinas. Antes la tarjeta calculaba a mano solo día+noche
     // × máquinas, así que su % de ocupación no coincidía con la capacidad que asume el motor.
-    const capacity = capacidadPuesto(puestoName, config, horasNetasDiurnas, horasNetasNocturnas, horasNetasFinSemana);
+    const capacidadBruta = capacidadPuesto(puestoName, config, horasNetasDiurnas, horasNetasNocturnas, horasNetasFinSemana);
+    // Mantenimiento preventivo agendado para esta Hoja de Ruta (puede venir combinada "HR-A / HR-B"
+    // en puestos con más de un código) — antes se mostraba solo como dato informativo en Resumen,
+    // nunca restaba de la capacidad real de ESTA tarjeta, así que el % de Ocupación y el tiempo
+    // disponible no reflejaban que esas horas ya no están libres (reportado por el usuario).
+    const mantenimientoHoras = hrCode
+      ? hrCode.split(' / ').reduce((sum, code) => sum + (mantenimientoHorasPorPuesto?.[code.trim().toUpperCase()] || 0), 0)
+      : 0;
+    // Citas médicas: se descuentan según QUIÉN está asignado a esta tarjeta (no un dato fijo por
+    // puesto) — se suman las horas de cada código presente en Día/Noche/Sábado que el usuario
+    // haya llenado en la "base" de Personal Asignado. Misma normalización de código que
+    // `normalizarCodigoEmpleado` (trim + quitar ceros a la izquierda) para calzar con esas claves.
+    const normCod = (c: string) => (c || '').trim().replace(/^0+(?=\d)/, '');
+    const citasMedicasHoras = citasMedicasPorPersona
+      ? [...(config.empleadosDia || []), ...(config.empleadosNoche || []), ...(config.empleadosSabado || [])]
+        .reduce((sum, c) => sum + (citasMedicasPorPersona[normCod(c)] || 0), 0)
+      : 0;
+    // Acolchadoras: la cita médica no resta capacidad (hay que buscar un reemplazo), a diferencia
+    // del resto de puestos — ver `esHRAcolchado`.
+    const esAcolchado = esHRAcolchado(hrCode);
+    const citasMedicasHorasDescontadas = esAcolchado ? 0 : citasMedicasHoras;
+    const capacity = Math.max(0, capacidadBruta - mantenimientoHoras - citasMedicasHorasDescontadas);
     const util = capacity > 0 ? (totalHours / capacity) * 100 : 0;
     const horasSinDescuento = totalSecondsSinDescuento / 3600;
     const utilSinDescuento = capacity > 0 ? (horasSinDescuento / capacity) * 100 : 0;
@@ -506,12 +818,17 @@ const MachineCard = React.memo(({
       totalTimeHours: totalHours,
       utilization: util,
       capacityHours: capacity,
+      capacidadBruta,
+      mantenimientoHoras,
+      citasMedicasHoras,
+      esAcolchado,
       utilizationSinDescuento: utilSinDescuento,
       horasDescontadas: horasSinDescuento - totalHours,
       horasSinUbicar,
       horasLibres: Math.max(0, capacity - totalHours),
+      totalQty,
     };
-  }, [orders, hrCode, puestoName, calculateProductionTime, config, horasNetasDiurnas, horasNetasNocturnas, horasNetasFinSemana, isConsolidated, normalizeMaterialCode, adjustedInOrders, excludeOrderKeys, splitRemainderOrders, excessOrderKeys, blockedOrderKeys, qtyOverrideByKey]);
+  }, [orders, hrCode, puestoName, calculateProductionTime, config, horasNetasDiurnas, horasNetasNocturnas, horasNetasFinSemana, isConsolidated, normalizeMaterialCode, adjustedInOrders, excludeOrderKeys, splitRemainderOrders, excessOrderKeys, blockedOrderKeys, qtyOverrideByKey, manualOrders, mantenimientoHorasPorPuesto, citasMedicasPorPersona, fertDelDiaPorMaquina]);
 
   // Hay descuento visible cuando la carga efectiva bajó respecto de la original (Tapas bloqueadas).
   const hayDescuento = horasDescontadas > 0.01;
@@ -542,31 +859,85 @@ const MachineCard = React.memo(({
 
         <div className="grid grid-cols-2 gap-4 items-stretch">
           <div className="bg-white p-3.5 rounded-2xl border border-slate-100 shadow-sm flex flex-col">
-            <div className="flex justify-between items-center text-[9px] text-slate-400 uppercase font-black tracking-widest mb-2">Turnos Activos</div>
-            {/* El sábado solo se muestra si aporta horas de verdad (puesto marcado + Jornada Fin de
-                Semana habilitada en Jornada Global) — así se ve de un vistazo si está entrando al
-                cálculo de la capacidad, en vez de tener que deducirlo del %. Cada turno muestra sus
-                propias horas netas (no solo si está activo), para no tener que ir a Personal y
-                Turnos a ver cuánto aporta cada uno. */}
-            <div className={cn("grid gap-2", sabadoAporta ? "grid-cols-3" : "grid-cols-2")}>
-              <div className={cn("rounded-xl p-2 border flex flex-col items-center", config.isDayActive ? "bg-amber-50 border-amber-200" : "bg-slate-50 border-slate-100 opacity-40")}>
-                <Sun className={cn("w-3.5 h-3.5 mb-0.5", config.isDayActive ? "text-amber-500" : "text-slate-400")} />
-                <span className={cn("text-[8px] font-black uppercase", config.isDayActive ? "text-amber-700" : "text-slate-400")}>Día</span>
-                {config.isDayActive && <span className="text-[7px] font-mono font-bold text-amber-500 mt-0.5">{horasNetasDiurnas.toFixed(2)}h</span>}
-              </div>
-              <div className={cn("rounded-xl p-2 border flex flex-col items-center", config.isNightActive ? "bg-indigo-50 border-indigo-200" : "bg-slate-50 border-slate-100 opacity-40")}>
-                <Moon className={cn("w-3.5 h-3.5 mb-0.5", config.isNightActive ? "text-indigo-500" : "text-slate-400")} />
-                <span className={cn("text-[8px] font-black uppercase", config.isNightActive ? "text-indigo-700" : "text-slate-400")}>Noche</span>
-                {config.isNightActive && <span className="text-[7px] font-mono font-bold text-indigo-500 mt-0.5">{horasNetasNocturnas.toFixed(2)}h</span>}
-              </div>
-              {sabadoAporta && (
-                <div className="rounded-xl p-2 border flex flex-col items-center bg-emerald-50 border-emerald-200">
-                  <CalendarIcon className="w-3.5 h-3.5 mb-0.5 text-emerald-500" />
-                  <span className="text-[8px] font-black uppercase text-emerald-700">Sábado</span>
-                  <span className="text-[7px] font-mono font-bold text-emerald-500 mt-0.5">{horasNetasFinSemana.toFixed(2)}h</span>
-                </div>
-              )}
+            <div className="flex justify-between items-center text-[9px] text-slate-400 uppercase font-black tracking-widest mb-2">
+              {config.equipoCompartidoCon ? 'Equipo Compartido' : 'Turnos Activos'}
             </div>
+            {/* Equipo Compartido reemplaza los 3 turnos fijos (igual que Resumen: ver `parEquipo` en
+                el componente padre) — mostrarlos igual sería engañoso, porque `capacidadPuesto` ya
+                los ignora por completo cuando este modo está activo (a pedido del usuario: "eso
+                podría ver en las tarjetas para saber cómo quedarían ajustadas mis capacidades" —
+                antes la tarjeta no mostraba nada de Equipo Compartido, aunque el % ya lo calculaba
+                bien por dentro). Las horas mostradas son las de ESTE puesto; el resto de la jornada
+                es lo que le queda a la pareja (ver `handleSetEquipoCompartido`). */}
+            {config.equipoCompartidoCon && config.equipoCompartidoModo !== 'prestamo' ? (
+              <div className="rounded-xl p-2.5 border bg-sky-50 border-sky-200 flex flex-col items-center gap-1">
+                <Users className="w-3.5 h-3.5 text-sky-600" />
+                <span className="text-[8px] font-black uppercase text-sky-700 text-center leading-tight">
+                  Equipo con {config.equipoCompartidoCon}
+                </span>
+                <span className="text-[8px] font-mono font-bold text-sky-600 text-center">
+                  {(config.equipoCompartidoHoras ?? 0).toFixed(2)}h aquí · {(workstationConfigsCompletas?.[config.equipoCompartidoCon]?.equipoCompartidoHoras ?? 0).toFixed(2)}h en {config.equipoCompartidoCon}
+                </span>
+                {(config.equipoCompartidoPersonas ?? 0) > 0 && (
+                  <span className="text-[7px] font-black uppercase text-sky-500">{config.equipoCompartidoPersonas} pers.</span>
+                )}
+                {/* % combinado del PAR (demanda de las dos máquinas ÷ capacidad de las dos) — a
+                    pedido del usuario: "lo que debería ver es qué porcentaje de la jornada estoy
+                    ocupando entre ambas máquinas", no solo el % individual de esta tarjeta. Solo
+                    aplica al modo "reparto" — en "préstamo" cada lado ya es correcto por su cuenta
+                    (INTPF no pierde su capacidad propia, no hace falta combinar). */}
+                {equipoCompartidoResumen && (
+                  <span className={cn(
+                    'text-[9px] font-black uppercase px-1.5 py-0.5 rounded-md border mt-0.5',
+                    equipoCompartidoResumen.utilizacion > 100 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-sky-100 text-sky-700 border-sky-200'
+                  )}>
+                    {equipoCompartidoResumen.utilizacion.toFixed(0)}% ocupación del equipo
+                  </span>
+                )}
+              </div>
+            ) : (
+              <>
+                {/* El sábado solo se muestra si aporta horas de verdad (puesto marcado + Jornada Fin de
+                    Semana habilitada en Jornada Global) — así se ve de un vistazo si está entrando al
+                    cálculo de la capacidad, en vez de tener que deducirlo del %. Cada turno muestra sus
+                    propias horas netas (no solo si está activo), para no tener que ir a Personal y
+                    Turnos a ver cuánto aporta cada uno. Modo "préstamo": los turnos NORMALES de este
+                    puesto se siguen mostrando tal cual (su capacidad propia no se toca) — el badge de
+                    abajo es lo único que cambia, con el ajuste de horas prestadas/recibidas. */}
+                <div className={cn("grid gap-2", sabadoAporta ? "grid-cols-3" : "grid-cols-2")}>
+                  <div className={cn("rounded-xl p-2 border flex flex-col items-center", config.isDayActive ? "bg-amber-50 border-amber-200" : "bg-slate-50 border-slate-100 opacity-40")}>
+                    <Sun className={cn("w-3.5 h-3.5 mb-0.5", config.isDayActive ? "text-amber-500" : "text-slate-400")} />
+                    <span className={cn("text-[8px] font-black uppercase", config.isDayActive ? "text-amber-700" : "text-slate-400")}>Día</span>
+                    {config.isDayActive && <span className="text-[7px] font-mono font-bold text-amber-500 mt-0.5">{horasNetasDiurnas.toFixed(2)}h</span>}
+                  </div>
+                  <div className={cn("rounded-xl p-2 border flex flex-col items-center", config.isNightActive ? "bg-indigo-50 border-indigo-200" : "bg-slate-50 border-slate-100 opacity-40")}>
+                    <Moon className={cn("w-3.5 h-3.5 mb-0.5", config.isNightActive ? "text-indigo-500" : "text-slate-400")} />
+                    <span className={cn("text-[8px] font-black uppercase", config.isNightActive ? "text-indigo-700" : "text-slate-400")}>Noche</span>
+                    {config.isNightActive && <span className="text-[7px] font-mono font-bold text-indigo-500 mt-0.5">{horasNetasNocturnas.toFixed(2)}h</span>}
+                  </div>
+                  {sabadoAporta && (
+                    <div className="rounded-xl p-2 border flex flex-col items-center bg-emerald-50 border-emerald-200">
+                      <CalendarIcon className="w-3.5 h-3.5 mb-0.5 text-emerald-500" />
+                      <span className="text-[8px] font-black uppercase text-emerald-700">Sábado</span>
+                      <span className="text-[7px] font-mono font-bold text-emerald-500 mt-0.5">{horasNetasFinSemana.toFixed(2)}h</span>
+                    </div>
+                  )}
+                </div>
+                {config.equipoCompartidoCon && config.equipoCompartidoModo === 'prestamo' && (
+                  <div className={cn(
+                    'mt-2 rounded-xl p-2 border flex items-center justify-center gap-1.5 text-center',
+                    config.equipoCompartidoEsPrestamista ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50 border-emerald-200'
+                  )}>
+                    <Users className={cn('w-3 h-3 shrink-0', config.equipoCompartidoEsPrestamista ? 'text-amber-600' : 'text-emerald-600')} />
+                    <span className={cn('text-[8px] font-black uppercase', config.equipoCompartidoEsPrestamista ? 'text-amber-700' : 'text-emerald-700')}>
+                      {config.equipoCompartidoEsPrestamista
+                        ? `-${(config.equipoCompartidoHorasPrestadas ?? 0).toFixed(2)}h prestadas a ${config.equipoCompartidoCon}`
+                        : `+${(config.equipoCompartidoHorasPrestadas ?? 0).toFixed(2)}h recibidas de ${config.equipoCompartidoCon}`}
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
             {/* Disponibilidad (OEE) y Capacitación — solo si aplican, para no ensuciar la tarjeta de
                 puestos que no las tienen cargadas. Mismos datos que Personal y Turnos, aquí a la vista
                 sin tener que salir de Ajuste de Producción. */}
@@ -584,9 +955,80 @@ const MachineCard = React.memo(({
                 )}
               </div>
             )}
-            <p className="mt-2 text-[8px] font-black uppercase tracking-tighter text-slate-400 text-center">
-              Capacidad {capacityHours.toFixed(2)} h
-            </p>
+            {/* Personal asignado por turno (Habilidades por Estación) — mismo dato que Personal y
+                Turnos y Resumen, a pedido del usuario: también visible acá en Ajuste de Producción. */}
+            {personalPorTurno && personalPorTurno.length > 0 && (
+              <div className="mt-2 bg-sky-50/60 border border-sky-200 rounded-xl px-2 py-1.5 space-y-1">
+                {personalPorTurno.map(t => (
+                  <div key={t.label} className="flex flex-wrap items-center justify-center gap-1 leading-tight">
+                    <span className={cn('text-[8px] font-black uppercase mr-0.5', t.color)}>{t.label}:</span>
+                    {t.lista.map((e, i) => (
+                      e.encontrado ? (
+                        <span key={i} className="inline-flex items-center gap-1 bg-white border border-slate-200 rounded-md pl-1.5 pr-0.5 py-0.5">
+                          <span className="text-[8px] font-bold text-slate-600 truncate max-w-[80px]">{e.nombre || e.codigo}</span>
+                          <Badge className={cn(
+                            'font-mono font-black text-[7px] px-1 py-0 rounded border-none shrink-0',
+                            e.calificacion >= 80 ? 'bg-emerald-100 text-emerald-700' :
+                            e.calificacion >= 50 ? 'bg-amber-100 text-amber-700' :
+                            'bg-red-100 text-red-700'
+                          )}>
+                            {e.calificacion}%
+                          </Badge>
+                        </span>
+                      ) : (
+                        <span key={i} className="text-[8px] font-bold text-red-500">{e.codigo} ⚠</span>
+                      )
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Mantenimiento preventivo agendado — se RESTA de la capacidad bruta para calcular el
+                tiempo realmente disponible (y así la barra de % Ocupación de abajo), a pedido del
+                usuario: antes el mantenimiento era solo informativo en Resumen y nunca bajaba la
+                capacidad de ESTA tarjeta. */}
+            {mantenimientoHoras > 0.01 && (() => {
+              // Detalle por OT — para validar el total contra SISMAC sin salir de esta tarjeta
+              // (mismo dato/formato que ya usa el tooltip de Personal y Turnos).
+              const mantenimientoDetalle = hrCode
+                ? hrCode.split(' / ').flatMap(code => mantenimientoDetallePorPuesto?.[code.trim().toUpperCase()] || [])
+                : [];
+              const tooltip = mantenimientoDetalle.length > 0
+                ? mantenimientoDetalle.map(d => `· ${d.fecha} — ${d.horas.toFixed(2)}h (${d.origen === 'sismac' ? 'duración SISMAC' : 'sin dato de duración en SISMAC'})`).join('\n')
+                : undefined;
+              return (
+                <div className="mt-2 flex justify-center">
+                  <Badge className="bg-rose-50 text-rose-700 border border-rose-200 font-black text-[8px] px-2 py-1 rounded-lg inline-flex items-center gap-1" title={tooltip}>
+                    <Wrench className="w-2.5 h-2.5" /> Mantenimiento: {mantenimientoHoras.toFixed(2)}h
+                  </Badge>
+                </div>
+              );
+            })()}
+            {/* Citas médicas del personal asignado acá — se RESTA de la capacidad bruta igual que
+                Mantenimiento (ver `citasMedicasPorPersona` en el padre: la "base" que llena el
+                usuario con horas por persona), EXCEPTO en acolchadoras: ahí no se descuenta, se
+                marca que hay que buscar un reemplazo (a pedido del usuario). */}
+            {citasMedicasHoras > 0.01 && (
+              <div className="mt-2 flex justify-center">
+                {esAcolchado ? (
+                  <Badge className="bg-amber-50 text-amber-700 border border-amber-200 font-black text-[8px] px-2 py-1 rounded-lg inline-flex items-center gap-1">
+                    <Stethoscope className="w-2.5 h-2.5" /> Cita médica {citasMedicasHoras.toFixed(2)}h — buscar reemplazo
+                  </Badge>
+                ) : (
+                  <Badge className="bg-pink-50 text-pink-700 border border-pink-200 font-black text-[8px] px-2 py-1 rounded-lg inline-flex items-center gap-1">
+                    <Stethoscope className="w-2.5 h-2.5" /> Citas médicas: {citasMedicasHoras.toFixed(2)}h
+                  </Badge>
+                )}
+              </div>
+            )}
+            <div className="mt-2 flex flex-col items-center gap-0.5">
+              <p className="text-[8px] font-black uppercase tracking-tighter text-slate-400">
+                Tiempo Bruto {capacidadBruta.toFixed(2)} h
+              </p>
+              <p className="text-[8px] font-black uppercase tracking-tighter text-slate-600">
+                Disponible {capacityHours.toFixed(2)} h
+              </p>
+            </div>
           </div>
 
           <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
@@ -685,9 +1127,67 @@ const MachineCard = React.memo(({
           <h4 className="text-[10px] font-black text-slate-800 uppercase tracking-[0.2em] flex items-center gap-2">
             <ClipboardList className="w-4 h-4 text-indigo-600" /> {isConsolidated ? 'Carga Consolidada' : 'Plan Operativo'}
           </h4>
-          <Badge className="bg-white text-slate-900 border-slate-200 font-mono font-black text-[10px] px-3 py-0.5 rounded-full shadow-sm">
-            {filteredOrders.length} {isConsolidated ? 'MATERIALES' : 'ÓRDENES'}
-          </Badge>
+          <div className="flex items-center gap-2">
+            {/* Cantidad total EFECTIVA — baja al instante al bloquear una orden (candado) o editar
+                su CANTIDAD en la tabla de abajo, sin tener que volver a "Aceptar Plan" para verlo. */}
+            <Badge className="bg-indigo-50 text-indigo-700 border-indigo-200 font-mono font-black text-[10px] px-3 py-0.5 rounded-full shadow-sm" title="Cantidad total (ya descuenta bloqueos y ediciones de cantidad)">
+              {totalQty.toLocaleString()} UDS
+            </Badge>
+            <Badge className="bg-white text-slate-900 border-slate-200 font-mono font-black text-[10px] px-3 py-0.5 rounded-full shadow-sm">
+              {filteredOrders.length} {isConsolidated ? 'MATERIALES' : 'ÓRDENES'}
+            </Badge>
+            {/* Producción manual — valida Versión de Fabricación en SAP antes de dejar agregar
+                (ver `onAgregarManual` en el padre); en Cosedoras de Tapa arrastra la corrección de
+                Acolchado sola, sin que el usuario tenga que hacer nada más acá. */}
+            {onAgregarManual && (
+              <Popover open={manualPanelOpen} onOpenChange={(open) => { setManualPanelOpen(open); if (!open) setManualError(null); }}>
+                <PopoverTrigger asChild>
+                  <button
+                    title="Agregar producción manual"
+                    className="w-6 h-6 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center shadow-sm transition-colors shrink-0"
+                  >
+                    <span className="text-sm font-black leading-none">+</span>
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent className="w-72 p-4 space-y-3" align="end">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Agregar producción manual</p>
+                  <div className="space-y-2">
+                    <input
+                      type="text"
+                      placeholder="Código de material"
+                      value={manualMaterial}
+                      onChange={(e) => setManualMaterial(e.target.value)}
+                      className="w-full text-[11px] font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:ring-1 focus:ring-emerald-400"
+                    />
+                    <input
+                      type="number"
+                      min={0}
+                      placeholder="Cantidad"
+                      value={manualCantidad}
+                      onChange={(e) => setManualCantidad(e.target.value)}
+                      className="w-full text-[11px] font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:ring-1 focus:ring-emerald-400"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Motivo (ej. reproceso, pedido urgente)"
+                      value={manualMotivo}
+                      onChange={(e) => setManualMotivo(e.target.value)}
+                      className="w-full text-[11px] font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:ring-1 focus:ring-emerald-400"
+                    />
+                  </div>
+                  {manualError && <p className="text-[10px] font-bold text-red-600">{manualError}</p>}
+                  <button
+                    onClick={handleConfirmarManual}
+                    disabled={manualLoading}
+                    className="w-full text-[10px] font-black uppercase tracking-widest text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg py-2 disabled:opacity-50 flex items-center justify-center gap-1.5"
+                  >
+                    {manualLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                    {manualLoading ? 'Validando versión SAP...' : 'Validar y Agregar'}
+                  </button>
+                </PopoverContent>
+              </Popover>
+            )}
+          </div>
         </div>
         <div className={cn(
           "overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-inner text-[10px]",
@@ -709,6 +1209,8 @@ const MachineCard = React.memo(({
                 const isAdjusted = !!o._isAdjusted;
                 const isSplitRemainder = !!o._isSplitRemainder;
                 const isSplitPart = !!o._isSplit;
+                const isManual = !!o._isManual;
+                const isFertDelDia = !!o._isFertDelDia;
                 const isExcess = !isAdjusted && !isSplitRemainder && !!excessOrderKeys?.has(makeKey(o));
                 const isBlocked = !!blockedOrderKeys?.has(makeKey(o));
                 // En vista consolidada la comparación es contra el total ORIGINAL del material
@@ -728,16 +1230,31 @@ const MachineCard = React.memo(({
                 const materialCode = o['CodMaterial'] || normalizeMaterialCode(o['MATERIAL'] || '');
                 const materialName = o['NOMBRE'] || o['TEXTOMATERIAL'] || o['Material'] || '—';
 
-                const textColor = isBlocked ? 'text-slate-400 line-through' : isAdjusted ? 'text-red-600' : isSplitRemainder ? 'text-violet-600' : isExcess ? 'text-amber-700' : 'text-slate-700';
+                const textColor = isFertDelDia ? 'text-sky-700' : isBlocked ? 'text-slate-400 line-through' : isManual ? 'text-emerald-700' : isAdjusted ? 'text-red-600' : isSplitRemainder ? 'text-violet-600' : isExcess ? 'text-amber-700' : 'text-slate-700';
                 return (
-                  <tr key={i} className={cn('hover:bg-indigo-50/30 transition-colors', isBlocked ? 'bg-slate-100/70 opacity-60' : isAdjusted ? 'bg-red-50/50' : isSplitRemainder ? 'bg-violet-50/50' : isExcess && 'bg-amber-50/60')}>
+                  <tr key={i} className={cn('hover:bg-indigo-50/30 transition-colors', isFertDelDia ? 'bg-sky-50/60' : isBlocked ? 'bg-slate-100/70 opacity-60' : isManual ? 'bg-emerald-50/50' : isAdjusted ? 'bg-red-50/50' : isSplitRemainder ? 'bg-violet-50/50' : isExcess && 'bg-amber-50/60')}>
                     <td className={cn('px-4 py-3 font-mono font-bold whitespace-nowrap', textColor)}>
                       {isSplitPart && <span className="mr-1 text-violet-500" title="Orden dividida">✂</span>}
                       {isExcess && !isBlocked && <span className="mr-1 text-amber-500">⚠</span>}
                       {materialCode}
                     </td>
-                    <td className={cn('px-4 py-3 font-medium whitespace-normal break-words leading-tight', isBlocked ? 'text-slate-400 line-through' : isAdjusted ? 'text-red-600' : isSplitRemainder ? 'text-violet-600' : isExcess ? 'text-amber-700' : 'text-slate-600')}>
+                    <td className={cn('px-4 py-3 font-medium whitespace-normal break-words leading-tight', isFertDelDia ? 'text-sky-700' : isBlocked ? 'text-slate-400 line-through' : isManual ? 'text-emerald-700' : isAdjusted ? 'text-red-600' : isSplitRemainder ? 'text-violet-600' : isExcess ? 'text-amber-700' : 'text-slate-600')}>
                       {materialName}
+                      {isFertDelDia && (
+                        <span className="ml-1.5 inline-block text-[8px] font-black uppercase tracking-wider text-sky-500 align-middle" title="Orden FERT ya comprometida en SAP para esta máquina en la fecha de planificación — solo visualización, no se puede bloquear ni editar">
+                          · FERT comprometido en SAP
+                        </span>
+                      )}
+                      {isManual && (
+                        <span className="ml-1.5 inline-flex items-center gap-1 text-[8px] font-black uppercase tracking-wider text-emerald-600 align-middle">
+                          · {o._manualOrigen === 'correccion-acolchado' ? `Corrección Acolchado (${o._manualOrigenDetalle})` : `Manual: ${o._manualMotivo}`}
+                          {onEliminarManual && (
+                            <button type="button" onClick={(e) => { e.stopPropagation(); onEliminarManual(o._manualId); }} title="Quitar" className="text-emerald-400 hover:text-red-500">
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          )}
+                        </span>
+                      )}
                       {isBlocked && (
                         <span className="ml-1.5 inline-block text-[8px] font-black uppercase tracking-wider text-slate-400 align-middle no-underline">
                           · Bloqueada (no se fabrica)
@@ -760,7 +1277,7 @@ const MachineCard = React.memo(({
                       )}
                     </td>
                     <td className={cn('px-4 py-3 text-right font-mono font-black', textColor)}>
-                      {qtyEditable && onQtyEdit && !isBlocked ? (
+                      {qtyEditable && onQtyEdit && !isBlocked && !isFertDelDia ? (
                         <input
                           type="number"
                           min={0}
@@ -773,9 +1290,14 @@ const MachineCard = React.memo(({
                         qty.toLocaleString()
                       )}
                     </td>
-                    <td className={cn('px-4 py-3 text-right font-mono font-black bg-indigo-50/10', isBlocked ? 'text-slate-400 line-through' : isAdjusted ? 'text-red-600' : isSplitRemainder ? 'text-violet-600' : isExcess ? 'text-amber-700' : 'text-indigo-600')}>{tHours.toFixed(2)}</td>
+                    <td className={cn('px-4 py-3 text-right font-mono font-black bg-indigo-50/10', isFertDelDia ? 'text-sky-600' : isBlocked ? 'text-slate-400 line-through' : isAdjusted ? 'text-red-600' : isSplitRemainder ? 'text-violet-600' : isExcess ? 'text-amber-700' : 'text-indigo-600')}>{tHours.toFixed(2)}</td>
                     {onToggleBlock && (
                       <td className="px-4 py-3 text-center">
+                        {isFertDelDia ? (
+                          <span className="inline-flex items-center justify-center w-6 h-6 text-sky-300" title="Orden FERT — solo visualización, no se puede bloquear">
+                            <PackageSearch className="w-3.5 h-3.5" />
+                          </span>
+                        ) : (
                         <button
                           type="button"
                           onClick={() => onToggleBlock(o)}
@@ -787,6 +1309,7 @@ const MachineCard = React.memo(({
                         >
                           {isBlocked ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
                         </button>
+                        )}
                       </td>
                     )}
                   </tr>
@@ -803,14 +1326,13 @@ const MachineCard = React.memo(({
                   <td colSpan={2} className="px-4 py-2 text-[9px] font-black uppercase text-slate-400 tracking-widest">
                     {filteredOrders.length} {isConsolidated ? 'materiales' : 'órdenes'} · total
                   </td>
+                  {/* `totalQty` (ya calculado arriba, mismo valor que el badge "UDS" del encabezado) —
+                      antes esta celda recalculaba la suma desde cero sobre `filteredOrders` SIN
+                      excluir lo bloqueado ni lo en exceso, así que no coincidía con el badge de
+                      arriba cuando había una corrección bloqueada (reportado por el usuario con un
+                      caso real en ACH10: badge 1270,24 vs. total de la tabla 3444,64). */}
                   <td className="px-4 py-2 text-right font-mono font-black text-slate-900">
-                    {filteredOrders.reduce((sum, o) => {
-                      const k = `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
-                      const qty = isConsolidated && o._isConsolidated
-                        ? o._totalQty
-                        : (qtyOverrideByKey?.get(k) ?? Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0));
-                      return sum + qty;
-                    }, 0).toLocaleString()}
+                    {totalQty.toLocaleString()}
                   </td>
                   <td className="px-4 py-2 text-right font-mono font-black text-indigo-700 bg-indigo-50/30">
                     {totalTimeHours.toFixed(2)}
@@ -834,6 +1356,14 @@ const MachineCard = React.memo(({
     prevProps.config.isSaturdayActive === nextProps.config.isSaturdayActive &&
     prevProps.config.peopleDay === nextProps.config.peopleDay &&
     prevProps.config.peopleNight === nextProps.config.peopleNight &&
+    prevProps.config.peopleWeekend === nextProps.config.peopleWeekend &&
+    prevProps.config.empleadosDia === nextProps.config.empleadosDia &&
+    prevProps.config.empleadosNoche === nextProps.config.empleadosNoche &&
+    prevProps.config.empleadosSabado === nextProps.config.empleadosSabado &&
+    prevProps.resolverEmpleado === nextProps.resolverEmpleado &&
+    prevProps.mantenimientoHorasPorPuesto === nextProps.mantenimientoHorasPorPuesto &&
+    prevProps.citasMedicasPorPersona === nextProps.citasMedicasPorPersona &&
+    prevProps.fertDelDiaPorMaquina === nextProps.fertDelDiaPorMaquina &&
     prevProps.horasNetasDiurnas === nextProps.horasNetasDiurnas &&
     prevProps.horasNetasNocturnas === nextProps.horasNetasNocturnas &&
     prevProps.horasNetasFinSemana === nextProps.horasNetasFinSemana &&
@@ -846,8 +1376,24 @@ const MachineCard = React.memo(({
     prevProps.qtyOverrideByKey === nextProps.qtyOverrideByKey &&
     prevProps.qtyEditable === nextProps.qtyEditable &&
     prevProps.onQtyEdit === nextProps.onQtyEdit &&
-    prevProps.onToggleBlock === nextProps.onToggleBlock;
+    prevProps.onToggleBlock === nextProps.onToggleBlock &&
+    prevProps.manualOrders === nextProps.manualOrders &&
+    prevProps.onAgregarManual === nextProps.onAgregarManual &&
+    prevProps.onEliminarManual === nextProps.onEliminarManual;
 });
+
+// Acolchadoras (HR-ACHxx / ACOLCHADORAxx — excluye COSEDORA-ACHxx de Tapas y ACH11/ACH12 de
+// Bandas, mismo criterio que `esPuestoAcolchado` dentro del componente principal): ahí una cita
+// médica NO debe descontar capacidad, hay que buscar un reemplazo en vez de reducir la meta (a
+// pedido explícito del usuario). Función de MÓDULO (no un hook) para que `MachineCard` —
+// declarado fuera del componente principal — pueda usar el mismo criterio sin que el padre tenga
+// que pasarlo como prop.
+function esHRAcolchado(puesto: string): boolean {
+  const p = (puesto || '').toUpperCase();
+  return (p.includes('ACOLCHADORA') || p.includes('ACH')) &&
+    !p.startsWith('COSEDORA') &&
+    !p.includes('11') && !p.includes('12');
+}
 
 // Registros del plan táctico cuyo "valor" corresponde a Centro 1000/2000
 // (ej: "Plan Táctico - Centro 1000", "Plan Táctico - Centro 2000 - P2" — el sufijo "-P#" es opcional
@@ -922,6 +1468,24 @@ function sumarDiasHabiles(fechaBase: string, dias: number, feriados: Set<string>
   return fecha.toISOString().split('T')[0];
 }
 
+// Misma lógica que `sumarDiasHabiles` (fines de semana y feriados NO cuentan), pero restando en
+// vez de sumando — para "PENDIENTES" del Resumen: el día hábil anterior a la fecha de
+// planificación, con el mismo criterio con el que esa fecha se calculó en primer lugar
+// (`sumarDiasHabiles` con `diasFechaN2N3`), para no desalinearse si la fecha de planificación cae
+// justo después de un fin de semana o feriado.
+function restarDiasHabiles(fechaBase: string, dias: number, feriados: Set<string>): string {
+  const fecha = new Date(fechaBase);
+  let restantes = dias;
+  while (restantes > 0) {
+    fecha.setUTCDate(fecha.getUTCDate() - 1);
+    const diaSemana = fecha.getUTCDay();
+    const iso = fecha.toISOString().split('T')[0];
+    if (diaSemana === 0 || diaSemana === 6 || feriados.has(iso)) continue;
+    restantes--;
+  }
+  return fecha.toISOString().split('T')[0];
+}
+
 // FECHA_CARGA/HORA_CARGA de la interfaz SAP (doc ZPPT_ORDER_INT): momento real en que este
 // aplicativo carga el registro, en formato AAAAMMDD/HHMMSS. Se calcula con `Intl.DateTimeFormat`
 // fijado a 'America/Guayaquil' (no con `new Date().getHours()` etc.) para que el valor sea
@@ -939,6 +1503,119 @@ function getFechaHoraCargaEcuador(): { fecha: string; hora: string } {
     fecha: `${valor('year')}${valor('month')}${valor('day')}`,
     hora: `${hora}${valor('minute')}${valor('second')}`,
   };
+}
+
+// VALIDAR PLAN — reparte la cantidad PLANIFICADA de cada "componente" (ej. un material de
+// ACOLCHADO) entre los "hijos" que lo necesitan (ej. las TAPAS de su BOM), con el mismo
+// criterio de "mejor ajuste" (mayor consumo unitario primero, sobrante unidad por unidad al
+// que más le falta) que ya usa `acolchadoTapasResultado` más abajo, pero aplicado de forma
+// genérica para poder reutilizarlo en el siguiente nivel de la cadena (TAPA → FORRO) sin
+// duplicar la lógica. Un hijo puede depender de VARIOS componentes (ej. una TAPA con dos
+// telas de acolchado distintas) — en ese caso queda limitado por el que menos le alcance
+// (mínimo entre todos los componentes que lo alimentan), nunca por la suma.
+function asignarComponentePorHijos(
+  supplyPorComponente: Map<string, number>,
+  factorPorComponente: Map<string, Map<string, number>>,
+  techoPorHijo: Map<string, number>,
+): { cobertura: Map<string, number>; limitante: Map<string, string> } {
+  const coberturaPorHijoPorComponente = new Map<string, Map<string, number>>();
+
+  factorPorComponente.forEach((hijos, componente) => {
+    let presupuesto = supplyPorComponente.get(componente) || 0;
+    if (presupuesto <= 0.01 || hijos.size === 0) return;
+
+    const producidoPorHijo = new Map<string, number>();
+    hijos.forEach((_, hijo) => producidoPorHijo.set(hijo, 0));
+
+    const candidatos = [...hijos.entries()].filter(([, factor]) => factor > 0).sort((a, b) => b[1] - a[1]);
+    for (const [hijo, factor] of candidatos) {
+      if (presupuesto <= 0.01) break;
+      const techo = techoPorHijo.get(hijo) || 0;
+      const unidadesPosibles = Math.min(techo, Math.floor(presupuesto / factor));
+      if (unidadesPosibles <= 0) continue;
+      presupuesto -= unidadesPosibles * factor;
+      producidoPorHijo.set(hijo, unidadesPosibles);
+    }
+    let progreso = true;
+    while (progreso && presupuesto > 0.01) {
+      progreso = false;
+      const cand = candidatos
+        .filter(([hijo, factor]) => factor <= presupuesto + 0.01 && (producidoPorHijo.get(hijo) || 0) < (techoPorHijo.get(hijo) || 0))
+        .sort((a, b) => a[1] - b[1])[0];
+      if (!cand) break;
+      const [hijo, factor] = cand;
+      presupuesto -= factor;
+      producidoPorHijo.set(hijo, (producidoPorHijo.get(hijo) || 0) + 1);
+      progreso = true;
+    }
+
+    producidoPorHijo.forEach((unidades, hijo) => {
+      if (!coberturaPorHijoPorComponente.has(hijo)) coberturaPorHijoPorComponente.set(hijo, new Map());
+      coberturaPorHijoPorComponente.get(hijo)!.set(componente, unidades);
+    });
+  });
+
+  // El "limitante" de cada hijo es el componente que menos le alcanzó (el mínimo) — ej. una
+  // Tapa con dos telas de Acolchado distintas queda limitada por la que esté más corta; se
+  // reporta para poder decir "a este Forro le falta justo ESTE material", no solo "le falta algo".
+  const resultado = new Map<string, number>();
+  const limitante = new Map<string, string>();
+  coberturaPorHijoPorComponente.forEach((porComponente, hijo) => {
+    let minComponente = '';
+    let minValor = Infinity;
+    porComponente.forEach((valor, componente) => { if (valor < minValor) { minValor = valor; minComponente = componente; } });
+    resultado.set(hijo, minValor);
+    limitante.set(hijo, minComponente);
+  });
+  return { cobertura: resultado, limitante };
+}
+
+// VALIDAR PLAN — balance simple de un eslabón del BOM (ej. Acolchado→Tapa, Tapa→Forro): por cada
+// COMPONENTE, suma cuánto necesitan en total sus hijos según el plan PROPIO de cada hijo (sin
+// repartir nada entre ellos — a diferencia de `asignarComponentePorHijos`, acá no importa CUÁL
+// hijo específico se queda corto si el componente no alcanza, solo si el material en conjunto
+// está corto o sobrando) y lo compara contra lo que el componente mismo tiene planificado. Da la
+// vista "¿estoy planificando de menos o de más este material?" en cualquier nivel de la cadena.
+function calcularBalancePorComponente(
+  planPorComponente: Map<string, number>,
+  factorPorComponente: Map<string, Map<string, number>>,
+  planPorHijo: Map<string, number>,
+): Map<string, { planeado: number; necesidad: number; deficit: number; excedente: number }> {
+  const resultado = new Map<string, { planeado: number; necesidad: number; deficit: number; excedente: number }>();
+  factorPorComponente.forEach((hijos, componente) => {
+    let necesidad = 0;
+    hijos.forEach((factor, hijo) => { necesidad += factor * (planPorHijo.get(hijo) || 0); });
+    if (necesidad <= 0.01 && !planPorComponente.has(componente)) return;
+    const planeado = planPorComponente.get(componente) || 0;
+    resultado.set(componente, {
+      planeado,
+      necesidad,
+      deficit: Math.max(0, necesidad - planeado),
+      excedente: Math.max(0, planeado - necesidad),
+    });
+  });
+  return resultado;
+}
+
+// Combina varios Map<string, number> sumando las claves que se repitan (ej. unir lo planificado
+// de TAPA y BANDA en un solo mapa "nivel 2", sin perder nada si algún material raro apareciera en
+// ambos). Usado solo para armar los insumos de VALIDAR PLAN.
+function combinarMapasSuma(...mapas: Map<string, number>[]): Map<string, number> {
+  const resultado = new Map<string, number>();
+  mapas.forEach(mapa => mapa.forEach((valor, clave) => resultado.set(clave, (resultado.get(clave) || 0) + valor)));
+  return resultado;
+}
+
+// Combina varios Map<string, Map<string, number>> (factor por componente→hijo) en uno solo. Si dos
+// mapas trajeran el MISMO componente (no debería pasar: cada rama usa materiales distintos), se
+// fusionan sus hijos en vez de pisarse.
+function combinarMapasDeFactores(...mapas: Map<string, Map<string, number>>[]): Map<string, Map<string, number>> {
+  const resultado = new Map<string, Map<string, number>>();
+  mapas.forEach(mapa => mapa.forEach((hijos, componente) => {
+    if (!resultado.has(componente)) resultado.set(componente, new Map(hijos));
+    else { const inner = resultado.get(componente)!; hijos.forEach((factor, hijo) => inner.set(hijo, factor)); }
+  }));
+  return resultado;
 }
 
 // Tabla pivote: filas = línea de producción, columnas = centro (1000/2000) del que proviene
@@ -1746,8 +2423,23 @@ const CapacidadComparacionPanel: React.FC<{
       .sort((a, b) => b.prioridad - a.prioridad);
 
     const deficitRestante = Array.from(deficitRestantePorLamina.values()).reduce((a, b) => a + b, 0);
-    return { deficitTotalInicial, deficitRestante, filas };
+    return { deficitTotalInicial, deficitRestante, deficitRestantePorLamina, filas };
   }, [laminasDeficitarias, forroALaminasMap, p15ForroPorMaterial, materialesBalanceoData, normalizeMaterialCode, chnAForroMap]);
+
+  // Hay déficit real, pero NINGÚN material de Materiales Balanceo pudo recortarse (ninguno
+  // consume, según el BOM, la Lámina que falta) — sin esto la pantalla no ofrece NINGÚN botón de
+  // guardar: ni el de "Aplicar Ajuste" (no hay nada que aplicar) ni el de "sin ajuste" (si hay
+  // déficit). Ver el botón "Guardar sin Ajuste" más abajo, que también se habilita en este caso.
+  const simulacionAjusteSinNadaQueRecortar = simulacionAjuste.deficitTotalInicial > 0 && !simulacionAjuste.filas.some(f => f.recorteAplicado > 0);
+
+  // Desglose por CÓDIGO de Lámina de lo que queda sin cubrir — el total agregado (22, 100, etc.)
+  // no dice CUÁL lámina falta; el usuario necesita el código exacto para ir a buscarlo en SAP.
+  const laminasSinCubrirDetalle = useMemo(() => (
+    Array.from(simulacionAjuste.deficitRestantePorLamina.entries())
+      .filter(([, cantidad]) => cantidad > 0.01)
+      .map(([codigo, cantidad]) => ({ codigo, nombre: materialNombrePorCodigo.get(codigo) || '', cantidad }))
+      .sort((a, b) => b.cantidad - a.cantidad)
+  ), [simulacionAjuste.deficitRestantePorLamina, materialNombrePorCodigo]);
 
   // Paginación de "Simulación de Ajuste — Forro P1.5" (mismo criterio que la tabla de comparación
   // de arriba, con su propia página porque son dos tablas independientes).
@@ -2247,7 +2939,10 @@ const CapacidadComparacionPanel: React.FC<{
         }
       }
 
-      addNotification('success', `PFM guardado sin ajuste: ${plansDesactivados} plan(es) desactivado(s) (${detallesDesactivados} filas), ${plansCreados} plan(es) nuevo(s) creado(s) (${detallesCreados} filas).`);
+      const avisoDeficit = simulacionAjusteSinNadaQueRecortar
+        ? ` ATENCIÓN: quedan ${Math.round(simulacionAjuste.deficitTotalInicial).toLocaleString()} unidad(es) de déficit de Lámina SIN CUBRIR (ningún material de Materiales Balanceo la consume) — ${laminasSinCubrirDetalle.map(l => `${l.codigo} (${l.nombre || '—'}): ${Math.round(l.cantidad).toLocaleString()}`).join(', ')}. Revisar Materiales Balanceo.`
+        : '';
+      addNotification(simulacionAjusteSinNadaQueRecortar ? 'warning' : 'success', `PFM guardado sin ajuste: ${plansDesactivados} plan(es) desactivado(s) (${detallesDesactivados} filas), ${plansCreados} plan(es) nuevo(s) creado(s) (${detallesCreados} filas).${avisoDeficit}`);
       setConfirmPFMSinAjusteOpen(false);
       fetchComparacion();
     } catch (error: any) {
@@ -2255,7 +2950,7 @@ const CapacidadComparacionPanel: React.FC<{
     } finally {
       setIsGuardandoPFMSinAjuste(false);
     }
-  }, [fechaN1, fechaN2N3, forrosGruposList, addNotification, fetchComparacion]);
+  }, [fechaN1, fechaN2N3, forrosGruposList, addNotification, fetchComparacion, simulacionAjusteSinNadaQueRecortar, simulacionAjuste.deficitTotalInicial, laminasSinCubrirDetalle]);
 
   // Clona el plan P1 (Ensamblado) activo de esta fecha tal cual, sin recortar nada,
   // renombrando el plan_grupo resultante de "P1" a "PFF". Mismo caso de uso que
@@ -2346,7 +3041,10 @@ const CapacidadComparacionPanel: React.FC<{
         }
       }
 
-      addNotification('success', `PFF guardado sin ajuste: ${plansDesactivados} plan(es) desactivado(s) (${detallesDesactivados} filas), ${plansCreados} plan(es) nuevo(s) creado(s) (${detallesCreados} filas).`);
+      const avisoDeficit = simulacionAjusteSinNadaQueRecortar
+        ? ` ATENCIÓN: quedan ${Math.round(simulacionAjuste.deficitTotalInicial).toLocaleString()} unidad(es) de déficit de Lámina SIN CUBRIR (ningún material de Materiales Balanceo la consume) — ${laminasSinCubrirDetalle.map(l => `${l.codigo} (${l.nombre || '—'}): ${Math.round(l.cantidad).toLocaleString()}`).join(', ')}. Revisar Materiales Balanceo.`
+        : '';
+      addNotification(simulacionAjusteSinNadaQueRecortar ? 'warning' : 'success', `PFF guardado sin ajuste: ${plansDesactivados} plan(es) desactivado(s) (${detallesDesactivados} filas), ${plansCreados} plan(es) nuevo(s) creado(s) (${detallesCreados} filas).${avisoDeficit}`);
       setConfirmPFFSinAjusteOpen(false);
       fetchComparacion();
     } catch (error: any) {
@@ -2354,7 +3052,7 @@ const CapacidadComparacionPanel: React.FC<{
     } finally {
       setIsGuardandoPFFSinAjuste(false);
     }
-  }, [fechaP1, gruposCoincidentes, addNotification, fetchComparacion]);
+  }, [fechaP1, gruposCoincidentes, addNotification, fetchComparacion, simulacionAjusteSinNadaQueRecortar, simulacionAjuste.deficitTotalInicial, laminasSinCubrirDetalle]);
 
   const handleAplicarAjustePlanP1 = useCallback(async () => {
     setIsAplicandoP1(true);
@@ -2690,13 +3388,39 @@ const CapacidadComparacionPanel: React.FC<{
         </Card>
       )}
 
-      {hasFetched && comparacionVisible.length > 0 && simulacionAjuste.deficitTotalInicial === 0 && (
+      {/* Sin nada que recortar: hay déficit real, pero ningún material de Materiales Balanceo
+          consume (según el BOM) la Lámina que falta — `simulacionAjuste.filas` queda con
+          `recorteAplicado` en 0 para todos. Antes esto dejaba la pantalla SIN ningún botón de
+          guardar (ni "con ajuste", porque no hay nada que aplicar, ni "sin ajuste", porque sí
+          hay déficit): el plan quedaba bloqueado sin salida (reportado por el usuario). Se
+          habilita el mismo camino de "sin ajuste" también en este caso, dejando bien visible que
+          se guarda con déficit pendiente, para no perder la trazabilidad de que falta revisar
+          Materiales Balanceo (probablemente falta registrar ahí el Forro que sí consume esa Lámina). */}
+      {hasFetched && comparacionVisible.length > 0 && (simulacionAjuste.deficitTotalInicial === 0 || simulacionAjusteSinNadaQueRecortar) && (
         <Card className="rounded-[2.5rem] bg-white ring-1 ring-slate-100 overflow-hidden shadow-sm border-none">
           <CardHeader className="bg-slate-50/50 border-b border-slate-200 p-8">
             <CardTitle className="text-lg font-black text-slate-900 uppercase">Guardar sin Ajuste</CardTitle>
             <CardDescription className="text-slate-400 font-bold uppercase text-[10px] tracking-widest mt-1">
-              No hay déficit para esta fecha, pero igual hace falta dejar guardados el PFM y el PFF a partir del plan actual, sin recortar nada.
+              {simulacionAjusteSinNadaQueRecortar
+                ? `Ningún material de Materiales Balanceo consume la Lámina en déficit — no hay nada que recortar. Se guarda el PFM/PFF tal cual, con ${Math.round(simulacionAjuste.deficitTotalInicial).toLocaleString()} unidad(es) de déficit SIN CUBRIR (revisar si falta registrar el Forro correcto en Materiales Balanceo).`
+                : 'No hay déficit para esta fecha, pero igual hace falta dejar guardados el PFM y el PFF a partir del plan actual, sin recortar nada.'}
             </CardDescription>
+            {simulacionAjusteSinNadaQueRecortar && laminasSinCubrirDetalle.length > 0 && (
+              <div className="mt-3 border border-red-200 bg-red-50 rounded-xl p-4 space-y-2">
+                <p className="text-[9px] font-black text-red-700 uppercase tracking-widest flex items-center gap-1.5">
+                  <AlertTriangle className="w-3 h-3 shrink-0" /> Lámina(s) sin cubrir, por código:
+                </p>
+                <div className="space-y-1">
+                  {laminasSinCubrirDetalle.map(l => (
+                    <div key={l.codigo} className="flex items-center justify-between gap-4 text-[11px]">
+                      <span className="font-mono font-bold text-red-700">{l.codigo}</span>
+                      <span className="font-bold text-slate-600 uppercase truncate">{l.nombre || '—'}</span>
+                      <span className="font-mono font-black text-red-700 shrink-0">{Math.round(l.cantidad).toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </CardHeader>
           <CardContent className="p-8 flex flex-wrap gap-4">
             <Button
@@ -2727,8 +3451,22 @@ const CapacidadComparacionPanel: React.FC<{
               <div>
                 <p>
                   Esto desactiva (soft delete) el plan P1.5 activo de esta fecha — Forro, Tapa y Acolchado — y crea uno nuevo
-                  (PFM) con las mismas cantidades, sin ningún recorte, ya que no hay déficit para esta fecha.
+                  (PFM) con las mismas cantidades, sin ningún recorte{simulacionAjusteSinNadaQueRecortar ? '' : ', ya que no hay déficit para esta fecha'}.
                 </p>
+                {simulacionAjusteSinNadaQueRecortar && (
+                  <div className="mt-2">
+                    <p className="font-bold text-red-600">
+                      Quedan {Math.round(simulacionAjuste.deficitTotalInicial).toLocaleString()} unidad(es) de déficit SIN CUBRIR — ningún material de Materiales Balanceo consume la Lámina que falta:
+                    </p>
+                    <ul className="mt-1 space-y-0.5">
+                      {laminasSinCubrirDetalle.map(l => (
+                        <li key={l.codigo} className="font-mono text-red-600">
+                          {l.codigo} ({l.nombre || '—'}): {Math.round(l.cantidad).toLocaleString()}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <p className="mt-2 font-bold text-slate-700">
                   Se guardará con fecha Forro: {fechaN1 || '—'} · Tapa/Acolchado/Otros: {fechaN2N3 || '—'}
                 </p>
@@ -2752,9 +3490,23 @@ const CapacidadComparacionPanel: React.FC<{
               <div>
                 <p>
                   Esto desactiva (soft delete) el plan_grupo P1 activo de esta fecha junto con todo su detalle, y crea uno nuevo
-                  (PFF) con las mismas cantidades, sin ningún recorte, ya que no hay déficit para esta fecha. No puede haber dos
+                  (PFF) con las mismas cantidades, sin ningún recorte{simulacionAjusteSinNadaQueRecortar ? '' : ', ya que no hay déficit para esta fecha'}. No puede haber dos
                   plan_grupo P1 activos simultáneos para el mismo centro/fecha.
                 </p>
+                {simulacionAjusteSinNadaQueRecortar && (
+                  <div className="mt-2">
+                    <p className="font-bold text-red-600">
+                      Quedan {Math.round(simulacionAjuste.deficitTotalInicial).toLocaleString()} unidad(es) de déficit SIN CUBRIR — ningún material de Materiales Balanceo consume la Lámina que falta:
+                    </p>
+                    <ul className="mt-1 space-y-0.5">
+                      {laminasSinCubrirDetalle.map(l => (
+                        <li key={l.codigo} className="font-mono text-red-600">
+                          {l.codigo} ({l.nombre || '—'}): {Math.round(l.cantidad).toLocaleString()}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <p className="mt-2 font-bold text-slate-700">
                   Se guardará con la fecha del plan P1: {fechaP1 || '—'}
                 </p>
@@ -2888,6 +3640,38 @@ const renderDateFilterHeader = (techStartDate: string, setTechStartDate: (d: str
   </div>
 );
 
+// Control compacto para el rango de fechas INDEPENDIENTE de un puesto FBASE/HR-FORRO puntual —
+// confirmado con el usuario: cada puesto tiene el SUYO PROPIO (ya no uno compartido entre todos),
+// así que se renderiza una vez POR TARJETA, con su propio estado (ver `rangoFbaseForroPorPuesto`/
+// `handleSetRangoFbaseForroPuesto`). MTBS1/MTBS no usan este rango — se unificaron con el general.
+const renderRangoIndependienteFbaseForro = (desde: string, setDesde: (d: string) => void, hasta: string, setHasta: (d: string) => void) => (
+  <div className="flex items-center justify-between gap-3 px-6 py-3 bg-white border border-slate-200 rounded-2xl shadow-sm mb-2">
+    <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
+      <CalendarIcon className="w-4 h-4 text-indigo-500" /> Rango independiente de este puesto
+    </div>
+    <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2">
+        <span className="text-[9px] font-black text-slate-400 uppercase">Desde:</span>
+        <input
+          type="date"
+          value={desde}
+          onChange={(e) => setDesde(e.target.value)}
+          className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 focus:ring-indigo-500 outline-none"
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-[9px] font-black text-slate-400 uppercase">Hasta:</span>
+        <input
+          type="date"
+          value={hasta}
+          onChange={(e) => setHasta(e.target.value)}
+          className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 focus:ring-indigo-500 outline-none"
+        />
+      </div>
+    </div>
+  </div>
+);
+
 export const TacticalPlanForrosSection: React.FC = () => {
   const { addNotification, apiCuboInventariosData } = useAppContext();
   const [isMounted, setIsMounted] = useState(false);
@@ -2902,6 +3686,25 @@ export const TacticalPlanForrosSection: React.FC = () => {
   const [kpiMaestroData, setKpiMaestroData] = useState<any[]>([]);
   const [mantenimientosData, setMantenimientosData] = useState<any[]>([]);
   const [isLoadingMantenimientos, setIsLoadingMantenimientos] = useState(false);
+  // Habilidades por Estación (serviciosService.getMaestroCuboHabilidadesCrudos, paginado) — a
+  // diferencia del Cubo de Habilidades OP genérico (CuboHabilidadesOp, usado en Muebles/Corte y
+  // Laminado, solo trae Rol/LineaProceso como texto libre), este SÍ trae una columna PuestoTrabajo
+  // con el código de Hoja de Ruta exacto (confirmado con datos reales: "HR-ACH02"), el MISMO
+  // formato que ya produce `mapToHojaRutaInternal` en este módulo — permite cruzar por igualdad
+  // exacta en vez de texto aproximado. Se trae completo (recorriendo TODAS las páginas, ver
+  // fetchBaseData) y cada puesto cruza por su propio código de empleado — ver
+  // `habilidadesPorCodigoYPuesto`/`resolverEmpleadoParaPuesto`.
+  const [habilidadesEstacionData, setHabilidadesEstacionData] = useState<any[]>([]);
+  // null = cargó bien (o todavía no se intentó); string = mensaje de error o "sin registros" para
+  // avisar en pantalla POR QUÉ un código de empleado nunca se va a encontrar — ver fetchHabilidadesEstacion.
+  const [errorHabilidadesEstacion, setErrorHabilidadesEstacion] = useState<string | null>(null);
+  const [isLoadingHabilidadesEstacion, setIsLoadingHabilidadesEstacion] = useState(false);
+  // Se carga LAZY (al visitar "Personal & Turnos"), no en el mount general — antes vivía dentro de
+  // `fetchBaseData` y bloqueaba el primer render de TODA la pestaña con varias llamadas paginadas
+  // en SECUENCIA (una tras otra) para traer miles de registros, sumando varios segundos al inicio
+  // aunque el usuario ni fuera a usar Personal & Turnos en esa sesión (reportado por el usuario:
+  // "la app está muy lenta"). Igual criterio que `hasFetchedMantenimientos`/`fetchOrdenesFert`.
+  const [hasFetchedHabilidadesEstacion, setHasFetchedHabilidadesEstacion] = useState(false);
 
   // Cantidad editada a mano en Ajuste de Producción — en TODAS las secciones EXCEPTO Acolchado &
   // Tapas (Célula Twin, que no recibe `qtyEditable` en su MachineCard). La key es la misma que ya
@@ -2929,10 +3732,6 @@ export const TacticalPlanForrosSection: React.FC = () => {
     return nueva === undefined ? o : { ...o, CANTIDAD: nueva, CANTPROGRAMADA: nueva };
   }, [manualQtyOverridePorOrden]);
   const [hasFetchedMantenimientos, setHasFetchedMantenimientos] = useState(false);
-  const mantenimientosForrosData = useMemo(
-    () => mantenimientosData.filter(m => String(m.AREA || '').toUpperCase().trim() === 'FORROS'),
-    [mantenimientosData]
-  );
   const [ordenesPrevisionalesData, setOrdenesPrevisionalesData] = useState<any[]>([]);
   const [listaMaterialesData, setListaMaterialesData] = useState<any[]>([]);
   const [materialesBalanceoData, setMaterialesBalanceoData] = useState<MaterialesBalanceo[]>([]);
@@ -2968,7 +3767,6 @@ export const TacticalPlanForrosSection: React.FC = () => {
   const [isTtchnAdjustActive, setIsTtchnAdjustActive] = useState(false);
   const [ttchnAcceptedMachines, setTtchnAcceptedMachines] = useState<Set<string>>(new Set());
   const [ttchnMovedOrders, setTtchnMovedOrders] = useState<{ order: any; fromHR: string; toHR: string }[]>([]);
-  const [bordBandExcessKeys, setBordBandExcessKeys] = useState<Set<string>>(new Set());
   // "Otras máquinas de interiores (sin grupos de ajuste)": máquinas de un solo puesto por hoja de
   // ruta (no hay con quién redistribuir), que hasta ahora no tenían NINGÚN botón de aceptación —
   // sus órdenes nunca llegaban a Plan Final desde esta pestaña. Mismo patrón simple que Forros
@@ -3025,6 +3823,7 @@ export const TacticalPlanForrosSection: React.FC = () => {
 
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingFert, setIsLoadingFert] = useState(false);
+  const [hasFetchedOrdenesFert, setHasFetchedOrdenesFert] = useState(false);
   const [isLoadingKPI, setIsLoadingKPI] = useState(false);
   const [isLoadingPrevisionales, setIsLoadingPrevisionales] = useState(false);
   const [searchQueryPrevisionales, setSearchQueryPrevisionales] = useState('');
@@ -3036,7 +3835,20 @@ export const TacticalPlanForrosSection: React.FC = () => {
   
   const [loadedTabs, setLoadedTabs] = useState<Set<string>>(new Set(['ajuste-produccion']));
   const [activeMainTab, setActiveMainTab] = useState('ajuste-produccion');
+  // Sub-pestaña activa dentro de "Ajuste de Producción" (Acolchado/Bandas/Interiores/Forros/
+  // Resumen/Validar Plan/Plan Final) — controlada (no `defaultValue`) para que el botón "Validar
+  // Plan" en Plan Final pueda saltar directo a la pestaña "Validar Plan" sin pasar por un diálogo.
+  const [activeAjusteSubTab, setActiveAjusteSubTab] = useState('acolchado-tapas');
   const hojaRutaCacheRef = React.useRef<Record<string, string>>({});
+  // Si `mapToHojaRuta` se llama para un puesto ANTES de que `kpiMaestroData` termine de cargar
+  // (ej. durante los primeros renders), cae al fallback genérico (que arma mal el código, ver
+  // `mapToHojaRuta` más abajo) y lo CACHEA en `hojaRutaCacheRef` — como el caché se revisa antes
+  // que `kpiMaestroData`, ese valor incorrecto quedaba pegado para el resto de la sesión aunque
+  // el maestro KPI llegara segundos después con el dato correcto (reportado por el usuario:
+  // "FORRO-BASE-BCAMAS" resolvía a "HR-FORRO-BASE-BCAMAS" en vez de "HR-FBASE", su código real
+  // registrado en el maestro KPI). Se limpia el caché cada vez que `kpiMaestroData` cambia, para
+  // que cualquier entrada vieja se recalcule con los datos ya cargados.
+  useEffect(() => { hojaRutaCacheRef.current = {}; }, [kpiMaestroData]);
   const kpiIndexRef = React.useRef<Record<string, any>>({});
   const tiemposIndexRef = React.useRef<Record<string, any>>({});
   const [dataReady, setDataReady] = useState(false);
@@ -3052,6 +3864,23 @@ export const TacticalPlanForrosSection: React.FC = () => {
   // feriados en los que igual se produce.
   const [esDiaFeriado, setEsDiaFeriado] = useState(false);
   const [jornadaFeriadoSel, setJornadaFeriadoSel] = useState("0");
+  // Fechas adicionales marcadas a mano como NO laborables (paro, cierre de planta, mantenimiento
+  // mayor, o un feriado oficial distinto al detectado automáticamente) — a diferencia de
+  // `esDiaFeriado` (un solo interruptor para LA fecha del plan actual), esta es una LISTA: puede
+  // haber más de un día no laborable en el rango que afecta los cálculos de día hábil (N1/N2N3/
+  // P2/P3, ver `sumarDiasHabiles`/`restarDiasHabiles`), sin que marcar cada una mueva por separado
+  // la fecha del plan actual — eso sigue siendo un paso explícito aparte (ver `feriadoVigente` y
+  // el botón "Aplicar feriado detectado" más abajo). Declarada acá arriba (no junto al resto del
+  // bloque "Día Feriado", más abajo en el archivo) porque los cálculos de FECHA_N1/N2N3/P2/P3 que
+  // la necesitan corren en efectos definidos antes en este componente.
+  const [feriadoFechasManuales, setFeriadoFechasManuales] = useState<string[]>([]);
+  // Horas de cita médica por persona (código de empleado, normalizado → horas) — la "base" que
+  // el usuario llena a mano; se descuentan de la capacidad del/los puesto(s) donde esa persona
+  // esté asignada en Día/Noche/Sábado (ver `horasCitasMedicasPuesto` más abajo), igual criterio
+  // que Mantenimiento pero a nivel de PERSONA en vez de puesto fijo (a pedido del usuario: "que
+  // vayas descontando ese tiempo por puesto de trabajo dependiendo en dónde esté asignada la
+  // persona"). Declarada junto al resto de Personal y Turnos por la misma persistencia semanal.
+  const [citasMedicasPorPersona, setCitasMedicasPorPersona] = useState<Record<string, number>>({});
   const [workstationConfigs, setWorkstationConfigs] = useState<Record<string, WorkstationConfig>>({});
   // Bloquea los controles de Máquinas/Personas/Turnos de todas las tarjetas de Personal & Turnos
   // una vez que el usuario confirma su plan. Se guarda en localStorage junto con la semana (lunes)
@@ -3084,6 +3913,8 @@ export const TacticalPlanForrosSection: React.FC = () => {
       if (saved.jornadaFinSemanaSel) setJornadaFinSemanaSel(saved.jornadaFinSemanaSel);
       if (typeof saved.esDiaFeriado === 'boolean') setEsDiaFeriado(saved.esDiaFeriado);
       if (saved.jornadaFeriadoSel) setJornadaFeriadoSel(saved.jornadaFeriadoSel);
+      if (Array.isArray(saved.feriadoFechasManuales)) setFeriadoFechasManuales(saved.feriadoFechasManuales);
+      if (saved.citasMedicasPorPersona) setCitasMedicasPorPersona(saved.citasMedicasPorPersona);
       if (typeof saved.isJornadaEstablecida === 'boolean') setIsJornadaEstablecida(saved.isJornadaEstablecida);
       if (typeof saved.isPlanPersonalEstablecido === 'boolean') setIsPlanPersonalEstablecido(saved.isPlanPersonalEstablecido);
       if (saved.workstationConfigs) setWorkstationConfigs(saved.workstationConfigs);
@@ -3097,19 +3928,34 @@ export const TacticalPlanForrosSection: React.FC = () => {
       localStorage.setItem(PERSONAL_TURNOS_STORAGE_KEY, JSON.stringify({
         semana: getLunesDeSemanaActual(),
         jornadaDiurnaSel, jornadaNocturnaSel, jornadaFinSemanaSel,
-        esDiaFeriado, jornadaFeriadoSel,
+        esDiaFeriado, jornadaFeriadoSel, feriadoFechasManuales,
+        citasMedicasPorPersona,
         isJornadaEstablecida, isPlanPersonalEstablecido, workstationConfigs,
       }));
     } catch {
       // localStorage no disponible: la sesión sigue funcionando solo en memoria.
     }
-  }, [jornadaDiurnaSel, jornadaNocturnaSel, jornadaFinSemanaSel, esDiaFeriado, jornadaFeriadoSel, isJornadaEstablecida, isPlanPersonalEstablecido, workstationConfigs]);
+  }, [jornadaDiurnaSel, jornadaNocturnaSel, jornadaFinSemanaSel, esDiaFeriado, jornadaFeriadoSel, feriadoFechasManuales, citasMedicasPorPersona, isJornadaEstablecida, isPlanPersonalEstablecido, workstationConfigs]);
 
   const [targetDate1000, setTargetDate1000] = useState<string>("");
   const [targetDate2000, setTargetDate2000] = useState<string>("");
   
   const [techStartDate, setTechStartDate] = useState<string>("");
   const [techEndDate, setTechEndDate] = useState<string>("");
+
+  // Rango de fechas INDEPENDIENTE del "Rango de Carga Técnica" global — a pedido del usuario, los
+  // puestos FBASE/HR-FORRO (en Forros Finales) dejaron de seguir el filtro global. Confirmado con
+  // el usuario: CADA puesto necesita su PROPIO rango (no uno solo compartido entre todos), así que
+  // es un Map puesto→{desde,hasta} en vez de dos strings — cada tarjeta trae su propio control.
+  const [rangoFbaseForroPorPuesto, setRangoFbaseForroPorPuesto] = useState<Map<string, { desde: string; hasta: string }>>(new Map());
+  const handleSetRangoFbaseForroPuesto = useCallback((puesto: string, campo: 'desde' | 'hasta', valor: string) => {
+    setRangoFbaseForroPorPuesto(prev => {
+      const next = new Map(prev);
+      const actual = next.get(puesto) || { desde: '', hasta: '' };
+      next.set(puesto, { ...actual, [campo]: valor });
+      return next;
+    });
+  }, []);
 
   const [planGrupoFecha, setPlanGrupoFecha] = useState<string>("");
   const [planGrupoDetalleData, setPlanGrupoDetalleData] = useState<any[]>([]);
@@ -3156,6 +4002,16 @@ export const TacticalPlanForrosSection: React.FC = () => {
 
   // Cadena automática Nivel 1 → 2 → 3 disparada por un único botón (0 = inactiva, 1/2/3 = esperando a que termine ese nivel)
   const [autoChainStep, setAutoChainStep] = useState<0 | 1 | 2 | 3>(0);
+  // true mientras el botón "Calcular Cobertura" del diálogo Validar Plan espera a que termine de
+  // consultarse el Plan Táctico de Grupos, para recién ahí encadenar la explosión de Niveles 1-3
+  // — independiente de que el usuario haya pasado por la pestaña "Planes Grupo Ensamblado".
+  const [validarPlanCoberturaPending, setValidarPlanCoberturaPending] = useState(false);
+  // true mientras el botón "Calcular Demanda Quito (FERT)" de Validar Plan espera a que termine
+  // de cargarse `ordenesFert`, para recién ahí disparar `handleExplodeFerts` — misma idea que
+  // `validarPlanCoberturaPending` pero para la demanda REAL de Quito (centro 1000) desde órdenes
+  // FERT, en vez del Plan Táctico de Grupos (confirmado con el usuario: la demanda de Quito debe
+  // salir de las órdenes FERT reales — pestaña "Órdenes FERT" —, no de la explosión del Nivel 1).
+  const [validarPlanDemandaQuitoPending, setValidarPlanDemandaQuitoPending] = useState(false);
 
   const [nivel4ExplosionData, setNivel4ExplosionData] = useState<any[]>([]);
   const [isLoadingNivel4, setIsLoadingNivel4] = useState(false);
@@ -3220,35 +4076,6 @@ export const TacticalPlanForrosSection: React.FC = () => {
     });
   }, [planningDate]);
 
-  // Horas de mantenimiento preventivo agendadas por hoja de ruta, filtradas a la fecha de
-  // planificación mostrada en el encabezado ("Planificación para"). La columna "Puesto de
-  // Trabajo" de sp_Get_MantenimientosPreventivosAgendados en realidad trae el código de hoja
-  // de ruta (p.ej. "HR-ACH09"), no el nombre descriptivo del puesto, así que el cruce con las
-  // tarjetas de Personal & Turnos se hace vía mapToHojaRuta(p) en el render, no por nombre.
-  const mantenimientoHorasPorPuesto = useMemo(() => {
-    const map: Record<string, number> = {};
-    if (!planningDate) return map;
-    mantenimientosForrosData.forEach(m => {
-      const rawFecha = m.FECHA_OT_PRG_INI || m.FECHA_PRO;
-      if (!rawFecha) return;
-      const fechaStr = toFechaEcuador(rawFecha);
-      if (fechaStr !== planningDate) return;
-      const hrCode = String(m.PuestoTrabajo || '').trim().toUpperCase();
-      if (!hrCode) return;
-      // Mismo respaldo que la tabla de Mantenimientos Preventivos: SISMAC hoy manda
-      // `Duracion_Minutos` vacío en todas las OT, y con `Number('' || 0)` el descuento quedaba
-      // siempre en 0 h — o sea, el mantenimiento existía pero no restaba capacidad.
-      map[hrCode] = (map[hrCode] || 0) + calcularTiempoMantenimiento(m).minutos / 60;
-    });
-    return map;
-  }, [mantenimientosForrosData, planningDate]);
-
-  const mantenimientoHorasTotal = useMemo(
-    () => Object.values(mantenimientoHorasPorPuesto).reduce((sum, h) => sum + h, 0),
-    [mantenimientoHorasPorPuesto]
-  );
-
-
   useEffect(() => {
     if (kpiMaestroData.length > 0) {
       const newIndex: Record<string, any> = {};
@@ -3277,6 +4104,15 @@ export const TacticalPlanForrosSection: React.FC = () => {
     const codeStr = String(code).trim();
     return codeStr.replace(/^0+/, '').slice(-8);
   }, []);
+
+  // SAP espera el código de material (MATNR) como texto de 18 caracteres, rellenado con ceros a
+  // la izquierda (ej. 30000466 → 000000000030000466) — confirmado por el usuario. Se aplica SOLO
+  // en los documentos que salen hacia SAP (Excel/TXT de Plan Final y el payload de
+  // InsertarSolicitudProduccionHB); el código normalizado de 8 dígitos sin ceros
+  // (`normalizeMaterialCode`) se sigue usando tal cual para todo cruce/comparación interno.
+  const materialCodeParaSap = useCallback((code: string | number): string => (
+    normalizeMaterialCode(code).padStart(18, '0')
+  ), [normalizeMaterialCode]);
 
   // Carga única del maestro de materiales (código -> descripción), usada para mostrar el
   // nombre del material en las tablas de recuperación de planes (Pasos P1.5 y P3).
@@ -3360,6 +4196,16 @@ export const TacticalPlanForrosSection: React.FC = () => {
     else if (pn === 'COSEDORA-ACH02') result = 'HR-PEF02';
     else if (pn === 'COSEDORA-ACH08') result = 'HR-PEF08';
     else if (pn === 'BORDADORA-BANDA01') result = 'HR-BO01';
+    // Sin esto, el fallback genérico de abajo (cualquier puesto con "COSEDORA" → HR-PEF + primer
+    // dígito que encuentre) tomaba el "3" de "BANDA3D" y armaba HR-PEF03 — una Hoja de Ruta real
+    // de otra máquina (Cosedora de Tapa 03), nada que ver con la Cosedora de Banda 3D (reportado
+    // por el usuario: "30001576 no tiene Versión de Fabricación... para HR-PEF03", debía ser HR-COS3D).
+    else if (pn === 'COS3D' || pn === 'COSEDORA-BANDA3D') result = 'HR-COS3D';
+    // Mismo bug que COS3D arriba: "COSEDORA-RMTB2"/"COSEDORA-RMTB3" contienen "COSEDORA" y un
+    // dígito, así que sin este caso explícito caían en el fallback genérico y armaban
+    // HR-PEF02/HR-PEF03 (confirmado por el usuario) en vez de su Hoja de Ruta real.
+    else if (pn === 'COSEDORA-RMTB2') result = 'HR-RMTB2';
+    else if (pn === 'COSEDORA-RMTB3') result = 'HR-RMTB3';
     else if (pn.includes('FORRO-COLCHONES')) result = 'HR-FORRO';
     
     if (!result && tiemposIndexRef.current[pn]) {
@@ -3382,6 +4228,20 @@ export const TacticalPlanForrosSection: React.FC = () => {
     return result;
   }, [kpiMaestroData]);
 
+  // En ACOLCHADORA (Acolchado y Tapas) cada máquina tiene 2 roles reales en Habilidades por
+  // Estación, con el MISMO número de máquina: el titular (HR-ACHxx) y el ayudante (PT-ACHxx) —
+  // confirmado por el usuario con datos reales (ACH08: HR-ACH08 = acolchador titular,
+  // PT-ACH08 = ayudante). El primer código ingresado en cada turno es siempre el titular; el
+  // segundo (y siguientes) es el ayudante. Solo aplica a puestos ACOLCHADORA — el resto de
+  // puestos (Cosedoras, Bordadoras, etc.) no tiene este desdoblamiento HR/PT en la base.
+  const puestoTrabajoParaIndice = useCallback((puesto: string, indice?: number) => {
+    const hr = mapToHojaRuta(puesto).trim().toUpperCase();
+    if ((indice ?? 0) > 0 && puesto.toUpperCase().includes('ACOLCHADORA') && hr.startsWith('HR-')) {
+      return hr.replace(/^HR-/, 'PT-');
+    }
+    return hr;
+  }, [mapToHojaRuta]);
+
   useEffect(() => {
     if (isMounted) {
       const today = new Date();
@@ -3392,14 +4252,101 @@ export const TacticalPlanForrosSection: React.FC = () => {
       if (!techStartDate) setTechStartDate(toFechaEcuador(today));
       if (!techEndDate) setTechEndDate(addBusinessDays(today, 1));
     }
+    // El rango por puesto de FBASE/HR-FORRO ya no se siembra acá — cada puesto se conoce recién
+    // cuando se dibuja su tarjeta, así que el valor por defecto se resuelve ahí mismo (ver
+    // `getRangoFbaseForroPuesto`), no en este efecto de montaje.
   }, [isMounted, targetDate1000, targetDate2000, techStartDate, techEndDate, addBusinessDays]);
+
+  // Mismo arranque por defecto que el rango global (hoy → +1 día hábil) para un puesto que
+  // todavía no tiene su propio rango guardado — se resuelve "perezoso" (al dibujar la tarjeta),
+  // no en un efecto de montaje, porque la lista de puestos FBASE/HR-FORRO depende de datos que
+  // cargan después (kpiMaestroData).
+  const getRangoFbaseForroPuesto = useCallback((puesto: string): { desde: string; hasta: string } => {
+    const guardado = rangoFbaseForroPorPuesto.get(puesto);
+    if (guardado?.desde && guardado?.hasta) return guardado;
+    const today = new Date();
+    return {
+      desde: guardado?.desde || toFechaEcuador(today),
+      hasta: guardado?.hasta || addBusinessDays(today, 1),
+    };
+  }, [rangoFbaseForroPorPuesto, addBusinessDays]);
+
+  // `getHabilidadesOperadorPorEstacion` (GET sin page/rowsPerPage) quedó reemplazado por
+  // `getMaestroCuboHabilidadesCrudos`: el endpoint viejo devolvía solo una porción fija del total
+  // sin ninguna forma de pedir el resto (confirmado con el usuario: 241 filas / 4 puestos —
+  // HR-ARM01/02/05, HR-BO01 — de una base real con muchos más, HR-ACH02 incluido). El nuevo SÍ
+  // pagina de verdad con page/rowsPerPage. Centro fijo '1000' (mismo criterio que el resto de la
+  // app) y año en curso — es personal vigente, no un histórico por año pasado.
+  //
+  // Se carga LAZY (ver el onValueChange de la pestaña "Personal & Turnos"/handleIrAPersonalTurnosAcolchado),
+  // NO en el mount general — antes vivía dentro de `fetchBaseData` y bloqueaba el primer render de
+  // TODA la pestaña esperando, en SECUENCIA, varias páginas de miles de registros (reportado por
+  // el usuario: "la app está muy lenta"). Las páginas 2+ se piden TODAS EN PARALELO (no una por
+  // una) una vez que la página 1 revela cuántas hacen falta — con miles de filas, el tiempo total
+  // pasa de "N páginas × latencia" a "~1 × latencia".
+  const fetchHabilidadesEstacion = useCallback(async () => {
+    setIsLoadingHabilidadesEstacion(true);
+    setHasFetchedHabilidadesEstacion(true);
+    try {
+      const anioHabilidades = String(new Date().getFullYear());
+      const centroHabilidades = '1000';
+      const rowsPerPageHabilidades = 2000;
+      const firstRes = await fetchPaginaConReintentos(() => serviciosService.getMaestroCuboHabilidadesCrudos(anioHabilidades, centroHabilidades, 1, rowsPerPageHabilidades));
+      let data = Array.isArray(firstRes?.data) ? firstRes.data : [];
+      // Antes se adivinaban 3 nombres exactos (totalRegistros/totalRecords/totalRows) — si el
+      // backend usa otro (ej. "Total", "total_registros", "TotalPaginas"), ninguno hacía match y
+      // `total` quedaba en 0 EN SILENCIO, lo que hacía `totalPages = 1` y se perdían las páginas
+      // 2+ sin ningún aviso — exactamente el bug ya confirmado una vez con el endpoint viejo
+      // (241 filas / 4 puestos). Ahora se busca cualquier campo de nivel superior cuyo nombre
+      // normalizado (solo letras, mayúsculas) contenga "TOTAL" y tenga un valor numérico — no
+      // depende de adivinar el nombre exacto.
+      const detectarTotal = (res: any): number => {
+        if (!res || typeof res !== 'object') return 0;
+        const directos = [res.totalRegistros, res.totalRecords, res.totalRows, res.total, res.Total, res.totalCount, res.count];
+        for (const v of directos) { const n = Number(v); if (!Number.isNaN(n) && n > 0) return n; }
+        const key = Object.keys(res).find(k => {
+          const norm = k.toUpperCase().replace(/[^A-Z]/g, '');
+          const n = Number((res as any)[k]);
+          return norm.includes('TOTAL') && !norm.includes('PAGINA') && !norm.includes('PAGE') && !Number.isNaN(n) && n > 0;
+        });
+        return key ? Number((res as any)[key]) || 0 : 0;
+      };
+      const total = detectarTotal(firstRes);
+      const totalPages = total > 0 ? Math.ceil(total / rowsPerPageHabilidades) : 1;
+      if (totalPages > 1) {
+        const paginasRestantes = await Promise.all(
+          Array.from({ length: totalPages - 1 }, (_, i) => i + 2).map(p =>
+            fetchPaginaConReintentos(() => serviciosService.getMaestroCuboHabilidadesCrudos(anioHabilidades, centroHabilidades, p, rowsPerPageHabilidades))
+          )
+        );
+        paginasRestantes.forEach(res => { if (Array.isArray(res?.data)) data = [...data, ...res.data]; });
+      }
+      setHabilidadesEstacionData(data);
+      // Verificación final: si el backend reportó un total y lo acumulado no cuadra, avisar en vez
+      // de quedarse callado — así cualquier desajuste de paginación se ve de inmediato, sin tener
+      // que volver a rastrearlo a mano como la vez pasada.
+      if (data.length === 0) {
+        setErrorHabilidadesEstacion('La consulta no devolvió ningún registro.');
+      } else if (total > 0 && data.length !== total) {
+        setErrorHabilidadesEstacion(`El backend reportó ${total.toLocaleString()} registros en total, pero se acumularon ${data.length.toLocaleString()} tras recorrer ${totalPages} página(s) de ${rowsPerPageHabilidades} — puede que el tamaño real de página no coincida con el pedido.`);
+      } else {
+        setErrorHabilidadesEstacion(null);
+      }
+    } catch (error: any) {
+      setHabilidadesEstacionData([]);
+      setErrorHabilidadesEstacion(error?.message || 'Error desconocido');
+      addNotification('error', `No se pudieron cargar las Habilidades por Estación (Personal & Turnos quedará sin nombre/calificación por código): ${error?.message || 'error desconocido'}`);
+    } finally {
+      setIsLoadingHabilidadesEstacion(false);
+    }
+  }, [addNotification]);
 
   const fetchBaseData = useCallback(async () => {
     try {
       setIsLoading(true);
       const [gRes, rRes] = await Promise.all([
         grupoService.getAll(),
-        restriccionService.getAll()
+        restriccionService.getAll(),
       ]);
       setGrupos(gRes.data || []);
       setRestricciones(rRes.data || []);
@@ -3412,6 +4359,7 @@ export const TacticalPlanForrosSection: React.FC = () => {
 
   const fetchOrdenesFert = useCallback(async () => {
     setIsLoadingFert(true);
+    setHasFetchedOrdenesFert(true);
     try {
       const rowsPerPage = 10000;
       const firstResponse = await fetchPaginaConReintentos(() => serviciosService.getOrdenesFert(1, rowsPerPage));
@@ -3437,7 +4385,13 @@ export const TacticalPlanForrosSection: React.FC = () => {
     setHasFetchedMantenimientos(true);
     try {
       const response = await serviciosService.ListarMantenimientoPreventivosProgramados();
-      setMantenimientosData(response.data || []);
+      // SISMAC agenda OT sin considerar fines de semana (una máquina puede quedar "programada"
+      // para un sábado/domingo, días en que la planta no trabaja) — `recorrerFinDeSemana` las
+      // recorre al siguiente día hábil, MISMA corrección que ya aplica la pestaña "Mantenimientos
+      // Preventivos Programados". Sin esto, el mantenimiento de un sábado nunca coincidía con
+      // ninguna fecha de planificación real (siempre un día hábil) y desaparecía en silencio del
+      // descuento de capacidad — confirmado por el usuario ("veo algunos errores").
+      setMantenimientosData(recorrerFinDeSemana(response.data || []));
     } catch (error: any) {
       console.error('Error fetching Mantenimientos Preventivos:', error);
       addNotification('error', `Error al cargar Mantenimientos Preventivos: ${error.message}`);
@@ -3531,6 +4485,32 @@ useEffect(() => {
       fetchMaestroMateriales();
     }
   }, [isMounted, fetchBaseData, fetchKPIMaestro, fetchOrdenesPrevisionales, fetchMaestroMateriales]);
+
+  // Efecto APARTE (bug corregido: antes vivía en el efecto de arriba, con `hasFetchedMantenimientos`/
+  // `hasFetchedOrdenesFert` como dependencias — como esos flags pasan de false a true DESPUÉS del
+  // montaje, el efecto se volvía a disparar y re-llamaba `fetchBaseData`/`fetchKPIMaestro`/etc. sin
+  // necesidad, en bucle con el resto de efectos que dependen de esa data — "Maximum update depth
+  // exceeded" reportado por el usuario). Acá los flags solo se usan DENTRO del `if` para no
+  // duplicar el fetch si el efecto se re-ejecuta por otra razón; no van en el arreglo de
+  // dependencias — el efecto solo necesita correr una vez, al montar.
+  useEffect(() => {
+    if (!isMounted) return;
+    // Antes era 100% perezoso (solo se cargaba al visitar "Mantenimientos Preventivos" o
+    // "Personal y Turnos") — pero el Mantenimiento ya descuenta capacidad y % de Ocupación en
+    // TODAS las tarjetas de Ajuste de Producción y en Resumen, pestañas que se visitan primero.
+    // Si el usuario entraba directo ahí sin pasar por esas dos pestañas, el Mantenimiento se
+    // veía vacío/"—" en todos lados — reportado por el usuario ("tengo inconvenientes con esa
+    // información, o no se está recuperando"). Se carga junto con el resto de la data base para
+    // que esté lista desde el principio, sin depender de qué pestaña se visite primero.
+    if (!hasFetchedMantenimientos) fetchMantenimientos();
+    // Mismo caso que Mantenimiento: las órdenes FERT ya alimentan "FERT del día" en TODAS las
+    // tarjetas de Ajuste de Producción y la columna PENDIENTES de Resumen — antes solo se
+    // cargaban al visitar "Órdenes FERT", "Forros Finales" o "Resumen" primero. Si el usuario
+    // entraba directo a otra pestaña (ej. "Acolchado y Tapas", la que abre por defecto),
+    // PENDIENTES podía verse vacía/desactualizada hasta que esa carga perezosa se disparara.
+    if (!hasFetchedOrdenesFert) fetchOrdenesFert();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMounted]);
   
   useEffect(() => {
     if (tiemposProduccion.length > 0 && kpiMaestroData.length > 0 && ordenesPrevisionalesData.length > 0) {
@@ -3591,18 +4571,24 @@ useEffect(() => {
   }, [restricciones, forrosGruposList]);
 
   const { fert1000, fert2000, summary1000, summary2000 } = useMemo(() => {
+    // RESPCTRLPROD del área de Forros (restricción "RESP_CTRL_PROD"/"RESPCTRLPROD", grupo FORROS —
+    // ver `allowedRespCodes`) en vez de los códigos fijos '3'/'4' (centro 1000) y '3'/'6' (centro
+    // 2000) que había antes — un solo lugar (Parámetros → Grupos → Restricciones) decide qué
+    // responsables cuentan como Forros para AMBOS centros, en vez de código hardcodeado acá. Si la
+    // restricción todavía no está configurada (`allowedRespCodes` vacío), no se filtra por RESP —
+    // mismo criterio que ya usa `filteredOrdenesPrevisionales` para esta misma restricción.
     const filter1000 = ordenesFert.filter(order => {
       const centro = String(order['Centro'] || order['CENTRO'] || '').trim();
       const resp = String(order['RESPCTRLPROD'] || order['RESP_CTRL_PROD'] || '').trim().replace(/^0+/, '');
       const date = String(order['FECHA'] || order['FECHA_INICIO'] || order['FECHAINICIO'] || '').split('T')[0];
-      return centro === '1000' && (resp === '3' || resp === '4') && date === targetDate1000;
+      return centro === '1000' && (allowedRespCodes.length === 0 || allowedRespCodes.includes(resp)) && date === targetDate1000;
     });
 
     const filter2000 = ordenesFert.filter(order => {
       const centro = String(order['Centro'] || order['CENTRO'] || '').trim();
       const resp = String(order['RESPCTRLPROD'] || order['RESP_CTRL_PROD'] || '').trim().replace(/^0+/, '');
       const date = String(order['FECHA'] || order['FECHA_INICIO'] || order['FECHAINICIO'] || '').split('T')[0];
-      return centro === '2000' && (resp === '3' || resp === '6') && date === targetDate2000;
+      return centro === '2000' && (allowedRespCodes.length === 0 || allowedRespCodes.includes(resp)) && date === targetDate2000;
     });
 
     const getSummary = (orders: any[]) => {
@@ -3621,7 +4607,35 @@ useEffect(() => {
       summary1000: getSummary(filter1000),
       summary2000: getSummary(filter2000)
     };
-  }, [ordenesFert, targetDate1000, targetDate2000]);
+  }, [ordenesFert, targetDate1000, targetDate2000, allowedRespCodes]);
+
+  // Vista de la pestaña "Órdenes FERT": SOLO Centro 1000, filtrada por RESPCTRLPROD de Forros
+  // (sin el filtro de un solo día que sí necesitan `fert1000`/`fert2000` para la Demanda de Quito
+  // de Validar Plan — ver `handleCalcularDemandaQuito`, que fuerza `targetDate1000` a la fecha del
+  // Plan Final) y agrupada por MÁQUINA (cada grupo ordenado por FECHA ascendente, la más antigua
+  // primero) — a pedido del usuario. Deliberadamente separada de `fert1000`/`fert2000` para no
+  // afectar ese cálculo, que sigue necesitando exactamente un día y Centro 2000 (GYE) también.
+  const fertVista1000PorMaquina = useMemo(() => {
+    const fechaOrden = (o: any) => String(o['FECHA'] || o['FECHA_INICIO'] || o['FECHAINICIO'] || '').split('T')[0];
+    const maquinaDe = (o: any) => String(o['MAQUINA'] || o['Maquina'] || '').trim() || 'S/MÁQUINA';
+    const filtradas = ordenesFert.filter(order => {
+      const centro = String(order['Centro'] || order['CENTRO'] || '').trim();
+      const resp = String(order['RESPCTRLPROD'] || order['RESP_CTRL_PROD'] || '').trim().replace(/^0+/, '');
+      return centro === '1000' && (allowedRespCodes.length === 0 || allowedRespCodes.includes(resp));
+    });
+    const grupos = new Map<string, any[]>();
+    filtradas.forEach(o => {
+      const m = maquinaDe(o);
+      if (!grupos.has(m)) grupos.set(m, []);
+      grupos.get(m)!.push(o);
+    });
+    return Array.from(grupos.entries())
+      .map(([maquina, ordenes]) => ({
+        maquina,
+        ordenes: [...ordenes].sort((a, b) => fechaOrden(a).localeCompare(fechaOrden(b))),
+      }))
+      .sort((a, b) => a.maquina.localeCompare(b.maquina));
+  }, [ordenesFert, allowedRespCodes]);
 
   const gruposCoincidentes = useMemo(() => {
     const valoresDepto = restricciones
@@ -3717,7 +4731,11 @@ useEffect(() => {
         finRango.setUTCDate(finRango.getUTCDate() + maxDias + 14);
         const feriados = await ecuadorHolidaysService.getHolidaysForRange(inicioRango, finRango);
         if (cancelled) return;
-        const feriadosSet = new Set(feriados.map(f => f.date));
+        // Los días marcados a mano como no laborables (`feriadoFechasManuales` — paro, cierre de
+        // planta, etc.) también cuentan como feriado para este cálculo de día hábil, igual que los
+        // oficiales de Ecuador — a pedido del usuario: "para guardar los planes no debes
+        // considerar esas fechas".
+        const feriadosSet = new Set([...feriados.map(f => f.date), ...feriadoFechasManuales]);
         setRecuperacionFechasCalculadas({
           n1: sumarDiasHabiles(fechaGeneracion, diasFechaN1, feriadosSet),
           n2n3: sumarDiasHabiles(fechaGeneracion, diasFechaN2N3, feriadosSet),
@@ -3732,7 +4750,7 @@ useEffect(() => {
       }
     })();
     return () => { cancelled = true; };
-  }, [recuperacionPasoFecha, gruposCoincidentes, forrosGruposList, restricciones, addNotification]);
+  }, [recuperacionPasoFecha, gruposCoincidentes, forrosGruposList, restricciones, feriadoFechasManuales, addNotification]);
 
   // codigo_plan_grupo -> centro (1000/2000) de los grupos P1 (Ensamblado), para el Resumen
   // por Centro y Línea del plan P1 — mismo criterio que centroPorPlanGrupo en RecuperacionPasoPanel.
@@ -4055,6 +5073,36 @@ useEffect(() => {
     };
   }, [nivel2BandaComponentes]);
 
+  // ─── Rama OTROS (Interiores) — Nivel 2, "todo lo demás" del BOM del FORRO ────────────────
+  // `nivel2ExplosionData` ya trae el árbol COMPLETO de cada FORRO (se pide una sola vez por
+  // Forro, sin filtrar); TAPA y BANDA arriba solo se quedan con lo que coincide esas dos
+  // palabras. El resto (FUNDAS, TELAS, BSC, TTCF, TTSUP, INTP...) alimenta las máquinas de
+  // "Otras máquinas de interiores" y SÍ es parte del BOM del Forro (confirmado por el usuario:
+  // "hay forros que también se componen por estos materiales") — se captura igual, por
+  // exclusión, sin pedir una explosión nueva. No se conoce un Nivel 3 propio para esta rama
+  // (son de un solo paso, igual que documenta `OTROS_INTERIORES_PUESTOS_FILTER`).
+  const nivel2OtrosComponentes = useMemo(() => {
+    return nivel2ExplosionData.filter(comp => {
+      if (Number(comp.NIVEL) !== 1) return false;
+      const nombre = normalizeText(String(comp.DESCRIPCION_COMPONENTE || comp.NOMBRE_COMPONENTE || ''));
+      return !nombre.includes('TAPA') && !nombre.includes('BANDA');
+    });
+  }, [nivel2ExplosionData]);
+
+  const nivel2OtrosResumen = useMemo(() => {
+    const map = new Map<string, { material: string; nombre: string; cantidadTotal: number }>();
+    nivel2OtrosComponentes.forEach(comp => {
+      const material = String(comp.COMPONENTE || '').trim();
+      const nombre = String(comp.DESCRIPCION_COMPONENTE || comp.NOMBRE_COMPONENTE || '').trim();
+      const cantidadUnitaria = Number(comp.CANTIDAD_UNITARIA || comp.Cantidad || 0);
+      const necesidad = cantidadUnitaria * Number(comp.parentCantidadTotal || 0);
+      const existing = map.get(material);
+      if (existing) existing.cantidadTotal += necesidad;
+      else map.set(material, { material, nombre, cantidadTotal: necesidad });
+    });
+    return Array.from(map.values()).sort((a, b) => b.cantidadTotal - a.cantidadTotal);
+  }, [nivel2OtrosComponentes]);
+
   // Identifica si un puesto corresponde a la Acolchadora de Bandas (ACH11/ACH12) — versión local
   // mínima porque `esPuestoBandasAcolchado` (Ajuste de Producción) se declara más abajo en este
   // mismo archivo y no se puede referenciar aquí por orden de declaración (mismo criterio, solo
@@ -4250,6 +5298,17 @@ useEffect(() => {
     setAutoChainStep(1);
     fetchNivelExplosionComponentes();
   }, [fertMaterialesColchones, addNotification, fetchNivelExplosionComponentes]);
+
+  // Encadena fetchPlanGrupoDetalle → handleExplosionarNiveles1a3, para el botón "Calcular
+  // Cobertura" del propio diálogo Validar Plan — así ya no depende de que el usuario haya
+  // visitado la pestaña "Planes Grupo Ensamblado" ni de qué fecha tenga seleccionada ahí: usa
+  // directo la fecha de producción del Plan Final que se está validando.
+  useEffect(() => {
+    if (!validarPlanCoberturaPending || isLoadingPlanGrupo) return;
+    if (!hasFetchedPlanGrupo) return;
+    setValidarPlanCoberturaPending(false);
+    handleExplosionarNiveles1a3();
+  }, [validarPlanCoberturaPending, isLoadingPlanGrupo, hasFetchedPlanGrupo, handleExplosionarNiveles1a3]);
 
   useEffect(() => {
     if (autoChainStep === 1 && hasFetchedNivelExplosion && !isLoadingNivelExplosion) {
@@ -4630,7 +5689,10 @@ useEffect(() => {
       const finRango = new Date(fechaGeneracion);
       finRango.setUTCDate(finRango.getUTCDate() + maxDias + 14);
       const feriados = await ecuadorHolidaysService.getHolidaysForRange(inicioRango, finRango);
-      const feriadosSet = new Set(feriados.map(f => f.date));
+      // Igual que en el cálculo de vista previa (`recuperacionFechasCalculadas`): las fechas
+      // marcadas a mano como no laborables también se excluyen al GUARDAR el plan, no solo al
+      // mostrarlas — a pedido del usuario.
+      const feriadosSet = new Set([...feriados.map(f => f.date), ...feriadoFechasManuales]);
       const fechaP2 = sumarDiasHabiles(fechaGeneracion, diasFechaP2, feriadosSet);
       const fechaN1 = sumarDiasHabiles(fechaGeneracion, diasFechaN1, feriadosSet);
       const fechaN2N3 = sumarDiasHabiles(fechaGeneracion, diasFechaN2N3, feriadosSet);
@@ -4686,7 +5748,7 @@ useEffect(() => {
     } finally {
       setIsSavingPlanNivel4(false);
     }
-  }, [nivel4LaminaResumen, listaNivel1, listaNivel2y3, planGrupoDetalleFiltrada, planGrupoFecha, forrosGruposList, restricciones, addNotification, ejecutarGuardadoPlanNivel4]);
+  }, [nivel4LaminaResumen, listaNivel1, listaNivel2y3, planGrupoDetalleFiltrada, planGrupoFecha, forrosGruposList, restricciones, feriadoFechasManuales, addNotification, ejecutarGuardadoPlanNivel4]);
 
   const handleConfirmarGuardarPlanNivel4 = useCallback(async () => {
     if (!pendingGuardarNivel4Ctx || !planesExistentesNivel4) return;
@@ -4797,6 +5859,34 @@ useEffect(() => {
     });
   }, [filteredOrdenesPrevisionales, techStartDate, techEndDate]);
 
+  // Puesto con rango de fechas INDEPENDIENTE (ver `rangoFbaseForroPorPuesto` más arriba) — se
+  // clasifica por la Hoja de Ruta REAL ya resuelta (`mapToHojaRuta`), no por el nombre crudo del
+  // puesto: antes se usaba `p.includes('FBASE')` sobre el nombre, pero un puesto como
+  // "FORRO-BASE-BCAMAS" puede resolver a HR-FBASE vía el maestro KPI sin tener "FBASE" en su
+  // propio nombre (confirmado con una captura real: la tarjeta mostraba el badge "HR-FBASE" para
+  // ese puesto) — clasificar por el nombre crudo lo dejaba afuera por error. HR-MTBS1 (pestaña
+  // Interiores & Corte, "Otras máquinas de interiores") recupera su rango independiente a pedido
+  // del usuario — el resto de MTBS/COSEDORA-MTBS1 sigue con el rango general, solo HR-MTBS1 exacto.
+  const esPuestoRangoIndependienteFbaseForro = useCallback((p: string) => {
+    const hr = mapToHojaRuta(p).trim().toUpperCase();
+    return hr.startsWith('HR-FBASE') || hr === 'HR-FORRO' || hr === 'HR-MTBS1';
+  }, [mapToHojaRuta]);
+
+  // Mismo filtro que techFilteredOrdenes, pero con el rango independiente DE ESE PUESTO puntual
+  // (`getRangoFbaseForroPuesto`) — cada puesto FBASE/HR-FORRO tiene su propia fecha, confirmada
+  // por el usuario ("cada uno de estos puestos de trabajo debe tener un rango independiente"), ya
+  // no una sola compartida entre todos. Los puestos que no caen en ese grupo siguen con
+  // `techFilteredOrdenes` (el rango general de la pestaña), sin cambios.
+  const techFilteredOrdenesParaPuesto = useCallback((puesto: string) => {
+    if (!esPuestoRangoIndependienteFbaseForro(puesto)) return techFilteredOrdenes;
+    const { desde, hasta } = getRangoFbaseForroPuesto(puesto);
+    return filteredOrdenesPrevisionales.filter(order => {
+      const dateVal = String(order['FECHAINICIO'] || order['FECHA'] || '').split('T')[0];
+      if (!dateVal || dateVal === '—') return false;
+      return dateVal >= desde && dateVal <= hasta;
+    });
+  }, [esPuestoRangoIndependienteFbaseForro, getRangoFbaseForroPuesto, techFilteredOrdenes, filteredOrdenesPrevisionales]);
+
   // `TiemposEnsambladoPorCentroYCodigoGrupo` (filtrado por Centro+CodigoGrupo) devuelve 0
   // registros para el grupo de Forros (verificado directo contra el backend) — esa tabla filtrada
   // por grupo está vacía/rota para ese grupo puntual, aunque el dato SÍ existe: el endpoint
@@ -4899,6 +5989,10 @@ useEffect(() => {
     });
     return Array.from(pSet).sort();
   }, [kpiMaestroData]);
+  // Versión Set de `uniquePuestos` — lookup O(1) en vez de `.includes()` (O(n)) para los filtros
+  // que corren dentro de un `.map()` sobre cada grupo/puesto en Personal & Turnos (puede recorrer
+  // cientos de combinaciones grupo×puesto en cada render de esa pestaña).
+  const uniquePuestosSet = useMemo(() => new Set(uniquePuestos), [uniquePuestos]);
 
   // Resumen de dotación por turno para la tarjeta lateral de Personal & Turnos: suma las personas
   // configuradas SOLO en los puestos que realmente tienen ese turno activo (un puesto con 3
@@ -4907,7 +6001,7 @@ useEffect(() => {
   const personasPorTurnoResumen = useMemo(() => {
     const puestosVisibles = workstationGroups
       .flatMap(g => g.items)
-      .filter(item => uniquePuestos.includes(item));
+      .filter(item => uniquePuestosSet.has(item));
     let dia = 0, noche = 0, finSemana = 0;
     let puestosDia = 0, puestosNoche = 0, puestosFinSemana = 0;
     puestosVisibles.forEach(p => {
@@ -4918,11 +6012,11 @@ useEffect(() => {
       if (cfg.isSaturdayActive && (cfg.peopleWeekend || 0) > 0) { finSemana += cfg.peopleWeekend || 0; puestosFinSemana++; }
     });
     return { dia, noche, finSemana, total: dia + noche + finSemana, puestosDia, puestosNoche, puestosFinSemana };
-  }, [uniquePuestos, workstationConfigs]);
+  }, [uniquePuestosSet, workstationConfigs]);
 
   // Resumen de capacitación del día: horas totales perdidas (personas × horas) y en cuántos puestos.
   const capacitacionResumen = useMemo(() => {
-    const puestosVisibles = workstationGroups.flatMap(g => g.items).filter(item => uniquePuestos.includes(item));
+    const puestosVisibles = workstationGroups.flatMap(g => g.items).filter(item => uniquePuestosSet.has(item));
     let horas = 0, personas = 0, puestos = 0;
     puestosVisibles.forEach(p => {
       const cfg = workstationConfigs[p];
@@ -4934,7 +6028,7 @@ useEffect(() => {
       puestos++;
     });
     return { horas, personas, puestos };
-  }, [uniquePuestos, workstationConfigs]);
+  }, [uniquePuestosSet, workstationConfigs]);
 
   useEffect(() => {
     if (dataReady && uniquePuestos.length > 0) {
@@ -5169,6 +6263,23 @@ useEffect(() => {
     }
   };
 
+  // `handleExplodeFerts` no es useCallback (se redefine cada render), así que no puede ir directo
+  // en el arreglo de dependencias de un efecto sin disparar renders de más — se guarda en un ref
+  // que siempre apunta a la versión más reciente, y el efecto de abajo solo lo invoca a través de
+  // él. Encadena fetchOrdenesFert → handleExplodeFerts para el botón "Calcular Demanda Quito
+  // (FERT)" de Validar Plan: fuerza `targetDate1000` a la fecha de producción del Plan Final
+  // antes de disparar la consulta, así la demanda de Quito siempre sale de la fecha correcta sin
+  // que el usuario tenga que ir a la pestaña "Órdenes FERT" a cambiarla a mano.
+  const handleExplodeFertsRef = useRef(handleExplodeFerts);
+  handleExplodeFertsRef.current = handleExplodeFerts;
+
+  useEffect(() => {
+    if (!validarPlanDemandaQuitoPending || isLoadingFert) return;
+    if (!hasFetchedOrdenesFert) return;
+    setValidarPlanDemandaQuitoPending(false);
+    handleExplodeFertsRef.current();
+  }, [validarPlanDemandaQuitoPending, isLoadingFert, hasFetchedOrdenesFert]);
+
   const handleConsolidateAcolchado = () => {
     setIsAchConsolidated(prev => !prev);
     addNotification('info', isAchConsolidated ? 'Vista detallada de acolchado activada.' : 'Vista consolidada de acolchado activada.');
@@ -5268,6 +6379,128 @@ useEffect(() => {
 
   const mapToHojaRutaInternal = useCallback((puestoName: string): string => mapToHojaRuta(puestoName), [mapToHojaRuta]);
 
+  // UNA sola restricción "MAQUINA_SISMAC" (grupo Forros, Parámetros → Grupos → Restricciones), con
+  // TODAS las máquinas de SISMAC relevantes a Forros — no una restricción por puesto/máquina, a
+  // pedido explícito del usuario (ineficiente de mantener). El valor es el JSON de una lista
+  // `{ maquina_sismac, hoja_ruta }[]` — `hoja_ruta` puede venir vacía para máquinas sin equivalencia
+  // confirmada todavía (ej. AC03/AC04/BO01), esas quedan sin atribuir a ningún puesto pero SÍ
+  // cuentan para el filtro "es de Forros". Se parsea una sola vez acá; el resto de esta sección
+  // deriva de este único array.
+  const sismacMaquinaHojaRutaJson = useMemo<{ maquina_sismac: string; hoja_ruta: string }[]>(() => {
+    const codigoGrupoForros = forrosGruposList[0]?.codigo_grupo;
+    if (codigoGrupoForros === undefined) return [];
+    const restriccion = restricciones.find(r => r.codigo_grupo === codigoGrupoForros && r.nombre_restriccion.toUpperCase().trim() === 'MAQUINA_SISMAC');
+    if (!restriccion) return [];
+    try {
+      const parsed = JSON.parse(restriccion.valor_restriccion);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      addNotification('error', 'La restricción MAQUINA_SISMAC no tiene un JSON válido — revisa su valor en Parámetros → Grupos → Restricciones.');
+      return [];
+    }
+  }, [restricciones, forrosGruposList, addNotification]);
+
+  // Set plano con TODAS las `maquina_sismac` del JSON (con o sin `hoja_ruta`) — usado SOLO para el
+  // filtro "es de Forros" de `mantenimientosForrosData`, sin resolver nada más.
+  const todasLasMaquinasSismac = useMemo(() => {
+    const set = new Set<string>();
+    sismacMaquinaHojaRutaJson.forEach(({ maquina_sismac }) => {
+      const clean = String(maquina_sismac || '').trim().toUpperCase();
+      if (clean) set.add(clean);
+    });
+    return set;
+  }, [sismacMaquinaHojaRutaJson]);
+
+  // Atribución por puesto (antes en standby): `hoja_ruta` del JSON YA es el código de Hoja de Ruta
+  // (ej. "HR-ACH09"), así que no hace falta resolver el puesto con `mapToHojaRuta` — se usa tal
+  // cual viene, para las entradas donde no está vacía. Direcciones máquina→HR y HR→máquina(s), para
+  // el descuento de horas por puesto (`mantenimientoHorasPorPuesto`) y el badge de SISMAC en las
+  // tarjetas de Personal y Turnos.
+  const sismacHRPorMaquina = useMemo(() => {
+    const map = new Map<string, string[]>();
+    sismacMaquinaHojaRutaJson.forEach(({ maquina_sismac, hoja_ruta }) => {
+      const maquina = String(maquina_sismac || '').trim().toUpperCase();
+      const hr = String(hoja_ruta || '').trim().toUpperCase();
+      if (maquina && hr) map.set(maquina, [hr]);
+    });
+    return map;
+  }, [sismacMaquinaHojaRutaJson]);
+
+  const sismacMaquinasPorHR = useMemo(() => {
+    const map = new Map<string, string[]>();
+    sismacMaquinaHojaRutaJson.forEach(({ maquina_sismac, hoja_ruta }) => {
+      const maquina = String(maquina_sismac || '').trim().toUpperCase();
+      const hr = String(hoja_ruta || '').trim().toUpperCase();
+      if (!maquina || !hr) return;
+      const existentes = map.get(hr) || [];
+      map.set(hr, [...existentes, maquina]);
+    });
+    return map;
+  }, [sismacMaquinaHojaRutaJson]);
+
+  // El cruce por `PuestoTrabajo` (campo libre de la OT) era el que nunca calzaba — se reemplaza por
+  // un filtro simple en dos partes: el `ID_MAQUINA` debe aparecer en la restricción MAQUINA_SISMAC
+  // (ver arriba) Y además `AREA` debe ser exactamente "FORROS". Hace falta lo segundo porque una
+  // misma máquina física puede estar compartida con OTRO producto (ej. CB01 aparece con
+  // AREA: "Almohadas" en varias OT, aunque esa máquina sí está en nuestra lista de Forros) — sin
+  // este filtro esas OT de Almohadas se contaban como si fueran de Forros.
+  const mantenimientosForrosData = useMemo(
+    () => mantenimientosData.filter(m =>
+      todasLasMaquinasSismac.has(String(m.ID_MAQUINA || '').trim().toUpperCase())
+      && String(m.AREA || '').trim().toUpperCase() === 'FORROS'
+    ),
+    [mantenimientosData, todasLasMaquinasSismac]
+  );
+
+  // Horas de mantenimiento preventivo agendadas por Hoja de Ruta, filtradas a la fecha que
+  // REALMENTE se está planificando (`planningDate`, el badge "Planificación para"). Si una
+  // ID_MAQUINA alimenta MÁS de una Hoja de Ruta (ej. CT01), la OT resta capacidad de cada una —
+  // es la misma máquina física, no un doble conteo.
+  const mantenimientoHorasPorPuesto = useMemo(() => {
+    const map: Record<string, number> = {};
+    if (!planningDate) return map;
+    mantenimientosForrosData.forEach(m => {
+      const rawFecha = m.FECHA_OT_PRG_INI;
+      if (!rawFecha) return;
+      const fechaStr = toFechaEcuador(rawFecha);
+      if (fechaStr !== planningDate) return;
+      const idMaquina = String(m.ID_MAQUINA || '').trim().toUpperCase();
+      const hrCodes = sismacHRPorMaquina.get(idMaquina);
+      if (!hrCodes || hrCodes.length === 0) return;
+      const horas = duracionMantenimientoSismac(m).minutos / 60;
+      hrCodes.forEach(hrCode => { map[hrCode] = (map[hrCode] || 0) + horas; });
+    });
+    return map;
+  }, [mantenimientosForrosData, planningDate, sismacHRPorMaquina]);
+
+  const mantenimientoHorasTotal = useMemo(
+    () => Object.values(mantenimientoHorasPorPuesto).reduce((sum, h) => sum + h, 0),
+    [mantenimientoHorasPorPuesto]
+  );
+
+  // Detalle (no solo el total sumado) de qué OT concretas componen las horas de Mantenimiento de
+  // cada HR, para poder validar contra SISMAC puesto por puesto — mismo filtro EXACTO que
+  // `mantenimientoHorasPorPuesto`, solo que sin sumar.
+  const mantenimientoDetallePorPuesto = useMemo(() => {
+    const map: Record<string, { fecha: string; horas: number; origen: string; idMaquina: string }[]> = {};
+    if (!planningDate) return map;
+    mantenimientosForrosData.forEach(m => {
+      const rawFecha = m.FECHA_OT_PRG_INI;
+      if (!rawFecha) return;
+      const fechaStr = toFechaEcuador(rawFecha);
+      if (fechaStr !== planningDate) return;
+      const idMaquina = String(m.ID_MAQUINA || '').trim().toUpperCase();
+      const hrCodes = sismacHRPorMaquina.get(idMaquina);
+      if (!hrCodes || hrCodes.length === 0) return;
+      const { minutos, origen } = duracionMantenimientoSismac(m);
+      hrCodes.forEach(hrCode => {
+        if (!map[hrCode]) map[hrCode] = [];
+        map[hrCode].push({ fecha: fechaStr, horas: minutos / 60, origen, idMaquina });
+      });
+    });
+    return map;
+  }, [mantenimientosForrosData, planningDate, sismacHRPorMaquina]);
+
   // ─── Calendario de feriados (Ecuador) para la fecha que se está planificando ─────────────
   // Mismo servicio que ya usan las fechas P2/P3 (`sumarDiasHabiles`), pero acá para AVISAR en
   // Personal & Turnos: si la fecha del plan cae en feriado — o si hay uno cerca — se muestra el
@@ -5293,28 +6526,41 @@ useEffect(() => {
     return () => { cancelled = true; };
   }, [techStartDate]);
 
-  // Feriado que cae EXACTAMENTE en la fecha del plan (si lo hay).
+  // Calendario oficial de Ecuador + los días marcados a mano (`feriadoFechasManuales`, ver el
+  // calendario multi-selección en Personal y Turnos) — unificados en un solo mapa para que la
+  // detección automática (abajo) trate igual a un feriado nacional y a un paro/cierre marcado a
+  // mano, en vez de necesitar un override aparte como antes (con una sola fecha manual posible).
+  const feriadosCombinadosPorFecha = useMemo(() => {
+    const combinados = new Map(feriadosPorFecha);
+    feriadoFechasManuales.forEach(fecha => {
+      if (!combinados.has(fecha)) combinados.set(fecha, 'Día no laborable (marcado manualmente)');
+    });
+    return combinados;
+  }, [feriadosPorFecha, feriadoFechasManuales]);
+
+  // Feriado (oficial o marcado a mano) que cae EXACTAMENTE en la fecha del plan (si lo hay).
   const feriadoDeFechaPlan = useMemo(() => {
     if (!techStartDate) return null;
-    const nombre = feriadosPorFecha.get(techStartDate);
+    const nombre = feriadosCombinadosPorFecha.get(techStartDate);
     return nombre ? { fecha: techStartDate, nombre } : null;
-  }, [techStartDate, feriadosPorFecha]);
+  }, [techStartDate, feriadosCombinadosPorFecha]);
 
-  // Próximo feriado dentro de los siguientes 14 días (aunque no sea la fecha del plan): sirve para
-  // avisar con anticipación — ej. planificando un viernes, que el lunes hay feriado.
+  // Próximo feriado (oficial o marcado a mano) dentro de los siguientes 14 días (aunque no sea la
+  // fecha del plan): sirve para avisar con anticipación — ej. planificando un viernes, que el
+  // lunes hay feriado.
   const proximoFeriado = useMemo(() => {
     const base = techStartDate || getFechaLocalHoy();
     const limite = new Date(`${base}T00:00:00`);
     limite.setDate(limite.getDate() + 14);
     const limiteIso = `${limite.getFullYear()}-${String(limite.getMonth() + 1).padStart(2, '0')}-${String(limite.getDate()).padStart(2, '0')}`;
-    const candidatos = Array.from(feriadosPorFecha.entries())
+    const candidatos = Array.from(feriadosCombinadosPorFecha.entries())
       .filter(([fecha]) => fecha > base && fecha <= limiteIso)
       .sort(([a], [b]) => a.localeCompare(b));
     if (candidatos.length === 0) return null;
     const [fecha, nombre] = candidatos[0];
     const dias = Math.round((new Date(`${fecha}T00:00:00`).getTime() - new Date(`${base}T00:00:00`).getTime()) / 86400000);
     return { fecha, nombre, dias };
-  }, [techStartDate, feriadosPorFecha]);
+  }, [techStartDate, feriadosCombinadosPorFecha]);
 
   const formatFechaLarga = useCallback((iso: string): string => {
     const d = new Date(`${iso}T00:00:00`);
@@ -5324,24 +6570,18 @@ useEffect(() => {
   // Guarda el rango de fechas previo para poder volver atrás si se desmarca el feriado.
   const [fechaAntesFeriado, setFechaAntesFeriado] = useState<{ inicio: string; fin: string } | null>(null);
 
-  // Fecha elegida a mano en el calendario del bloque "Día Feriado". Manda sobre la detección
-  // automática: el usuario puede marcar como no laborable un día que no es feriado nacional
-  // (paro, mantenimiento mayor, cierre de planta), o elegir otro feriado distinto al más próximo.
-  const [feriadoFechaManual, setFeriadoFechaManual] = useState<string | null>(null);
   const [isFeriadoCalendarOpen, setIsFeriadoCalendarOpen] = useState(false);
 
   // Fecha en hora de Ecuador (ver `toFechaEcuador`): nunca UTC, o el día se corre.
   const toIsoLocal = useCallback((d: Date): string => toFechaEcuador(d), []);
 
-  // Fecha del feriado que motiva el salto: la elegida a mano si la hay; si no, el que cae en la
-  // fecha del plan o, si el plan se arma antes (ej. viernes 7 para el lunes 10), el próximo detectado.
+  // Fecha del feriado que motiva el salto: la que cae en la fecha del plan (oficial o marcada a
+  // mano, ya unificadas en `feriadoDeFechaPlan`) o, si el plan se arma antes (ej. viernes 7 para
+  // el lunes 10), el próximo detectado dentro de 14 días.
   const feriadoVigente = useMemo(() => {
-    if (feriadoFechaManual) {
-      return { fecha: feriadoFechaManual, nombre: feriadosPorFecha.get(feriadoFechaManual) || 'Día no laborable (marcado manualmente)' };
-    }
     if (feriadoDeFechaPlan) return feriadoDeFechaPlan;
     return proximoFeriado ? { fecha: proximoFeriado.fecha, nombre: proximoFeriado.nombre } : null;
-  }, [feriadoFechaManual, feriadosPorFecha, feriadoDeFechaPlan, proximoFeriado]);
+  }, [feriadoDeFechaPlan, proximoFeriado]);
 
   // Mueve la planificación al primer día hábil DESPUÉS del feriado (salta sábados, domingos y
   // otros feriados encadenados). Se ancla en la fecha del FERIADO, no en la fecha actual del plan:
@@ -5359,15 +6599,22 @@ useEffect(() => {
       addNotification('warning', 'Aún no se cargó el calendario de feriados. Intenta de nuevo en unos segundos.');
       return null;
     }
-    const siguiente = sumarDiasHabiles(base, 1, new Set(feriadosPorFecha.keys()));
+    const siguiente = sumarDiasHabiles(base, 1, new Set([...feriadosPorFecha.keys(), ...feriadoFechasManuales]));
     const original = rangoOriginal ?? { inicio: techStartDate, fin: techEndDate };
     // Sin `rangoOriginal`, `prev ?? ...` conserva el rango de la primera vez que se movió.
     setFechaAntesFeriado(prev => rangoOriginal ?? prev ?? original);
     setTechStartDate(siguiente);
     if (!original.fin || original.fin <= siguiente) setTechEndDate(siguiente);
+    // El badge "Planificación para" del encabezado (`planningDate`) es un estado aparte que antes
+    // se fijaba UNA SOLA VEZ al montar la página ("mañana hábil") y nunca se volvía a tocar — así
+    // que marcar un feriado movía `techStartDate` (lo que de verdad filtra las órdenes) pero el
+    // encabezado seguía mostrando la fecha vieja. Se sincroniza acá, en el mismo punto donde se
+    // mueve la fecha por feriado (confirmado por el usuario con un caso real: feriado el viernes
+    // 9/oct/2026 → el encabezado debe mostrar el lunes 12/oct/2026, no el 9).
+    setPlanningDate(siguiente);
     addNotification('info', `Feriado ${formatFechaLarga(base)}: la planificación pasa al ${formatFechaLarga(siguiente)}.`);
     return siguiente;
-  }, [feriadoVigente, feriadosPorFecha, techStartDate, techEndDate, addNotification, formatFechaLarga]);
+  }, [feriadoVigente, feriadosPorFecha, feriadoFechasManuales, techStartDate, techEndDate, addNotification, formatFechaLarga]);
 
   // Caso contrario: sí se trabaja el feriado con jornada reducida — entonces la planificación es
   // la del feriado mismo, no la del día siguiente.
@@ -5378,6 +6625,7 @@ useEffect(() => {
     setFechaAntesFeriado(prev => rangoOriginal ?? prev ?? original);
     setTechStartDate(base);
     if (!original.fin || original.fin <= base) setTechEndDate(base);
+    setPlanningDate(base);
     addNotification('info', `Se trabaja el feriado ${formatFechaLarga(base)}: la planificación queda en esa fecha con jornada reducida.`);
   }, [feriadoVigente, techStartDate, techEndDate, addNotification, formatFechaLarga]);
 
@@ -5385,8 +6633,35 @@ useEffect(() => {
     if (!fechaAntesFeriado) return;
     setTechStartDate(fechaAntesFeriado.inicio);
     setTechEndDate(fechaAntesFeriado.fin);
+    setPlanningDate(fechaAntesFeriado.inicio);
     setFechaAntesFeriado(null);
   }, [fechaAntesFeriado]);
+
+  // Corrige la "Planificación para" del encabezado (`planningDate`) la PRIMERA vez que el
+  // calendario de feriados está disponible, si el cálculo inicial (que solo saltaba sábados y
+  // domingos, antes de que los feriados terminaran de cargar — ver el efecto de montaje de
+  // `planningDate`) había caído en un feriado, oficial o marcado a mano. Antes eso solo se
+  // corregía si el usuario hacía clic en "Aplicar feriado detectado"; a pedido del usuario debe
+  // respetarse automáticamente desde el arranque (caso real: feriados 2 y 3 de noviembre 2026
+  // encadenados — la planificación debía partir directo en el 4, no quedarse en el 2 esperando un
+  // clic). Corre UNA sola vez (no es un watcher perpetuo): si el usuario cambia la fecha después a
+  // mano, eso queda en sus manos, igual que con "Aplicar feriado detectado" para cualquier feriado
+  // posterior.
+  const planningDateAjustadoPorFeriadoRef = React.useRef(false);
+  useEffect(() => {
+    if (planningDateAjustadoPorFeriadoRef.current) return;
+    if (!planningDate) return;
+    // `feriadosPorFecha.size === 0` como señal de "calendario aún no cargado" — mismo criterio que
+    // ya usa `moverPlanASiguienteDiaProduccion` más arriba.
+    if (feriadosPorFecha.size === 0 && feriadoFechasManuales.length === 0) return;
+    planningDateAjustadoPorFeriadoRef.current = true;
+    const feriadosSet = new Set([...feriadosPorFecha.keys(), ...feriadoFechasManuales]);
+    const corregida = sumarDiasHabiles(toFechaEcuador(new Date()), 1, feriadosSet);
+    if (corregida !== planningDate) {
+      setPlanningDate(corregida);
+      addNotification('info', `La planificación se ajustó al ${formatFechaLarga(corregida)} por feriado(s) configurado(s).`);
+    }
+  }, [planningDate, feriadosPorFecha, feriadoFechasManuales, addNotification, formatFechaLarga]);
 
   // Marcar feriado con "No se trabaja" NO deja el día en 0 h: salta directo al siguiente día de
   // producción (ej. feriado lunes 10 → el plan pasa al martes 11). Solo si se elige trabajar el
@@ -5394,7 +6669,6 @@ useEffect(() => {
   const handleToggleDiaFeriado = useCallback(() => {
     if (esDiaFeriado) {
       setEsDiaFeriado(false);
-      setFeriadoFechaManual(null);
       restaurarFechaAntesFeriado();
       return;
     }
@@ -5402,19 +6676,6 @@ useEffect(() => {
     if (jornadaFeriadoSel === '0') moverPlanASiguienteDiaProduccion();
     else moverPlanAlFeriado();
   }, [esDiaFeriado, jornadaFeriadoSel, moverPlanASiguienteDiaProduccion, moverPlanAlFeriado, restaurarFechaAntesFeriado]);
-
-  // Elegir un día en el calendario: queda marcado como feriado/no laborable y se aplica de una vez
-  // la regla vigente de la Jornada Feriado (saltar al siguiente día hábil, o quedarse a trabajarlo).
-  const handleSeleccionarFechaFeriado = useCallback((fecha: string) => {
-    setFeriadoFechaManual(fecha);
-    setEsDiaFeriado(true);
-    setIsFeriadoCalendarOpen(false);
-    // El rango a preservar es el de ANTES de cualquier salto previo: si ya se había movido el plan
-    // por otro feriado, elegir otra fecha no debe encadenar saltos sobre una fecha ya desplazada.
-    const rangoOriginal = fechaAntesFeriado ?? { inicio: techStartDate, fin: techEndDate };
-    if (jornadaFeriadoSel === '0') moverPlanASiguienteDiaProduccion(fecha, rangoOriginal);
-    else moverPlanAlFeriado(fecha, rangoOriginal);
-  }, [jornadaFeriadoSel, fechaAntesFeriado, techStartDate, techEndDate, moverPlanASiguienteDiaProduccion, moverPlanAlFeriado]);
 
   // Cambiar la jornada con el modo ya activo también mueve la fecha, según corresponda.
   const handleChangeJornadaFeriado = useCallback((valor: string) => {
@@ -5432,6 +6693,206 @@ useEffect(() => {
   const horasNetasDiurnasVal = trabajaEnFeriado ? horasNetasFeriadoVal : parseFloat(jornadaDiurnaSel || "0") * 0.84;
   const horasNetasNocturnasVal = trabajaEnFeriado ? 0 : parseFloat(jornadaNocturnaSel || "0") * 0.84;
   const horasNetasFinSemanaVal = parseFloat(jornadaFinSemanaSel || "0") * 0.84;
+
+  // Activa/actualiza/desactiva el reparto de horas entre dos puestos (máximo 2 a la vez,
+  // cualquier combinación — ver comentario arriba de `parejasDisponibles`). Las horas de ESTE
+  // puesto y las de la pareja SIEMPRE suman el total disponible del EQUIPO — se escriben los dos
+  // lados en el mismo set para que nunca queden desincronizados. Si `parejaPuesto` es null, se
+  // desactiva (y se limpia también el lado de la pareja anterior, si había una).
+  // El total disponible NO es solo la Jornada Diurna neta: es la UNIÓN de los turnos activos entre
+  // las dos máquinas (Día/Noche/Sábado, cada uno contado UNA sola vez aunque ambas lo tengan
+  // activo, sumando el que solo UNA de las dos tenga) — confirmado por el usuario con un caso
+  // real: ACH07 solo con Día activo + ACH10 con Día y Noche → el equipo dispone de Día (una vez) +
+  // Noche = el total real que puede cubrir entre las dos máquinas, no solo una jornada de 8h.
+  // Antes esto SIEMPRE usaba la Jornada Diurna neta sola, sin importar qué turnos tuviera
+  // encendidos cada máquina — por eso un reparto "50/50" en realidad dejaba horas reales sin
+  // contar (el usuario reportó: "no debe ser el 50% cada uno, la suma de ambas máquinas debe ser
+  // 19h de producción").
+  // Limpia TODOS los campos de Equipo Compartido (ambos modos) de un puesto — se usa al desactivar
+  // o al cambiar de pareja, para no dejar basura del modo anterior si se reactiva distinto.
+  const limpiarCamposEquipoCompartido = {
+    equipoCompartidoCon: undefined, equipoCompartidoModo: undefined,
+    equipoCompartidoHoras: undefined, equipoCompartidoPersonas: undefined,
+    equipoCompartidoHorasPrestadas: undefined, equipoCompartidoEsPrestamista: undefined,
+  };
+
+  const handleSetEquipoCompartido = useCallback((puesto: string, parejaPuesto: string | null, horasPropias: number) => {
+    setWorkstationConfigs(prev => {
+      const next = { ...prev };
+      const actual = next[puesto] || { machine: puesto, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
+      const parejaAnterior = actual.equipoCompartidoCon;
+      if (parejaAnterior && parejaAnterior !== parejaPuesto && next[parejaAnterior]) {
+        next[parejaAnterior] = { ...next[parejaAnterior], ...limpiarCamposEquipoCompartido };
+      }
+      if (!parejaPuesto) {
+        next[puesto] = { ...actual, ...limpiarCamposEquipoCompartido };
+        return next;
+      }
+      const parejaActual = next[parejaPuesto] || { machine: parejaPuesto, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
+      const jornadaTotal = ((actual.isDayActive || parejaActual.isDayActive) ? horasNetasDiurnasVal : 0) +
+        ((actual.isNightActive || parejaActual.isNightActive) ? horasNetasNocturnasVal : 0) +
+        ((actual.isSaturdayActive || parejaActual.isSaturdayActive) ? horasNetasFinSemanaVal : 0);
+      const horasEste = Math.max(0, Math.min(jornadaTotal, horasPropias));
+      // Las personas del equipo se conservan al ajustar las horas o cambiar de pareja — vienen de
+      // cualquiera de los dos lados que ya las tuviera (0 si ninguno las había puesto).
+      const personas = actual.equipoCompartidoPersonas ?? parejaActual.equipoCompartidoPersonas ?? 0;
+      next[puesto] = { ...actual, horarioPersonalizadoActivo: false, equipoCompartidoCon: parejaPuesto, equipoCompartidoModo: 'reparto', equipoCompartidoHoras: horasEste, equipoCompartidoPersonas: personas, equipoCompartidoHorasPrestadas: undefined, equipoCompartidoEsPrestamista: undefined };
+      next[parejaPuesto] = { ...parejaActual, horarioPersonalizadoActivo: false, equipoCompartidoCon: puesto, equipoCompartidoModo: 'reparto', equipoCompartidoHoras: jornadaTotal - horasEste, equipoCompartidoPersonas: personas, equipoCompartidoHorasPrestadas: undefined, equipoCompartidoEsPrestamista: undefined };
+      return next;
+    });
+  }, [horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal]);
+
+  // Personas del equipo compartido — se escribe igual en los dos lados del par (es la MISMA
+  // gente, no una por máquina). Solo aplica al modo "reparto".
+  const handleSetEquipoCompartidoPersonas = useCallback((puesto: string, personas: number) => {
+    setWorkstationConfigs(prev => {
+      const actual = prev[puesto];
+      if (!actual?.equipoCompartidoCon) return prev;
+      const next = { ...prev, [puesto]: { ...actual, equipoCompartidoPersonas: personas } };
+      const pareja = next[actual.equipoCompartidoCon];
+      if (pareja) next[actual.equipoCompartidoCon] = { ...pareja, equipoCompartidoPersonas: personas };
+      return next;
+    });
+  }, []);
+
+  // Modo "PRÉSTAMO": `puestoQueRecibe` mantiene su capacidad propia normal y le SUMA `horas` de
+  // capacidad prestadas por `puestoQuePresta`, que a su vez le RESTA esas mismas horas a la suya —
+  // ninguno de los dos reemplaza su cálculo normal (turnos/personas propios), solo se ajusta. Ver
+  // el caso real que motivó este modo: HR-TTSUP (con horas libres) presta a HR-INTPF, que conserva
+  // su propio equipo completo. Si `puestoQuePresta` es null, desactiva el préstamo en ambos lados.
+  const handleSetEquipoCompartidoPrestamo = useCallback((puestoQueRecibe: string, puestoQuePresta: string | null, horas: number) => {
+    setWorkstationConfigs(prev => {
+      const next = { ...prev };
+      const actual = next[puestoQueRecibe] || { machine: puestoQueRecibe, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
+      const parejaAnterior = actual.equipoCompartidoCon;
+      if (parejaAnterior && parejaAnterior !== puestoQuePresta && next[parejaAnterior]) {
+        next[parejaAnterior] = { ...next[parejaAnterior], ...limpiarCamposEquipoCompartido };
+      }
+      if (!puestoQuePresta) {
+        next[puestoQueRecibe] = { ...actual, ...limpiarCamposEquipoCompartido };
+        return next;
+      }
+      const prestamistaActual = next[puestoQuePresta] || { machine: puestoQuePresta, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
+      const horasClamp = Math.max(0, horas);
+      next[puestoQueRecibe] = { ...actual, equipoCompartidoCon: puestoQuePresta, equipoCompartidoModo: 'prestamo', equipoCompartidoHorasPrestadas: horasClamp, equipoCompartidoEsPrestamista: false, equipoCompartidoHoras: undefined, equipoCompartidoPersonas: undefined };
+      next[puestoQuePresta] = { ...prestamistaActual, equipoCompartidoCon: puestoQueRecibe, equipoCompartidoModo: 'prestamo', equipoCompartidoHorasPrestadas: horasClamp, equipoCompartidoEsPrestamista: true, equipoCompartidoHoras: undefined, equipoCompartidoPersonas: undefined };
+      return next;
+    });
+  }, []);
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // HABILIDADES POR ESTACIÓN — nombre/calificación EXACTOS por código de empleado + puesto
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // Trae a TODO el personal de la empresa (no filtrado por área) con una fila por combinación
+  // operador+puesto+línea. Los nombres de columna no son consistentes entre cubos (a veces
+  // PascalCase, a veces MAYUS_CON_GUION), así que se normalizan a solo letras mayúsculas para
+  // detectarlas sin depender del formato exacto que mande el backend — mismo criterio que ya usa
+  // `CalificacionTecnicaSection.tsx` para esta misma API.
+  const normalizarColumnaHabilidad = useCallback((s: string) => s.toUpperCase().replace(/[^A-Z]/g, ''), []);
+  // Primero intenta match EXACTO (PUESTOTRABAJO, ROL, LINEAPROCESO — confirmados así contra datos
+  // reales). Si no hay ninguna columna exactamente igual, cae a buscar una que CONTENGA el patrón
+  // — mismo criterio que ya usa `CalificacionTecnicaSection.tsx` para esta misma API, donde
+  // CALIFICACION en particular viene con texto extra en el nombre real de la columna (ej.
+  // "CALIFICACION_PROMEDIO"). Sin este fallback, un match exacto que nunca ocurre deja el campo
+  // siempre vacío/0 en silencio — confirmado por el usuario: no encontraba el % de habilidad.
+  const getPropHabilidad = useCallback((obj: any, patronNormalizado: string): string => {
+    if (!obj) return '';
+    const keys = Object.keys(obj);
+    const exacto = keys.find(k => normalizarColumnaHabilidad(k) === patronNormalizado);
+    const found = exacto || keys.find(k => normalizarColumnaHabilidad(k).includes(patronNormalizado));
+    return found ? String(obj[found] ?? '').trim() : '';
+  }, [normalizarColumnaHabilidad]);
+
+  // El código de empleado puede venir con ceros a la izquierda en la base (ej. "00001874", campo
+  // CHAR/NUMC típico de SAP) mientras que el usuario lo escribe sin ellos ("1874") — sin esto, un
+  // match de texto exacto nunca cuadra y reporta "código no encontrado" aunque el código sí exista
+  // (confirmado por el usuario con un caso real: HR-ACH06, códigos 1874/2339/2158). Se normaliza
+  // IGUAL en la clave del mapa y en la búsqueda, para que ambos lados cuadren sin importar el padding.
+  const normalizarCodigoEmpleado = useCallback((s: string) => s.trim().replace(/^0+(?=\d)/, ''), []);
+
+  // Clave = código de empleado → todas sus filas (una persona puede estar calificada en varios
+  // puestos). `puestoTrabajo` viene en el MISMO formato que ya usa `mapToHojaRutaInternal`
+  // (confirmado con datos reales: "HR-ACH02"), así que el cruce contra el puesto es exacto, no
+  // por texto aproximado como con el cubo genérico (CuboHabilidadesOp) que se usaba antes.
+  const habilidadesPorCodigoYPuesto = useMemo(() => {
+    const map = new Map<string, { nombre: string; calificacion: number; rol: string; lineaProceso: string; puestoTrabajo: string }[]>();
+    habilidadesEstacionData.forEach(row => {
+      const codigo = normalizarCodigoEmpleado(getPropHabilidad(row, 'CODIGOOPERADOR'));
+      if (!codigo) return;
+      const entrada = {
+        nombre: getPropHabilidad(row, 'NOMBREOPERADOR'),
+        calificacion: Number(getPropHabilidad(row, 'CALIFICACION').replace('%', '')) || 0,
+        rol: getPropHabilidad(row, 'ROL'),
+        lineaProceso: getPropHabilidad(row, 'LINEAPROCESO'),
+        puestoTrabajo: getPropHabilidad(row, 'PUESTOTRABAJO'),
+      };
+      if (!map.has(codigo)) map.set(codigo, []);
+      map.get(codigo)!.push(entrada);
+    });
+    return map;
+  }, [habilidadesEstacionData, getPropHabilidad, normalizarCodigoEmpleado]);
+
+  // Índice inverso (puesto → códigos registrados ahí) — SOLO para el diagnóstico de "código no
+  // encontrado": si un código no cuadra, mostrar qué códigos SÍ existen para ese puesto exacto
+  // dice de un vistazo si es un typo/código mal escrito o si el puesto entero no tiene datos
+  // (problema distinto: formato de PuestoTrabajo que no está cuadrando, no el código en sí).
+  const habilidadesPorPuestoTrabajo = useMemo(() => {
+    const map = new Map<string, { codigo: string; nombre: string }[]>();
+    habilidadesPorCodigoYPuesto.forEach((entradas, codigo) => {
+      entradas.forEach(e => {
+        const key = e.puestoTrabajo.trim().toUpperCase();
+        if (!key) return;
+        if (!map.has(key)) map.set(key, []);
+        map.get(key)!.push({ codigo, nombre: e.nombre });
+      });
+    });
+    return map;
+  }, [habilidadesPorCodigoYPuesto]);
+
+  // Busca el código y, si tiene calificación en VARIOS puestos, se queda con la fila cuyo
+  // `PuestoTrabajo` sea EXACTAMENTE igual a la Hoja de Ruta de esta tarjeta — ya no es una
+  // coincidencia de texto aproximada. Si no tiene ninguna fila para este puesto puntual, muestra
+  // la de mayor calificación que sí tenga, avisando que no es exacta — nunca bloquea, solo
+  // informa (la decisión final la confirma quien lo está cargando).
+  const resolverEmpleadoParaPuesto = useCallback((codigo: string, puesto: string, indice?: number): { encontrado: boolean; nombre: string; calificacion: number; coincideExacto: boolean; etiqueta: string } | null => {
+    const cod = normalizarCodigoEmpleado(codigo);
+    if (!cod) return null;
+    const entradas = habilidadesPorCodigoYPuesto.get(cod);
+    if (!entradas || entradas.length === 0) return { encontrado: false, nombre: '', calificacion: 0, coincideExacto: false, etiqueta: '' };
+    const hrPuesto = puestoTrabajoParaIndice(puesto, indice);
+    const match = entradas.find(e => e.puestoTrabajo.toUpperCase() === hrPuesto);
+    const elegido = match || [...entradas].sort((a, b) => b.calificacion - a.calificacion)[0];
+    return {
+      encontrado: true,
+      nombre: elegido?.nombre || entradas[0].nombre,
+      calificacion: elegido?.calificacion || 0,
+      coincideExacto: !!match,
+      etiqueta: match ? match.puestoTrabajo : (elegido?.puestoTrabajo || elegido?.rol || elegido?.lineaProceso || ''),
+    };
+  }, [habilidadesPorCodigoYPuesto, puestoTrabajoParaIndice, normalizarCodigoEmpleado]);
+
+  // Horas de cita médica a descontar de UN puesto: suma las horas (`citasMedicasPorPersona`, la
+  // "base" llenada a mano) de cada código presente en Día/Noche/Sábado de ese puesto — mismo
+  // criterio de descuento por puesto que Mantenimiento, pero el origen del dato es la PERSONA, no
+  // el puesto (ver prop homónima en MachineCard, que hace este mismo cálculo por su cuenta).
+  const horasCitasMedicasPuesto = useCallback((config: WorkstationConfig): number =>
+    [...(config.empleadosDia || []), ...(config.empleadosNoche || []), ...(config.empleadosSabado || [])]
+      .reduce((sum, c) => {
+        const cod = normalizarCodigoEmpleado(c || '');
+        return cod ? sum + (citasMedicasPorPersona[cod] || 0) : sum;
+      }, 0),
+  [citasMedicasPorPersona, normalizarCodigoEmpleado]);
+
+  // Código por posición de un turno — arma el arreglo completo (no solo la posición tocada) para
+  // no perder las demás posiciones ya cargadas.
+  const handleSetEmpleadoTurno = useCallback((puesto: string, campo: 'empleadosDia' | 'empleadosNoche' | 'empleadosSabado', index: number, codigo: string) => {
+    setWorkstationConfigs(prev => {
+      const actual = prev[puesto] || { machine: puesto, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
+      const arr = [...(actual[campo] || [])];
+      arr[index] = codigo;
+      return { ...prev, [puesto]: { ...actual, [campo]: arr } };
+    });
+  }, []);
 
   // ── Factibilidad ACOLCHADO (cuello de botella): horas requeridas vs. capacidad disponible por puesto ──
   type CandidatoAcolchado = { puesto: string; tiempoSegPorUnidad: number; capacidad: number; cfg: WorkstationConfig };
@@ -6093,8 +7554,9 @@ useEffect(() => {
       setLoadedTabs(prev => new Set([...prev, 'personal-turnos']));
     }
     if (!hasFetchedMantenimientos) fetchMantenimientos();
+    if (!hasFetchedHabilidadesEstacion) fetchHabilidadesEstacion();
     requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
-  }, [loadedTabs, hasFetchedMantenimientos, fetchMantenimientos]);
+  }, [loadedTabs, hasFetchedMantenimientos, fetchMantenimientos, hasFetchedHabilidadesEstacion, fetchHabilidadesEstacion]);
 
   const acolchadoFactibilidadAjustada = useMemo(() => {
     if (!acolchadoManualSplit || acolchadoMateriales.length === 0) return null;
@@ -6433,11 +7895,27 @@ useEffect(() => {
   // asignada la orden (todas llegan por defecto en la de Versión 1). Se identifica que un material
   // es de Acolchado por tener tiempo estándar registrado en alguna acolchadora real (excluye las
   // COSEDORA-ACH*, que son máquinas de Tapas, no de Acolchado).
-  const esPuestoAcolchado = useCallback((puesto: string) => (
-    (puesto.includes('ACOLCHADORA') || puesto.includes('ACH')) &&
-    !puesto.startsWith('COSEDORA') &&
-    !puesto.includes('11') && !puesto.includes('12') // ACH11/ACH12 son de Bandas, no de Acolchado & Tapas
-  ), []);
+  const esPuestoAcolchado = useCallback((puesto: string) => esHRAcolchado(puesto), []);
+
+  // Resumen de citas médicas del día — mismo criterio que Mantenimiento/Capacitación (solo cuenta
+  // puestos visibles con algo cargado), separando lo que SÍ resta capacidad de lo que no
+  // (acolchadoras: no se descuenta, se marca "buscar reemplazo" — ver `esHRAcolchado`).
+  const citasMedicasResumen = useMemo(() => {
+    const puestosVisibles = workstationGroups.flatMap(g => g.items).filter(item => uniquePuestosSet.has(item));
+    let horas = 0, horasDescontadas = 0, horasReemplazo = 0, puestos = 0;
+    puestosVisibles.forEach(p => {
+      const cfg = workstationConfigs[p];
+      if (!cfg) return;
+      const h = horasCitasMedicasPuesto(cfg);
+      if (h <= 0) return;
+      horas += h;
+      puestos++;
+      const hr = mapToHojaRutaInternal(p);
+      if (esPuestoAcolchado((hr || p).toUpperCase())) horasReemplazo += h;
+      else horasDescontadas += h;
+    });
+    return { horas, horasDescontadas, horasReemplazo, puestos };
+  }, [uniquePuestosSet, workstationConfigs, horasCitasMedicasPuesto, mapToHojaRutaInternal, esPuestoAcolchado]);
 
   // Bloqueo manual de órdenes de Acolchado (ej. protectores en HR-ACH07): igual mecánica que el
   // bloqueo de Tapa/Cosedora — la orden sigue visible en la tabla (marcada) pero se excluye del
@@ -6532,6 +8010,121 @@ useEffect(() => {
       setTapasResolviendoRatio(prev => { const next = new Set(prev); next.delete(tapaMat); return next; });
     }
   }, [tapaAcolchadoRatiosSAP, normalizeMaterialCode, explotarMaterialConReintentos, addNotification]);
+
+  // ─── Consumo de Espuma (Nivel 4 / LÁMINA) por máquina ACOLCHADORA, resuelto BAJO DEMANDA ──────
+  // Mismo patrón que `resolverRatioTapaAcolchado` (Tapa→Acolchado), un nivel más abajo en la misma
+  // cadena BOM: Forro→Tapa→Acolchado→LÁMINA. Pestaña "Consumo Espuma": para cada Acolchado
+  // REALMENTE aceptado en Plan Final, explota su material contra SAP y lee su(s) componente(s)
+  // LÁMINA de Nivel 1 con su CANTIDAD_UNITARIA — nunca depende de que se haya corrido antes la
+  // explosión de "Resumen Nivel 3/4" (otra pestaña, otro flujo, otro resultado solo en memoria).
+  // Se cachea por material: un Acolchado que ya se resolvió no se vuelve a consultar.
+  const [acolchadoLaminaRatiosSAP, setAcolchadoLaminaRatiosSAP] = useState<Map<string, Map<string, { nombre: string; cantidadUnitaria: number }>>>(new Map());
+  const [acolchadosResolviendoRatioLamina, setAcolchadosResolviendoRatioLamina] = useState<Set<string>>(new Set());
+  const acolchadosSinLaminaEnBomRef = React.useRef<Set<string>>(new Set());
+
+  const resolverRatioAcolchadoLamina = useCallback(async (acolchadoMaterialRaw: string) => {
+    const acolchadoMat = normalizeMaterialCode(acolchadoMaterialRaw);
+    if (!acolchadoMat) return;
+    if (acolchadoLaminaRatiosSAP.has(acolchadoMat) || acolchadosSinLaminaEnBomRef.current.has(acolchadoMat)) return;
+    setAcolchadosResolviendoRatioLamina(prev => new Set(prev).add(acolchadoMat));
+    try {
+      const { ok, components } = await explotarMaterialConReintentos(acolchadoMaterialRaw);
+      if (!ok) {
+        addNotification('warning', `No se pudo consultar la lista de materiales del Acolchado ${acolchadoMat} en SAP; no se contó en Consumo Espuma. Reingresa a la pestaña para reintentar.`);
+        return;
+      }
+      const laminas = new Map<string, { nombre: string; cantidadUnitaria: number }>();
+      components.forEach((comp: any) => {
+        if (Number(comp.NIVEL) !== 1) return;
+        const desc = normalizeText(String(comp.DESCRIPCION_COMPONENTE || comp.NOMBRE_COMPONENTE || ''));
+        if (!desc.startsWith('LAMINA')) return;
+        const compMat = normalizeMaterialCode(comp.COMPONENTE || '');
+        // Mismo blindaje que el resto del módulo: rollos cortados con "LAMINA" en el nombre
+        // (ej. 30026039/30026042 — Corte de Espuma) no son laminado real, se excluyen igual.
+        if (!compMat || MATERIALES_ROLLOS_CORTADOS_EXCLUIDOS.has(compMat)) return;
+        const cantidadUnitaria = Number(comp.CANTIDAD_UNITARIA || comp.Cantidad || 0);
+        if (cantidadUnitaria <= 0) return;
+        const nombre = String(comp.DESCRIPCION_COMPONENTE || comp.NOMBRE_COMPONENTE || '').trim();
+        const existente = laminas.get(compMat);
+        if (!existente || cantidadUnitaria > existente.cantidadUnitaria) laminas.set(compMat, { nombre, cantidadUnitaria });
+      });
+      if (laminas.size === 0) {
+        acolchadosSinLaminaEnBomRef.current.add(acolchadoMat);
+        return;
+      }
+      setAcolchadoLaminaRatiosSAP(prev => new Map(prev).set(acolchadoMat, laminas));
+    } finally {
+      setAcolchadosResolviendoRatioLamina(prev => { const next = new Set(prev); next.delete(acolchadoMat); return next; });
+    }
+  }, [acolchadoLaminaRatiosSAP, normalizeMaterialCode, explotarMaterialConReintentos, addNotification]);
+
+  // Materiales de Acolchado ÚNICOS ya aceptados en Plan Final — fuente para resolver su ratio de
+  // Lámina bajo demanda (arriba) en cuanto aparecen, sin que el usuario tenga que pedirlo material
+  // por material.
+  const acolchadoMaterialesEnPlanFinal = useMemo(() => {
+    const set = new Set<string>();
+    planFinalOrders.forEach(o => {
+      if (!String(o._source || '').startsWith('acolchado-')) return;
+      const mat = normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || '');
+      if (mat) set.add(mat);
+    });
+    return Array.from(set);
+  }, [planFinalOrders, normalizeMaterialCode]);
+
+  useEffect(() => {
+    acolchadoMaterialesEnPlanFinal.forEach(mat => { void resolverRatioAcolchadoLamina(mat); });
+  }, [acolchadoMaterialesEnPlanFinal, resolverRatioAcolchadoLamina]);
+
+  // Consumo de Espuma (Lámina) por máquina ACOLCHADORA — pestaña "Consumo Espuma", a pedido del
+  // usuario. Fuente: Plan Final (solo lo YA ACEPTADO, confirmado con el usuario — no lo que se ve
+  // en cada tarjeta antes de aceptar). Por cada orden de Acolchado aceptada, cruza su cantidad
+  // contra el ratio Acolchado→Lámina resuelto arriba, agrupado por máquina (`_finalHR`, el mismo
+  // código de Hoja de Ruta que ya usa el resto de Plan Final) y por material de Lámina — el total
+  // por máquina es la vista principal, el detalle por material queda para el tooltip.
+  const consumoEspumaPorMaquina = useMemo(() => {
+    const map = new Map<string, { total: number; detalle: Map<string, { nombre: string; cantidad: number }> }>();
+    planFinalOrders.forEach(o => {
+      if (!String(o._source || '').startsWith('acolchado-')) return;
+      const hr = String(o._finalHR || '').trim().toUpperCase();
+      if (!hr) return;
+      const mat = normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || '');
+      const laminas = acolchadoLaminaRatiosSAP.get(mat);
+      if (!laminas) return;
+      const cantidadAcolchado = Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0);
+      if (cantidadAcolchado <= 0) return;
+      if (!map.has(hr)) map.set(hr, { total: 0, detalle: new Map() });
+      const entry = map.get(hr)!;
+      laminas.forEach(({ nombre, cantidadUnitaria }, laminaMat) => {
+        const necesidad = cantidadAcolchado * cantidadUnitaria;
+        entry.total += necesidad;
+        const existente = entry.detalle.get(laminaMat);
+        if (existente) existente.cantidad += necesidad;
+        else entry.detalle.set(laminaMat, { nombre, cantidad: necesidad });
+      });
+    });
+    return map;
+  }, [planFinalOrders, acolchadoLaminaRatiosSAP, normalizeMaterialCode]);
+
+  // Mismo dato que arriba, invertido: lista por MATERIAL de Lámina primero, con el desglose de en
+  // qué máquina(s) Acolchadora se usa cada uno — a pedido del usuario, cambia la forma de vista
+  // (antes era por máquina con el material en el detalle; ahora es por material con la máquina en
+  // el detalle).
+  const consumoEspumaPorMaterial = useMemo(() => {
+    const map = new Map<string, { nombre: string; total: number; porMaquina: Map<string, number> }>();
+    consumoEspumaPorMaquina.forEach((info, hr) => {
+      info.detalle.forEach(({ nombre, cantidad }, laminaMat) => {
+        if (!map.has(laminaMat)) map.set(laminaMat, { nombre, total: 0, porMaquina: new Map() });
+        const entry = map.get(laminaMat)!;
+        entry.total += cantidad;
+        entry.porMaquina.set(hr, (entry.porMaquina.get(hr) || 0) + cantidad);
+      });
+    });
+    return map;
+  }, [consumoEspumaPorMaquina]);
+
+  // Qué filas de "Consumo Espuma" tienen el desglose abierto — por botón, no por mouse encima (a
+  // pedido del usuario: el detalle no se ve en un hover, solo al hacer clic).
+  const [consumoEspumaExpandido, setConsumoEspumaExpandido] = useState<Set<string>>(new Set());
 
   // Índice ACOLCHADO → Tapa(s) que lo consumen, combinando las dos fuentes. La cascada de Tapa
   // (mover la Tapa a donde se fue su Acolchado) necesita este sentido, y antes dependía SOLO de la
@@ -7452,6 +9045,221 @@ useEffect(() => {
     return map;
   }, [acolchadoAsignacionOptima]);
 
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // PRODUCCIÓN MANUAL — botón "+" en las tarjetas de Ajuste de Producción
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // Permite agregar manualmente cantidad de un material a cualquier tarjeta (motivo libre, ej.
+  // reproceso o pedido urgente). Antes de agregar se valida que el material tenga Versión de
+  // Fabricación en SAP para la Hoja de Ruta de ESA máquina puntual (mismo servicio que ya usa
+  // Plan Final) — si no hay versión, se bloquea. En Cosedoras de Tapa (COSEDORA-ACHxx) la Tapa
+  // agregada arrastra su propia "corrección de Acolchado" (vía el factor del BOM, Nivel 3): se
+  // agrega la cantidad de Acolchado correspondiente a la tarjeta de SU Acolchadora natural, para
+  // que esa carga extra se vea ahí también — nunca bloquea (solo avisa si deja la Acolchadora
+  // sobrecargada, igual criterio visual que cualquier otro exceso del módulo).
+  interface ManualAddition {
+    id: string;
+    material: string;
+    nombre: string;
+    cantidad: number;
+    motivo: string;
+    prodVersion: string;
+    origen: 'manual' | 'correccion-acolchado';
+    origenDetalle?: string;
+    // Solo para origen 'correccion-acolchado': de qué adición de Tapa viene cada parte de la
+    // cantidad (puede ser más de una — varias Tapas distintas pueden compartir el mismo
+    // Acolchado). Al agregar una Tapa nueva que usa un Acolchado YA corregido antes, se SUMA acá
+    // en vez de crear una segunda orden del mismo material; al eliminar una Tapa, se resta solo
+    // SU contribución (nunca se borra la corrección completa si otra Tapa todavía la necesita).
+    contribuciones?: { tapaId: string; cantidad: number }[];
+  }
+  const esPuestoCosedoraTapa = useCallback((p: string) => p.toUpperCase().includes('COSEDORA-ACH'), []);
+
+  const [produccionManualPorPuesto, setProduccionManualPorPuesto] = useState<Map<string, ManualAddition[]>>(new Map());
+
+  // Busca la Versión de Fabricación de `material` para la Hoja de Ruta de `puesto` — reutiliza el
+  // mismo servicio que ya usa Plan Final (`fetchVersionConReintentos`), probando cada código si la
+  // Hoja de Ruta viniera combinada ("HR-A / HR-B").
+  const validarVersionMaterialParaPuesto = useCallback(async (material: string, puesto: string): Promise<{ ok: boolean; version?: string; error?: string }> => {
+    const mat = normalizeMaterialCode(material);
+    if (!mat) return { ok: false, error: 'Código de material vacío.' };
+    const hrRaw = mapToHojaRutaInternal(puesto).trim().toUpperCase();
+    const candidatos = (hrRaw.includes('/') ? hrRaw.split('/') : [hrRaw]).map(c => c.trim().replace(/^HR-/, '')).filter(Boolean);
+    try {
+      const versiones = await fetchVersionConReintentos(mat);
+      for (const v of versiones) {
+        const hoja = String(v.GRUPOHOJARUTA || '').trim().toUpperCase().replace(/^HR-/, '');
+        const texto = String(v.VERSION || '').trim();
+        if (texto && hoja && candidatos.includes(hoja)) return { ok: true, version: texto };
+      }
+      return { ok: false, error: `${mat} no tiene Versión de Fabricación registrada en SAP para ${puesto} (${hrRaw || 'sin Hoja de Ruta'}).` };
+    } catch (error: any) {
+      return { ok: false, error: `Error al consultar la Versión de Fabricación en SAP: ${error.message}` };
+    }
+  }, [normalizeMaterialCode, mapToHojaRutaInternal, fetchVersionConReintentos]);
+
+  // Dado una Tapa y la cantidad agregada, cuánto Acolchado adicional se necesita y en qué
+  // Acolchadora — puede ser más de un componente si la Tapa combina 2 telas. Va a la Acolchadora
+  // PAREJA de la Cosedora donde se agregó ESTA Tapa (`puestoTapa`, misma célula física por sufijo —
+  // ver `getSuffixCelula`/`getAchDeCelula`), NUNCA a la "natural" del motor automático de Acolchado:
+  // el mismo material de Tapa agregado en dos Cosedoras distintas (ej. PEF10 y PEF06) debe generar
+  // DOS correcciones separadas, una por máquina — antes ambas caían en la misma Acolchadora
+  // "natural" del material (ej. siempre ACH10) y se combinaban en una sola orden, cubriendo mal la
+  // necesidad real de la otra célula (reportado por el usuario con un caso real: Zafiro 135 23).
+  // Se cae al "natural" solo si la Cosedora no tiene pareja identificable (fuera de
+  // `CELULA_TWIN_SUFIJOS`), para no perder la corrección en ese caso excepcional.
+  const calcularCorreccionAcolchado = useCallback((tapaMaterialNorm: string, cantidadTapa: number, puestoTapa: string) => {
+    const componentes = tapaAcolchadoPorMaterialNorm.get(tapaMaterialNorm);
+    if (!componentes) return [] as { acolchadoMaterial: string; nombre: string; cantidad: number; puesto: string }[];
+    const suffix = getSuffixCelula(puestoTapa);
+    const puestoPareja = suffix ? getAchDeCelula(suffix) : undefined;
+    const resultado: { acolchadoMaterial: string; nombre: string; cantidad: number; puesto: string }[] = [];
+    componentes.forEach((factor, acolchadoMat) => {
+      const puesto = puestoPareja || acolchadoMaterialPuestoNatural.get(acolchadoMat);
+      if (!puesto || factor <= 0) return;
+      resultado.push({ acolchadoMaterial: acolchadoMat, nombre: materialNombrePorCodigo.get(acolchadoMat) || '', cantidad: cantidadTapa * factor, puesto });
+    });
+    return resultado;
+  }, [tapaAcolchadoPorMaterialNorm, acolchadoMaterialPuestoNatural, materialNombrePorCodigo, getSuffixCelula, getAchDeCelula]);
+
+  const handleAgregarProduccionManual = useCallback(async (puesto: string, materialRaw: string, cantidad: number, motivo: string): Promise<{ ok: boolean; error?: string }> => {
+    if (!(cantidad > 0)) return { ok: false, error: 'La cantidad debe ser mayor a 0.' };
+    const resultado = await validarVersionMaterialParaPuesto(materialRaw, puesto);
+    if (!resultado.ok) return { ok: false, error: resultado.error };
+    const mat = normalizeMaterialCode(materialRaw);
+    const nombre = materialNombrePorCodigo.get(mat) || '';
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const nuevaEntrada: ManualAddition = { id, material: mat, nombre, cantidad, motivo, prodVersion: resultado.version!, origen: 'manual' };
+    setProduccionManualPorPuesto(prev => {
+      const next = new Map(prev);
+      next.set(puesto, [...(next.get(puesto) || []), nuevaEntrada]);
+      return next;
+    });
+
+    if (esPuestoCosedoraTapa(puesto)) {
+      const correcciones = calcularCorreccionAcolchado(mat, cantidad, puesto);
+      if (correcciones.length === 0) {
+        addNotification('warning', `${mat} no tiene un componente de Acolchado identificado en el BOM (Nivel 3) — se agregó la Tapa sin corrección de Acolchado.`);
+      } else {
+        setProduccionManualPorPuesto(prev => {
+          const next = new Map(prev);
+          correcciones.forEach(c => {
+            const lista = next.get(c.puesto) || [];
+            const idxExistente = lista.findIndex(m => m.origen === 'correccion-acolchado' && m.material === c.acolchadoMaterial);
+            if (idxExistente >= 0) {
+              const existente = lista[idxExistente];
+              const contribuciones = [...(existente.contribuciones || []), { tapaId: id, cantidad: c.cantidad }];
+              const nuevaCantidad = contribuciones.reduce((sum, ct) => sum + ct.cantidad, 0);
+              const nuevoDetalle = `${existente.origenDetalle ? existente.origenDetalle + ' + ' : ''}${mat} en ${puesto}`;
+              const actualizada: ManualAddition = {
+                ...existente,
+                cantidad: nuevaCantidad,
+                motivo: `Corrección por Tapas en ${nuevoDetalle}`,
+                origenDetalle: nuevoDetalle,
+                contribuciones,
+                // La Versión de Fabricación de la Tapa y la de su Acolchado SIEMPRE coinciden
+                // (confirmado por el usuario) — se actualiza a la de la Tapa que se acaba de
+                // agregar, para que una corrección ya existente no se quede pegada a la versión de
+                // la PRIMERA Tapa que la generó si una Tapa posterior trae otra.
+                prodVersion: resultado.version!,
+              };
+              const nuevaLista = [...lista];
+              nuevaLista[idxExistente] = actualizada;
+              next.set(c.puesto, nuevaLista);
+            } else {
+              next.set(c.puesto, [...lista, {
+                id: `${id}-ach-${c.acolchadoMaterial}`,
+                material: c.acolchadoMaterial,
+                nombre: c.nombre,
+                cantidad: c.cantidad,
+                motivo: `Corrección por ${cantidad.toLocaleString()} de Tapa ${mat} agregada en ${puesto}`,
+                // Antes quedaba vacío y, al exportar a SAP, `getProdVersionPlanFinal` caía al
+                // respaldo genérico por material+Hoja de Ruta — que normalmente resuelve a la
+                // PRIMERA versión registrada (casi siempre la "1"), sin importar en qué Versión se
+                // agregó la Tapa. La Versión de Fabricación de la Tapa y su Acolchado SIEMPRE
+                // coinciden (confirmado por el usuario), así que se usa la misma directamente.
+                prodVersion: resultado.version!,
+                origen: 'correccion-acolchado' as const,
+                origenDetalle: `${mat} en ${puesto}`,
+                contribuciones: [{ tapaId: id, cantidad: c.cantidad }],
+              }]);
+            }
+          });
+          return next;
+        });
+        addNotification('success', `Se agregaron ${cantidad.toLocaleString()} de ${mat} a ${puesto} y su corrección de Acolchado a ${correcciones.map(c => c.puesto).join(', ')}.`);
+        return { ok: true };
+      }
+    }
+    addNotification('success', `Se agregaron ${cantidad.toLocaleString()} unidades de ${mat} a ${puesto} (Versión ${resultado.version}).`);
+    return { ok: true };
+  }, [validarVersionMaterialParaPuesto, normalizeMaterialCode, materialNombrePorCodigo, esPuestoCosedoraTapa, calcularCorreccionAcolchado, addNotification]);
+
+  const handleEliminarProduccionManual = useCallback((puesto: string, id: string) => {
+    setProduccionManualPorPuesto(prev => {
+      const next = new Map(prev);
+      next.set(puesto, (next.get(puesto) || []).filter(m => m.id !== id));
+      // Si lo eliminado era una Tapa que generó corrección de Acolchado, esa corrección (en OTRO
+      // puesto, posiblemente SUMADA con la de otras Tapas) debe restar solo la contribución de
+      // ESTA Tapa — no borrarse completa si otra Tapa todavía la necesita.
+      next.forEach((lista, otroPuesto) => {
+        let cambio = false;
+        const actualizada = lista
+          .map(m => {
+            if (m.origen !== 'correccion-acolchado' || !m.contribuciones) return m;
+            const tieneContribucion = m.contribuciones.some(c => c.tapaId === id);
+            if (!tieneContribucion) return m;
+            cambio = true;
+            const contribuciones = m.contribuciones.filter(c => c.tapaId !== id);
+            const cantidad = contribuciones.reduce((sum, c) => sum + c.cantidad, 0);
+            return contribuciones.length > 0 ? { ...m, cantidad, contribuciones } : null;
+          })
+          .filter((m): m is ManualAddition => m !== null);
+        if (cambio) next.set(otroPuesto, actualizada);
+      });
+      return next;
+    });
+  }, []);
+
+  // UNIDAD real (ST/M/KG) por material, tomada de las órdenes reales de SAP — las adiciones
+  // manuales (botón "+") y sus correcciones de Acolchado son objetos sintéticos que nunca traen
+  // este campo por sí mismos, y sin él `esUnidadContinua` las trata siempre como discretas y les
+  // redondea los decimales (ej. una corrección de Acolchado de 60.75 m terminaba en 61 o 60).
+  const unidadPorMaterial = useMemo(() => {
+    const map = new Map<string, string>();
+    // `filteredOrdenesPrevisionales` (sin filtrar por fecha) en vez de combinar techFilteredOrdenes
+    // con un pool por puesto — ahora que el rango FBASE/HR-FORRO es POR PUESTO (ver
+    // `techFilteredOrdenesParaPuesto`), no hay un único pool "de más" que agregar aquí; esta lista
+    // ya cubre cualquier material de cualquier puesto, sin importar su rango de fechas.
+    filteredOrdenesPrevisionales.forEach(o => {
+      const mat = normalizeMaterialCode(o['MATERIAL']);
+      if (!mat || map.has(mat)) return;
+      const unidad = String(o['UNIDAD'] || o['Unidad'] || '').trim().toUpperCase();
+      if (unidad) map.set(mat, unidad);
+    });
+    return map;
+  }, [filteredOrdenesPrevisionales, normalizeMaterialCode]);
+
+  // Convierte las adiciones manuales en objetos con forma de "orden" (MATERIAL/CANTIDAD/MAQUINA)
+  // para que las tarjetas y el resto del módulo las sumen con el MISMO camino que ya usan las
+  // órdenes reales de SAP (`calculateProductionTime`), sin duplicar la fórmula de horas en
+  // ningún lado. `ORDENPREVISIONAL` sintética y única para que nunca choque con una orden real.
+  const manualOrdersPorPuesto = useMemo(() => {
+    const map = new Map<string, any[]>();
+    produccionManualPorPuesto.forEach((lista, puesto) => {
+      if (lista.length === 0) return;
+      const hr = mapToHojaRutaInternal(puesto).trim().toUpperCase();
+      map.set(puesto, lista.map(m => ({
+        MATERIAL: m.material, CANTIDAD: m.cantidad, CANTPROGRAMADA: m.cantidad,
+        UNIDAD: unidadPorMaterial.get(m.material) || '',
+        MAQUINA: hr, Maquina: hr,
+        ORDENPREVISIONAL: `MANUAL-${m.id}`,
+        _finalHR: hr, _prodVersion: m.prodVersion,
+        _isManual: true, _manualId: m.id, _manualMotivo: m.motivo, _manualOrigen: m.origen, _manualOrigenDetalle: m.origenDetalle,
+      })));
+    });
+    return map;
+  }, [produccionManualPorPuesto, mapToHojaRutaInternal, unidadPorMaterial]);
+
   // Por Tapa: cuántas unidades son producibles con el Acolchado disponible (repartido "mejor
   // ajuste" cuando un mismo Acolchado alimenta varias Tapas, igual criterio que el panel Nivel 3/4)
   // y, a nivel de ORDEN real de SAP, cuáles quedan sin poder fabricarse por falta de Acolchado.
@@ -7771,6 +9579,15 @@ useEffect(() => {
     });
   }, [getSuffixCelula, getPefDeCelula]);
 
+  // Red de seguridad para "Plan Final se vació solo" (ver el efecto que lo dispara, más abajo
+  // tras aceptar BSC/INTPF/TTCHN): si `planFinalOrders` queda vacío mientras TODAVÍA hay secciones
+  // aceptadas (sus Sets/flags siguen con contenido — nunca se limpian al guardar), es una
+  // inconsistencia transitoria, no una pérdida real de datos (el usuario reportó que las órdenes
+  // "reaparecen" solo con cambiar de pestaña, lo cual confirma que el origen de verdad seguía
+  // intacto). Este contador se agrega a la dependencia de cada efecto "resync de aceptados" para
+  // forzar que se reconstruyan solos, sin que el usuario tenga que cambiar de pestaña a mano.
+  const [planFinalForceResync, setPlanFinalForceResync] = useState(0);
+
   // Aceptar por célula (mismo patrón que acceptGroupAdjust): arma la lista final de órdenes de
   // ESE puesto (originales menos las movidas fuera, más remanentes de split, más las que entraron)
   // y la envía a Plan Final bajo su propio `_source`, sin tocar las demás células.
@@ -7796,6 +9613,33 @@ useEffect(() => {
   useEffect(() => {
     if (acolchadoAceptadoPuestos.size === 0) return;
     const mk = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
+    // Blindaje contra ALIAS DUPLICADOS de la misma máquina física: la maestra puede listar más de
+    // un nombre para una misma Hoja de Ruta (ej. "ACOLCHADORA02" y "ACH02" ambas resuelven a
+    // HR-ACH02) y este Set no tiene forma de "desaceptar" — si el alias que usa la UI cambia de una
+    // sesión a otra (o el borrador local restaura uno viejo), el nombre ANTERIOR se queda atascado
+    // acá para siempre y se sigue resincronizando EN PARALELO al nuevo, duplicando las horas de esa
+    // HR (caso real reportado por el usuario). Si dos alias del Set resuelven a la misma HR, se
+    // conserva solo el último aceptado (el Set mantiene el orden de inserción) y se descartan los
+    // demás, tanto del propio Set como de Plan Final.
+    const aliasPorHR = new Map<string, string[]>();
+    acolchadoAceptadoPuestos.forEach(p => {
+      const hr = mapToHojaRutaInternal(p).trim().toUpperCase();
+      if (!aliasPorHR.has(hr)) aliasPorHR.set(hr, []);
+      aliasPorHR.get(hr)!.push(p);
+    });
+    const puestosVigentes = new Set<string>();
+    const aliasDescartados: string[] = [];
+    aliasPorHR.forEach(lista => {
+      puestosVigentes.add(lista[lista.length - 1]);
+      aliasDescartados.push(...lista.slice(0, -1));
+    });
+    if (aliasDescartados.length > 0) {
+      setAcolchadoAceptadoPuestos(prev => {
+        const next = new Set(prev);
+        aliasDescartados.forEach(p => next.delete(p));
+        return next;
+      });
+    }
     // El usuario debe poder aceptar SIEMPRE el plan de una célula "sin ajuste" (tal como está hoy en
     // SAP), aunque el motor haya calculado que otra célula podría recibir su excedente — esa
     // redistribución solo se aplica si el usuario activa "Ajustar por Versión" aquí. Antes esto se
@@ -7803,8 +9647,10 @@ useEffect(() => {
     // al usuario la opción de aceptar el plan natural. Aceptar sin ajuste siempre manda la producción
     // ORIGINAL completa de la célula — nunca puede duplicarse por sí sola.
     setPlanFinalOrders(prev => {
-      let next = prev;
-      acolchadoAceptadoPuestos.forEach(puesto => {
+      let next = aliasDescartados.length > 0
+        ? prev.filter(o => !aliasDescartados.some(p => o._source === `acolchado-${p}`))
+        : prev;
+      puestosVigentes.forEach(puesto => {
         const source = `acolchado-${puesto}`;
         const hr = mapToHojaRutaInternal(puesto).trim().toUpperCase();
         const hojaSinPrefijo = hr.replace(/^HR-/, '');
@@ -7820,8 +9666,18 @@ useEffect(() => {
           ...(ajusteActivo ? (acolchadoExcludeKeysPorPuesto.get(puesto) || []) : []),
           ...(averiaAcolchadoResultado.excludeKeysPorPuesto.get(puesto) || []),
         ]);
+        // `acolchadoAdjustedInVisiblePorPuesto` (NO `acolchadoAdjustedInPorPuesto` a secas) — mismo
+        // mapa que ya usa la tarjeta para decidir qué ENTRANTE mostrar: una célula ve lo que recibe
+        // de otra YA ajustada aunque ELLA MISMA no tenga "Ajustar por Versión" activo (confirmado:
+        // "ajustar la ACH09 hace que la ACH08 reciba y recalcule su ocupación sola"). Antes acá se
+        // exigía ADEMÁS `ajusteActivo` de ESTE puesto — si el destino no estaba ajustado, Plan Final
+        // no incluía lo entrante aunque la tarjeta SÍ lo mostrara (reportado como "el % de la
+        // tarjeta no coincide con el de Resumen/correo" para ACH07). Peor aún: como el ORIGEN ya
+        // ajustado SÍ excluye esas piezas de SU propio Plan Final (ver `excludeKeys` arriba), con la
+        // lógica vieja esa producción desaparecía del plan por completo (ni en origen ni en
+        // destino), no solo se veía distinta en pantalla.
         const adjustedIn = [
-          ...(ajusteActivo ? (acolchadoAdjustedInPorPuesto.get(puesto) || []) : []),
+          ...(acolchadoAdjustedInVisiblePorPuesto.get(puesto) || []),
           ...(averiaAcolchadoResultado.adjustedInPorPuesto.get(puesto) || []),
         ];
         const splitRemainders = [
@@ -7854,30 +9710,49 @@ useEffect(() => {
           ...splitRemainders.map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: source, _prodVersion: getVersion(o) })),
           ...adjustedIn.map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: source, _prodVersion: getVersion(o) })),
         ];
+        // Producción manual (botón "+"): se suma tal cual, ya validada contra SAP al agregarla —
+        // así llega a Plan Final junto con "Aceptar Plan", mismo flujo que el resto, sin casos
+        // especiales (ver `manualOrdersPorPuesto`). Debe entrar a la MISMA consolidación de abajo
+        // (si está activa) — si no, con "Consolidar Carga de Acolchado" encendido, la corrección de
+        // Acolchado por una Tapa quedaba como fila SEPARADA del mismo material ya consolidado,
+        // duplicando visualmente el material (una fila real en su versión "por defecto" de SAP y
+        // otra con la corrección en la versión real de la Tapa) en vez de sumarse en una sola fila
+        // (reportado por el usuario).
+        // Una fila manual (botón "+") también se puede bloquear con el mismo candado que una real
+        // (`handleToggleBloqueoOrden` usa la misma key ORDEN|MATERIAL|CANTIDAD para ambas) — sin
+        // este filtro, bloquearla no tenía ningún efecto: igual se exportaba a Plan Final/SAP
+        // (reportado por el usuario).
+        const manualOrds = (manualOrdersPorPuesto.get(puesto) || [])
+          .filter(o => !acolchadoBloqueadasKeysGlobal.has(mk(o)))
+          .map(o => ({ ...o, _source: source }));
         // Si el usuario activó "Consolidar Carga de Acolchado" (isAchConsolidated), la vista ya
         // muestra una sola fila por material — Plan Final debe reflejar exactamente eso: una sola
         // orden consolidada por material para este puesto, no las órdenes crudas individuales.
         const finalOrds = isAchConsolidated
           ? Array.from(
-              finalOrdsRaw.reduce((map, o) => {
+              [...finalOrdsRaw, ...manualOrds].reduce((map, o) => {
                 const mat = normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || '');
                 const qty = Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0);
                 const existing = map.get(mat);
                 if (existing) {
                   existing['CANTIDAD'] = Number(existing['CANTIDAD'] || 0) + qty;
                   existing._wasAdjusted = existing._wasAdjusted || o._wasAdjusted;
+                  // La corrección manual por Tapa trae su propia Versión de Fabricación (siempre
+                  // coincide con la de la Tapa que la generó, ya validada contra SAP) — nunca se
+                  // pisa por la versión "por defecto" de la orden real consolidada.
+                  if (o._isManual) existing._prodVersion = o._prodVersion;
                 } else {
                   map.set(mat, { ...o, CANTIDAD: qty, _isConsolidated: true });
                 }
                 return map;
               }, new Map<string, any>()).values()
             )
-          : finalOrdsRaw;
+          : [...finalOrdsRaw, ...manualOrds];
         next = [...next.filter(o => o._source !== source), ...finalOrds];
       });
       return next;
     });
-  }, [acolchadoAceptadoPuestos, acolchadoCelulasAjusteActivas, acolchadoExcludeKeysPorPuesto, acolchadoAdjustedInPorPuesto, acolchadoSplitRemaindersPorPuesto, averiaAcolchadoResultado, mapToHojaRutaInternal, techFilteredOrdenesParaAcolchado, normalizeMaterialCode, versionPorMaterialAjusteAcolchado, acolchadoBloqueadasKeysGlobal, acolchadoQtyOverridePorOrden, isAchConsolidated, addNotification]);
+  }, [acolchadoAceptadoPuestos, acolchadoCelulasAjusteActivas, acolchadoExcludeKeysPorPuesto, acolchadoAdjustedInVisiblePorPuesto, acolchadoSplitRemaindersPorPuesto, averiaAcolchadoResultado, mapToHojaRutaInternal, techFilteredOrdenesParaAcolchado, normalizeMaterialCode, versionPorMaterialAjusteAcolchado, acolchadoBloqueadasKeysGlobal, acolchadoQtyOverridePorOrden, isAchConsolidated, addNotification, manualOrdersPorPuesto, planFinalForceResync]);
 
   // ─── Aceptar Plan de Tapa/Cosedora (COSEDORA-ACHXX) — igual patrón que Acolchado ───────
   // Antes, la Tapa/Cosedora nunca tenía forma de llegar a Plan Final (solo Acolchado la tenía).
@@ -7894,9 +9769,34 @@ useEffect(() => {
   useEffect(() => {
     if (tapaAceptadoPuestos.size === 0) return;
     const mk = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
+    // Mismo blindaje que Acolchado: "COSEDORA-ACH02" y "PEF02" pueden ser dos alias de la MISMA
+    // HR-PEF02 — si el Set termina con ambos (alias viejo nunca se quita), se resincronizarían los
+    // dos en paralelo y se duplicarían las horas (caso real reportado por el usuario: COSEDORA-ACH02
+    // mostraba el doble de T. Requerido en Resumen pese a que su tarjeta individual estaba bien).
+    const aliasPorHR = new Map<string, string[]>();
+    tapaAceptadoPuestos.forEach(p => {
+      const hr = mapToHojaRutaInternal(p).trim().toUpperCase();
+      if (!aliasPorHR.has(hr)) aliasPorHR.set(hr, []);
+      aliasPorHR.get(hr)!.push(p);
+    });
+    const puestosVigentes = new Set<string>();
+    const aliasDescartados: string[] = [];
+    aliasPorHR.forEach(lista => {
+      puestosVigentes.add(lista[lista.length - 1]);
+      aliasDescartados.push(...lista.slice(0, -1));
+    });
+    if (aliasDescartados.length > 0) {
+      setTapaAceptadoPuestos(prev => {
+        const next = new Set(prev);
+        aliasDescartados.forEach(p => next.delete(p));
+        return next;
+      });
+    }
     setPlanFinalOrders(prev => {
-      let next = prev;
-      tapaAceptadoPuestos.forEach(puesto => {
+      let next = aliasDescartados.length > 0
+        ? prev.filter(o => !aliasDescartados.some(p => o._source === `tapa-${p}`))
+        : prev;
+      puestosVigentes.forEach(puesto => {
         const hr = mapToHojaRutaInternal(puesto).trim().toUpperCase();
         // Reasignación por Avería: se une a la cascada normal Tapa-sigue-a-Acolchado, siempre que
         // esté activa (independiente de si esta célula tiene cascada normal o no).
@@ -7921,11 +9821,16 @@ useEffect(() => {
           ...splitRemainders.filter(o => !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: source })),
           ...adjustedIn.filter(o => !bloqueadas.has(mk(o))).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: source })),
         ];
-        next = [...next.filter(o => o._source !== source), ...finalOrds];
+        // Una fila manual también puede bloquearse con el mismo candado — sin filtrarla acá,
+        // bloquearla no tenía ningún efecto (reportado por el usuario).
+        const manualOrds = (manualOrdersPorPuesto.get(puesto) || [])
+          .filter(o => !bloqueadas.has(mk(o)))
+          .map(o => ({ ...o, _source: source }));
+        next = [...next.filter(o => o._source !== source), ...finalOrds, ...manualOrds];
       });
       return next;
     });
-  }, [tapaAceptadoPuestos, tapaCascadaDesdeAcolchado, averiaTapaResultado, tapaOrdenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes]);
+  }, [tapaAceptadoPuestos, tapaCascadaDesdeAcolchado, averiaTapaResultado, tapaOrdenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes, manualOrdersPorPuesto, planFinalForceResync]);
 
   // ─── Aceptar Plan de Forros Finales (FORRO / FBASE) ───────────────────────
   // Esta pestaña no tiene motor de ajuste (cada puesto produce lo suyo, no hay redistribución),
@@ -7958,16 +9863,29 @@ useEffect(() => {
         const codigos = hr.includes(' / ') ? hr.split(' / ').map(c => c.trim().toUpperCase()) : [hr];
         const bloqueadas = ordenesBloqueadasPorPuesto.get(puesto) || new Set<string>();
         const source = `forros-${puesto}`;
-        const finalOrds = techFilteredOrdenes
+        // FBASE/HR-FORRO usan el rango de fechas independiente DE ESE PUESTO — ver techFilteredOrdenesParaPuesto.
+        const origen = techFilteredOrdenesParaPuesto(puesto);
+        const finalOrds = origen
           .filter(o => codigos.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()))
           .filter(o => !bloqueadas.has(mk(o)))
           .map(aplicarCantidadManual)
-          .map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: source }));
-        next = [...next.filter(o => o._source !== source), ...finalOrds];
+          // `_finalHR` se usa como ARBPL en la exportación y como clave para buscar la Versión de
+          // Fabricación por material+hoja — si `hr` viene combinado ("HR-A / HR-B") y se le asigna
+          // TAL CUAL a toda orden del puesto, SAP recibe un ARBPL sin sentido y la búsqueda de
+          // versión nunca encuentra coincidencia (reportado por el usuario: "en algunos no me
+          // coloca la versión"). Se usa el código PROPIO de cada orden (el que de verdad hizo match
+          // en el filtro de arriba), nunca el combinado completo.
+          .map(o => ({ ...o, _finalHR: String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() || hr, _wasAdjusted: false, _source: source }));
+        // Una fila manual también puede bloquearse con el mismo candado — sin filtrarla acá,
+        // bloquearla no tenía ningún efecto (reportado por el usuario).
+        const manualOrds = (manualOrdersPorPuesto.get(puesto) || [])
+          .filter(o => !bloqueadas.has(mk(o)))
+          .map(o => ({ ...o, _source: source }));
+        next = [...next.filter(o => o._source !== source), ...finalOrds, ...manualOrds];
       });
       return next;
     });
-  }, [forrosAceptadoPuestos, ordenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes, aplicarCantidadManual]);
+  }, [forrosAceptadoPuestos, ordenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenesParaPuesto, aplicarCantidadManual, manualOrdersPorPuesto, planFinalForceResync]);
 
   const renderDateFilterHeaderInternal = () => renderDateFilterHeader(techStartDate, setTechStartDate, techEndDate, setTechEndDate);
 
@@ -7977,6 +9895,421 @@ useEffect(() => {
   // creada para ese grupo, que aplica igual a todas las órdenes exportadas.
   const planFinalCentro = useMemo(() => (
     forrosGruposList.find(g => g.codigo_grupo === 2)?.centro || '1000'
+  ), [forrosGruposList]);
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // VALIDAR PLAN — control de cobertura Componentes↔Forro↔Demanda sobre el Plan Final
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // Se dispara a demanda (botón "VALIDAR PLAN", no automático) y revisa DOS cosas sobre lo que
+  // ya está en `planFinalOrders` — que por construcción YA excluye lo bloqueado con el candado
+  // en cada sección, así que ningún nivel necesita filtrarlo de nuevo acá:
+  //   1) Balance por componente (Tabla A) + Forro producible (Tabla B): ¿lo que vamos a
+  //      fabricar de cada componente (ACOLCHADO, BANDA EN METROS/RMTB, TAPA, BANDA, OTROS —
+  //      confirmado con el usuario que el Forro también se compone de materiales de "Otras
+  //      máquinas de interiores", no solo Tapa/Banda) alcanza para lo que el siguiente nivel
+  //      tiene planificado? Se reporta en AMBOS sentidos: déficit (no alcanza) Y excedente
+  //      (sobra — esa capacidad se podría redirigir a algo que sí se necesita).
+  //   2) Forro → Demanda real: Colchón/FERT en Quito, traslado manual en GYE (sin cubo,
+  //      `trasladoGyePorForro` — se carga un valor nuevo cada día). Un Forro planificado sin
+  //      demanda que lo explique se marca `sinExplicar` para confirmar si es un traslado de
+  //      reparación (con cantidad, puede cubrir solo una parte).
+  // Cualquier fila con déficit (de cualquiera de los dos checks, a cualquier nivel) se puede
+  // marcar como "Validé en SAP, tengo stock" (`stockConfirmadoPorClave`) y esa marca se puede
+  // bloquear con candado para que no se desmarque por accidente — igual criterio que el candado
+  // de bloqueo de órdenes que ya usa el resto del módulo. Todo esto (traslado GYE, reparación,
+  // stock confirmado) viaja en el snapshot del .txt del día (`PlanTxtSnapshot`) para recuperarse
+  // si se vuelve a abrir el plan de esa misma fecha.
+  const [trasladoGyePorForro, setTrasladoGyePorForro] = useState<Map<string, number>>(new Map());
+  const [trasladoGyeBloqueado, setTrasladoGyeBloqueado] = useState<Set<string>>(new Set());
+  const [reparacionTrasladoPorForro, setReparacionTrasladoPorForro] = useState<Map<string, number>>(new Map());
+  const [stockConfirmadoPorClave, setStockConfirmadoPorClave] = useState<Map<string, { confirmado: boolean; bloqueado: boolean }>>(new Map());
+
+  // ─── Pestaña "Traslado a GYE": dos totales manuales (CHN/BASES) ──────────────────────────────
+  // Independiente de `trasladoGyePorForro` de arriba (un número por Forro, usado solo para el
+  // check de demanda de Validar Plan) — esto es puramente informativo para Resumen y el correo:
+  // no alimenta ningún cálculo de capacidad/demanda. Antes era una tabla de detalle pegada de
+  // SAP/Excel línea por línea (12 columnas exactas); se simplificó a solo el total por almacén
+  // a pedido del usuario (el pegado de detalle fallaba seguido por no coincidir el número de
+  // columnas tabuladas con lo que realmente trae el reporte).
+  const [trasladoGyeChn, setTrasladoGyeChn] = useState<number>(0);
+  const [trasladoGyeBase, setTrasladoGyeBase] = useState<number>(0);
+
+  const TRASLADO_GYE_ALMACEN_NOMBRE: Record<string, string> = { '2008': '2008 - Forros CHN', '2011': '2011 - Forros Bases' };
+
+  const trasladoGyeResumenPorAlmacen = useMemo(() => ({
+    total2008: trasladoGyeChn,
+    total2011: trasladoGyeBase,
+    totalGeneral: trasladoGyeChn + trasladoGyeBase,
+    filas: (trasladoGyeChn > 0 || trasladoGyeBase > 0) ? 1 : 0,
+  }), [trasladoGyeChn, trasladoGyeBase]);
+
+  // Nivel 2 → 1, una rama por cada "hijo" directo del FORRO (TAPA, BANDA, OTROS) — misma forma
+  // que `acolchadoTapasPorMaterialNorm` (Acolchado → Tapa), un nivel más arriba. Se construyen
+  // directo desde la explosión ya hecha de cada FORRO (`nivel2ExplosionData`, filtrada por rama).
+  const tapaForrosPorMaterialNorm = useMemo(() => {
+    const map = new Map<string, Map<string, number>>();
+    nivel2TapaComponentes.forEach(comp => {
+      const tapaNorm = normalizeMaterialCode(comp.COMPONENTE || '');
+      const forroNorm = normalizeMaterialCode(comp.parentMaterial || '');
+      const factor = Number(comp.CANTIDAD_UNITARIA || comp.Cantidad || 0);
+      if (!tapaNorm || !forroNorm || factor <= 0) return;
+      if (!map.has(tapaNorm)) map.set(tapaNorm, new Map());
+      const inner = map.get(tapaNorm)!;
+      inner.set(forroNorm, Math.max(inner.get(forroNorm) || 0, factor));
+    });
+    return map;
+  }, [nivel2TapaComponentes, normalizeMaterialCode]);
+
+  const bandaForrosPorMaterialNorm = useMemo(() => {
+    const map = new Map<string, Map<string, number>>();
+    nivel2BandaComponentes.forEach(comp => {
+      const bandaNorm = normalizeMaterialCode(comp.COMPONENTE || '');
+      const forroNorm = normalizeMaterialCode(comp.parentMaterial || '');
+      const factor = Number(comp.CANTIDAD_UNITARIA || comp.Cantidad || 0);
+      if (!bandaNorm || !forroNorm || factor <= 0) return;
+      if (!map.has(bandaNorm)) map.set(bandaNorm, new Map());
+      const inner = map.get(bandaNorm)!;
+      inner.set(forroNorm, Math.max(inner.get(forroNorm) || 0, factor));
+    });
+    return map;
+  }, [nivel2BandaComponentes, normalizeMaterialCode]);
+
+  const otrosForrosPorMaterialNorm = useMemo(() => {
+    const map = new Map<string, Map<string, number>>();
+    nivel2OtrosComponentes.forEach(comp => {
+      const otroNorm = normalizeMaterialCode(comp.COMPONENTE || '');
+      const forroNorm = normalizeMaterialCode(comp.parentMaterial || '');
+      const factor = Number(comp.CANTIDAD_UNITARIA || comp.Cantidad || 0);
+      if (!otroNorm || !forroNorm || factor <= 0) return;
+      if (!map.has(otroNorm)) map.set(otroNorm, new Map());
+      const inner = map.get(otroNorm)!;
+      inner.set(forroNorm, Math.max(inner.get(forroNorm) || 0, factor));
+    });
+    return map;
+  }, [nivel2OtrosComponentes, normalizeMaterialCode]);
+
+  // Nivel 3 → 2 de la rama BANDA: BANDA EN METROS/RMTB alimenta normalmente a BANDA, pero en
+  // algunos BASE nace anidada directo dentro de TAPA (`fetchNivel3BandaMetrosComponentes`,
+  // "Origen 2") — `parentMaterial` ya apunta al material correcto en cada caso, así que se usa
+  // tal cual sin distinguir el origen.
+  const bandaMetrosBandaPorMaterialNorm = useMemo(() => {
+    const map = new Map<string, Map<string, number>>();
+    nivel3BandaExplosionData.forEach(comp => {
+      const bandaMetrosNorm = normalizeMaterialCode(comp.COMPONENTE || '');
+      const padreNorm = normalizeMaterialCode(comp.parentMaterial || '');
+      const factor = Number(comp.CANTIDAD_UNITARIA || 0);
+      if (!bandaMetrosNorm || !padreNorm || factor <= 0) return;
+      if (!map.has(bandaMetrosNorm)) map.set(bandaMetrosNorm, new Map());
+      const inner = map.get(bandaMetrosNorm)!;
+      inner.set(padreNorm, Math.max(inner.get(padreNorm) || 0, factor));
+    });
+    return map;
+  }, [nivel3BandaExplosionData, normalizeMaterialCode]);
+
+  const validacionPlan = useMemo(() => {
+    // Universo de materiales "Forro" para clasificar lo planificado en Plan Final: unión de
+    // ambas fuentes — la explosión de Niveles 1-3 (Plan Táctico de Grupos, da los FACTORES/ratios
+    // de Tapa-Banda-Otros→Forro que usa la Tabla B) Y las órdenes FERT reales (da la demanda real
+    // de Quito, `resumenForrosFert` más abajo) — así un Forro clasifica aunque solo se haya
+    // corrido una de las dos explosiones.
+    const forroMatsNorm = new Set([
+      ...nivel1ForroResumen.map(r => normalizeMaterialCode(r.material)),
+      ...resumenForros.map(r => normalizeMaterialCode(r.material)),
+    ]);
+    const tapaMatsNorm = new Set(nivel2TapaResumen.map(r => normalizeMaterialCode(r.material)));
+    const bandaMatsNorm = new Set(nivel2BandaResumen.map(r => normalizeMaterialCode(r.material)));
+    const otrosMatsNorm = new Set(nivel2OtrosResumen.map(r => normalizeMaterialCode(r.material)));
+    const acolchadoMatsNorm = new Set(acolchadoMateriales.map(m => normalizeMaterialCode(m.material)));
+    const bandaMetrosMatsNorm = new Set(nivel3BandaMetrosResumen.map(r => normalizeMaterialCode(r.material)));
+
+    const sumarPlaneadoPorMaterial = (filtro: Set<string>) => {
+      const map = new Map<string, number>();
+      planFinalOrders.forEach(o => {
+        const mat = normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || '');
+        if (!mat || !filtro.has(mat)) return;
+        const cantidad = Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0);
+        if (cantidad <= 0) return;
+        map.set(mat, (map.get(mat) || 0) + cantidad);
+      });
+      return map;
+    };
+
+    const acolchadoPlaneado = sumarPlaneadoPorMaterial(acolchadoMatsNorm);
+    const bandaMetrosPlaneado = sumarPlaneadoPorMaterial(bandaMetrosMatsNorm);
+    const tapaPlaneado = sumarPlaneadoPorMaterial(tapaMatsNorm);
+    const bandaPlaneado = sumarPlaneadoPorMaterial(bandaMatsNorm);
+    const otrosPlaneado = sumarPlaneadoPorMaterial(otrosMatsNorm);
+    const forroPlaneado = sumarPlaneadoPorMaterial(forroMatsNorm);
+
+    const nombrePorNivel = (material: string): { nivel: string; nombre: string } => {
+      if (acolchadoMatsNorm.has(material)) return { nivel: 'Acolchado', nombre: materialNombrePorCodigo.get(material) || '' };
+      if (bandaMetrosMatsNorm.has(material)) return { nivel: 'Banda en Metros', nombre: materialNombrePorCodigo.get(material) || '' };
+      if (tapaMatsNorm.has(material)) return { nivel: 'Tapa', nombre: materialNombrePorCodigo.get(material) || '' };
+      if (bandaMatsNorm.has(material)) return { nivel: 'Banda', nombre: materialNombrePorCodigo.get(material) || '' };
+      if (otrosMatsNorm.has(material)) return { nivel: 'Otros Interiores', nombre: materialNombrePorCodigo.get(material) || '' };
+      return { nivel: '', nombre: materialNombrePorCodigo.get(material) || '' };
+    };
+
+    // ── TABLA A — Balance por componente, en AMBOS sentidos (déficit y excedente) ──────────
+    // No reparte nada entre hijos que compartan un mismo componente: solo compara, material
+    // por material, "cuánto necesitan en total mis hijos según SU PROPIO plan" vs "cuánto
+    // planifiqué yo" — así se puede avisar tanto si falta como si sobra, en cualquier nivel.
+    const balanceMapas = [
+      calcularBalancePorComponente(acolchadoPlaneado, acolchadoTapasPorMaterialNorm, tapaPlaneado),
+      calcularBalancePorComponente(bandaMetrosPlaneado, bandaMetrosBandaPorMaterialNorm, combinarMapasSuma(tapaPlaneado, bandaPlaneado)),
+      calcularBalancePorComponente(tapaPlaneado, tapaForrosPorMaterialNorm, forroPlaneado),
+      calcularBalancePorComponente(bandaPlaneado, bandaForrosPorMaterialNorm, forroPlaneado),
+      calcularBalancePorComponente(otrosPlaneado, otrosForrosPorMaterialNorm, forroPlaneado),
+    ];
+    const balance = balanceMapas.flatMap(mapa => Array.from(mapa.entries()).map(([material, b]) => {
+      const { nivel, nombre } = nombrePorNivel(material);
+      const pctNoCubierto = b.necesidad > 0 ? (b.deficit / b.necesidad) * 100 : 0;
+      return { material, nivel, nombre, ...b, pctNoCubierto };
+    })).filter(b => b.deficit > 0.01 || b.excedente > 0.01)
+      .sort((a, b) => (b.deficit + b.excedente) - (a.deficit + a.excedente));
+
+    // ── TABLA B — Forro producible (cascada de reparto "mejor ajuste") ──────────────────────
+    // Acá sí importa el reparto entre hijos que comparten un componente: la pregunta es "de
+    // los Forros planificados, ¿cuáles puntualmente se van a quedar cortos?", igual que el
+    // ejemplo original del usuario ("90 Tapas, solo 45 producibles").
+    const tier3Planeado = combinarMapasSuma(acolchadoPlaneado, bandaMetrosPlaneado);
+    const tier3FactorMap = combinarMapasDeFactores(acolchadoTapasPorMaterialNorm, bandaMetrosBandaPorMaterialNorm);
+    const tier2Techo = combinarMapasSuma(tapaPlaneado, bandaPlaneado, otrosPlaneado);
+    const tier2 = asignarComponentePorHijos(tier3Planeado, tier3FactorMap, tier2Techo);
+
+    const tier2SupplyParaForro = new Map<string, number>();
+    tier2Techo.forEach((cantidad, material) => {
+      const limite = tier2.cobertura.get(material);
+      tier2SupplyParaForro.set(material, limite !== undefined ? Math.min(cantidad, limite) : cantidad);
+    });
+
+    const tier2to1FactorMap = combinarMapasDeFactores(tapaForrosPorMaterialNorm, bandaForrosPorMaterialNorm, otrosForrosPorMaterialNorm);
+    const tier1 = asignarComponentePorHijos(tier2SupplyParaForro, tier2to1FactorMap, forroPlaneado);
+
+    const check1 = Array.from(forroPlaneado.entries()).map(([material, planeado]) => {
+      const producible = tier1.cobertura.get(material);
+      const producibleFinal = producible !== undefined ? Math.min(producible, planeado) : planeado;
+      const deficit = Math.max(0, planeado - producibleFinal);
+      const pctNoCubierto = planeado > 0 ? (deficit / planeado) * 100 : 0;
+      // Material limitante: el que causó el "mínimo" en la cascada — si ESE mismo material (el
+      // nivel 2: Tapa/Banda/Otros) a su vez quedó corto porque su propio nivel 3 (Acolchado/
+      // Banda en Metros) no le alcanzó, se reporta ese nivel 3 como la causa raíz real, no el
+      // intermedio (que en ese caso solo está reflejando un problema de más abajo).
+      const limitanteNivel2 = deficit > 0.01 ? tier1.limitante.get(material) : '';
+      const nivel2QuedoCortoPorTier3 = !!limitanteNivel2 && (tier2.cobertura.get(limitanteNivel2) ?? Infinity) < (tier2Techo.get(limitanteNivel2) || 0) - 0.01;
+      const limitanteNivel3 = nivel2QuedoCortoPorTier3 ? tier2.limitante.get(limitanteNivel2!) : '';
+      const limitante = limitanteNivel3 || limitanteNivel2 || '';
+      return {
+        material,
+        nombre: materialNombrePorCodigo.get(material) || '',
+        planeado,
+        producible: producibleFinal,
+        deficit,
+        pctNoCubierto,
+        sinDatoBom: producible === undefined,
+        limitante,
+        limitanteNombre: limitante ? (nombrePorNivel(limitante).nombre || '') : '',
+        limitanteNivel: limitante ? nombrePorNivel(limitante).nivel : '',
+      };
+    }).sort((a, b) => b.deficit - a.deficit);
+
+    // CHECK 2 — Forro → Demanda: UN SOLO plan (siempre centro 1000, Quito) — no hay una "sesión"
+    // de centro 2000 aparte. Lo que se traslada a GYE sale del MISMO Forro planificado acá, así
+    // que su necesidad se SUMA a la demanda de Colchón/FERT de Quito, no la reemplaza — ambas
+    // compiten por el mismo Forro (confirmado con el usuario: antes esto estaba mal, mostraba una
+    // Y OTRA como alternativas según un "centro del plan" que en la práctica nunca cambia).
+    // La demanda de Quito sale de `resumenForros` (arriba, fuera de este memo) — órdenes FERT
+    // REALES de centro 1000 (pestaña "Órdenes FERT", botón "Calcular Demanda Quito (FERT)" de
+    // Validar Plan), NO del Plan Táctico de Grupos — confirmado con el usuario: esa es la fuente
+    // correcta, independiente de la explosión de Niveles 1-3 (que sigue siendo necesaria solo
+    // para los FACTORES/ratios de componentes de la Tabla A/B más arriba).
+    const demandaColchonNorm = new Map<string, number>();
+    resumenForros.forEach(r => {
+      const mat = normalizeMaterialCode(r.material);
+      if (!mat) return;
+      demandaColchonNorm.set(mat, (demandaColchonNorm.get(mat) || 0) + r.total1000);
+    });
+
+    const materialesCheck2 = new Set<string>([...forroPlaneado.keys(), ...demandaColchonNorm.keys(), ...trasladoGyePorForro.keys()]);
+    const check2 = Array.from(materialesCheck2).map(material => {
+      const planeado = forroPlaneado.get(material) || 0;
+      const demandaColchon = demandaColchonNorm.get(material) || 0;
+      const trasladoGye = trasladoGyePorForro.get(material) || 0;
+      const demanda = demandaColchon + trasladoGye;
+      const reparacion = Math.min(reparacionTrasladoPorForro.get(material) || 0, Math.max(0, planeado - demanda));
+      const demandaEfectiva = demanda + reparacion;
+      const deficit = Math.max(0, demandaEfectiva - planeado);
+      const superavit = Math.max(0, planeado - demandaEfectiva);
+      const pctNoCubierto = demandaEfectiva > 0 ? (deficit / demandaEfectiva) * 100 : 0;
+      // Sigue pidiendo atención mientras el Forro planificado no tenga NINGUNA demanda (ni
+      // Colchón ni traslado) que lo explique, y el traslado de reparación confirmado todavía no
+      // cubra todo lo planificado.
+      const sinExplicar = demanda <= 0 && planeado > reparacion;
+      return { material, nombre: materialNombrePorCodigo.get(material) || '', planeado, demandaColchon, trasladoGye, demanda, reparacion, deficit, superavit, pctNoCubierto, sinExplicar };
+    }).sort((a, b) => (b.deficit + b.superavit) - (a.deficit + a.superavit));
+
+    // ── RESUMEN DE FORROS — una fila por Forro con el veredicto final: cuánto necesitamos,
+    // cuánto vamos a entregar realmente (lo mínimo entre lo PLANIFICADO y lo PRODUCIBLE según
+    // componentes — de nada sirve tener planificado si Tapa/Banda/Otros no alcanzan) y, si no
+    // se cubre, el porqué puntual (falta de componente vs. falta de planificación frente a la
+    // demanda real). Se muestra ANTES que el detalle de las tablas 1/2/3, como veredicto rápido.
+    const check1PorMaterial = new Map(check1.map(r => [r.material, r]));
+    const check2PorMaterial = new Map(check2.map(r => [r.material, r]));
+    const materialesResumen = new Set<string>([...forroPlaneado.keys(), ...materialesCheck2]);
+    const resumenCumplimientoForros = Array.from(materialesResumen).map(material => {
+      const planeado = forroPlaneado.get(material) || 0;
+      const c1 = check1PorMaterial.get(material);
+      const c2 = check2PorMaterial.get(material);
+      const producible = c1 ? c1.producible : planeado;
+      const entregaReal = Math.min(planeado, producible);
+      const demanda = c2?.demanda || 0;
+      const sinExplicar = !!c2?.sinExplicar;
+      const cumplimientoPct = demanda > 0 ? Math.min(100, (entregaReal / demanda) * 100) : (planeado > 0 ? 100 : 0);
+      const cubierto = demanda <= 0 || entregaReal >= demanda - 0.01;
+      let porque = '';
+      if (demanda <= 0) {
+        porque = sinExplicar
+          ? 'Planificado sin demanda que lo explique (ni Colchón de Quito ni traslado a GYE) — confirmar si es un traslado de reparación.'
+          : 'Sin demanda registrada para este Forro.';
+      } else if (cubierto) {
+        porque = 'Cubierto completo: lo producible alcanza para la demanda.';
+      } else if (c1 && c1.deficit > 0.01 && c1.limitante) {
+        porque = `Falta ${Math.round(c1.deficit).toLocaleString()} por falta de ${c1.limitanteNombre || c1.limitante} (${c1.limitanteNivel})`;
+      } else {
+        porque = `Falta planificar ${Math.round(demanda - entregaReal).toLocaleString()} unidades frente a la demanda (Colchón${(c2?.trasladoGye || 0) > 0 ? ' + traslado GYE' : ''})`;
+      }
+      return {
+        material,
+        nombre: materialNombrePorCodigo.get(material) || '',
+        planeado, producible, entregaReal, demanda,
+        cumplimientoPct, cubierto, sinExplicar, porque,
+      };
+    }).sort((a, b) => a.cumplimientoPct - b.cumplimientoPct);
+
+    // ── RESUMEN PARA ENSAMBLADO — los Forros que NO se van a poder entregar completos ───────
+    // Es el área afectada (consume el Forro terminado), así que el resumen se enfoca en lo que
+    // a ELLOS les importa: qué Forro, cuánto no llega, y por culpa de qué material — no en el
+    // detalle interno de cómo se calculó.
+    const resumenEnsamblado = check1
+      .filter(r => r.deficit > 0.01)
+      .map(r => ({
+        material: r.material,
+        nombre: r.nombre,
+        planeado: r.planeado,
+        noEntregable: r.deficit,
+        pctNoCubierto: r.pctNoCubierto,
+        limitante: r.limitante,
+        limitanteNombre: r.limitanteNombre,
+        limitanteNivel: r.limitanteNivel,
+      }))
+      .sort((a, b) => b.noEntregable - a.noEntregable);
+    const resumenEnsambladoTotales = {
+      forrosAfectados: resumenEnsamblado.length,
+      unidadesNoEntregables: resumenEnsamblado.reduce((acc, r) => acc + r.noEntregable, 0),
+      unidadesPlaneadas: resumenEnsamblado.reduce((acc, r) => acc + r.planeado, 0),
+    };
+
+    return { balance, check1, check2, resumenForros: resumenCumplimientoForros, resumenEnsamblado, resumenEnsambladoTotales };
+  }, [
+    planFinalOrders, nivel1ForroResumen, resumenForros, nivel2TapaResumen, nivel2BandaResumen, nivel2OtrosResumen,
+    acolchadoMateriales, nivel3BandaMetrosResumen, acolchadoTapasPorMaterialNorm, bandaMetrosBandaPorMaterialNorm,
+    tapaForrosPorMaterialNorm, bandaForrosPorMaterialNorm, otrosForrosPorMaterialNorm,
+    normalizeMaterialCode, materialNombrePorCodigo, trasladoGyePorForro, reparacionTrasladoPorForro,
+  ]);
+
+  const handleSetTrasladoGye = useCallback((material: string, valor: string) => {
+    const cantidad = Math.max(0, Number(valor) || 0);
+    setTrasladoGyePorForro(prev => {
+      const next = new Map(prev);
+      if (cantidad > 0) next.set(material, cantidad); else next.delete(material);
+      return next;
+    });
+  }, []);
+
+  const handleToggleTrasladoGyeBloqueado = useCallback((material: string) => {
+    setTrasladoGyeBloqueado(prev => {
+      const next = new Set(prev);
+      if (next.has(material)) next.delete(material); else next.add(material);
+      return next;
+    });
+  }, []);
+
+  const handleSetReparacionTraslado = useCallback((material: string, valor: string) => {
+    const cantidad = Math.max(0, Number(valor) || 0);
+    setReparacionTrasladoPorForro(prev => {
+      const next = new Map(prev);
+      if (cantidad > 0) next.set(material, cantidad); else next.delete(material);
+      return next;
+    });
+  }, []);
+
+  // Marca/desmarca "Validé en SAP, tengo stock" para una fila con déficit — `clave` identifica
+  // la fila de forma única (ej. "forro1:<material>", "bal:<material>") para que el mismo
+  // material no comparta el estado entre tablas distintas. No hace nada si la fila ya está
+  // bloqueada con candado (hay que desbloquear primero).
+  const handleToggleStockConfirmado = useCallback((clave: string) => {
+    setStockConfirmadoPorClave(prev => {
+      const actual = prev.get(clave);
+      if (actual?.bloqueado) return prev;
+      const next = new Map(prev);
+      next.set(clave, { confirmado: !actual?.confirmado, bloqueado: false });
+      return next;
+    });
+  }, []);
+
+  const handleToggleStockBloqueado = useCallback((clave: string) => {
+    setStockConfirmadoPorClave(prev => {
+      const actual = prev.get(clave) || { confirmado: false, bloqueado: false };
+      const next = new Map(prev);
+      next.set(clave, { ...actual, bloqueado: !actual.bloqueado });
+      return next;
+    });
+  }, []);
+
+  // Celda reutilizable "Validé en SAP, tengo stock" + candado — aparece en toda fila con
+  // déficit de las tres tablas de VALIDAR PLAN. `clave` identifica la fila de forma única
+  // (ver `handleToggleStockConfirmado`).
+  // Barra de cobertura reutilizable (mismo estilo que el %Ocupación del resto del módulo) — un
+  // vistazo visual de "cuánto hay" vs "cuánto se necesita/planificó", en vez de solo números.
+  const BarraCobertura: React.FC<{ pct: number; tono: 'rojo' | 'ambar' | 'verde' }> = ({ pct, tono }) => (
+    <div className="flex-1 bg-slate-200/70 h-2.5 rounded-full overflow-hidden border border-slate-200 shadow-inner min-w-[60px]">
+      <div
+        className={cn('h-full transition-all duration-500', tono === 'rojo' ? 'bg-red-500' : tono === 'ambar' ? 'bg-amber-400' : 'bg-emerald-500')}
+        style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+      />
+    </div>
+  );
+
+  const StockCheckCell: React.FC<{ clave: string; label?: string }> = ({ clave, label = 'Stock SAP' }) => {
+    const estado = stockConfirmadoPorClave.get(clave);
+    return (
+      <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+        <label className={cn('flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide cursor-pointer', estado?.confirmado ? 'text-emerald-600' : 'text-slate-400')}>
+          <input
+            type="checkbox"
+            checked={!!estado?.confirmado}
+            disabled={!!estado?.bloqueado}
+            onChange={() => handleToggleStockConfirmado(clave)}
+            className="accent-emerald-600"
+          />
+          {label}
+        </label>
+        <button
+          type="button"
+          onClick={() => handleToggleStockBloqueado(clave)}
+          title={estado?.bloqueado ? 'Desbloquear' : 'Bloquear esta confirmación'}
+          className="text-slate-400 hover:text-indigo-600"
+        >
+          {estado?.bloqueado ? <Lock className="w-3 h-3 text-indigo-600" /> : <Unlock className="w-3 h-3" />}
+        </button>
+      </div>
+    );
+  };
+
+  // {GRUPO} de la ruta del respaldo .txt (ver src/app/api/planes-txt-forros): el mismo grupo Forros
+  // (codigo_grupo 2) cuyas restricciones usa todo Plan Táctico Forros. {CENTRO} = planFinalCentro.
+  const planTxtGrupo = useMemo(() => (
+    (forrosGruposList.find(g => g.codigo_grupo === 2) || forrosGruposList[0])?.nombre_grupo?.trim() || 'FORROS'
   ), [forrosGruposList]);
 
   const planFinalTipoOrden = useMemo(() => (
@@ -8048,8 +10381,19 @@ useEffect(() => {
   const getProdVersionPlanFinal = useCallback((o: any): string | undefined => {
     if (o._prodVersion !== undefined && o._prodVersion !== null && o._prodVersion !== '') return o._prodVersion;
     const mat = normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || '');
-    const hoja = String(o._finalHR || o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase().replace(/^HR-/, '');
-    return versionPorMaterialPlanFinal.get(mat)?.get(hoja)?.texto;
+    const porHoja = versionPorMaterialPlanFinal.get(mat);
+    if (!porHoja) return undefined;
+    // Respaldo defensivo: `_finalHR` ya no debería venir combinado ("HR-A / HR-B") tras el fix de
+    // las secciones que lo asignan, pero si algún caso se nos escapó, probar cada código por
+    // separado es más seguro que solo sacar el primer prefijo "HR-" (lo que dejaba el resto del
+    // string pegado y nunca encontraba la versión).
+    const hrRaw = String(o._finalHR || o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase();
+    const candidatos = hrRaw.includes('/') ? hrRaw.split('/').map(c => c.trim()) : [hrRaw];
+    for (const candidato of candidatos) {
+      const info = porHoja.get(candidato.replace(/^HR-/, ''));
+      if (info) return info.texto;
+    }
+    return undefined;
   }, [normalizeMaterialCode, versionPorMaterialPlanFinal]);
 
   // Cuando el motor de Acolchado (`asignarOptimoPorVersion`) parte una orden entre varias máquinas,
@@ -8139,6 +10483,162 @@ useEffect(() => {
   // como respaldo si todavía no se eligió la fecha del P1 en "Recuperación Pasos P1-P3".
   const planFinalFechaPlanificada = recuperacionFechasCalculadas?.n2n3 || techStartDate;
 
+  // Órdenes FERT que caen justo en la fecha de planificación del plan ("Planificación para" del
+  // encabezado, `planningDate` — NO `planFinalFechaPlanificada`, que depende de haber elegido una
+  // fecha de P1 en "Recuperación Pasos P1-P3" y, si no se eligió, cae a HOY como respaldo: con el
+  // usuario sin pasar por esa pestaña, esta tarjeta terminaba trayendo el FERT de HOY en vez del
+  // de la fecha que de verdad se está planificando — reportado por el usuario con un caso real en
+  // ACH02, 15 órdenes de fechas que no eran la de "Planificación para"), agrupadas por la MÁQUINA
+  // que ya trae cada orden FERT — a pedido del usuario: se muestran DENTRO de la tarjeta de Ajuste
+  // de Producción del puesto correspondiente, como referencia de producción YA comprometida en SAP
+  // para ese puesto ese día. No son órdenes de Forros editables (no tienen candado de bloqueo, no
+  // se pueden excluir ni editar su cantidad — solo visualizar), pero SÍ suman a las horas/% de
+  // Ocupación de la tarjeta: si no sumaran, la tarjeta mostraría capacidad libre que en realidad ya
+  // está tomada por esta producción FERT. Mismo filtro RESP (`allowedRespCodes`, grupo FORROS) que
+  // ya usa el resto de FERT, para no mezclar producción de otras áreas.
+  const fertDelDiaPorMaquina = useMemo(() => {
+    const map = new Map<string, any[]>();
+    if (!planningDate) return map;
+    ordenesFert.forEach(order => {
+      const centro = String(order['Centro'] || order['CENTRO'] || '').trim();
+      if (centro !== '1000') return;
+      const resp = String(order['RESPCTRLPROD'] || order['RESP_CTRL_PROD'] || '').trim().replace(/^0+/, '');
+      if (allowedRespCodes.length > 0 && !allowedRespCodes.includes(resp)) return;
+      const fecha = String(order['FECHA'] || order['FECHA_INICIO'] || order['FECHAINICIO'] || '').split('T')[0];
+      if (fecha !== planningDate) return;
+      const maquina = String(order['MAQUINA'] || order['Maquina'] || '').trim().toUpperCase();
+      if (!maquina) return;
+      if (!map.has(maquina)) map.set(maquina, []);
+      map.get(maquina)!.push(order);
+    });
+    return map;
+  }, [ordenesFert, allowedRespCodes, planningDate]);
+
+  // "PENDIENTES" del Resumen — a pedido del usuario: suma por puesto (Hoja de Ruta) de TODAS las
+  // órdenes FERT con fecha HASTA HOY (acumulado, no un solo día puntual — corregido a pedido del
+  // usuario: "los pendientes se toman hasta la fecha hoy") que todavía tienen `CANTPENDIENTE` sin
+  // entregar. `getFechaLocalHoy()` (no `techStartDate`/la fecha de planificación): es el backlog
+  // real a HOY, independiente de para qué fecha se esté armando el plan.
+  const fechaPendientes = useMemo(() => getFechaLocalHoy(), []);
+
+  // PENDIENTES del Resumen — suma por puesto (Hoja de Ruta) de las órdenes FERT con fecha HASTA
+  // HOY (`fecha <= fechaPendientes`, acumulado), mismo filtro Centro 1000 + RESP de grupo FORROS y
+  // mismo cruce por MAQUINA que ya usa `fertDelDiaPorMaquina`. La cantidad es `CANTPENDIENTE` — el
+  // campo que SAP ya manda PRECALCULADO para esto exacto (lo pendiente de entregar), confirmado
+  // revisando el resto del proyecto: lo usan 15+ componentes de esta misma app para esta misma
+  // noción (ProductionPlanSection, OrdenesFertTabSection, TacticalPlanEspumasSection, etc.) — ni
+  // `CANTNOTIFICADA` ni restar `CANTENTREGADA` a mano era necesario, el backend ya lo calcula.
+  // Respaldo (`CANTPROGRAMADA`/`CANTIDAD`) solo por si alguna orden puntual no trae el campo.
+  const pendientesPorHR = useMemo(() => {
+    const map: Record<string, number> = {};
+    if (!fechaPendientes) return map;
+    ordenesFert.forEach(order => {
+      const centro = String(order['Centro'] || order['CENTRO'] || '').trim();
+      if (centro !== '1000') return;
+      const resp = String(order['RESPCTRLPROD'] || order['RESP_CTRL_PROD'] || '').trim().replace(/^0+/, '');
+      if (allowedRespCodes.length > 0 && !allowedRespCodes.includes(resp)) return;
+      const fecha = String(order['FECHA'] || order['FECHA_INICIO'] || order['FECHAINICIO'] || '').split('T')[0];
+      if (!fecha || fecha > fechaPendientes) return;
+      const hr = String(order['MAQUINA'] || order['Maquina'] || '').trim().toUpperCase();
+      if (!hr) return;
+      const qty = Number(order['CANTPENDIENTE'] ?? order['CANTPROGRAMADA'] ?? order['CANTIDAD'] ?? 0);
+      if (qty <= 0) return;
+      map[hr] = (map[hr] || 0) + qty;
+    });
+    return map;
+  }, [ordenesFert, allowedRespCodes, fechaPendientes]);
+
+  // Detalle por orden (no solo el total sumado) para poder validar PENDIENTES línea por línea —
+  // mismo filtro EXACTO que `pendientesPorHR`, sin sumar. Muestra programada vs. pendiente para
+  // poder comparar directo contra "Ctd.teórica"/"Ctd.pend." de SAP.
+  const pendientesDetallePorHR = useMemo(() => {
+    const map: Record<string, { orden: string; material: string; cantProgramada: number; cantidad: number }[]> = {};
+    if (!fechaPendientes) return map;
+    ordenesFert.forEach(order => {
+      const centro = String(order['Centro'] || order['CENTRO'] || '').trim();
+      if (centro !== '1000') return;
+      const resp = String(order['RESPCTRLPROD'] || order['RESP_CTRL_PROD'] || '').trim().replace(/^0+/, '');
+      if (allowedRespCodes.length > 0 && !allowedRespCodes.includes(resp)) return;
+      const fecha = String(order['FECHA'] || order['FECHA_INICIO'] || order['FECHAINICIO'] || '').split('T')[0];
+      if (!fecha || fecha > fechaPendientes) return;
+      const hr = String(order['MAQUINA'] || order['Maquina'] || '').trim().toUpperCase();
+      if (!hr) return;
+      const cantidad = Number(order['CANTPENDIENTE'] ?? order['CANTPROGRAMADA'] ?? order['CANTIDAD'] ?? 0);
+      if (cantidad <= 0) return;
+      if (!map[hr]) map[hr] = [];
+      map[hr].push({
+        orden: String(order['ORDEN'] || order['ORDENPREVISIONAL'] || ''),
+        material: String(order['CodMaterial'] || order['MATERIAL'] || ''),
+        cantProgramada: Number(order['CANTPROGRAMADA'] ?? order['CANTIDAD'] ?? 0),
+        cantidad,
+      });
+    });
+    return map;
+  }, [ordenesFert, allowedRespCodes, fechaPendientes]);
+
+  // Botón "Calcular Cobertura" dentro del propio diálogo Validar Plan — dispara la consulta del
+  // Plan Táctico de Grupos de Ensamblado (P1/PFF) y, cuando termina, encadena la explosión de
+  // Niveles 1-3 (ver el useEffect de `validarPlanCoberturaPending`). Usa `recuperacionPasoFecha`
+  // (la fecha del P1, la MISMA bajo la que "Guardar PFF sin ajuste"/"Aplicar Ajuste al Plan P1"
+  // siempre guardan el plan — ver `fechaP1` en `CapacidadComparacionPanel`), NO
+  // `planFinalFechaPlanificada` (la fecha de PRODUCCIÓN de Forros, N2N3 — un día distinto en la
+  // cadena P1→P1.5→P2/P3). Antes usaba esta última, así que la consulta buscaba el plan de
+  // Ensamblado en el día equivocado y nunca lo encontraba — reportado por el usuario al recuperar
+  // un plan guardado ("no estamos recuperando los planes de ensamblado... de los grupos 1 y 6").
+  // Se cae a `planFinalFechaPlanificada` solo si todavía no se eligió fecha de P1 en "Recuperación
+  // Pasos P1-P3" (caso excepcional, ver mismo respaldo que ya usa el resto del módulo).
+  const handleCalcularCoberturaValidarPlan = useCallback(() => {
+    const fechaConsulta = recuperacionPasoFecha || planFinalFechaPlanificada;
+    if (!fechaConsulta) {
+      addNotification('warning', 'No se pudo determinar la fecha del Plan de Ensamblado (P1) — selecciona la fecha del P1 en la pestaña "Recuperación Pasos P1-P3".');
+      return;
+    }
+    if (gruposCoincidentes.length === 0) {
+      addNotification('warning', 'No hay grupos de Ensamblado (P1) configurados para consultar el Plan Táctico.');
+      return;
+    }
+    setValidarPlanCoberturaPending(true);
+    fetchPlanGrupoDetalle(fechaConsulta);
+  }, [recuperacionPasoFecha, planFinalFechaPlanificada, gruposCoincidentes, fetchPlanGrupoDetalle, addNotification]);
+
+  // Botón "Calcular Demanda Quito (FERT)" de Validar Plan — demanda real de Colchón en Quito,
+  // confirmada con el usuario: debe salir de las órdenes FERT reales (centro 1000, pestaña
+  // "Órdenes FERT"), NO del Plan Táctico de Grupos. Fuerza `targetDate1000` a la fecha de
+  // producción de este Plan Final y encadena fetchOrdenesFert → handleExplodeFerts (ver el
+  // useEffect de `validarPlanDemandaQuitoPending`). GYE sigue siendo ingreso manual (no tiene
+  // FERT propio relacionado al traslado — confirmado con el usuario).
+  const handleCalcularDemandaQuito = useCallback(() => {
+    if (!planFinalFechaPlanificada) {
+      addNotification('warning', 'No se pudo determinar la fecha de producción del Plan Final.');
+      return;
+    }
+    setTargetDate1000(planFinalFechaPlanificada);
+    setValidarPlanDemandaQuitoPending(true);
+    if (!hasFetchedOrdenesFert) fetchOrdenesFert();
+  }, [planFinalFechaPlanificada, hasFetchedOrdenesFert, fetchOrdenesFert, addNotification]);
+
+  // Copia el resumen de Forros no entregables en texto plano, listo para pegar en un correo o
+  // chat con Ensamblado — pensado para compartir afuera de la app, no solo para verlo en pantalla.
+  const handleCopiarResumenEnsamblado = useCallback(() => {
+    const { resumenEnsamblado, resumenEnsambladoTotales } = validacionPlan;
+    if (resumenEnsamblado.length === 0) {
+      addNotification('warning', 'No hay Forros con déficit para compartir — todo el plan está cubierto.');
+      return;
+    }
+    const lineas = [
+      `FORROS QUE NO SE VAN A ENTREGAR COMPLETOS — Plan del ${planFinalFechaPlanificada ? formatFechaSAP(planFinalFechaPlanificada) : 'día en curso'} (centro ${planFinalCentro})`,
+      `${resumenEnsambladoTotales.forrosAfectados} forro(s) afectado(s) · ${Math.round(resumenEnsambladoTotales.unidadesNoEntregables).toLocaleString()} unidad(es) no entregables de ${Math.round(resumenEnsambladoTotales.unidadesPlaneadas).toLocaleString()} planificadas`,
+      '',
+      ...resumenEnsamblado.map(r =>
+        `• ${r.material}${r.nombre ? ` (${r.nombre})` : ''}: faltan ${Math.round(r.noEntregable).toLocaleString()} de ${Math.round(r.planeado).toLocaleString()} (${r.pctNoCubierto.toFixed(0)}% sin cubrir)` +
+        (r.limitante ? ` — por falta de ${r.limitante}${r.limitanteNombre ? ` (${r.limitanteNombre})` : ''} [${r.limitanteNivel}]` : '')
+      ),
+    ];
+    navigator.clipboard.writeText(lineas.join('\n'))
+      .then(() => addNotification('success', 'Resumen copiado — ya lo puedes pegar en un correo o chat con Ensamblado.'))
+      .catch(() => addNotification('error', 'No se pudo copiar al portapapeles.'));
+  }, [validacionPlan, planFinalFechaPlanificada, formatFechaSAP, planFinalCentro, addNotification]);
+
   // HORA INICIO/FIN (GSUZS/GLUZS) van fijas en "00:00" para todas las filas (confirmado por el
   // usuario) — Forros no planifica a nivel de hora, solo de día. KDAUF/KDPOS (pedido comercial)
   // van en blanco: Forros es make-to-stock, no contra pedido. ESTATUS_REG_ORD siempre "1".
@@ -8149,7 +10649,7 @@ useEffect(() => {
       COD_ORDEN: String(idx + 1),
       AUART: planFinalTipoOrden,
       WERKS: planFinalCentro,
-      PLNBEZ: normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || ''),
+      PLNBEZ: materialCodeParaSap(o['MATERIAL'] || o['CodMaterial'] || ''),
       GAMNG: getCantidadFinalCorregida(o),
       VERID: getProdVersionPlanFinal(o) ?? '',
       ARBPL: String(o._finalHR || o['MAQUINA'] || o['Maquina'] || ''),
@@ -8169,7 +10669,7 @@ useEffect(() => {
       HORA_PROCESO: '',
       USUARIO: '',
     }));
-  }, [planFinalOrders, planFinalMandt, planFinalCentro, planFinalTipoOrden, planFinalFechaPlanificada, formatFechaSAP, normalizeMaterialCode, getProdVersionPlanFinal, getCantidadFinalCorregida]);
+  }, [planFinalOrders, planFinalMandt, planFinalCentro, planFinalTipoOrden, planFinalFechaPlanificada, formatFechaSAP, materialCodeParaSap, getProdVersionPlanFinal, getCantidadFinalCorregida]);
 
   const handleDescargarPlanFinalExcel = useCallback(() => {
     if (planFinalExportRows.length === 0) return;
@@ -8227,6 +10727,10 @@ useEffect(() => {
   // ejecutarGuardadoPlanFinal) porque el codigo_detalle_tactico de un guardado anterior ya no
   // corresponde al plan_grupo PFM-FINAL vigente.
   const [sapEnviado, setSapEnviado] = useState(false);
+
+  // Arma el contenido del .txt (Resumen + detalle de Plan Final). Se asigna más abajo, junto al
+  // correo de Resumen, porque depende de `ocupacionPorHR`, que se declara después de este punto.
+  const construirTxtPlanRef = useRef<((fechaObjetivo: string) => string) | null>(null);
 
   const ejecutarGuardadoPlanFinal = useCallback(async (planesADesactivar: PlanGrupo[]) => {
     const fecha = recuperacionFechasCalculadas?.n2n3;
@@ -8288,12 +10792,47 @@ useEffect(() => {
     // plan_grupo PFM-FINAL recién creado — se descarta, hay que volver a "Generar SAP".
     setSapPreviewOpen(false);
     setSapPreviewRows([]);
+    // El progreso ya quedó a salvo en el backend (plan_grupo + respaldo .txt): el borrador local
+    // de "Aceptar Plan" (ACEPTAR_PLAN_DRAFT_STORAGE_KEY) ya no hace falta.
+    try { localStorage.removeItem(ACEPTAR_PLAN_DRAFT_STORAGE_KEY); } catch { /* localStorage no disponible */ }
     addNotification('success', `Plan Final guardado (PFM - FINAL): ${planesADesactivar.length} plan(es) anterior(es) desactivado(s), ${detallesCreados} orden(es) guardada(s).`);
-  }, [recuperacionFechasCalculadas, planFinalCentro, planFinalOrders, addNotification, normalizeMaterialCode, getCantidadFinalCorregida]);
+
+    // Respaldo .txt en la carpeta compartida, en el mismo momento del guardado. Si falla (red,
+    // permisos) NO se revierte el plan ya guardado en base: solo se avisa.
+    try {
+      const contenido = construirTxtPlanRef.current?.(fecha);
+      if (contenido) {
+        const res = await planesTxtService.guardar({ fechaObjetivo: fecha, grupo: planTxtGrupo, centro: planFinalCentro, contenido });
+        addNotification('success', `Respaldo .txt guardado en ${res.ruta}`);
+      }
+    } catch (error: any) {
+      addNotification('warning', `El plan se guardó, pero no se pudo escribir el respaldo .txt: ${error.message}`);
+    }
+  }, [recuperacionFechasCalculadas, planFinalCentro, planTxtGrupo, planFinalOrders, addNotification, normalizeMaterialCode, getCantidadFinalCorregida]);
 
   const handleGuardarPlanFinal = useCallback(async () => {
     if (planFinalOrders.length === 0) {
       addNotification('warning', 'No hay órdenes en Plan Final para guardar.');
+      return;
+    }
+    // Blindaje contra duplicados antes de exportar a SAP: si la MISMA orden (orden+material+
+    // cantidad) quedó repetida bajo la misma Hoja de Ruta destino con `_source` distintos — caso
+    // real detectado por el usuario: un `_source` viejo sin limpiar (de un cambio anterior del
+    // motor, o un borrador local restaurado) duplicaba las horas de una Cosedora al doble de lo
+    // real. Nunca se envía algo duplicado a SAP en silencio: se bloquea y se dice exactamente qué
+    // puesto(s) tienen que "Quitar de Plan Final" y volver a "Aceptar Plan" para limpiarlo.
+    const mkDup = (o: any) => `${String(o['_finalHR'] || '').toUpperCase()}|${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
+    const vistosDup = new Map<string, Set<string>>();
+    planFinalOrders.forEach(o => {
+      if (o._isSplit || o.origen === 'manual') return; // los fragmentos partidos comparten key a propósito, no son duplicados reales
+      const key = mkDup(o);
+      if (!vistosDup.has(key)) vistosDup.set(key, new Set());
+      vistosDup.get(key)!.add(String(o._source || 'sin-fuente'));
+    });
+    const sourcesDuplicados = new Set<string>();
+    vistosDup.forEach(sources => { if (sources.size > 1) sources.forEach(s => sourcesDuplicados.add(s)); });
+    if (sourcesDuplicados.size > 0) {
+      addNotification('error', `Plan Final tiene órdenes duplicadas (misma orden/material/cantidad repetida bajo distintos orígenes: ${Array.from(sourcesDuplicados).join(', ')}). No se envía a SAP así — en los puestos afectados, presiona "Quitar de Plan Final" y vuelve a "Aceptar Plan" para limpiarlo, luego intenta guardar de nuevo.`);
       return;
     }
     const fecha = recuperacionFechasCalculadas?.n2n3;
@@ -8358,6 +10897,10 @@ useEffect(() => {
   const [isEnviandoSapConfirmado, setIsEnviandoSapConfirmado] = useState(false);
   const [sapPreviewOpen, setSapPreviewOpen] = useState(false);
   const [sapPreviewRows, setSapPreviewRows] = useState<SolicitudProduccionHB[]>([]);
+  // Filas que el usuario decide NO enviar en esta tanda (índice dentro de `sapPreviewRows`) —
+  // se quedan a la vista, tachadas, pero `handleConfirmarEnvioSap` las salta. No se borran de la
+  // vista previa para no perder de vista que existen (ej. para enviarlas después, por separado).
+  const [sapPreviewExcluidas, setSapPreviewExcluidas] = useState<Set<number>>(new Set());
 
   const handlePrepararEnvioSap = useCallback(async () => {
     if (planFinalOrders.length === 0) return;
@@ -8392,10 +10935,11 @@ useEffect(() => {
         // no calzar con ningún código real, así que se normaliza acá antes de enviar.
         ClaseOrden: planFinalTipoOrden.trim().toUpperCase(),
         Centro: planFinalCentro,
-        CodigoMaterial: normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || ''),
+        CodigoMaterial: materialCodeParaSap(o['MATERIAL'] || o['CodMaterial'] || ''),
         CantidadPlanificada: getCantidadFinalCorregida(o),
         VersionFabricacion: getProdVersionPlanFinal(o) ?? '',
-        PuestoTrabajo: String(o._finalHR || o['MAQUINA'] || o['Maquina'] || ''),
+        // A pedido del usuario: se envía vacío a SAP (antes iba la Hoja de Ruta resuelta).
+        PuestoTrabajo: '',
         FechaFinProgramada: fechaSap,
         HoraFinProgramada: '230000',
         FechaInicioProgramada: fechaSap,
@@ -8409,20 +10953,21 @@ useEffect(() => {
         // real de carga — acá solo van de placeholder mientras se arma la vista previa.
         FechaCarga: '',
         HoraCarga: '',
-        EstadoCarga: 'X',
+        EstadoCarga: '',
         NumeroOrdenSap: '',
         FechaProceso: '',
         HoraProceso: '',
         UsuarioProceso: 'APIUSR',
       }));
       setSapPreviewRows(filas);
+      setSapPreviewExcluidas(new Set());
       setSapPreviewOpen(true);
     } catch (error: any) {
       addNotification('error', `Error al preparar el envío a SAP: ${error.message}`);
     } finally {
       setIsPreparandoSap(false);
     }
-  }, [planFinalOrders, recuperacionFechasCalculadas, forrosGruposList, addNotification, getCantidadFinalCorregida, planFinalMandt, planFinalTipoOrden, planFinalCentro, normalizeMaterialCode, getProdVersionPlanFinal]);
+  }, [planFinalOrders, recuperacionFechasCalculadas, forrosGruposList, addNotification, getCantidadFinalCorregida, planFinalMandt, planFinalTipoOrden, planFinalCentro, materialCodeParaSap, getProdVersionPlanFinal]);
 
   // Edita un campo de una fila de la vista previa (Cantidad/Puesto/Versión/Observaciones) antes
   // de confirmar el envío — el resto de campos quedan fijos por diseño (mandante, fechas, estados).
@@ -8430,18 +10975,27 @@ useEffect(() => {
     setSapPreviewRows(prev => prev.map((r, i) => i === index ? { ...r, [campo]: valor } : r));
   }, []);
 
+  const handleToggleOmitirFilaSap = useCallback((index: number) => {
+    setSapPreviewExcluidas(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index); else next.add(index);
+      return next;
+    });
+  }, []);
+
   // Envío real a SAP — toma lo que quedó en `sapPreviewRows` (con las ediciones del usuario, si
   // las hubo), no vuelve a calcular nada. Un POST por orden, en secuencia; solo bloquea el botón
   // ("Generado ✓") si TODAS se insertaron sin error, igual criterio que antes.
   const handleConfirmarEnvioSap = useCallback(async () => {
-    if (sapPreviewRows.length === 0) return;
+    const filasAEnviar = sapPreviewRows.filter((_, i) => !sapPreviewExcluidas.has(i));
+    if (filasAEnviar.length === 0) return;
     setIsEnviandoSapConfirmado(true);
     try {
       // Misma fecha/hora de carga para todo el lote — se insertan juntas en esta misma acción.
       const { fecha: fechaCarga, hora: horaCarga } = getFechaHoraCargaEcuador();
       let exitos = 0;
       const errores: string[] = [];
-      for (const fila of sapPreviewRows) {
+      for (const fila of filasAEnviar) {
         const payload: SolicitudProduccionHB = { ...fila, FechaCarga: fechaCarga, HoraCarga: horaCarga };
         try {
           const resp = await serviciosService.insertarSolicitudProduccionHB(payload);
@@ -8455,17 +11009,23 @@ useEffect(() => {
         }
       }
 
+      const omitidas = sapPreviewExcluidas.size;
+      const sufijoOmitidas = omitidas > 0 ? ` · ${omitidas} orden(es) omitida(s), no enviada(s)` : '';
       if (errores.length === 0) {
-        setSapEnviado(true);
-        setSapPreviewOpen(false);
-        addNotification('success', `Generar SAP: ${exitos} orden(es) insertada(s) correctamente en HANA.`);
+        // Si quedó algo omitido a propósito, el botón NO se bloquea como "Generado ✓" — todavía
+        // falta esa parte por enviar en otra vuelta.
+        if (omitidas === 0) {
+          setSapEnviado(true);
+          setSapPreviewOpen(false);
+        }
+        addNotification('success', `Generar SAP: ${exitos} orden(es) insertada(s) correctamente en HANA${sufijoOmitidas}.`);
       } else {
-        addNotification('error', `Generar SAP: ${exitos} orden(es) insertada(s), ${errores.length} con error. ${errores.slice(0, 5).join(' | ')}${errores.length > 5 ? ` y ${errores.length - 5} más` : ''}`);
+        addNotification('error', `Generar SAP: ${exitos} orden(es) insertada(s), ${errores.length} con error${sufijoOmitidas}. ${errores.slice(0, 5).join(' | ')}${errores.length > 5 ? ` y ${errores.length - 5} más` : ''}`);
       }
     } finally {
       setIsEnviandoSapConfirmado(false);
     }
-  }, [sapPreviewRows, addNotification]);
+  }, [sapPreviewRows, sapPreviewExcluidas, addNotification]);
 
   // ─── ACOLCHADORA DE BANDAS (ACH11/ACH12): ajuste por Versión de Fabricación ──
   // Mismo criterio que Acolchado & Tapas — ya no se balancea por simple utilización. Materiales
@@ -8674,6 +11234,9 @@ useEffect(() => {
           ...orig.filter(o => !excludeKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'bandas-version', _prodVersion: getVersion(o) })),
           ...splitRemainders.filter(o => !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
           ...adjustedIn.filter(o => !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
+          // Una fila manual también puede bloquearse con el mismo candado — sin filtrarla, bloquearla
+        // no tenía efecto (reportado por el usuario).
+        ...(manualOrdersPorPuesto.get(puesto) || []).filter(o => !bloqueadas.has(mk(o))).map(o => ({ ...o, _source: 'bandas-version' })),
         );
       });
       setPlanFinalOrders(prev => [...prev.filter(o => o._source !== 'bandas-version'), ...finalOrds]);
@@ -8684,7 +11247,7 @@ useEffect(() => {
     } finally {
       setIsAceptandoAjusteBandas(false);
     }
-  }, [uniquePuestos, mapToHojaRutaInternal, isBandasAjusteActivo, bandasExcludeKeysPorPuesto, bandasAdjustedInPorPuesto, bandasSplitRemaindersPorPuesto, techFilteredOrdenes, bandasMovedOrders, addNotification, versionPorMaterialAjusteBandas, normalizeMaterialCode, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
+  }, [uniquePuestos, mapToHojaRutaInternal, isBandasAjusteActivo, bandasExcludeKeysPorPuesto, bandasAdjustedInPorPuesto, bandasSplitRemaindersPorPuesto, techFilteredOrdenes, bandasMovedOrders, addNotification, versionPorMaterialAjusteBandas, normalizeMaterialCode, ordenesBloqueadasPorPuesto, aplicarCantidadManual, manualOrdersPorPuesto]);
 
   // Mantiene sincronizado el Plan Final de Bandas ya aceptado con el estado vigente del candado —
   // igual que Acolchado/Tapa/Forros. Sin esto, bloquear un material DESPUÉS de haber presionado
@@ -8714,10 +11277,13 @@ useEffect(() => {
         ...orig.filter(o => !excludeKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'bandas-version', _prodVersion: getVersion(o) })),
         ...splitRemainders.filter(o => !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
         ...adjustedIn.filter(o => !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'bandas-version', _prodVersion: getVersion(o) })),
+        // Una fila manual también puede bloquearse con el mismo candado — sin filtrarla, bloquearla
+        // no tenía efecto (reportado por el usuario).
+        ...(manualOrdersPorPuesto.get(puesto) || []).filter(o => !bloqueadas.has(mk(o))).map(o => ({ ...o, _source: 'bandas-version' })),
       );
     });
     setPlanFinalOrders(prev => [...prev.filter(o => o._source !== 'bandas-version'), ...finalOrds]);
-  }, [ajusteBandasAceptado, uniquePuestos, mapToHojaRutaInternal, isBandasAjusteActivo, bandasExcludeKeysPorPuesto, bandasAdjustedInPorPuesto, bandasSplitRemaindersPorPuesto, techFilteredOrdenes, versionPorMaterialAjusteBandas, normalizeMaterialCode, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
+  }, [ajusteBandasAceptado, uniquePuestos, mapToHojaRutaInternal, isBandasAjusteActivo, bandasExcludeKeysPorPuesto, bandasAdjustedInPorPuesto, bandasSplitRemaindersPorPuesto, techFilteredOrdenes, versionPorMaterialAjusteBandas, normalizeMaterialCode, ordenesBloqueadasPorPuesto, aplicarCantidadManual, manualOrdersPorPuesto, planFinalForceResync]);
 
   const BORD_BAND_PUESTOS_FILTER = useCallback((p: string) =>
     p.includes('BO01') || p.includes('BORDADORA-BANDA01') ||
@@ -8748,6 +11314,15 @@ useEffect(() => {
     p.includes('COSEDORA-TTCHN')) &&
     !p.toUpperCase().includes('CORTELA10') &&
     !p.toUpperCase().includes('CORTE-ESPUMA') &&
+    // CORTELA10 (pestaña Corte) agrupa 4 Hojas de Ruta en una sola máquina (HR-CTBSC/CTCHN/CTINT/
+    // CTBAN combinadas) — si estos 4 puestos NO se excluyeran acá, "p.includes('CT')" los dejaría
+    // aceptar las MISMAS órdenes por su cuenta en esta pestaña, duplicándolas en Plan Final bajo
+    // dos `_source` distintos para la misma Hoja de Ruta (mismo patrón de bug ya encontrado en
+    // Acolchado/Tapa, confirmado por auditoría a pedido del usuario).
+    !p.toUpperCase().includes('CT-BAN') &&
+    !p.toUpperCase().includes('CT-BSC') &&
+    !p.toUpperCase().includes('CT-CHN') &&
+    !p.toUpperCase().includes('CT-INT') &&
     !p.toUpperCase().includes('COSEDORA-BSC-CC') &&
     !p.toUpperCase().includes('COSEDORA-BSCTP') &&
     !p.toUpperCase().includes('COSEDORA-INTPF') &&
@@ -8785,47 +11360,43 @@ useEffect(() => {
         const codigos = hr.includes(' / ') ? hr.split(' / ').map(c => c.trim().toUpperCase()) : [hr];
         const bloqueadas = ordenesBloqueadasPorPuesto.get(puesto) || new Set<string>();
         const source = `otros-interiores-${puesto}`;
-        const finalOrds = techFilteredOrdenes
+        // Ningún puesto de "Otras máquinas de interiores" cae en FBASE/HR-FORRO (esos viven en
+        // Forros Finales) — siempre usa el rango general, pero se llama igual por si acaso cambia
+        // la clasificación de algún puesto más adelante.
+        const origen = techFilteredOrdenesParaPuesto(puesto);
+        const finalOrds = origen
           .filter(o => codigos.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()))
           .filter(o => !bloqueadas.has(mk(o)))
           .map(aplicarCantidadManual)
-          .map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: source }));
-        next = [...next.filter(o => o._source !== source), ...finalOrds];
+          // Mismo fix que Forros Finales: nunca asignar el `hr` COMBINADO tal cual a `_finalHR`
+          // (rompería ARBPL y la búsqueda de Versión de Fabricación) — se usa el código propio de
+          // cada orden, el que de verdad coincidió en el filtro de arriba.
+          .map(o => ({ ...o, _finalHR: String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() || hr, _wasAdjusted: false, _source: source }));
+        // Una fila manual también puede bloquearse con el mismo candado — sin filtrarla acá,
+        // bloquearla no tenía ningún efecto (reportado por el usuario).
+        const manualOrds = (manualOrdersPorPuesto.get(puesto) || [])
+          .filter(o => !bloqueadas.has(mk(o)))
+          .map(o => ({ ...o, _source: source }));
+        next = [...next.filter(o => o._source !== source), ...finalOrds, ...manualOrds];
       });
       return next;
     });
-  }, [otrosInterioresAceptadoPuestos, ordenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenes, aplicarCantidadManual]);
+  }, [otrosInterioresAceptadoPuestos, ordenesBloqueadasPorPuesto, mapToHojaRutaInternal, techFilteredOrdenesParaPuesto, aplicarCantidadManual, manualOrdersPorPuesto, planFinalForceResync]);
 
+  // El exceso ya NO se precalcula/congela acá — `bordBandAdjustSummary` (abajo) lo calcula SIEMPRE
+  // en vivo a partir del estado actual, y tanto la tarjeta como el accept/resync lo leen de ahí
+  // directamente. Antes este handler guardaba un snapshot (`bordBandExcessKeys`) solo al activar
+  // el ajuste, que quedaba desactualizado si se bloqueaba/editaba algo después (auditoría
+  // confirmada: la tarjeta mostraba un % con el exceso viejo).
   const handleBordadoraBandAdjust = useCallback(() => {
     if (isBordBandAdjustActive) {
-      setBordBandExcessKeys(new Set());
       setIsBordBandAdjustActive(false);
       setBordBandAcceptedMachines(new Set());
       setPlanFinalOrders(prev => prev.filter(o => !String(o._source || '').startsWith('bord-bandas-')));
       return;
     }
-
-    const makeKey = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
-    const getHours = (o: any) => calculateProductionTime(o['MATERIAL'] || o['CodMaterial'] || '', Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), o) / 3600;
-
-    const excessKeys = new Set<string>();
-    uniquePuestos.filter(BORD_BAND_PUESTOS_FILTER).forEach(pName => {
-      const hr = mapToHojaRutaInternal(pName).trim().toUpperCase();
-      const cfg = workstationConfigs[pName] || { isDayActive: true, isNightActive: false, machines: 1 };
-      const cap = capacidadPuesto(pName, cfg, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
-      if (cap === 0) return;
-      const machineOrders = techFilteredOrdenes.filter(o => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hr);
-      let cumHours = 0;
-      for (const order of machineOrders) {
-        const h = getHours(order);
-        cumHours += h;
-        if (cumHours > cap) excessKeys.add(makeKey(order));
-      }
-    });
-
-    setBordBandExcessKeys(excessKeys);
     setIsBordBandAdjustActive(true);
-  }, [isBordBandAdjustActive, uniquePuestos, BORD_BAND_PUESTOS_FILTER, mapToHojaRutaInternal, workstationConfigs, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, techFilteredOrdenes, calculateProductionTime]);
+  }, [isBordBandAdjustActive]);
 
   // Exceso NATURAL de cada máquina (capacidad vs lo que ya tiene en SAP), calculado SIEMPRE — antes
   // dependía de `bordBandExcessKeys`, que solo se llenaba al activar el toggle, así que sin el
@@ -8881,15 +11452,19 @@ useEffect(() => {
         _wasAdjusted: false,
         _source: `bord-bandas-${hrCode}`,
       }));
+    // Una fila manual también puede bloquearse con el mismo candado — sin filtrarla, bloquearla no
+    // tenía efecto (reportado por el usuario).
+    const manualOrds = (manualOrdersPorPuesto.get(machineName) || []).filter(o => !bloqueadas.has(makeKey(o))).map(o => ({ ...o, _source: `bord-bandas-${hrCode}` }));
     setPlanFinalOrders(prev => [
       ...prev.filter(o => o._source !== `bord-bandas-${hrCode}`),
       ...machineOrders,
+      ...manualOrds,
     ]);
     setBordBandAcceptedMachines(prev => new Set([...prev, hrCode]));
     addNotification('success', isBordBandAdjustActive
       ? `Ajuste aceptado para ${machineName}: ${excessCount} ${excessCount === 1 ? 'orden marcada' : 'órdenes marcadas'} como no producible. Ver pestaña Plan Final.`
       : `Plan ORIGINAL de ${machineName} aceptado sin ajuste (${machineOrders.length} orden(es), tal como está hoy en SAP). Ver pestaña Plan Final.`);
-  }, [bordBandAdjustSummary, bordBandAcceptedMachines, techFilteredOrdenes, addNotification, isBordBandAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
+  }, [bordBandAdjustSummary, bordBandAcceptedMachines, techFilteredOrdenes, addNotification, isBordBandAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual, manualOrdersPorPuesto]);
 
   // Mantiene sincronizadas las máquinas de Bordadora/Cosedoras de Banda YA aceptadas con el estado
   // vigente del candado — sin esto, bloquear un material DESPUÉS de aceptar dejaba la fila ya
@@ -8912,11 +11487,12 @@ useEffect(() => {
           })
           .map(aplicarCantidadManual)
           .map(o => ({ ...o, _finalHR: hrCode, _wasAdjusted: false, _source: source }));
-        next = [...next.filter(o => o._source !== source), ...machineOrders];
+        const manualOrds = (manualOrdersPorPuesto.get(machineName) || []).filter(o => !bloqueadas.has(makeKey(o))).map(o => ({ ...o, _source: source }));
+        next = [...next.filter(o => o._source !== source), ...machineOrders, ...manualOrds];
       });
       return next;
     });
-  }, [bordBandAdjustSummary, bordBandAcceptedMachines, techFilteredOrdenes, isBordBandAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
+  }, [bordBandAdjustSummary, bordBandAcceptedMachines, techFilteredOrdenes, isBordBandAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual, manualOrdersPorPuesto, planFinalForceResync]);
 
   // ─── RMTB1/2/3: ajuste por Versión de Fabricación ────────────────────────
   // Mismo criterio que Acolchado & Tapas y Bandas — ya no se balancea por simple utilización.
@@ -8938,6 +11514,21 @@ useEffect(() => {
     rmtb2: uniquePuestos.find(p => { const u = p.toUpperCase(); return (u.includes('RMTB2') || u.includes('RMTB-2') || u.includes('RMTB02')) && !u.includes('RMTBM') && !u.includes('RMTB-M'); }),
     rmtb3: uniquePuestos.find(p => { const u = p.toUpperCase(); return (u.includes('RMTB3') || u.includes('RMTB-3') || u.includes('RMTB03')) && !u.includes('RMTBM') && !u.includes('RMTB-M'); }),
   }), [uniquePuestos]);
+
+  // Lista CANÓNICA de puestos para dibujar las tarjetas de "Cosedoras RMTB" — a diferencia de
+  // filtrar `uniquePuestos` directo por `.includes('RMTB')` (lo que había antes: una tarjeta POR
+  // CADA nombre crudo que matchee, sin deduplicar), acá se usa el MISMO único nombre "ganador" por
+  // categoría que ya usan `rmtb123PuestosActivos`/el resto de la lógica de aceptación. Si la
+  // maestra KPI llega a tener dos filas (`Categoria`) distintas para la MISMA máquina física RMTBM
+  // (ej. un alias viejo sin limpiar), antes se dibujaban DOS tarjetas con los mismos números —
+  // exactamente lo que el usuario reportó como "producción duplicada en RMTBM". Con esta lista
+  // acotada a un máximo de 4 nombres (uno por RMTB1/2/3/M) ya no puede pasar, sin importar cuántos
+  // alias sueltos existan en la maestra.
+  const rmtbPuestosParaTarjetas = useMemo(() => {
+    const rmtbM = uniquePuestos.find(p => { const u = p.toUpperCase(); return u.includes('RMTBM') || u.includes('RMTB-M'); });
+    return [rmtb123PuestosActivos.rmtb1, rmtb123PuestosActivos.rmtb2, rmtb123PuestosActivos.rmtb3, rmtbM]
+      .filter((p): p is string => !!p);
+  }, [uniquePuestos, rmtb123PuestosActivos]);
 
   const ajustePrevisionalRmtbData = useMemo(() => {
     const map = new Map<string, number>();
@@ -9026,8 +11617,13 @@ useEffect(() => {
     return () => { cancelled = true; };
   }, [ajusteRmtbMateriales, addNotification, fetchVersionesPorMaterial]);
 
-  // Alternativas de ajuste (igual concepto que Acolchado & Tapas / Bandas).
-  const [modoAjusteRmtb, setModoAjusteRmtb] = useState<'optimo' | 'equilibrado'>('optimo');
+  // A diferencia de Acolchado & Tapas / Bandas, RMTB no tiene selector de estrategia — un solo
+  // botón, fijo en modo "equilibrado": entre las máquinas con Versión de Fabricación válida para el
+  // material (la Versión nunca se salta, garantiza que la orden luego se pueda crear en SAP), manda
+  // el excedente a la que tenga más holgura en ese momento, no a la de menor número de versión. Con
+  // RMTB1/RMTB3 sobrecargadas y RMTB2 con espacio libre, esto es lo que empuja el excedente de las
+  // dos hacia RMTB2 en vez de dejarlo estancado en la máquina de origen.
+  const modoAjusteRmtb = 'equilibrado' as const;
 
   // Antes RMTB iba SIN split, porque partir generaba fracciones imposibles de fabricar (ej. 49,5
   // unidades). Ahora sí se parte, pero SOLO en unidades enteras: así se llena la capacidad libre de
@@ -9323,7 +11919,14 @@ useEffect(() => {
     const cfg = workstationConfigs[rmtbM] || { isDayActive: true, isNightActive: false, machines: 1 };
     const cap = capacidadPuesto(rmtbM, cfg, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
     const getHours = (o: any) => calculateProductionTime(o['MATERIAL'] || o['CodMaterial'] || '', Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), o) / 3600;
-    const orders = techFilteredOrdenes.filter(o => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hr);
+    const mkBloqueo = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
+    const bloqueadasRmtbM = bloqueoEfectivoPorPuesto.get(rmtbM) || new Set<string>();
+    // Antes esto contaba órdenes bloqueadas con candado, a diferencia de la tarjeta (MachineCard)
+    // que sí las descuenta — las dos mostraban números distintos para la misma máquina (reportado
+    // como "RMTBM duplicado": no era doble conteo, pero confundía igual al no coincidir).
+    const orders = techFilteredOrdenes.filter(o =>
+      String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() === hr && !bloqueadasRmtbM.has(mkBloqueo(o))
+    );
     const finalHours = orders.reduce((s, o) => s + getHours(o), 0);
     // Best-fit: se ordena de mayor a menor duración y se acumula solo lo que efectivamente cabe en
     // la capacidad restante — nunca se abandona apenas una orden grande no encaja, se sigue
@@ -9349,10 +11952,202 @@ useEffect(() => {
     const excessOrderKeys = new Set(excessOrders.map(mk));
 
     return { name: rmtbM, hrCode: hr, cap, finalHours, excessOrders, excessOrderKeys, obligatoryRmtb3 };
-  }, [uniquePuestos, mapToHojaRutaInternal, workstationConfigs, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, techFilteredOrdenes, calculateProductionTime, rmtb3FinalOrders, normalizeMaterialCode, listaMaterialesData]);
+  }, [uniquePuestos, mapToHojaRutaInternal, workstationConfigs, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, techFilteredOrdenes, calculateProductionTime, rmtb3FinalOrders, normalizeMaterialCode, listaMaterialesData, bloqueoEfectivoPorPuesto]);
 
   const [isAceptandoAjusteRmtb, setIsAceptandoAjusteRmtb] = useState(false);
   const [ajusteRmtbAceptado, setAjusteRmtbAceptado] = useState(false);
+
+  // ─── Persistencia LOCAL del borrador de "Aceptar Plan" (ver ACEPTAR_PLAN_DRAFT_STORAGE_KEY) ───
+  // Al cargar, si hay un borrador guardado se restaura solo y en silencio (sin diálogo de
+  // confirmación) y se avisa con una notificación cuánto se recuperó. Después de eso, cada cambio
+  // relevante (aceptar/desaceptar un puesto, bloquear una orden, agregar producción manual, etc.)
+  // se guarda al instante — no hay debounce ni guardado periódico.
+  const aceptarPlanDraftHidratadoRef = React.useRef(false);
+  useEffect(() => {
+    if (aceptarPlanDraftHidratadoRef.current) return;
+    aceptarPlanDraftHidratadoRef.current = true;
+    try {
+      const raw = localStorage.getItem(ACEPTAR_PLAN_DRAFT_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+
+      // El borrador es progreso SIN GUARDAR de HOY — no debe arrastrarse a un día distinto (ej.
+      // abrir la app el día siguiente y encontrar producción manual u órdenes aceptadas de ayer,
+      // reportado por el usuario). Se descarta en silencio si quedó de un día anterior — incluye
+      // un borrador SIN `fechaGuardado` (formato viejo, guardado antes de este fix): no se asume
+      // que es de hoy solo porque no se puede probar lo contrario, se descarta igual.
+      if (saved.fechaGuardado !== getFechaLocalHoy()) {
+        localStorage.removeItem(ACEPTAR_PLAN_DRAFT_STORAGE_KEY);
+        return;
+      }
+
+      if (Array.isArray(saved.acolchadoAceptadoPuestos)) setAcolchadoAceptadoPuestos(new Set(saved.acolchadoAceptadoPuestos));
+      if (Array.isArray(saved.tapaAceptadoPuestos)) setTapaAceptadoPuestos(new Set(saved.tapaAceptadoPuestos));
+      if (Array.isArray(saved.forrosAceptadoPuestos)) setForrosAceptadoPuestos(new Set(saved.forrosAceptadoPuestos));
+      if (Array.isArray(saved.otrosInterioresAceptadoPuestos)) setOtrosInterioresAceptadoPuestos(new Set(saved.otrosInterioresAceptadoPuestos));
+      if (Array.isArray(saved.bordBandAcceptedMachines)) setBordBandAcceptedMachines(new Set(saved.bordBandAcceptedMachines));
+      if (Array.isArray(saved.corteAcceptedMachines)) setCorteAcceptedMachines(new Set(saved.corteAcceptedMachines));
+      if (Array.isArray(saved.bscAcceptedMachines)) setBscAcceptedMachines(new Set(saved.bscAcceptedMachines));
+      if (Array.isArray(saved.intpfAcceptedMachines)) setIntpfAcceptedMachines(new Set(saved.intpfAcceptedMachines));
+      if (Array.isArray(saved.ttchnAcceptedMachines)) setTtchnAcceptedMachines(new Set(saved.ttchnAcceptedMachines));
+      if (typeof saved.ajusteBandasAceptado === 'boolean') setAjusteBandasAceptado(saved.ajusteBandasAceptado);
+      if (typeof saved.ajusteRmtbAceptado === 'boolean') setAjusteRmtbAceptado(saved.ajusteRmtbAceptado);
+
+      if (Array.isArray(saved.ordenesBloqueadasPorPuesto)) {
+        setOrdenesBloqueadasPorPuesto(new Map(saved.ordenesBloqueadasPorPuesto.map(([k, v]: [string, string[]]) => [k, new Set(v)])));
+      }
+      if (Array.isArray(saved.acolchadoOrdenesBloqueadasPorPuesto)) {
+        setAcolchadoOrdenesBloqueadasPorPuesto(new Map(saved.acolchadoOrdenesBloqueadasPorPuesto.map(([k, v]: [string, string[]]) => [k, new Set(v)])));
+      }
+      if (Array.isArray(saved.tapaOrdenesBloqueadasPorPuesto)) {
+        setTapaOrdenesBloqueadasPorPuesto(new Map(saved.tapaOrdenesBloqueadasPorPuesto.map(([k, v]: [string, string[]]) => [k, new Set(v)])));
+      }
+      if (Array.isArray(saved.produccionManualPorPuesto)) setProduccionManualPorPuesto(new Map(saved.produccionManualPorPuesto));
+      if (Array.isArray(saved.manualQtyOverridePorOrden)) setManualQtyOverridePorOrden(new Map(saved.manualQtyOverridePorOrden));
+      if (Array.isArray(saved.acolchadoCorreccionesAplicadas)) setAcolchadoCorreccionesAplicadas(new Set(saved.acolchadoCorreccionesAplicadas));
+
+      if (saved.recuperacionPasoFecha) setRecuperacionPasoFecha(saved.recuperacionPasoFecha);
+      if (saved.techStartDate) setTechStartDate(saved.techStartDate);
+      if (saved.techEndDate) setTechEndDate(saved.techEndDate);
+      if (Array.isArray(saved.rangoFbaseForroPorPuesto)) setRangoFbaseForroPorPuesto(new Map(saved.rangoFbaseForroPorPuesto));
+
+      // No cuenta como "actualización automática" para el aviso de `planFinalOrders` — es una
+      // restauración de una sesión anterior, no un resync en caliente.
+      planFinalPrimeraCargaRef.current = true;
+      if (Array.isArray(saved.planFinalOrders)) {
+        // Blindaje: un borrador viejo (guardado antes de algún ajuste al motor de aceptación)
+        // puede traer la MISMA orden repetida bajo `_source` distintos — confirmado por el
+        // usuario con un caso real (una Cosedora al doble de horas). Se descarta cualquier
+        // duplicado al restaurar, quedándose con la primera aparición, en vez de arrastrarlo.
+        const mkDupRestore = (o: any) => `${String(o?._finalHR || '').toUpperCase()}|${o?.['ORDEN'] || o?.['ORDENPREVISIONAL'] || ''}|${String(o?.['MATERIAL'] || o?.['CodMaterial'] || '')}|${String(o?.['CANTIDAD'] || o?.['CANTPROGRAMADA'] || '')}`;
+        const vistosRestore = new Set<string>();
+        const planFinalLimpio = saved.planFinalOrders.filter((o: any) => {
+          if (o?._isSplit || o?.origen === 'manual') return true;
+          const key = mkDupRestore(o);
+          if (vistosRestore.has(key)) return false;
+          vistosRestore.add(key);
+          return true;
+        });
+        if (planFinalLimpio.length !== saved.planFinalOrders.length) {
+          addNotification('warning', `El borrador recuperado tenía ${saved.planFinalOrders.length - planFinalLimpio.length} orden(es) duplicada(s) en Plan Final — se descartaron automáticamente.`);
+        }
+        setPlanFinalOrders(planFinalLimpio);
+      }
+      if (typeof saved.trasladoGyeChn === 'number') setTrasladoGyeChn(saved.trasladoGyeChn);
+      if (typeof saved.trasladoGyeBase === 'number') setTrasladoGyeBase(saved.trasladoGyeBase);
+
+      const totalAceptados =
+        (saved.acolchadoAceptadoPuestos?.length || 0) + (saved.tapaAceptadoPuestos?.length || 0) +
+        (saved.forrosAceptadoPuestos?.length || 0) + (saved.otrosInterioresAceptadoPuestos?.length || 0) +
+        (saved.bordBandAcceptedMachines?.length || 0) + (saved.corteAcceptedMachines?.length || 0) +
+        (saved.bscAcceptedMachines?.length || 0) + (saved.intpfAcceptedMachines?.length || 0) +
+        (saved.ttchnAcceptedMachines?.length || 0) + (saved.ajusteBandasAceptado ? 1 : 0) + (saved.ajusteRmtbAceptado ? 1 : 0);
+      const totalOrdenes = saved.planFinalOrders?.length || 0;
+
+      if (totalAceptados > 0 || totalOrdenes > 0) {
+        addNotification('info', `Se recuperó tu progreso sin guardar de Ajuste de Producción: ${totalAceptados} puesto(s)/ajuste(s) aceptado(s), ${totalOrdenes} orden(es) en Plan Final.`);
+      }
+    } catch {
+      // localStorage no disponible o dato corrupto: se ignora, la pestaña queda con los defaults.
+    }
+  }, [addNotification]);
+
+  useEffect(() => {
+    // No guardar nada antes de intentar restaurar — evita pisar un borrador real con el estado
+    // "vacío" del primer render.
+    if (!aceptarPlanDraftHidratadoRef.current) return;
+    try {
+      const hayProgreso = acolchadoAceptadoPuestos.size > 0 || tapaAceptadoPuestos.size > 0 ||
+        forrosAceptadoPuestos.size > 0 || otrosInterioresAceptadoPuestos.size > 0 ||
+        bordBandAcceptedMachines.size > 0 || corteAcceptedMachines.size > 0 ||
+        bscAcceptedMachines.size > 0 || intpfAcceptedMachines.size > 0 ||
+        ttchnAcceptedMachines.size > 0 || ajusteBandasAceptado || ajusteRmtbAceptado ||
+        planFinalOrders.length > 0 || trasladoGyeChn > 0 || trasladoGyeBase > 0;
+      if (!hayProgreso) {
+        localStorage.removeItem(ACEPTAR_PLAN_DRAFT_STORAGE_KEY);
+        return;
+      }
+      localStorage.setItem(ACEPTAR_PLAN_DRAFT_STORAGE_KEY, JSON.stringify({
+        fechaGuardado: getFechaLocalHoy(),
+        acolchadoAceptadoPuestos: Array.from(acolchadoAceptadoPuestos),
+        tapaAceptadoPuestos: Array.from(tapaAceptadoPuestos),
+        forrosAceptadoPuestos: Array.from(forrosAceptadoPuestos),
+        otrosInterioresAceptadoPuestos: Array.from(otrosInterioresAceptadoPuestos),
+        bordBandAcceptedMachines: Array.from(bordBandAcceptedMachines),
+        corteAcceptedMachines: Array.from(corteAcceptedMachines),
+        bscAcceptedMachines: Array.from(bscAcceptedMachines),
+        intpfAcceptedMachines: Array.from(intpfAcceptedMachines),
+        ttchnAcceptedMachines: Array.from(ttchnAcceptedMachines),
+        ajusteBandasAceptado, ajusteRmtbAceptado,
+        ordenesBloqueadasPorPuesto: Array.from(ordenesBloqueadasPorPuesto.entries()).map(([k, v]) => [k, Array.from(v)]),
+        acolchadoOrdenesBloqueadasPorPuesto: Array.from(acolchadoOrdenesBloqueadasPorPuesto.entries()).map(([k, v]) => [k, Array.from(v)]),
+        tapaOrdenesBloqueadasPorPuesto: Array.from(tapaOrdenesBloqueadasPorPuesto.entries()).map(([k, v]) => [k, Array.from(v)]),
+        produccionManualPorPuesto: Array.from(produccionManualPorPuesto.entries()),
+        manualQtyOverridePorOrden: Array.from(manualQtyOverridePorOrden.entries()),
+        acolchadoCorreccionesAplicadas: Array.from(acolchadoCorreccionesAplicadas),
+        recuperacionPasoFecha, techStartDate, techEndDate,
+        rangoFbaseForroPorPuesto: Array.from(rangoFbaseForroPorPuesto.entries()),
+        planFinalOrders,
+        trasladoGyeChn, trasladoGyeBase,
+      }));
+    } catch {
+      // localStorage no disponible (o cuota excedida): la sesión sigue funcionando solo en memoria.
+    }
+  }, [
+    acolchadoAceptadoPuestos, tapaAceptadoPuestos, forrosAceptadoPuestos, otrosInterioresAceptadoPuestos,
+    bordBandAcceptedMachines, corteAcceptedMachines, bscAcceptedMachines, intpfAcceptedMachines, ttchnAcceptedMachines,
+    ajusteBandasAceptado, ajusteRmtbAceptado,
+    ordenesBloqueadasPorPuesto, acolchadoOrdenesBloqueadasPorPuesto, tapaOrdenesBloqueadasPorPuesto,
+    produccionManualPorPuesto, manualQtyOverridePorOrden, acolchadoCorreccionesAplicadas,
+    recuperacionPasoFecha, techStartDate, techEndDate, rangoFbaseForroPorPuesto,
+    planFinalOrders, trasladoGyeChn, trasladoGyeBase,
+  ]);
+
+  // ─── Lienzo limpio cada día: detecta cambio de fecha con la pestaña ABIERTA ────────────────────
+  // El chequeo de `fechaGuardado` de arriba solo protege al MONTAR (recargar la página al día
+  // siguiente). Si la pestaña se queda abierta toda la noche sin recargar (caso real en un módulo
+  // de planificación que puede quedar abierto en un turno nocturno), nada volvía a correr: el
+  // día cambiaba de verdad pero la producción manual, los aceptados y los bloqueos de AYER seguían
+  // en memoria, se seguían mostrando en las tarjetas y encima se re-guardaban con la fecha de HOY
+  // en el próximo cambio (el borrador "heredaba" la fecha nueva sin ser de hoy). Revisa cada
+  // minuto si la fecha real cambió desde que se montó esta pestaña y, si cambió, limpia TODO el
+  // progreso sin guardar — el lienzo debe quedar en blanco, con solo las órdenes previsionales
+  // filtradas para la fecha de hoy, nunca nada de ayer (pedido explícito del usuario).
+  const diaSesionRef = React.useRef(getFechaLocalHoy());
+  useEffect(() => {
+    const limpiarPorCambioDeDia = () => {
+      setAcolchadoAceptadoPuestos(new Set());
+      setTapaAceptadoPuestos(new Set());
+      setForrosAceptadoPuestos(new Set());
+      setOtrosInterioresAceptadoPuestos(new Set());
+      setBordBandAcceptedMachines(new Set());
+      setCorteAcceptedMachines(new Set());
+      setBscAcceptedMachines(new Set());
+      setIntpfAcceptedMachines(new Set());
+      setTtchnAcceptedMachines(new Set());
+      setAjusteBandasAceptado(false);
+      setAjusteRmtbAceptado(false);
+      setOrdenesBloqueadasPorPuesto(new Map());
+      setAcolchadoOrdenesBloqueadasPorPuesto(new Map());
+      setTapaOrdenesBloqueadasPorPuesto(new Map());
+      setProduccionManualPorPuesto(new Map());
+      setManualQtyOverridePorOrden(new Map());
+      setAcolchadoCorreccionesAplicadas(new Set());
+      setPlanFinalOrders([]);
+      setTrasladoGyeChn(0);
+      setTrasladoGyeBase(0);
+      try { localStorage.removeItem(ACEPTAR_PLAN_DRAFT_STORAGE_KEY); } catch { /* localStorage no disponible */ }
+      addNotification('warning', 'Cambió el día con la pestaña abierta — se limpió automáticamente la producción manual, los bloqueos y lo aceptado de ayer. Empieza en blanco, solo con las órdenes previsionales de hoy.');
+    };
+    const intervalo = setInterval(() => {
+      const hoy = getFechaLocalHoy();
+      if (hoy !== diaSesionRef.current) {
+        diaSesionRef.current = hoy;
+        limpiarPorCambioDeDia();
+      }
+    }, 60000);
+    return () => clearInterval(intervalo);
+  }, [addNotification]);
 
   // Igual patrón que Acolchado & Tapas / Bandas / Corte / Bordadora: por defecto se ven las
   // órdenes ORIGINALES; el ajuste por versión (RMTB1/2/3) solo se muestra tras presionar "Ajustar
@@ -9413,6 +12208,9 @@ useEffect(() => {
           ...orig.filter(o => !excludeKeys.has(mk(o)) && !isLiberada(o) && !estaBloqueada(puesto, o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
           ...splitRemainders.filter(o => !isLiberada(o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
           ...adjustedIn.filter(o => !isLiberada(o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
+          // Una fila manual también puede bloquearse con el mismo candado — sin filtrarla,
+          // bloquearla no tenía efecto (reportado por el usuario).
+          ...(manualOrdersPorPuesto.get(puesto) || []).filter(o => !estaBloqueada(puesto, o)).map(o => ({ ...o, _source: 'rmtb-version' })),
         );
       });
 
@@ -9437,6 +12235,7 @@ useEffect(() => {
           }));
         ordenesRmtbM = ordsM.length;
         finalOrds.push(...ordsM);
+        finalOrds.push(...(manualOrdersPorPuesto.get(rmtbM) || []).filter(o => !estaBloqueada(rmtbM, o)).map(o => ({ ...o, _source: 'rmtb-version' })));
       }
 
       setPlanFinalOrders(prev => [...prev.filter(o => o._source !== 'rmtb-version'), ...finalOrds]);
@@ -9449,7 +12248,7 @@ useEffect(() => {
     } finally {
       setIsAceptandoAjusteRmtb(false);
     }
-  }, [rmtb123PuestosActivos, uniquePuestos, mapToHojaRutaInternal, isRmtbAjusteActivo, rmtbExcludeKeysPorPuesto, rmtbAdjustedInPorPuesto, rmtbSplitRemaindersPorPuesto, techFilteredOrdenes, rmtbmBandaLiberada, rmtbVersionMovedOrders, bloqueoEfectivoPorPuesto, addNotification, versionPorMaterialAjusteRmtb, normalizeMaterialCode, aplicarCantidadManual]);
+  }, [rmtb123PuestosActivos, uniquePuestos, mapToHojaRutaInternal, isRmtbAjusteActivo, rmtbExcludeKeysPorPuesto, rmtbAdjustedInPorPuesto, rmtbSplitRemaindersPorPuesto, techFilteredOrdenes, rmtbmBandaLiberada, rmtbVersionMovedOrders, bloqueoEfectivoPorPuesto, addNotification, versionPorMaterialAjusteRmtb, normalizeMaterialCode, aplicarCantidadManual, manualOrdersPorPuesto]);
 
   // Mantiene sincronizado el Plan Final de RMTB (RMTB1/2/3 + RMTBM) ya aceptado con el estado
   // vigente del candado — sin esto, bloquear un material DESPUÉS de aceptar dejaba la fila ya
@@ -9459,7 +12258,12 @@ useEffect(() => {
     const { rmtb1, rmtb2, rmtb3 } = rmtb123PuestosActivos;
     const puestos = [rmtb1, rmtb2, rmtb3].filter(Boolean) as string[];
     const mk = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
-    const estaBloqueada = (puesto: string, o: any) => (ordenesBloqueadasPorPuesto.get(puesto) || new Set<string>()).has(mk(o));
+    // `bloqueoEfectivoPorPuesto` (no `ordenesBloqueadasPorPuesto`) — el accept inicial
+    // (`handleAceptarAjusteRmtb`) ya usa el efectivo (incluye la cascada BOM RMTBM↔RMTB3), pero
+    // este resync usaba el candado CRUDO: bloquear un material de RMTBM después de aceptar sí
+    // cascadeaba visualmente a la tarjeta de RMTB3 (que usa el mapa efectivo), pero no se reflejaba
+    // en Plan Final hasta volver a presionar "Aceptar Plan" a mano (auditoría confirmada).
+    const estaBloqueada = (puesto: string, o: any) => (bloqueoEfectivoPorPuesto.get(puesto) || new Set<string>()).has(mk(o));
     const liberadaMats = new Set(isRmtbAjusteActivo ? rmtbmBandaLiberada.map(item => item.material) : []);
     const isLiberada = (o: any) => liberadaMats.has(String(o['MATERIAL'] || o['CodMaterial'] || '').trim());
     const finalOrds: any[] = [];
@@ -9478,6 +12282,7 @@ useEffect(() => {
         ...orig.filter(o => !excludeKeys.has(mk(o)) && !isLiberada(o) && !estaBloqueada(puesto, o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
         ...splitRemainders.filter(o => !isLiberada(o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: false, _isSplit: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
         ...adjustedIn.filter(o => !isLiberada(o)).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: hr, _wasAdjusted: true, _source: 'rmtb-version', _prodVersion: getVersion(o) })),
+        ...(manualOrdersPorPuesto.get(puesto) || []).filter(o => !estaBloqueada(puesto, o)).map(o => ({ ...o, _source: 'rmtb-version' })),
       );
     });
     const rmtbM = uniquePuestos.find(p => { const u = p.toUpperCase(); return u.includes('RMTBM') || u.includes('RMTB-M'); });
@@ -9497,9 +12302,10 @@ useEffect(() => {
             _prodVersion: versionPorMaterialAjusteRmtb.get(normalizeMaterialCode(o['MATERIAL'] || o['CodMaterial'] || ''))?.get(hojaSinPrefijoM)?.texto,
           }))
       );
+      finalOrds.push(...(manualOrdersPorPuesto.get(rmtbM) || []).filter(o => !estaBloqueada(rmtbM, o)).map(o => ({ ...o, _source: 'rmtb-version' })));
     }
     setPlanFinalOrders(prev => [...prev.filter(o => o._source !== 'rmtb-version'), ...finalOrds]);
-  }, [ajusteRmtbAceptado, rmtb123PuestosActivos, uniquePuestos, mapToHojaRutaInternal, isRmtbAjusteActivo, rmtbExcludeKeysPorPuesto, rmtbAdjustedInPorPuesto, rmtbSplitRemaindersPorPuesto, techFilteredOrdenes, rmtbmBandaLiberada, bloqueoEfectivoPorPuesto, versionPorMaterialAjusteRmtb, normalizeMaterialCode, aplicarCantidadManual]);
+  }, [ajusteRmtbAceptado, rmtb123PuestosActivos, uniquePuestos, mapToHojaRutaInternal, isRmtbAjusteActivo, rmtbExcludeKeysPorPuesto, rmtbAdjustedInPorPuesto, rmtbSplitRemaindersPorPuesto, techFilteredOrdenes, rmtbmBandaLiberada, bloqueoEfectivoPorPuesto, versionPorMaterialAjusteRmtb, normalizeMaterialCode, aplicarCantidadManual, manualOrdersPorPuesto, planFinalForceResync]);
 
   // Cascada inversa RMTBM → RMTB3 (regla de negocio ya existente, sin cambios): llama
   // getMaestroMaterialesExplosion para cada material en exceso de RMTBM y cruza los componentes
@@ -9722,11 +12528,19 @@ useEffect(() => {
     // (`ordenesBloqueadasPorPuesto`) guarda las órdenes de esta tarjeta. Faltaba este filtro.
     const bloqueadas = ordenesBloqueadasPorPuesto.get(machineName) || new Set<string>();
     const hrList = machineFullHR.includes('/') ? machineFullHR.split('/').map(c => c.trim()) : [machineFullHR];
+    // `_finalHR` es ARBPL en la exportación y la clave de búsqueda de Versión de Fabricación por
+    // material+hoja — CORTELA10 agrupa 4 hojas de ruta distintas (CTBSC/CTCHN/CTINT/CTBAN) en una
+    // sola máquina física, así que `machineFullHR` (el combinado) NUNCA debe quedar como el valor
+    // final de una orden puntual: se usa el código PROPIO de cada orden, el que de verdad hizo
+    // match contra `hrList` arriba (o contra el movido, que conserva su propia hoja de origen —
+    // el material no cambia de ruta SAP solo porque se reubicó a otra máquina por capacidad).
+    const ordenHR = (o: any) => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() || machineFullHR;
     const machineOrders = [
       ...techFilteredOrdenes
         .filter(o => hrList.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()) && !movedOutKeys.has(makeKey(o)) && !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o)))
-        .map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: false, _source: `corte-${machineFullHR}` })),
-      ...movedInOrders.filter(o => !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: true, _source: `corte-${machineFullHR}` })),
+        .map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: ordenHR(o), _wasAdjusted: false, _source: `corte-${machineFullHR}` })),
+      ...movedInOrders.filter(o => !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: ordenHR(o), _wasAdjusted: true, _source: `corte-${machineFullHR}` })),
+      ...(manualOrdersPorPuesto.get(machineName) || []).filter(o => !bloqueadas.has(makeKey(o))).map(o => ({ ...o, _source: `corte-${machineFullHR}` })),
     ];
     setPlanFinalOrders(prev => [...prev.filter(o => o._source !== `corte-${machineFullHR}`), ...machineOrders]);
     setCorteAcceptedMachines(prev => new Set([...prev, machineFullHR]));
@@ -9734,7 +12548,7 @@ useEffect(() => {
     addNotification('success', isCorteAdjustActive
       ? `Ajuste aceptado para ${machineName}: ${totalMoves} ${totalMoves === 1 ? 'orden redistribuida' : 'órdenes redistribuidas'}. Ver pestaña Plan Final.`
       : `Plan ORIGINAL de ${machineName} aceptado sin ajuste (${machineOrders.length} orden(es), tal como está hoy en SAP). Ver pestaña Plan Final.`);
-  }, [corteAdjustSummary, corteAcceptedMachines, corteMovedOrders, techFilteredOrdenes, addNotification, isCorteAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
+  }, [corteAdjustSummary, corteAcceptedMachines, corteMovedOrders, techFilteredOrdenes, addNotification, isCorteAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual, manualOrdersPorPuesto]);
 
   // Mantiene sincronizadas las máquinas de Corte YA aceptadas con el estado vigente del candado —
   // sin esto, bloquear un material DESPUÉS de aceptar dejaba la fila ya exportada congelada con lo
@@ -9753,17 +12567,21 @@ useEffect(() => {
         const bloqueadas = ordenesBloqueadasPorPuesto.get(machineName) || new Set<string>();
         const hrList = machineFullHR.includes('/') ? machineFullHR.split('/').map(c => c.trim()) : [machineFullHR];
         const source = `corte-${machineFullHR}`;
+        // Mismo fix que handleAcceptCorteAdjustForMachine: nunca el `machineFullHR` combinado tal
+        // cual, siempre el código propio de la orden.
+        const ordenHR = (o: any) => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() || machineFullHR;
         const machineOrders = [
           ...techFilteredOrdenes
             .filter(o => hrList.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()) && !movedOutKeys.has(makeKey(o)) && !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o)))
-            .map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: false, _source: source })),
-          ...movedInOrders.filter(o => !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: true, _source: source })),
+            .map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: ordenHR(o), _wasAdjusted: false, _source: source })),
+          ...movedInOrders.filter(o => !excessKeys.has(makeKey(o)) && !bloqueadas.has(makeKey(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: ordenHR(o), _wasAdjusted: true, _source: source })),
+          ...(manualOrdersPorPuesto.get(machineName) || []).filter(o => !bloqueadas.has(makeKey(o))).map(o => ({ ...o, _source: source })),
         ];
         next = [...next.filter(o => o._source !== source), ...machineOrders];
       });
       return next;
     });
-  }, [corteAdjustSummary, corteAcceptedMachines, corteMovedOrders, techFilteredOrdenes, isCorteAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual]);
+  }, [corteAdjustSummary, corteAcceptedMachines, corteMovedOrders, techFilteredOrdenes, isCorteAdjustActive, ordenesBloqueadasPorPuesto, aplicarCantidadManual, manualOrdersPorPuesto, planFinalForceResync]);
 
   // ─── Utilidad compartida: bin-packing genérico ────────────────────────────
   const binPackGroup = useCallback((groupPuestos: string[]): { order: any; fromHR: string; toHR: string }[] => {
@@ -9851,11 +12669,18 @@ useEffect(() => {
     // por relación de BOM con el puesto pareja (ej. INTPF ↔ INTPR/INTPT) — ver esa constante.
     const bloqueadas = bloqueoEfectivoPorPuesto.get(machineName) || new Set<string>();
     const hrList = machineFullHR.includes('/') ? machineFullHR.split('/').map(c => c.trim()) : [machineFullHR];
+    // Mismo fix que Corte/Forros/Otros Interiores: nunca el `machineFullHR` combinado tal cual —
+    // rompería ARBPL y la búsqueda de Versión de Fabricación si esta máquina llegara a tener una
+    // Hoja de Ruta compuesta. Se usa el código propio de cada orden.
+    const ordenHR = (o: any) => String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase() || machineFullHR;
     return [
-      ...techFilteredOrdenes.filter(o => hrList.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()) && !outKeys.has(mk(o)) && !excessKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: false, _source: '' })),
-      ...inOrds.filter(o => !excessKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: machineFullHR, _wasAdjusted: true, _source: '' })),
+      ...techFilteredOrdenes.filter(o => hrList.includes(String(o['MAQUINA'] || o['Maquina'] || '').trim().toUpperCase()) && !outKeys.has(mk(o)) && !excessKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: ordenHR(o), _wasAdjusted: false, _source: '' })),
+      ...inOrds.filter(o => !excessKeys.has(mk(o)) && !bloqueadas.has(mk(o))).map(aplicarCantidadManual).map(o => ({ ...o, _finalHR: ordenHR(o), _wasAdjusted: true, _source: '' })),
+      // Una fila manual también puede bloquearse con el mismo candado — sin filtrarla, bloquearla
+      // no tenía efecto (reportado por el usuario).
+      ...(manualOrdersPorPuesto.get(machineName) || []).filter(o => !bloqueadas.has(mk(o))),
     ];
-  }, [techFilteredOrdenes, bloqueoEfectivoPorPuesto, aplicarCantidadManual]);
+  }, [techFilteredOrdenes, bloqueoEfectivoPorPuesto, aplicarCantidadManual, manualOrdersPorPuesto]);
 
   const acceptGroupAdjust = useCallback((
     machineFullHR: string, machineName: string, sourcePrefix: string,
@@ -9920,7 +12745,7 @@ useEffect(() => {
 
   useEffect(() => {
     resyncGrupoAceptado('bsc', bscAcceptedMachines, bscAdjustSummary, bscMovedOrders, isBscAdjustActive);
-  }, [resyncGrupoAceptado, bscAcceptedMachines, bscAdjustSummary, bscMovedOrders, isBscAdjustActive]);
+  }, [resyncGrupoAceptado, bscAcceptedMachines, bscAdjustSummary, bscMovedOrders, isBscAdjustActive, planFinalForceResync]);
 
   // ─── PROCESO DE INTERIORES (COSEDORA-INTPF + INTPR + INTPT) ─────────────
   // Procesos independientes — sin redistribución. INTPF es prerequisito de INTPR e INTPT.
@@ -10015,7 +12840,7 @@ useEffect(() => {
 
   useEffect(() => {
     resyncGrupoAceptado('intpf', intpfAcceptedMachines, intpfAdjustSummary, intpfMovedOrders, isIntpfAdjustActive);
-  }, [resyncGrupoAceptado, intpfAcceptedMachines, intpfAdjustSummary, intpfMovedOrders, isIntpfAdjustActive]);
+  }, [resyncGrupoAceptado, intpfAcceptedMachines, intpfAdjustSummary, intpfMovedOrders, isIntpfAdjustActive, planFinalForceResync]);
 
   // ─── PROCESO TAPA SUPERIOR CHN (COSEDORA-TTCHN + COSEDORA-TTSUP-CHN — independientes) ───
   const handleTtchnAdjust = useCallback(() => {
@@ -10036,7 +12861,31 @@ useEffect(() => {
 
   useEffect(() => {
     resyncGrupoAceptado('ttchn', ttchnAcceptedMachines, ttchnAdjustSummary, ttchnMovedOrders, isTtchnAdjustActive);
-  }, [resyncGrupoAceptado, ttchnAcceptedMachines, ttchnAdjustSummary, ttchnMovedOrders, isTtchnAdjustActive]);
+  }, [resyncGrupoAceptado, ttchnAcceptedMachines, ttchnAdjustSummary, ttchnMovedOrders, isTtchnAdjustActive, planFinalForceResync]);
+
+  // Red de seguridad para "Plan Final se vació solo" (ver `planFinalForceResync` arriba): si NO
+  // hay ninguna orden pero SÍ hay al menos una sección marcada como aceptada, algo dejó
+  // `planFinalOrders` inconsistente con esos Sets — se fuerza un reconstruido inmediato en vez de
+  // esperar a que el usuario cambie de pestaña por su cuenta (que es lo que hoy lo arregla).
+  // Tope de reintentos: si al hidratar el borrador algo quedó "aceptado" (p.ej. `ajusteRmtbAceptado`)
+  // mientras los datos base (`techFilteredOrdenes`, etc.) todavía no terminaban de cargar desde SAP,
+  // cada resync forzado podía volver a dejar `planFinalOrders` en un array VACÍO pero con referencia
+  // NUEVA — lo cual volvía a disparar esta misma red de seguridad sin límite (bucle infinito real,
+  // "Maximum update depth exceeded", confirmado con diagnóstico en pantalla). Se resetea en cuanto
+  // `planFinalOrders` deja de estar vacío, así que un vaciado genuino futuro sigue reintentando.
+  const planFinalForceResyncIntentosRef = useRef(0);
+  useEffect(() => {
+    if (planFinalOrders.length > 0) { planFinalForceResyncIntentosRef.current = 0; return; }
+    const hayAlgoAceptado =
+      acolchadoAceptadoPuestos.size > 0 || tapaAceptadoPuestos.size > 0 || forrosAceptadoPuestos.size > 0 ||
+      otrosInterioresAceptadoPuestos.size > 0 || bordBandAcceptedMachines.size > 0 || corteAcceptedMachines.size > 0 ||
+      bscAcceptedMachines.size > 0 || intpfAcceptedMachines.size > 0 || ttchnAcceptedMachines.size > 0 ||
+      ajusteBandasAceptado || ajusteRmtbAceptado;
+    if (!hayAlgoAceptado) return;
+    if (planFinalForceResyncIntentosRef.current >= 5) return;
+    planFinalForceResyncIntentosRef.current += 1;
+    setPlanFinalForceResync(n => n + 1);
+  }, [planFinalOrders, acolchadoAceptadoPuestos, tapaAceptadoPuestos, forrosAceptadoPuestos, otrosInterioresAceptadoPuestos, bordBandAcceptedMachines, corteAcceptedMachines, bscAcceptedMachines, intpfAcceptedMachines, ttchnAcceptedMachines, ajusteBandasAceptado, ajusteRmtbAceptado]);
 
   // `isActive` es el toggle "Ajuste de Producción" del grupo. Antes el botón decía "Aceptar
   // Ajuste" SIEMPRE, aunque el ajuste estuviera apagado y la función ya aceptara el plan ORIGINAL
@@ -10247,7 +13096,15 @@ useEffect(() => {
     );
   };
 
-  const renderFertTableInternal = (orders: any[], summary: any[], title: string, date: string, setDate: (d: string) => void, color: string) => {
+  const renderFertTableInternal = (grupos: { maquina: string; ordenes: any[] }[], title: string, color: string) => {
+    // Rango real de fechas presente en TODA la lista (todas las máquinas juntas) — informativo, ya
+    // que ahora se muestran todas las órdenes (cada grupo ordenado ascendente, la más antigua
+    // primero) en vez de un solo día elegido a mano.
+    const fechaOrden = (o: any) => String(o['FECHA'] || o['FECHA_INICIO'] || o['FECHAINICIO'] || '').split('T')[0];
+    const todasLasOrdenes = grupos.flatMap(g => g.ordenes);
+    const fechasOrdenadas = todasLasOrdenes.map(fechaOrden).sort();
+    const fechaMin = fechasOrdenadas[0] || '';
+    const fechaMax = fechasOrdenadas[fechasOrdenadas.length - 1] || '';
     const fertCols = [
       { id: 'CENTRO', key: 'Centro' },
       { id: 'ORDEN', key: 'ORDEN' },
@@ -10255,7 +13112,9 @@ useEffect(() => {
       { id: 'NOMBRE', key: 'Material' },
       { id: 'CANTPROGRAMADA', key: 'CANTIDAD' },
       { id: 'FECHA', key: 'FECHA' },
-      { id: 'RESPCTRLPROD', key: 'RESPCTRLPROD' }
+      { id: 'RESPCTRLPROD', key: 'RESPCTRLPROD' },
+      { id: 'ENLINEA', key: 'ENLINEA' },
+      { id: 'MAQUINA', key: 'MAQUINA' },
     ];
 
     return (
@@ -10271,25 +13130,34 @@ useEffect(() => {
                 <CardDescription className="text-white/60 font-bold uppercase text-[10px] tracking-widest mt-1">
                   Carga Operativa FERT
                 </CardDescription>
+                {/* RESPCTRLPROD del área de Forros (restricción "RESP_CTRL_PROD", grupo FORROS) —
+                    mismo filtro que ya se ve en Órdenes Previsionales, ahora también acá para que
+                    quede claro qué responsables entran sin tener que adivinarlo. */}
+                <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                  {allowedRespCodes.length > 0 ? allowedRespCodes.map(code => (
+                    <Badge key={code} className="bg-white/15 text-white border-white/20 font-mono text-[9px] font-black py-0.5 px-2 rounded-lg">RESP: {code}</Badge>
+                  )) : (
+                    <Badge className="bg-white/10 text-white/70 border-white/20 font-bold uppercase text-[9px] py-0.5 px-2 rounded-lg">Sin restricción RESP configurada — sin filtrar por responsable</Badge>
+                  )}
+                </div>
               </div>
             </div>
             <div className="flex items-center gap-3">
-              <div className="flex items-center bg-white/10 border border-white/20 rounded-lg px-3 py-1 gap-2">
-                <CalendarIcon className="w-3.5 h-3.5 text-white" />
-                <input 
-                  type="date" 
-                  value={date} 
-                  onChange={(e) => setDate(e.target.value)}
-                  className="bg-transparent border-none text-white text-[10px] font-bold focus:ring-0 outline-none p-0 cursor-pointer"
-                />
-              </div>
-              <Badge className="bg-white text-slate-900 border-none font-mono font-black text-sm px-4 py-1.5 rounded-xl">{orders.length} REG</Badge>
+              {fechaMin && (
+                <div className="flex items-center bg-white/10 border border-white/20 rounded-lg px-3 py-1.5 gap-2">
+                  <CalendarIcon className="w-3.5 h-3.5 text-white" />
+                  <span className="text-white text-[10px] font-bold">
+                    {fechaMin === fechaMax ? fechaMin : `${fechaMin} → ${fechaMax}`}
+                  </span>
+                </div>
+              )}
+              <Badge className="bg-white text-slate-900 border-none font-mono font-black text-sm px-4 py-1.5 rounded-xl">{todasLasOrdenes.length} REG</Badge>
             </div>
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          <div className="overflow-x-auto max-h-[50vh]">
-            {orders.length > 0 ? (
+          <div className="overflow-x-auto max-h-[70vh]">
+            {todasLasOrdenes.length > 0 ? (
               <table className="w-full text-[11px] border-collapse">
                 <thead className="bg-slate-100 sticky top-0 z-10 text-slate-600 text-left uppercase tracking-widest font-black">
                   <tr>
@@ -10298,28 +13166,37 @@ useEffect(() => {
                     ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {orders.map((order, i) => (
-                    <tr key={i} className="hover:bg-indigo-50 transition-colors">
-                      {fertCols.map((col) => {
-                        let val = order[col.key] || order[col.id] || order[col.id.toLowerCase()];
-                        if (col.id === 'MATERIAL' && val) {
-                          val = normalizeMaterialCode(val); 
-                        }
-                        if (col.id === 'FECHA' && val) val = String(val).split('T')[0];
-                        if (col.id === 'CANTPROGRAMADA' && val) val = Math.round(Number(val)).toLocaleString();
-                        return (
-                          <td key={col.id} className={cn(
-                            "px-6 py-4 font-medium text-slate-600 whitespace-nowrap",
-                            col.id === 'MATERIAL' && "font-mono font-bold",
-                            col.id === 'CANTPROGRAMADA' && "text-right font-black text-slate-900",
-                            col.id === 'NOMBRE' && "whitespace-normal break-words min-w-[250px]"
-                          )}>{val ?? '—'}</td>
-                        );
-                      })}
+                {/* Agrupado por MÁQUINA (a pedido del usuario) — una fila de encabezado por grupo,
+                    y dentro de cada uno las órdenes ya vienen ordenadas por FECHA ascendente. */}
+                {grupos.map(grupo => (
+                  <tbody key={grupo.maquina} className="divide-y divide-slate-100">
+                    <tr className="bg-slate-800">
+                      <td colSpan={fertCols.length} className="px-6 py-2.5 font-black text-white uppercase text-[10px] tracking-widest">
+                        <Database className="w-3 h-3 inline mr-2 -mt-0.5" /> {grupo.maquina} <span className="text-slate-400 font-bold normal-case ml-1">({grupo.ordenes.length} orden{grupo.ordenes.length === 1 ? '' : 'es'})</span>
+                      </td>
                     </tr>
+                    {grupo.ordenes.map((order, i) => (
+                      <tr key={i} className="hover:bg-indigo-50 transition-colors">
+                        {fertCols.map((col) => {
+                          let val = order[col.key] || order[col.id] || order[col.id.toLowerCase()];
+                          if (col.id === 'MATERIAL' && val) {
+                            val = normalizeMaterialCode(val);
+                          }
+                          if (col.id === 'FECHA' && val) val = String(val).split('T')[0];
+                          if (col.id === 'CANTPROGRAMADA' && val) val = Math.round(Number(val)).toLocaleString();
+                          return (
+                            <td key={col.id} className={cn(
+                              "px-6 py-4 font-medium text-slate-600 whitespace-nowrap",
+                              col.id === 'MATERIAL' && "font-mono font-bold",
+                              col.id === 'CANTPROGRAMADA' && "text-right font-black text-slate-900",
+                              col.id === 'NOMBRE' && "whitespace-normal break-words min-w-[250px]"
+                            )}>{val ?? '—'}</td>
+                          );
+                        })}
+                      </tr>
                     ))}
-                </tbody>
+                  </tbody>
+                ))}
               </table>
             ) : (
               <div className="py-20 text-center text-slate-400 uppercase font-black tracking-widest text-xs opacity-40">No hay registros para este centro</div>
@@ -10337,6 +13214,7 @@ useEffect(() => {
   // viven dentro de CapacidadComparacionPanel (no en este componente), así que llegan acá
   // vía el callback onProcessChange → subPanelProcess.
   const activeProcess = useMemo(() => {
+    if (isLoadingPlanGrupo) return { label: 'Consultando Plan Táctico de Grupos', progress: null as number | null };
     if (isLoadingNivelExplosion) return { label: 'Explosionando Nivel 1 — Forro', progress: nivelExplosionProgress };
     if (isLoadingNivel2) return { label: 'Explosionando Nivel 2 — Tapa', progress: nivel2Progress };
     if (isLoadingNivel3) return { label: 'Explosionando Nivel 3 — Acolchado', progress: nivel3Progress };
@@ -10349,6 +13227,7 @@ useEffect(() => {
     if (subPanelProcess) return subPanelProcess;
     return null;
   }, [
+    isLoadingPlanGrupo,
     isLoadingNivelExplosion, nivelExplosionProgress,
     isLoadingNivel2, nivel2Progress,
     isLoadingNivel3, nivel3Progress,
@@ -10382,12 +13261,68 @@ useEffect(() => {
         }
         return v === hrCodeFromMaestro;
       };
-      const ordenesCrudas = techFilteredOrdenes.filter(o => coincideHR(String(o['MAQUINA'] || o['Maquina'] || '')));
-      const ordenesPlanFinal = planFinalOrders.filter(o => coincideHR(String(o._finalHR || '')));
+      // FBASE/HR-FORRO usan el rango de fechas independiente DE CADA PUESTO (no uno compartido) —
+      // ver techFilteredOrdenesParaPuesto. Si el pool agrupa varios puestos bajo la misma Hoja de
+      // Ruta, se trae el pool propio de CADA UNO y se combinan — los puestos que NO son FBASE/
+      // HR-FORRO comparten la MISMA referencia (`techFilteredOrdenes`), así que simplemente
+      // concatenar duplicaría esas órdenes tantas veces como puestos tenga el pool; se deduplica
+      // por IDENTIDAD de objeto (mismo registro, no una copia) antes de contar nada.
+      const origenOrdenesVistos = new Set<any>();
+      const origenOrdenes = groupInfo.puestos.flatMap((p: string) => techFilteredOrdenesParaPuesto(p))
+        .filter((o: any) => {
+          if (origenOrdenesVistos.has(o)) return false;
+          origenOrdenesVistos.add(o);
+          return true;
+        });
+      // Mientras el puesto NO esté "Aceptado" en Plan Final, este es el único camino que cuenta
+      // para Resumen — tiene que excluir lo bloqueado con candado igual que ya hace la tarjeta
+      // (MachineCard), o el bloqueo no se refleja acá hasta presionar "Aceptar Plan" (reportado
+      // por el usuario: bloquear una Tapa no bajaba el exceso en Resumen). Se chequean los TRES
+      // candados posibles por puesto: el genérico (Forros/Bandas/Corte/etc.), el de Tapa y el de
+      // Acolchado — cada sección usa el suyo.
+      const mkBloqueo = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
+      const estaBloqueadaEnAlgunPuesto = (o: any) => {
+        const key = mkBloqueo(o);
+        return groupInfo.puestos.some((p: string) =>
+          ordenesBloqueadasPorPuesto.get(p)?.has(key) ||
+          tapaOrdenesBloqueadasPorPuesto.get(p)?.has(key) ||
+          acolchadoOrdenesBloqueadasPorPuesto.get(p)?.has(key)
+        );
+      };
+      const ordenesCrudas = origenOrdenes
+        .filter(o => coincideHR(String(o['MAQUINA'] || o['Maquina'] || '')))
+        .filter(o => !estaBloqueadaEnAlgunPuesto(o));
+      // Deduplicado por contenido (ORDEN|MATERIAL|CANTIDAD), no por identidad de objeto: a
+      // diferencia de `origenOrdenes` (misma referencia repetida por puestos que comparten
+      // `techFilteredOrdenes`), acá cada `_source` crea una COPIA nueva del objeto al aceptar — si
+      // dos `_source` distintos llegan a representar la misma orden real para esta Hoja de Ruta
+      // (ej. un `_source` viejo que quedó sin limpiar de un cambio anterior, o un borrador local
+      // restaurado de una versión previa del motor), antes se sumaba dos veces sin que nada lo
+      // notara — confirmado por el usuario con un caso real: una Cosedora marcando el doble de
+      // horas que su Acolchado pareja, pese a que la tarjeta individual mostraba el número correcto.
+      const mkPlanFinal = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
+      const planFinalVistos = new Set<string>();
+      const ordenesPlanFinal = planFinalOrders
+        .filter(o => coincideHR(String(o._finalHR || '')))
+        .filter(o => {
+          const key = mkPlanFinal(o);
+          if (planFinalVistos.has(key)) return false;
+          planFinalVistos.add(key);
+          return true;
+        });
       const yaAceptado = ordenesPlanFinal.length > 0;
       const orders = yaAceptado ? ordenesPlanFinal : ordenesCrudas;
-      const totalUnits = orders.reduce((sum, o) => sum + Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), 0);
-      const totalTimeHours = orders.reduce((sum, o) => sum + calculateProductionTime(o['MATERIAL'] || o['CodMaterial'] || '', Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), o), 0) / 3600;
+      // FERT comprometido en SAP (`fertDelDiaPorMaquina`, mismo lookup por HR que ya usa
+      // MachineCard) — SÍ suma a la capacidad ocupada que ve Resumen, igual que ya suma en la
+      // tarjeta (si no sumara, Resumen mostraría un % distinto al de la tarjeta: reportado por el
+      // usuario — "50% de previsionales + 25% de FERT, la barra debe indicar 75%, y ese dato debe
+      // irse al resumen"). NUNCA se agrega a Plan Final/SAP — esto es solo para el total que ve
+      // Resumen/correo, el mismo criterio ya usado en `ordenesCrudas`/`ordenesPlanFinal` arriba.
+      const fertOrders = fertDelDiaPorMaquina.get(hrCodeFromMaestro) || [];
+      const totalUnits = orders.reduce((sum, o) => sum + Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), 0)
+        + fertOrders.reduce((sum, o) => sum + Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), 0);
+      const totalTimeHours = orders.reduce((sum, o) => sum + calculateProductionTime(o['MATERIAL'] || o['CodMaterial'] || '', Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), o), 0) / 3600
+        + fertOrders.reduce((sum, o) => sum + calculateProductionTime(o['MATERIAL'] || o['CodMaterial'] || '', Number(o['CANTIDAD'] || o['CANTPROGRAMADA'] || 0), o), 0) / 3600;
       let totalCapacityHours = 0;
       groupInfo.puestos.forEach(p => {
         const config = workstationConfigs[p] || { machine: p, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
@@ -10398,7 +13333,34 @@ useEffect(() => {
       groupInfo.puestos.forEach(p => resultado.set(p, entry));
     });
     return resultado;
-  }, [uniquePuestos, mapToHojaRutaInternal, techFilteredOrdenes, planFinalOrders, calculateProductionTime, workstationConfigs, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal]);
+  }, [uniquePuestos, mapToHojaRutaInternal, techFilteredOrdenesParaPuesto, planFinalOrders, calculateProductionTime, workstationConfigs, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, ordenesBloqueadasPorPuesto, tapaOrdenesBloqueadasPorPuesto, acolchadoOrdenesBloqueadasPorPuesto, fertDelDiaPorMaquina]);
+
+  // % de ocupación COMBINADO de un par de Equipo Compartido — a pedido del usuario: "lo que debería
+  // ver es qué porcentaje de la jornada estoy ocupando entre ambas máquinas", visible en la tarjeta
+  // de Ajuste de Producción (no solo en Resumen, que además exige tener ambas máquinas ya aceptadas
+  // en Plan Final). Reutiliza `ocupacionPorHR` — que ya resuelve demanda/capacidad tanto si el
+  // puesto está aceptado como si no (`ordenesCrudas`/`ordenesPlanFinal`) — sumando la demanda y la
+  // capacidad de ESTE puesto y de su pareja, para un único % que refleja al equipo como un todo.
+  const equipoCompartidoResumenPorPuesto = useMemo(() => {
+    const map = new Map<string, { horasRequeridas: number; capacidad: number; utilizacion: number }>();
+    uniquePuestos.forEach(p => {
+      const cfgP = workstationConfigs[p];
+      const pareja = cfgP?.equipoCompartidoCon;
+      // Solo modo "reparto" — en "préstamo" cada lado ya es correcto por su cuenta (su capacidad
+      // propia + lo prestado/recibido), no tiene sentido combinar demanda+capacidad de los dos.
+      if (!pareja || cfgP?.equipoCompartidoModo === 'prestamo' || map.has(p)) return;
+      const esteOcup = ocupacionPorHR.get(p);
+      const parejaOcup = ocupacionPorHR.get(pareja);
+      if (!esteOcup || !parejaOcup) return;
+      const horasRequeridas = esteOcup.totalTimeHours + parejaOcup.totalTimeHours;
+      const capacidad = esteOcup.totalCapacityHours + parejaOcup.totalCapacityHours;
+      const utilizacion = capacidad > 0 ? (horasRequeridas / capacidad) * 100 : 0;
+      const resumen = { horasRequeridas, capacidad, utilizacion };
+      map.set(p, resumen);
+      map.set(pareja, resumen);
+    });
+    return map;
+  }, [uniquePuestos, workstationConfigs, ocupacionPorHR]);
 
   // Correo de "Horarios y Turnos" + "Salud de Planta" (pestaña Resumen) — POST
   // /api/servicios/enviarCorreo. Destinatarios vienen de la restricción "CORREOS_PLAN" (grupo
@@ -10413,100 +13375,924 @@ useEffect(() => {
   //    franjas alternadas y badges de color para Día/Noche/Sábado, en vez de texto plano — estilos
   //    100% inline (nada de <style>/flex/grid) porque los clientes de correo (Outlook en
   //    particular) ignoran CSS moderno y hasta bloques <style>.
+  // Filas de "Horarios y Turnos — Salud de Planta" (solo puestos con plan aceptado), compartidas
+  // por el correo y el respaldo .txt para que ambos digan exactamente lo mismo.
+  // Cant. Total y T. Requerido vienen de `ocupacionPorHR` (grupo.totalUnits/totalTimeHours): ESE
+  // número SÍ refleja el ajuste ya aceptado (usa `planFinalOrders` cuando el puesto está aceptado,
+  // igual que la tarjeta en pantalla) — un intento anterior los recalculaba desde cero ignorando
+  // el ajuste aceptado, y por eso un puesto aceptado con ajuste al 84%/93% salía con un % muy
+  // distinto (el "natural", sin ajustar) en este resumen. Lo único que se corrige acá es la
+  // CAPACIDAD: en vez de la capacidad del POOL completo de Hoja de Ruta (lo que usa `grupo.
+  // utilization`), se usa la del puesto individual (`capacidadPuesto(p, ...)`, según sus propios
+  // turnos/personas) — así el % de esta fila SÍ se puede reconstruir a mano con los otros 3
+  // números de la misma fila (antes Capacidad ya era individual pero el % dividía por el pool,
+  // y no cuadraban entre sí).
+  // Reparto de la cantidad TOTAL de un puesto entre sus turnos activos, proporcional a las horas
+  // netas de cada uno — confirmado con el usuario: 8h Día + 8h Noche = 50%/50%; si las horas no
+  // son iguales, la proporción sigue las horas (ej. 8h + 6h = 8/14 y 6/14). Todavía NO es un
+  // reparto por código de material (eso queda pendiente para después) — es solo el total del
+  // puesto repartido entre Día/Noche/Sábado según cuáles tenga activos. Sábado entra con el mismo
+  // criterio cuando está activo (reparto a 3 bandas, no solo Día/Noche). Horario Personalizado
+  // reemplaza los 3 turnos fijos por sus propios tramos (ver `turnosPersonalizados`), así que acá
+  // no aplica este reparto — se reporta `null` en los 3 campos para mostrarlo como "—" en pantalla.
+  const repartoProduccionPorTurno = useCallback((config: WorkstationConfig, totalUnits: number): { cantDia: number | null; cantNoche: number | null; cantSabado: number | null } => {
+    if (config.horarioPersonalizadoActivo) return { cantDia: null, cantNoche: null, cantSabado: null };
+    const horasDia = config.isDayActive ? horasNetasDiurnasVal : 0;
+    const horasNoche = config.isNightActive ? horasNetasNocturnasVal : 0;
+    const horasSabado = config.isSaturdayActive ? horasNetasFinSemanaVal : 0;
+    const horasTotal = horasDia + horasNoche + horasSabado;
+    if (horasTotal <= 0) return { cantDia: 0, cantNoche: 0, cantSabado: 0 };
+    return {
+      cantDia: totalUnits * (horasDia / horasTotal),
+      cantNoche: totalUnits * (horasNoche / horasTotal),
+      cantSabado: totalUnits * (horasSabado / horasTotal),
+    };
+  }, [horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal]);
+
+  // Igual que `repartoProduccionPorTurno` pero para HORAS — a pedido del usuario: la tabla de
+  // calificaciones (Resumen y correo) también debe mostrar, por equipo de trabajo y turno, las
+  // horas REQUERIDAS (mismo reparto proporcional que ya usan cantDia/cantNoche/cantSabado,
+  // aplicado a `totalTimeHours`) y las horas DISPONIBLES (capacidad real de ESE turno puntual, con
+  // el mismo factor por puesto que usa `capacidadPuesto` — ver `factorCapacidadPuestoPorTurno`, así
+  // un puesto que mide por personas o con multiplicador distinto por turno no sale parejo). Horario
+  // Personalizado reemplaza los 3 turnos fijos (igual que en `repartoProduccionPorTurno`), así que
+  // acá tampoco aplica — se reporta `null` en los 6 campos.
+  // Equipo Compartido (reparto o préstamo): `isDayActive`/`isNightActive`/`isSaturdayActive` NO se
+  // tocan al activarlo (ver `handleSetEquipoCompartido`/`handleSetEquipoCompartidoPrestamo` — la
+  // misma persona queda con su código cargado en el turno de siempre), así que usar la jornada
+  // NETA completa de ese turno como "disponible" mostraba a la MISMA persona con una jornada
+  // entera disponible en CADA uno de los dos puestos a la vez — el doble de lo real, cuando en
+  // realidad reparte UNA sola jornada entre ambos (reparto) o mantiene la suya y solo se ajusta por
+  // lo prestado/recibido (préstamo). Reportado por el usuario: "la producción debe reflejar a la
+  // persona en dos puestos y no con una capacidad en exceso, solo lo que le toca hacer". Por eso,
+  // en este modo, lo "disponible" se toma de `capacidadTotal` (la capacidad YA ajustada por
+  // `capacidadPuesto` para este lado puntual) repartida entre los turnos activos en la misma
+  // proporción que sus horas netas — no de la jornada neta completa sin ajustar.
+  const repartoHorasPorTurno = useCallback((puesto: string, config: WorkstationConfig, totalTimeHours: number, capacidadTotal: number): {
+    horasReqDia: number | null; horasReqNoche: number | null; horasReqSabado: number | null;
+    horasDispDia: number | null; horasDispNoche: number | null; horasDispSabado: number | null;
+  } => {
+    if (config.horarioPersonalizadoActivo) {
+      return { horasReqDia: null, horasReqNoche: null, horasReqSabado: null, horasDispDia: null, horasDispNoche: null, horasDispSabado: null };
+    }
+    const horasDia = config.isDayActive ? horasNetasDiurnasVal : 0;
+    const horasNoche = config.isNightActive ? horasNetasNocturnasVal : 0;
+    const horasSabado = config.isSaturdayActive ? horasNetasFinSemanaVal : 0;
+    const horasTotal = horasDia + horasNoche + horasSabado;
+    const esEquipoCompartido = !!config.equipoCompartidoCon;
+    if (horasTotal <= 0) return { horasReqDia: 0, horasReqNoche: 0, horasReqSabado: 0, horasDispDia: 0, horasDispNoche: 0, horasDispSabado: 0 };
+    const horasDispDia = esEquipoCompartido
+      ? (config.isDayActive ? capacidadTotal * (horasDia / horasTotal) : 0)
+      : (config.isDayActive ? horasNetasDiurnasVal * factorCapacidadPuestoPorTurno(puesto, config, 'dia') : 0);
+    const horasDispNoche = esEquipoCompartido
+      ? (config.isNightActive ? capacidadTotal * (horasNoche / horasTotal) : 0)
+      : (config.isNightActive ? horasNetasNocturnasVal * factorCapacidadPuestoPorTurno(puesto, config, 'noche') : 0);
+    const horasDispSabado = esEquipoCompartido
+      ? (config.isSaturdayActive ? capacidadTotal * (horasSabado / horasTotal) : 0)
+      : (config.isSaturdayActive ? horasNetasFinSemanaVal * factorCapacidadPuestoPorTurno(puesto, config, 'sabado') : 0);
+    return {
+      horasReqDia: totalTimeHours * (horasDia / horasTotal),
+      horasReqNoche: totalTimeHours * (horasNoche / horasTotal),
+      horasReqSabado: totalTimeHours * (horasSabado / horasTotal),
+      horasDispDia, horasDispNoche, horasDispSabado,
+    };
+  }, [horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal]);
+
+  const construirResumenAceptados = useCallback(() => workstationGroups
+    .map(group => ({
+      title: group.title,
+      items: group.items
+        .filter(p => uniquePuestosSet.has(p) && ocupacionPorHR.get(p)?.yaAceptado)
+        .map(p => {
+          const config = workstationConfigs[p] || { machine: p, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
+          const grupo = ocupacionPorHR.get(p);
+          const capacidadTotal = capacidadPuesto(p, config, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
+          const totalUnits = grupo?.totalUnits ?? 0;
+          const totalTimeHours = grupo?.totalTimeHours ?? 0;
+          const { cantDia, cantNoche, cantSabado } = repartoProduccionPorTurno(config, totalUnits);
+          const { horasReqDia, horasReqNoche, horasReqSabado, horasDispDia, horasDispNoche, horasDispSabado } = repartoHorasPorTurno(p, config, totalTimeHours, capacidadTotal);
+          // Mantenimiento preventivo AGENDADO para ese puesto, ese día — mismo dato que ya usaba
+          // Personal & Turnos para descontar horas del desglose visual (línea ~16020), pero nunca
+          // se mostraba en Resumen. `mantenimientoHorasPorPuesto` está indexado por HR, y un puesto
+          // puede tener HR combinada ("HR-A / HR-B") — se suma cada código, mismo criterio.
+          const hrCombinada = mapToHojaRutaInternal(p);
+          const mantenimientoHoras = hrCombinada
+            ? hrCombinada.split(' / ').reduce((sum, code) => sum + (mantenimientoHorasPorPuesto[code.trim().toUpperCase()] || 0), 0)
+            : 0;
+          // Citas médicas del personal asignado a este puesto (ver `horasCitasMedicasPuesto`) —
+          // mismo criterio de descuento que Mantenimiento, pero el dato viene de la PERSONA.
+          // Acolchadoras: NO se descuenta (hay que buscar reemplazo), a pedido del usuario — ver
+          // `esHRAcolchado`. `citasMedicasHoras` se conserva SIN descontar para mostrarlo siempre
+          // (tabla/correo), y `citasMedicasHorasDescontadas` es lo que realmente resta capacidad.
+          const citasMedicasHoras = horasCitasMedicasPuesto(config);
+          const esAcolchado = esPuestoAcolchado((hrCombinada || p).toUpperCase());
+          const citasMedicasHorasDescontadas = esAcolchado ? 0 : citasMedicasHoras;
+          // % Ocupación contra la capacidad NETA (bruta menos mantenimiento y citas médicas) —
+          // mismo criterio que ya usa la tarjeta (MachineCard: `capacity = capacidadBruta -
+          // mantenimientoHoras - citasMedicasHorasDescontadas`). Antes acá se dividía por la
+          // capacidad BRUTA sin descontar, así que el % de Resumen/correo salía más bajo que el de
+          // la tarjeta para cualquier puesto con mantenimiento agendado (reportado por el usuario:
+          // "no me coincide con lo que tú llevas al resumen"). `Capacidad` se sigue mostrando BRUTA
+          // en la tabla (con Mantenimiento/Citas médicas como columnas aparte) — solo el % cambia
+          // de base, igual que ya hace la tarjeta.
+          const capacidadNeta = Math.max(0, capacidadTotal - mantenimientoHoras - citasMedicasHorasDescontadas);
+          const utilization = capacidadNeta > 0 ? (totalTimeHours / capacidadNeta) * 100 : 0;
+          // PENDIENTES — órdenes FERT con fecha hasta HOY (acumulado) que todavía tienen
+          // CANTPENDIENTE sin entregar (ver `pendientesPorHR`). Mismo criterio de HR combinada que Mantenimiento.
+          const pendientes = hrCombinada
+            ? hrCombinada.split(' / ').reduce((sum, code) => sum + (pendientesPorHR[code.trim().toUpperCase()] || 0), 0)
+            : 0;
+          // Personal asignado por turno (Habilidades por Estación) — mismos códigos que ya se
+          // cargan en Personal y Turnos (`empleadosDia/Noche/Sabado`), resueltos a nombre +
+          // calificación con `resolverEmpleadoParaPuesto` para que Resumen y el correo muestren
+          // QUIÉN está en cada máquina/turno, no solo el conteo de personas.
+          // Índice calculado ANTES de filtrar los vacíos — ver mismo criterio en `personalPorTurno`
+          // de MachineCard (si el titular se deja vacío, el ayudante no debe correrse a posición 0).
+          const resolverTurnoPersonal = (codigos: string[] | undefined) =>
+            (codigos || [])
+              .map((c, idx) => ({ codigo: (c || '').trim(), idx }))
+              .filter(x => x.codigo)
+              .map(({ codigo, idx }) => {
+                const r = resolverEmpleadoParaPuesto(codigo, p, idx);
+                return { codigo, nombre: r?.nombre || '', calificacion: r?.calificacion || 0, encontrado: !!r?.encontrado };
+              });
+          const personal = {
+            dia: resolverTurnoPersonal(config.empleadosDia),
+            noche: resolverTurnoPersonal(config.empleadosNoche),
+            sabado: resolverTurnoPersonal(config.empleadosSabado),
+          };
+          return { puesto: p, hr: mapToHojaRutaInternal(p) || 'S/HR', config, capacidadTotal, totalUnits, totalTimeHours, utilization, cantDia, cantNoche, cantSabado, horasReqDia, horasReqNoche, horasReqSabado, horasDispDia, horasDispNoche, horasDispSabado, mantenimientoHoras, citasMedicasHoras, citasMedicasHorasDescontadas, esAcolchado, pendientes, personal };
+        }),
+    }))
+    .filter(group => group.items.length > 0),
+  [ocupacionPorHR, uniquePuestosSet, workstationConfigs, capacidadPuesto, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, mapToHojaRutaInternal, repartoProduccionPorTurno, repartoHorasPorTurno, mantenimientoHorasPorPuesto, horasCitasMedicasPuesto, esPuestoAcolchado, pendientesPorHR, resolverEmpleadoParaPuesto]);
+
+  // Pestaña Resumen: la misma tabla que ya arma `construirResumenAceptados` (idéntica a la del
+  // correo — un solo lugar, nada repetido), más los totales de personas por turno al final. Un
+  // puesto con "Horario Personalizado" activo YA NO usa peopleDay/peopleNight/peopleWeekend (ver
+  // `capacidadPuesto` — esos 3 turnos fijos quedan reemplazados por `turnosPersonalizados`), así
+  // que sumarlos ahí daría 0 aunque el puesto sí tenga gente asignada — por eso se cuentan aparte,
+  // en su propio total "Personalizado". Esto es justo el caso reportado: "coloco una persona pero
+  // en el resumen me pones cero".
+  const resumenAceptadosConTotales = useMemo(() => {
+    const grupos = construirResumenAceptados();
+    let personasDia = 0, personasNoche = 0, personasSabado = 0, personasPersonalizado = 0, personasEquipoCompartido = 0;
+    let totalCantidad = 0, totalTiempo = 0, totalCapacidad = 0, totalMantenimiento = 0, totalCitasMedicas = 0, totalPendientes = 0;
+    const todosLosItems = grupos.flatMap(g => g.items);
+    const itemPorPuesto = new Map(todosLosItems.map(item => [item.puesto, item]));
+    // Equipo Compartido: combinado por par (no por máquina) — un par solo cuenta una vez en el
+    // total de personas, aunque sus dos máquinas aparezcan como filas separadas. Si la pareja de
+    // una máquina no está TAMBIÉN aceptada en Plan Final, no hay con qué combinar — esa máquina
+    // se muestra sola, con su propio % (que de todas formas ya es correcto, porque su capacidad ya
+    // trae las horas reducidas del reparto).
+    const paresEquipoCompartido = new Map<string, {
+      pareja: string; horasPropias: number; horasPareja: number; personas: number;
+      capacidadCombinada: number; tiempoCombinado: number; unidadesCombinadas: number; utilizacionCombinada: number;
+      primero: boolean;
+    }>();
+    const paresVistos = new Set<string>();
+
+    grupos.forEach(group => group.items.forEach(item => {
+      if (item.config.horarioPersonalizadoActivo) {
+        personasPersonalizado += (item.config.turnosPersonalizados || []).reduce((s: number, t: TurnoPersonalizado) => s + (t.personas || 0), 0);
+      } else if (item.config.equipoCompartidoCon && item.config.equipoCompartidoModo !== 'prestamo') {
+        const claveParDesordenada = [item.puesto, item.config.equipoCompartidoCon].sort().join('|');
+        if (!paresVistos.has(claveParDesordenada)) {
+          paresVistos.add(claveParDesordenada);
+          personasEquipoCompartido += item.config.equipoCompartidoPersonas || 0;
+        }
+      } else {
+        // Modo "préstamo" cae acá también (no reemplaza el personal propio del puesto, solo le
+        // suma/resta horas de capacidad — ver `capacidadPuesto`): sigue contando su propia gente
+        // normal, nunca `equipoCompartidoPersonas` (que ni siquiera se usa en este modo).
+        if (item.config.isDayActive) personasDia += item.config.peopleDay || 0;
+        if (item.config.isNightActive) personasNoche += item.config.peopleNight || 0;
+        if (item.config.isSaturdayActive) personasSabado += item.config.peopleWeekend || 0;
+      }
+      totalCantidad += item.totalUnits;
+      totalTiempo += item.totalTimeHours;
+      totalCapacidad += item.capacidadTotal;
+      totalMantenimiento += item.mantenimientoHoras;
+      totalCitasMedicas += item.citasMedicasHorasDescontadas;
+      totalPendientes += item.pendientes;
+    }));
+
+    todosLosItems.forEach(item => {
+      const pareja = item.config.equipoCompartidoCon;
+      // Modo "préstamo" no arma fila combinada — cada lado ya es correcto por su cuenta (su
+      // capacidad propia + lo prestado/recibido), no hay nada que combinar.
+      if (!pareja || item.config.equipoCompartidoModo === 'prestamo' || paresEquipoCompartido.has(item.puesto)) return;
+      const itemPareja = itemPorPuesto.get(pareja);
+      if (!itemPareja) return; // la pareja aún no está aceptada en Plan Final — no hay combinado que mostrar
+      const capacidadCombinada = item.capacidadTotal + itemPareja.capacidadTotal;
+      const tiempoCombinado = item.totalTimeHours + itemPareja.totalTimeHours;
+      // % contra la capacidad NETA del par (menos mantenimiento y citas médicas de cada lado) —
+      // mismo criterio que la tarjeta y el resto de Resumen (ver fix en `construirResumenAceptados`).
+      const capacidadCombinadaNeta = Math.max(0, capacidadCombinada - item.mantenimientoHoras - itemPareja.mantenimientoHoras - item.citasMedicasHorasDescontadas - itemPareja.citasMedicasHorasDescontadas);
+      const info = {
+        pareja,
+        horasPropias: item.config.equipoCompartidoHoras || 0,
+        horasPareja: itemPareja.config.equipoCompartidoHoras || 0,
+        personas: item.config.equipoCompartidoPersonas || 0,
+        capacidadCombinada,
+        tiempoCombinado,
+        unidadesCombinadas: item.totalUnits + itemPareja.totalUnits,
+        utilizacionCombinada: capacidadCombinadaNeta > 0 ? (tiempoCombinado / capacidadCombinadaNeta) * 100 : 0,
+        primero: true,
+      };
+      paresEquipoCompartido.set(item.puesto, info);
+      paresEquipoCompartido.set(pareja, { ...info, pareja: item.puesto, horasPropias: info.horasPareja, horasPareja: info.horasPropias, primero: false });
+    });
+
+    return { grupos, paresEquipoCompartido, totales: { personasDia, personasNoche, personasSabado, personasPersonalizado, personasEquipoCompartido, totalCantidad, totalTiempo, totalCapacidad, totalMantenimiento, totalCitasMedicas, totalPendientes } };
+  }, [construirResumenAceptados]);
+
+  // Resumen de personas al final de la pestaña Resumen — a pedido del usuario: una sola lista con
+  // quién quedó asignado a cada puesto/turno y la calificación que se le encontró en Habilidades
+  // por Estación, para revisarlo de un vistazo antes de enviar el plan. Si no se encontró
+  // calificación (código sin ninguna fila en la base, o con calificación registrada en 0) se marca
+  // como alerta en vez de mostrarse como si nada — no bloquea, solo avisa, igual que el resto de
+  // los cruces de Habilidades por Estación en este módulo. No cubre Horario Personalizado: esos
+  // turnos solo guardan un conteo de personas (`turnosPersonalizados[].personas`), sin código de
+  // empleado por posición, así que no hay con qué resolver nombre/calificación.
+  const personalAsignadoResumen = useMemo(() => {
+    // `produccion`: reparto proporcional de ese puesto para ESE turno (ver `repartoProduccionPorTurno`
+    // / `cantDia`/`cantNoche`/`cantSabado` en cada item de `resumenAceptadosConTotales`) — a pedido
+    // del usuario: la tabla de calificaciones también debe mostrar, por equipo de trabajo (puesto) y
+    // por turno, cuánta producción tiene asignada ese equipo. Es el mismo número para cada persona
+    // del mismo puesto/turno (es la meta del turno completo, no dividida por persona).
+    // `horasRequeridas`/`horasDisponibles`: mismo reparto por turno que `produccion`, pero en horas
+    // (ver `repartoHorasPorTurno`) — a pedido del usuario: la tabla de calificaciones también debe
+    // mostrar, por equipo de trabajo y turno, cuántas horas requiere ese turno y cuántas tiene
+    // disponibles, para detectar sobrecarga u holgura sin cruzar con la tabla principal.
+    const TURNOS = [
+      { campo: 'dia' as const, label: 'Día', produccion: (item: typeof resumenAceptadosConTotales.grupos[number]['items'][number]) => item.cantDia, horasRequeridas: (item: typeof resumenAceptadosConTotales.grupos[number]['items'][number]) => item.horasReqDia, horasDisponibles: (item: typeof resumenAceptadosConTotales.grupos[number]['items'][number]) => item.horasDispDia },
+      { campo: 'noche' as const, label: 'Noche', produccion: (item: typeof resumenAceptadosConTotales.grupos[number]['items'][number]) => item.cantNoche, horasRequeridas: (item: typeof resumenAceptadosConTotales.grupos[number]['items'][number]) => item.horasReqNoche, horasDisponibles: (item: typeof resumenAceptadosConTotales.grupos[number]['items'][number]) => item.horasDispNoche },
+      { campo: 'sabado' as const, label: 'Sábado', produccion: (item: typeof resumenAceptadosConTotales.grupos[number]['items'][number]) => item.cantSabado, horasRequeridas: (item: typeof resumenAceptadosConTotales.grupos[number]['items'][number]) => item.horasReqSabado, horasDisponibles: (item: typeof resumenAceptadosConTotales.grupos[number]['items'][number]) => item.horasDispSabado },
+    ];
+    const filas: { grupo: string; puesto: string; hr: string; turno: string; produccion: number | null; horasRequeridas: number | null; horasDisponibles: number | null; codigo: string; nombre: string; calificacion: number; encontrado: boolean; citasMedicasHoras: number; esAcolchado: boolean }[] = [];
+    resumenAceptadosConTotales.grupos.forEach(group => {
+      group.items.forEach(item => {
+        TURNOS.forEach(t => {
+          (item.personal[t.campo] || []).forEach(persona => {
+            filas.push({
+              grupo: group.title, puesto: item.puesto, hr: item.hr, turno: t.label, produccion: t.produccion(item),
+              horasRequeridas: t.horasRequeridas(item), horasDisponibles: t.horasDisponibles(item),
+              codigo: persona.codigo, nombre: persona.nombre, calificacion: persona.calificacion, encontrado: persona.encontrado,
+              // Horas de cita médica de ESTA persona (la "base" manual, llenada en Personal y
+              // Turnos — acá solo se visualiza) — y si este puesto es acolchadora, donde NO se
+              // descuenta capacidad, sino que se marca que hay que buscar un reemplazo.
+              citasMedicasHoras: citasMedicasPorPersona[normalizarCodigoEmpleado(persona.codigo)] || 0,
+              esAcolchado: item.esAcolchado,
+            });
+          });
+        });
+      });
+    });
+    const sinCalificacion = filas.filter(f => !f.encontrado || f.calificacion <= 0);
+    // Acolchadoras con cita médica: no se descontó capacidad (ver `esHRAcolchado`), así que hay
+    // que buscar un reemplazo a mano — se junta aparte para que no se pierda entre las filas.
+    const necesitaReemplazo = filas.filter(f => f.esAcolchado && f.citasMedicasHoras > 0.01);
+    return { filas, sinCalificacion, necesitaReemplazo };
+  }, [resumenAceptadosConTotales, citasMedicasPorPersona, normalizarCodigoEmpleado]);
+
+  // Tarjetas Hero de HR-FORRO / HR-FBASE al inicio del Resumen — confirmado con el usuario
+  // (mockup aprobado: "Tarjetas Hero lado a lado"). Agregan, entre todos los puestos que caen bajo
+  // cada una de las dos Hojas de Ruta, el mismo reparto por turno que ya usa la tabla de abajo
+  // (`cantDia/cantNoche/cantSabado`, ver `repartoProduccionPorTurno`) — se destacan aparte porque
+  // son las HR con más volumen entre las que tienen rango de fechas INDEPENDIENTE del resto del
+  // plan (ver `rangoFbaseForroPorPuesto`, uno por puesto — HR-MTBS1 también tiene el suyo, pero
+  // sin tarjeta Hero propia), así que conviene verlas de un vistazo antes que la tabla general.
+  // Clasificación por la HR REAL ya resuelta (no por el nombre del puesto) — ver el mismo
+  // criterio/motivo en `esPuestoRangoIndependienteFbaseForro`.
+  const resumenFbaseForroHero = useMemo(() => {
+    const todosLosItems = resumenAceptadosConTotales.grupos.flatMap(g => g.items);
+    const agregar = (items: typeof todosLosItems) => {
+      if (items.length === 0) return null;
+      const totalUnits = items.reduce((s, i) => s + i.totalUnits, 0);
+      const totalTimeHours = items.reduce((s, i) => s + i.totalTimeHours, 0);
+      const capacidadTotal = items.reduce((s, i) => s + i.capacidadTotal, 0);
+      const mantenimientoHoras = items.reduce((s, i) => s + i.mantenimientoHoras, 0);
+      const citasMedicasHoras = items.reduce((s, i) => s + i.citasMedicasHorasDescontadas, 0);
+      const cantDia = items.reduce((s, i) => s + (i.cantDia ?? 0), 0);
+      const cantNoche = items.reduce((s, i) => s + (i.cantNoche ?? 0), 0);
+      const cantSabado = items.reduce((s, i) => s + (i.cantSabado ?? 0), 0);
+      // Contra la capacidad NETA (menos mantenimiento y citas médicas), mismo criterio que la
+      // tarjeta y la tabla de abajo — ver el fix en `construirResumenAceptados`.
+      const capacidadNeta = Math.max(0, capacidadTotal - mantenimientoHoras - citasMedicasHoras);
+      const utilization = capacidadNeta > 0 ? (totalTimeHours / capacidadNeta) * 100 : 0;
+      return { totalUnits, totalTimeHours, capacidadTotal, cantDia, cantNoche, cantSabado, utilization, puestos: items.map(i => i.puesto) };
+    };
+    const forro = agregar(todosLosItems.filter(i => mapToHojaRutaInternal(i.puesto).trim().toUpperCase() === 'HR-FORRO'));
+    const fbase = agregar(todosLosItems.filter(i => mapToHojaRutaInternal(i.puesto).trim().toUpperCase().startsWith('HR-FBASE')));
+    return { forro, fbase };
+  }, [resumenAceptadosConTotales, mapToHojaRutaInternal]);
+
+  // Contenido del respaldo .txt que se escribe al "Guardar Plan" de Plan Final: la misma tabla del
+  // correo de Resumen + el detalle completo de órdenes de Plan Final (mismas columnas SAP del
+  // Excel/TXT de exportación).
+  const construirTxtPlan = useCallback((fechaObjetivo: string): string => {
+    const pad = (v: unknown, n: number, derecha = false) => {
+      const s = String(v ?? '');
+      return derecha ? s.padStart(n) : s.padEnd(n);
+    };
+    const turno = (activo: boolean, personas: number) => activo ? `${personas} pers.` : 'Inactivo';
+    const linea = '='.repeat(130);
+    const sub = '-'.repeat(130);
+    const { grupos: resumen, totales, paresEquipoCompartido } = resumenAceptadosConTotales;
+    const totalPuestos = resumen.reduce((acc, g) => acc + g.items.length, 0);
+
+    const out: string[] = [
+      linea,
+      'PLAN TÁCTICO FORROS — REPORTE DE PRODUCCIÓN',
+      linea,
+      `Fecha objetivo : ${fechaObjetivo} (${formatFechaLarga(fechaObjetivo)})`,
+      `Grupo          : ${planTxtGrupo}`,
+      `Centro         : ${planFinalCentro}`,
+      `Tipo de orden  : ${planFinalTipoOrden || '-'}`,
+      `Generado       : ${new Date().toLocaleString('es-EC', { timeZone: 'America/Guayaquil' })}`,
+      `Jornada (h)    : Diurna ${horasNetasDiurnasVal} · Nocturna ${horasNetasNocturnasVal} · Fin de semana ${horasNetasFinSemanaVal}`,
+      `Destinatarios  : ${correosPlanDestinatarios.join(', ') || '-'}`,
+      '',
+      linea,
+      `HORARIOS Y TURNOS — SALUD DE PLANTA (${totalPuestos} puesto(s) con plan aceptado)`,
+      linea,
+      [pad('PUESTO', 26), pad('HR', 16), pad('DÍA', 10), pad('NOCHE', 10), pad('SÁBADO', 10), pad('MÁQ.', 5, true), pad('CANT. TOTAL', 12, true), pad('T. REQ. (h)', 12, true), pad('CAPACIDAD (h)', 14, true), pad('% OCUP.', 8, true)].join(' '),
+    ];
+    if (resumen.length === 0) out.push('(Sin puestos con plan aceptado)');
+    resumen.forEach(group => {
+      out.push(sub, `[${group.title.toUpperCase()}]`);
+      group.items.forEach(r => {
+        // Horario Personalizado y Equipo Compartido reemplazan los 3 turnos fijos — "Inactivo"/0
+        // sería engañoso, así que se marcan acá y el detalle real va en la línea de abajo.
+        const personalizado = !!r.config.horarioPersonalizadoActivo;
+        const parEquipo = paresEquipoCompartido.get(r.puesto);
+        out.push([
+          pad(r.puesto, 26), pad(r.hr, 16),
+          pad(personalizado ? 'VER ABAJO' : parEquipo ? 'EQUIPO COMP.' : turno(r.config.isDayActive, r.config.peopleDay || 0), 10),
+          pad(personalizado || parEquipo ? '-' : turno(r.config.isNightActive, r.config.peopleNight || 0), 10),
+          pad(personalizado || parEquipo ? '-' : turno(r.config.isSaturdayActive, r.config.peopleWeekend || 0), 10),
+          pad(r.config.machines || 1, 5, true),
+          pad(r.totalUnits.toLocaleString('es-EC'), 12, true),
+          pad(r.totalTimeHours.toFixed(2), 12, true),
+          pad(r.capacidadTotal.toFixed(2), 14, true),
+          pad(`${r.utilization.toFixed(0)}%`, 8, true),
+        ].join(' '));
+        if (personalizado) {
+          const turnos = r.config.turnosPersonalizados || [];
+          out.push(`    > Horario Personalizado: ${turnos.length === 0 ? 'sin turnos' : turnos.map(t => `${t.horaInicio}-${t.horaFin} (${t.personas || 0} pers.)`).join(' · ')}`);
+        }
+        if (parEquipo) {
+          out.push(`    > Equipo Compartido: ${parEquipo.horasPropias.toFixed(2)}h aquí · ${parEquipo.horasPareja.toFixed(2)}h en ${parEquipo.pareja} · ${parEquipo.personas} pers.`);
+          if (parEquipo.primero) {
+            out.push(`    > Equipo combinado (${r.puesto} + ${parEquipo.pareja}): ${parEquipo.unidadesCombinadas.toLocaleString('es-EC')} uds · ${parEquipo.tiempoCombinado.toFixed(2)}h requeridas · ${parEquipo.capacidadCombinada.toFixed(2)}h capacidad · ${parEquipo.utilizacionCombinada.toFixed(0)}% ocupación`);
+          }
+        }
+        // Modo "préstamo" — no reemplaza Día/Noche/Sábado (el puesto conserva su capacidad propia),
+        // solo se indica el ajuste; Capacidad/% Ocup. de la fila ya lo incluyen vía `capacidadPuesto`.
+        if (r.config.equipoCompartidoCon && r.config.equipoCompartidoModo === 'prestamo') {
+          out.push(r.config.equipoCompartidoEsPrestamista
+            ? `    > Préstamo: -${(r.config.equipoCompartidoHorasPrestadas ?? 0).toFixed(2)}h prestadas a ${r.config.equipoCompartidoCon}`
+            : `    > Préstamo: +${(r.config.equipoCompartidoHorasPrestadas ?? 0).toFixed(2)}h recibidas de ${r.config.equipoCompartidoCon}`);
+        }
+      });
+    });
+    out.push(sub, [
+      pad('TOTAL PERSONAS POR TURNO', 26),
+      pad('', 16),
+      pad(`${totales.personasDia} pers.`, 10),
+      pad(`${totales.personasNoche} pers.`, 10),
+      pad(`${totales.personasSabado} pers.`, 10),
+      pad('', 5, true),
+      pad(totales.totalCantidad.toLocaleString('es-EC'), 12, true),
+      pad(totales.totalTiempo.toFixed(2), 12, true),
+      pad(totales.totalCapacidad.toFixed(2), 14, true),
+      pad('', 8, true),
+    ].join(' '));
+    if (totales.personasPersonalizado > 0) out.push(`    > Personas en Horario Personalizado (no incluidas arriba): ${totales.personasPersonalizado}`);
+    if (totales.personasEquipoCompartido > 0) out.push(`    > Personas en Equipo Compartido (no incluidas arriba): ${totales.personasEquipoCompartido}`);
+
+    const cols = PLAN_FINAL_EXPORT_COLUMNS.filter(c => !['OBSERVACION', 'FECHA_CARGA', 'HORA_CARGA', 'ESTATUS_CARGA', 'AUFNR', 'FECHA_PROCESO', 'HORA_PROCESO', 'USUARIO'].includes(c));
+    const totalCantidad = planFinalExportRows.reduce((acc, r) => acc + Number(r.GAMNG || 0), 0);
+    out.push(
+      '',
+      linea,
+      `DETALLE PLAN FINAL (${planFinalExportRows.length} orden(es) · cantidad total ${totalCantidad.toLocaleString('es-EC')})`,
+      linea,
+      cols.join('\t'),
+      ...planFinalExportRows.map(r => cols.map(c => String((r as any)[c] ?? '')).join('\t')),
+      '',
+      'Este archivo fue generado automáticamente al guardar el Plan Final.',
+    );
+
+    // Función inversa: estado completo para "Restaurar en pantalla" (ver restaurarPlanDesdeSnapshot).
+    // Va al final y en una sola línea para no estorbar la lectura; la API lo separa del texto.
+    const snapshot: PlanTxtSnapshot = {
+      version: 1,
+      fechaObjetivo, grupo: planTxtGrupo, centro: planFinalCentro,
+      recuperacionPasoFecha, techStartDate, techEndDate,
+      rangoFbaseForroPorPuesto: Array.from(rangoFbaseForroPorPuesto.entries()),
+      jornadaDiurnaSel, jornadaNocturnaSel, jornadaFinSemanaSel, esDiaFeriado, jornadaFeriadoSel,
+      feriadoFechasManuales,
+      citasMedicasPorPersona,
+      workstationConfigs, planFinalOrders,
+      trasladoGyePorForro: Array.from(trasladoGyePorForro.entries()),
+      trasladoGyeBloqueado: Array.from(trasladoGyeBloqueado),
+      reparacionTrasladoPorForro: Array.from(reparacionTrasladoPorForro.entries()),
+      stockConfirmadoPorClave: Array.from(stockConfirmadoPorClave.entries()),
+      trasladoGyeChn, trasladoGyeBase,
+    };
+    out.push(
+      '',
+      '### SNAPSHOT-JSON-INICIO (no editar: se usa para restaurar el plan en pantalla) ###',
+      JSON.stringify(snapshot),
+      '### SNAPSHOT-JSON-FIN ###',
+    );
+    return out.join('\r\n');
+  }, [resumenAceptadosConTotales, formatFechaLarga, planTxtGrupo, planFinalCentro, planFinalTipoOrden, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, correosPlanDestinatarios, planFinalExportRows, recuperacionPasoFecha, techStartDate, techEndDate, rangoFbaseForroPorPuesto, jornadaDiurnaSel, jornadaNocturnaSel, jornadaFinSemanaSel, esDiaFeriado, jornadaFeriadoSel, feriadoFechasManuales, citasMedicasPorPersona, workstationConfigs, planFinalOrders, trasladoGyePorForro, trasladoGyeBloqueado, reparacionTrasladoPorForro, stockConfirmadoPorClave, trasladoGyeChn, trasladoGyeBase]);
+  construirTxtPlanRef.current = construirTxtPlan;
+
   const [isEnviandoCorreoResumen, setIsEnviandoCorreoResumen] = useState(false);
-  const handleEnviarCorreoResumen = useCallback(async () => {
-    if (correosPlanDestinatarios.length === 0) {
-      addNotification('warning', 'No hay destinatarios configurados. Crea la restricción "CORREOS_PLAN" (grupo Forros) en Parámetros → Grupos → Restricciones, con los correos separados por "&" o ",".');
-      return;
-    }
-    const gruposConAceptados = workstationGroups
-      .map(group => ({
-        title: group.title,
-        items: group.items.filter(p => uniquePuestos.includes(p) && ocupacionPorHR.get(p)?.yaAceptado),
-      }))
-      .filter(group => group.items.length > 0);
-
-    if (gruposConAceptados.length === 0) {
-      addNotification('warning', 'No hay puestos con plan aceptado todavía — acepta al menos una máquina (botón "Aceptar Plan"/"Aceptar Ajuste") antes de enviar el correo.');
-      return;
-    }
-
-    setIsEnviandoCorreoResumen(true);
-    try {
-      const td = 'padding:8px 12px;border-bottom:1px solid #e2e8f0;';
+  // Vista previa antes de enviar — mismo criterio que "Vista Previa SAP": arma el asunto/cuerpo
+  // como un cálculo puro (sin tocar la API), se muestra en un diálogo, y solo al confirmar ahí se
+  // dispara el envío real. `null` cuando no hay nada que enviar (sin puestos aceptados todavía).
+  const correoResumenPreview = useMemo((): { asunto: string; cuerpo: string; totalPuestos: number } | null => {
+    const { grupos: gruposConAceptados, totales, paresEquipoCompartido } = resumenAceptadosConTotales;
+    if (gruposConAceptados.length === 0) return null;
+    {
+      // Vuelve al modelo original de 16 columnas (una por dato), a pedido explícito del usuario
+      // tras probar la versión agrupada en 4 columnas — mismo orden y contenido que la tabla en
+      // pantalla de la pestaña Resumen (ver el <table> de la pestaña Resumen, justo debajo de las
+      // tarjetas Hero): Puesto, HR, Día, Noche, Sábado, Máq., Cant. Total, Cant. Día, Cant. Noche,
+      // Cant. Sábado, T. Requerido, Capacidad, % Ocup., Mantenimiento, Citas Médicas, Pendientes,
+      // Personal (17 columnas desde que se agregó Citas Médicas).
+      const td = 'padding:8px 10px;border-bottom:1px solid #e2e8f0;vertical-align:middle;font-size:11px;';
       const badge = (activo: boolean, personas: number, bg: string, color: string) => activo
         ? `<span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${bg};color:${color};font-weight:bold;font-size:10px;white-space:nowrap;">${personas} pers.</span>`
         : `<span style="display:inline-block;padding:3px 10px;border-radius:999px;background:#f1f5f9;color:#94a3b8;font-weight:bold;font-size:10px;white-space:nowrap;">Inactivo</span>`;
+      // Sin redondear a entero — mismo criterio que la tabla en pantalla (ver `fmtCantTurno`): el
+      // reparto por proporción de horas da decimales reales, Math.round los perdía.
+      const fmtCant = (v: number | null | undefined) => v === null || v === undefined ? '—' : v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+      // Chip de calificación coloreado por nivel (mismo criterio que la insignia en pantalla:
+      // verde ≥80%, ámbar 50-80%, rojo <50%) — estilos inline, los clientes de correo ignoran clases.
+      const calificacionChip = (cal: number) => {
+        const colores = cal >= 80 ? { bg: '#d1fae5', fg: '#047857' } : cal >= 50 ? { bg: '#fef3c7', fg: '#92400e' } : { bg: '#fee2e2', fg: '#b91c1c' };
+        return `<span style="display:inline-block;padding:1px 5px;border-radius:4px;background:${colores.bg};color:${colores.fg};font-weight:bold;font-size:8px;font-family:monospace;">${cal}%</span>`;
+      };
+      const metaChip = (meta: number | null) => meta === null ? '' : `<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:#e2e8f0;color:#334155;font-weight:bold;font-size:8px;font-family:monospace;margin-right:4px;">Meta ${fmtCant(meta)}</span>`;
+      const mantenimientoCelda = (mantenimientoHoras: number) => mantenimientoHoras > 0.01
+        ? `<span style="display:inline-block;padding:3px 8px;border-radius:999px;background:#fff1f2;color:#be123c;font-weight:bold;font-size:10px;white-space:nowrap;">&#128295; ${mantenimientoHoras.toFixed(2)}h</span>`
+        : '<span style="color:#cbd5e1;font-size:10px;">—</span>';
+      const citasMedicasCelda = (citasMedicasHoras: number, esAcolchado: boolean) => citasMedicasHoras > 0.01
+        ? (esAcolchado
+          ? `<span style="display:inline-block;padding:3px 8px;border-radius:999px;background:#fffbeb;color:#92400e;font-weight:bold;font-size:10px;white-space:nowrap;">&#9877; ${citasMedicasHoras.toFixed(2)}h &mdash; reemplazo</span>`
+          : `<span style="display:inline-block;padding:3px 8px;border-radius:999px;background:#fdf2f8;color:#be185d;font-weight:bold;font-size:10px;white-space:nowrap;">&#9877; ${citasMedicasHoras.toFixed(2)}h</span>`)
+        : '<span style="color:#cbd5e1;font-size:10px;">—</span>';
+      const pendientesCelda = (pendientes: number) => pendientes > 0.01
+        ? `<span style="display:inline-block;padding:3px 8px;border-radius:999px;background:#fffbeb;color:#92400e;font-weight:bold;font-size:10px;white-space:nowrap;">&#9888; ${pendientes.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>`
+        : '<span style="color:#cbd5e1;font-size:10px;">—</span>';
+      // Columna "Personal" — una línea por turno con la meta de ese turno (reparto proporcional,
+      // ver `repartoProduccionPorTurno`) y los nombres con su calificación, igual que en pantalla.
+      const personalTurnoLinea = (label: string, color: string, meta: number | null, lista: { codigo: string; nombre: string; calificacion: number; encontrado: boolean }[]) => lista.length === 0 ? '' : `
+        <div style="margin-bottom:3px;white-space:nowrap;">
+          <span style="font-size:9px;font-weight:bold;text-transform:uppercase;color:${color};margin-right:2px;">${label}:</span>
+          ${metaChip(meta)}<span style="font-size:9px;">${lista.map(e => e.encontrado ? `${e.nombre || e.codigo} ${calificacionChip(e.calificacion)}` : `<span style="color:#dc2626;">${e.codigo} &#9888;</span>`).join(', ')}</span>
+        </div>`;
+      const personalCelda = (personal: { dia: any[]; noche: any[]; sabado: any[] }, cantDia: number | null, cantNoche: number | null, cantSabado: number | null) => {
+        const bloques = [
+          personalTurnoLinea('D', '#b45309', cantDia, personal.dia),
+          personalTurnoLinea('N', '#3730a3', cantNoche, personal.noche),
+          personalTurnoLinea('S', '#065f46', cantSabado, personal.sabado),
+        ].filter(Boolean).join('');
+        return bloques || '<span style="color:#cbd5e1;font-size:10px;">—</span>';
+      };
       let totalPuestos = 0;
       const filas = gruposConAceptados.flatMap(group => {
         const filaCategoria = `
           <tr>
-            <td colspan="10" style="padding:10px 12px;background:#312e81;color:#e0e7ff;font-weight:bold;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;">${group.title}</td>
+            <td colspan="17" style="padding:10px 12px;background:#312e81;color:#e0e7ff;font-weight:bold;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;">${group.title}</td>
           </tr>`;
-        const filasPuesto = group.items.map((p, idx) => {
+        const filasPuesto = group.items.map(({ puesto: p, hr, config, capacidadTotal, totalUnits, totalTimeHours, utilization, cantDia, cantNoche, cantSabado, mantenimientoHoras, citasMedicasHoras, esAcolchado, pendientes, personal }, idx) => {
           totalPuestos++;
-          const config = workstationConfigs[p] || { machine: p, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
-          const capacidadTotal = capacidadPuesto(p, config, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
-          const grupo = ocupacionPorHR.get(p);
-          const utilization = grupo?.utilization ?? 0;
-          const utilColor = utilization > 100 ? '#dc2626' : utilization >= 90 ? '#16a34a' : '#ca8a04';
+          const utilColores = utilization > 100 ? { bg: '#fee2e2', fg: '#dc2626' } : utilization >= 90 ? { bg: '#dcfce7', fg: '#16a34a' } : { bg: '#fef3c7', fg: '#ca8a04' };
           const bg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
-          return `
-            <tr style="background:${bg};">
-              <td style="${td}font-weight:bold;color:#0f172a;">${p}</td>
-              <td style="${td}font-family:monospace;color:#4338ca;">${mapToHojaRutaInternal(p) || 'S/HR'}</td>
+          // Horario Personalizado y Equipo Compartido (reparto) reemplazan los 3 turnos fijos
+          // (Día/Noche/Sábado) — mostrarlos en "Inactivo"/0 sería engañoso, así que colapsan las 3
+          // columnas en una sola celda (colspan 3), igual que en pantalla.
+          const parEquipo = paresEquipoCompartido.get(p);
+          const turnosCeldas = config.horarioPersonalizadoActivo
+            ? `<td colspan="3" style="${td}text-align:center;">${(config.turnosPersonalizados || []).length === 0
+                ? '<span style="color:#94a3b8;font-size:10px;">Personalizado sin turnos</span>'
+                : config.turnosPersonalizados!.map(t => `<span style="display:inline-block;margin:2px;padding:3px 10px;border-radius:999px;background:#ede9fe;color:#5b21b6;font-weight:bold;font-size:10px;white-space:nowrap;">${t.horaInicio}-${t.horaFin}: ${t.personas || 0} pers.</span>`).join('')}</td>`
+            : parEquipo
+            ? `<td colspan="3" style="${td}text-align:center;"><span style="display:inline-block;padding:3px 10px;border-radius:999px;background:#e0f2fe;color:#0369a1;font-weight:bold;font-size:10px;white-space:nowrap;">${parEquipo.horasPropias.toFixed(2)}h aquí &middot; ${parEquipo.horasPareja.toFixed(2)}h en ${parEquipo.pareja} &middot; ${parEquipo.personas} pers.</span></td>`
+            : `
               <td style="${td}text-align:center;">${badge(config.isDayActive, config.peopleDay || 0, '#fef3c7', '#92400e')}</td>
               <td style="${td}text-align:center;">${badge(config.isNightActive, config.peopleNight || 0, '#e0e7ff', '#3730a3')}</td>
-              <td style="${td}text-align:center;">${badge(config.isSaturdayActive, config.peopleWeekend || 0, '#d1fae5', '#065f46')}</td>
-              <td style="${td}text-align:center;color:#334155;">${config.machines || 1}</td>
-              <td style="${td}text-align:right;color:#334155;">${(grupo?.totalUnits ?? 0).toLocaleString()}</td>
-              <td style="${td}text-align:right;color:#334155;">${(grupo?.totalTimeHours ?? 0).toFixed(2)} h</td>
-              <td style="${td}text-align:right;color:#334155;">${capacidadTotal.toFixed(2)} h</td>
-              <td style="${td}text-align:right;font-weight:bold;color:${utilColor};">${utilization.toFixed(0)}%</td>
-            </tr>`;
+              <td style="${td}text-align:center;">${badge(config.isSaturdayActive, config.peopleWeekend || 0, '#d1fae5', '#065f46')}</td>`;
+          // Modo "préstamo" — no reemplaza Día/Noche/Sábado (ya calculados arriba), solo se indica
+          // el ajuste junto al nombre del puesto; Capacidad/% Ocup. ya lo incluyen vía `capacidadPuesto`.
+          const prestamoChip = (config.equipoCompartidoCon && config.equipoCompartidoModo === 'prestamo')
+            ? `<br><span style="display:inline-block;margin-top:2px;font-weight:bold;font-size:8px;text-transform:uppercase;color:${config.equipoCompartidoEsPrestamista ? '#b45309' : '#047857'};">${
+                config.equipoCompartidoEsPrestamista
+                  ? `-${(config.equipoCompartidoHorasPrestadas ?? 0).toFixed(2)}h prestadas a ${config.equipoCompartidoCon}`
+                  : `+${(config.equipoCompartidoHorasPrestadas ?? 0).toFixed(2)}h recibidas de ${config.equipoCompartidoCon}`
+              }</span>`
+            : '';
+          const equipoChip = parEquipo ? `<br><span style="font-size:8px;font-weight:bold;color:#0369a1;">Equipo con ${parEquipo.pareja}</span>` : '';
+          const filaCombinada = parEquipo?.primero ? `
+            <tr style="background:#e0f2fe;">
+              <td colspan="6" style="padding:7px 10px;color:#0369a1;font-weight:bold;font-size:10px;text-transform:uppercase;">
+                <span>&#128101;</span> Equipo combinado (${p} + ${parEquipo.pareja})
+              </td>
+              <td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:bold;color:#0369a1;">${parEquipo.unidadesCombinadas.toLocaleString()}</td>
+              <td colspan="3" style="padding:7px 10px;text-align:center;color:#7dd3fc;font-size:10px;">—</td>
+              <td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:bold;color:#0369a1;">${parEquipo.tiempoCombinado.toFixed(2)}h</td>
+              <td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:bold;color:#0369a1;">${parEquipo.capacidadCombinada.toFixed(2)}h</td>
+              <td style="padding:7px 10px;text-align:center;"><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:${parEquipo.utilizacionCombinada > 100 ? '#fee2e2' : parEquipo.utilizacionCombinada >= 90 ? '#dcfce7' : '#fef3c7'};color:${parEquipo.utilizacionCombinada > 100 ? '#dc2626' : parEquipo.utilizacionCombinada >= 90 ? '#16a34a' : '#ca8a04'};font-weight:bold;font-size:10px;">${parEquipo.utilizacionCombinada.toFixed(0)}%</span></td>
+              <td colspan="4" style="padding:7px 10px;text-align:center;color:#7dd3fc;font-size:10px;">—</td>
+            </tr>` : '';
+          return `
+            <tr style="background:${bg};">
+              <td style="${td}font-weight:bold;color:#0f172a;">${p}${equipoChip}${prestamoChip}</td>
+              <td style="${td}font-family:monospace;color:#4338ca;">${hr}</td>
+              ${turnosCeldas}
+              <td style="${td}text-align:center;font-family:monospace;">${config.machines || 1}</td>
+              <td style="${td}text-align:right;font-family:monospace;font-weight:bold;">${totalUnits.toLocaleString()}</td>
+              <td style="${td}text-align:right;font-family:monospace;color:#b45309;">${fmtCant(cantDia)}</td>
+              <td style="${td}text-align:right;font-family:monospace;color:#3730a3;">${fmtCant(cantNoche)}</td>
+              <td style="${td}text-align:right;font-family:monospace;color:#065f46;">${fmtCant(cantSabado)}</td>
+              <td style="${td}text-align:right;font-family:monospace;font-weight:bold;background:#eef2ff;">${totalTimeHours.toFixed(2)}h</td>
+              <td style="${td}text-align:right;font-family:monospace;font-weight:bold;">${capacidadTotal.toFixed(2)}h</td>
+              <td style="${td}text-align:center;"><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:${utilColores.bg};color:${utilColores.fg};font-weight:bold;font-size:11px;">${utilization.toFixed(0)}%</span></td>
+              <td style="${td}text-align:center;">${mantenimientoCelda(mantenimientoHoras)}</td>
+              <td style="${td}text-align:center;">${citasMedicasCelda(citasMedicasHoras, esAcolchado)}</td>
+              <td style="${td}text-align:center;">${pendientesCelda(pendientes)}</td>
+              <td style="${td}">${personalCelda(personal, cantDia, cantNoche, cantSabado)}</td>
+            </tr>${filaCombinada}`;
         }).join('');
         return [filaCategoria, filasPuesto];
       }).join('');
+      const filaTotales = `
+        <tr style="background:#1e1b4b;">
+          <td colspan="2" style="padding:10px 12px;color:#c7d2fe;font-weight:bold;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;">Totales</td>
+          <td style="padding:10px 12px;text-align:center;color:#ffffff;font-weight:bold;font-size:11px;">${totales.personasDia}</td>
+          <td style="padding:10px 12px;text-align:center;color:#ffffff;font-weight:bold;font-size:11px;">${totales.personasNoche}</td>
+          <td style="padding:10px 12px;text-align:center;color:#ffffff;font-weight:bold;font-size:11px;">${totales.personasSabado}</td>
+          <td style="padding:10px 12px;text-align:center;color:#a5b4fc;font-size:10px;">—</td>
+          <td style="padding:10px 12px;text-align:right;color:#ffffff;font-weight:bold;font-size:11px;">${totales.totalCantidad.toLocaleString()}</td>
+          <td style="padding:10px 12px;text-align:center;color:#a5b4fc;font-size:10px;">—</td>
+          <td style="padding:10px 12px;text-align:center;color:#a5b4fc;font-size:10px;">—</td>
+          <td style="padding:10px 12px;text-align:center;color:#a5b4fc;font-size:10px;">—</td>
+          <td style="padding:10px 12px;text-align:right;color:#ffffff;font-weight:bold;font-size:11px;">${totales.totalTiempo.toFixed(2)}h</td>
+          <td style="padding:10px 12px;text-align:right;color:#ffffff;font-weight:bold;font-size:11px;">${totales.totalCapacidad.toFixed(2)}h</td>
+          <td style="padding:10px 12px;text-align:center;color:#a5b4fc;font-size:10px;">—</td>
+          <td style="padding:10px 12px;text-align:center;color:#ffffff;font-weight:bold;font-size:10px;">${totales.totalMantenimiento > 0.01 ? totales.totalMantenimiento.toFixed(2) + 'h' : '—'}</td>
+          <td style="padding:10px 12px;text-align:center;color:#ffffff;font-weight:bold;font-size:10px;">${totales.totalCitasMedicas > 0.01 ? totales.totalCitasMedicas.toFixed(2) + 'h' : '—'}</td>
+          <td style="padding:10px 12px;text-align:center;color:#ffffff;font-weight:bold;font-size:10px;">${totales.totalPendientes > 0.01 ? totales.totalPendientes.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</td>
+          <td style="padding:10px 12px;color:#a5b4fc;font-size:9px;">${[totales.personasPersonalizado > 0 ? `Personalizado ${totales.personasPersonalizado}` : '', totales.personasEquipoCompartido > 0 ? `Eq. Compartido ${totales.personasEquipoCompartido}` : ''].filter(Boolean).join(' &middot; ') || '—'}</td>
+        </tr>`;
+
+      // Capitaliza solo la primera letra ("miércoles..." -> "Miércoles...") — formatFechaLarga
+      // siempre da el día de semana en minúscula (Intl/es-ES), y se usa tanto en el asunto como en
+      // estas dos fechas del cuerpo.
+      const capitalizar = (s: string) => s.replace(/^./, c => c.toUpperCase());
+      // Fecha del PLAN (a qué día corresponde la producción — "Planificación para" del encabezado)
+      // vs. fecha de GENERACIÓN (hoy, cuándo se mandó este correo) — son conceptos distintos y
+      // pueden no coincidir (el plan casi siempre es para un día hábil futuro).
+      const fechaPlanCorreo = capitalizar(planningDateFormatted);
+      const fechaGeneracionCorreo = capitalizar(formatFechaLarga(toFechaEcuador(new Date())));
+
+      // Tarjetas Hero HR-FORRO / HR-FBASE — mismo contenido que las de pantalla (% ocupación,
+      // Cant. Total, reparto Día/Noche/Sábado, rango de fechas independiente), confirmado con el
+      // usuario: todo lo nuevo de Resumen tiene que estar también en el correo. Tabla de 2
+      // columnas (no flex/grid — los clientes de correo, Outlook en particular, los ignoran).
+      const heroCard = (titulo: string, iconoColor: string, data: typeof resumenFbaseForroHero.forro) => {
+        if (!data) {
+          return `<td width="50%" style="padding:16px;background:#f1f5f9;border-radius:14px;vertical-align:top;">
+            <p style="margin:0;color:#64748b;font-size:11px;font-weight:bold;text-transform:uppercase;letter-spacing:0.08em;">${titulo}</p>
+            <p style="margin:8px 0 0;color:#94a3b8;font-size:11px;font-style:italic;">Sin plan aceptado todavía.</p>
+          </td>`;
+        }
+        const utilColor = data.utilization > 100 ? '#fecaca' : data.utilization >= 90 ? '#bbf7d0' : '#ffffff';
+        const rangos = data.puestos.map(p => getRangoFbaseForroPuesto(p));
+        const [primero, ...resto] = rangos;
+        const todosIguales = resto.every(r => r.desde === primero.desde && r.hasta === primero.hasta);
+        const rangoTxt = todosIguales
+          ? `${formatFechaLarga(primero.desde)} &ndash; ${formatFechaLarga(primero.hasta)}`
+          : `var&iacute;a por puesto (${data.puestos.length})`;
+        return `<td width="50%" style="padding:18px;background:${iconoColor};border-radius:14px;vertical-align:top;">
+          <table style="width:100%;border-collapse:collapse;"><tr>
+            <td style="color:#ffffff;font-size:13px;font-weight:bold;text-transform:uppercase;letter-spacing:0.05em;">${titulo}</td>
+            <td style="text-align:right;color:${utilColor};font-size:22px;font-weight:bold;font-family:monospace;">${data.utilization.toFixed(0)}%</td>
+          </tr></table>
+          <p style="margin:4px 0 12px;color:#ffffff;opacity:0.75;font-size:10px;">Rango: ${rangoTxt}</p>
+          <table style="width:100%;border-collapse:collapse;">
+            <tr>
+              <td style="color:#ffffff;opacity:0.8;font-size:10px;font-weight:bold;text-transform:uppercase;">Cant. Total</td>
+              <td style="text-align:right;color:#ffffff;font-size:20px;font-weight:bold;font-family:monospace;">${fmtCant(data.totalUnits)}</td>
+            </tr>
+          </table>
+          <table style="width:100%;border-collapse:collapse;margin-top:10px;">
+            <tr>
+              <td width="33%" style="background:rgba(255,255,255,0.12);border-radius:8px;padding:6px 8px;">
+                <p style="margin:0;color:#ffffff;opacity:0.75;font-size:8px;font-weight:bold;text-transform:uppercase;">D&iacute;a</p>
+                <p style="margin:0;color:#ffffff;font-size:12px;font-weight:bold;font-family:monospace;">${fmtCant(data.cantDia)}</p>
+                <p style="margin:0;color:#ffffff;opacity:0.6;font-size:9px;font-weight:bold;">${(data.totalUnits > 0 ? (data.cantDia / data.totalUnits) * 100 : 0).toFixed(0)}%</p>
+              </td>
+              <td width="1%"></td>
+              <td width="33%" style="background:rgba(255,255,255,0.12);border-radius:8px;padding:6px 8px;">
+                <p style="margin:0;color:#ffffff;opacity:0.75;font-size:8px;font-weight:bold;text-transform:uppercase;">Noche</p>
+                <p style="margin:0;color:#ffffff;font-size:12px;font-weight:bold;font-family:monospace;">${fmtCant(data.cantNoche)}</p>
+                <p style="margin:0;color:#ffffff;opacity:0.6;font-size:9px;font-weight:bold;">${(data.totalUnits > 0 ? (data.cantNoche / data.totalUnits) * 100 : 0).toFixed(0)}%</p>
+              </td>
+              <td width="1%"></td>
+              <td width="33%" style="background:rgba(255,255,255,0.12);border-radius:8px;padding:6px 8px;">
+                <p style="margin:0;color:#ffffff;opacity:0.75;font-size:8px;font-weight:bold;text-transform:uppercase;">S&aacute;b</p>
+                <p style="margin:0;color:#ffffff;font-size:12px;font-weight:bold;font-family:monospace;">${fmtCant(data.cantSabado)}</p>
+                <p style="margin:0;color:#ffffff;opacity:0.6;font-size:9px;font-weight:bold;">${(data.totalUnits > 0 ? (data.cantSabado / data.totalUnits) * 100 : 0).toFixed(0)}%</p>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:10px 0 0;color:#ffffff;opacity:0.7;font-size:9px;">T. Req ${data.totalTimeHours.toFixed(1)}h &middot; Cap ${data.capacidadTotal.toFixed(1)}h &middot; ${data.puestos.length} puesto${data.puestos.length === 1 ? '' : 's'}</p>
+        </td>`;
+      };
+      // Siempre se renderiza (igual que en pantalla, que muestra las 2 tarjetas incluso sin plan
+      // aceptado todavía) — antes, si NINGUNA de las dos tenía plan aceptado, el bloque entero
+      // desaparecía del correo en vez de avisar "Sin plan aceptado todavía" como sí hace Resumen.
+      const heroHtml = `
+        <table style="width:100%;border-collapse:separate;border-spacing:8px 0;margin:16px 0;">
+          <tr>
+            ${heroCard('HR-FORRO', '#4f46e5', resumenFbaseForroHero.forro)}
+            ${heroCard('HR-FBASE', '#d97706', resumenFbaseForroHero.fbase)}
+          </tr>
+        </table>`;
+
+      // Traslado a GYE — mismo modelo de tarjeta Hero que HR-FORRO/HR-FBASE (a pedido del
+      // usuario), con el total por almacén (CHN/BASES, carga manual de dos valores, sin detalle
+      // de filas). Colores sólidos (no gradiente) por compatibilidad con Outlook, igual que `heroCard`.
+      const trasladoGyeCard = (titulo: string, color: string, total: number) => `
+        <td width="50%" style="padding:18px;background:${color};border-radius:14px;vertical-align:top;">
+          <p style="margin:0 0 12px;color:#ffffff;font-size:13px;font-weight:bold;text-transform:uppercase;letter-spacing:0.05em;">${titulo}</p>
+          <table style="width:100%;border-collapse:collapse;">
+            <tr>
+              <td style="color:#ffffff;opacity:0.8;font-size:10px;font-weight:bold;text-transform:uppercase;">Cant. Total</td>
+              <td style="text-align:right;color:#ffffff;font-size:20px;font-weight:bold;font-family:monospace;">${fmtCant(total)}</td>
+            </tr>
+          </table>
+        </td>`;
+      const trasladoGyeHtml = (TRASLADO_GYE_MOSTRAR_EN_RESUMEN_Y_CORREO && trasladoGyeResumenPorAlmacen.filas > 0) ? `
+        <table style="width:100%;border-collapse:separate;border-spacing:8px 0;margin:0 0 16px;">
+          <tr>
+            ${trasladoGyeCard(TRASLADO_GYE_ALMACEN_NOMBRE['2008'], '#4f46e5', trasladoGyeResumenPorAlmacen.total2008)}
+            ${trasladoGyeCard(TRASLADO_GYE_ALMACEN_NOMBRE['2011'], '#d97706', trasladoGyeResumenPorAlmacen.total2011)}
+          </tr>
+        </table>` : '';
+
+      // Mismas 3-4 insignias de Jornada Global que ya se ven arriba de la tabla en Resumen
+      // (Diurna/Nocturna/Fin de Semana + Día Feriado si aplica) — faltaban en el correo.
+      const jornadaChip = (bg: string, fg: string, label: string, valor: string) => `
+        <td style="padding:10px 14px;background:${bg};border-radius:12px;">
+          <p style="margin:0;color:${fg};font-size:8px;font-weight:bold;text-transform:uppercase;letter-spacing:0.1em;">${label}</p>
+          <p style="margin:2px 0 0;color:#1e293b;font-size:12px;font-weight:bold;">${valor}</p>
+        </td>`;
+      const jornadaDiurnaTxt = trabajaEnFeriado
+        ? `${FERIADO_OPTIONS.find(o => o.value === jornadaFeriadoSel)?.label || `${jornadaFeriadoSel} h`} (feriado)`
+        : (DIURNA_OPTIONS.find(o => o.value === jornadaDiurnaSel)?.label || `${jornadaDiurnaSel} h`);
+      const jornadaNocturnaTxt = trabajaEnFeriado ? 'Sin jornada (feriado)' : (NOCTURNA_OPTIONS.find(o => o.value === jornadaNocturnaSel)?.label || `${jornadaNocturnaSel} h`);
+      const jornadaFinSemanaTxt = FIN_DE_SEMANA_OPTIONS.find(o => o.value === jornadaFinSemanaSel)?.label || `${jornadaFinSemanaSel} h`;
+      const jornadaHtml = `
+        <table style="width:100%;border-collapse:separate;border-spacing:8px 0;margin:0 0 16px;">
+          <tr>
+            ${jornadaChip('#fffbeb', '#b45309', 'Jornada Diurna', jornadaDiurnaTxt)}
+            ${jornadaChip('#eef2ff', '#4338ca', 'Jornada Nocturna', jornadaNocturnaTxt)}
+            ${jornadaChip('#ecfdf5', '#047857', 'Jornada Fin de Semana', jornadaFinSemanaTxt)}
+            ${esDiaFeriado ? jornadaChip('#fff1f2', '#be123c', 'Día Feriado', feriadoVigente?.nombre || 'Marcado manualmente') : ''}
+          </tr>
+        </table>`;
+
+      // Tabla "Personal Asignado — Calificación por Puesto" — mismo contenido que la tarjeta al
+      // final de la pestaña Resumen (`personalAsignadoResumen`), agregada también al correo a
+      // pedido del usuario, con la producción de ESE equipo de trabajo (puesto) en ESE turno
+      // (reparto proporcional, misma columna Cant. Día/Noche/Sábado de la tabla de arriba).
+      const personalCalificacionHtml = personalAsignadoResumen.filas.length === 0 ? '' : `
+        <div style="margin-top:22px;">
+          <h3 style="margin:0 0 10px;color:#1e1b4b;font-size:14px;">Personal Asignado &mdash; Calificaci&oacute;n por Puesto</h3>
+          ${personalAsignadoResumen.sinCalificacion.length > 0 ? `
+            <div style="padding:10px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;margin-bottom:10px;">
+              <span style="color:#b91c1c;font-size:11px;font-weight:bold;">&#9888; ${personalAsignadoResumen.sinCalificacion.length} persona(s) sin calificaci&oacute;n registrada para su puesto &mdash; revisar antes de enviar el plan.</span>
+            </div>` : ''}
+          ${personalAsignadoResumen.necesitaReemplazo.length > 0 ? `
+            <div style="padding:10px 14px;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;margin-bottom:10px;">
+              <span style="color:#92400e;font-size:11px;font-weight:bold;">&#9877; ${personalAsignadoResumen.necesitaReemplazo.length} persona(s) con cita m&eacute;dica en acolchadora &mdash; buscar reemplazo (no se descont&oacute; capacidad): ${personalAsignadoResumen.necesitaReemplazo.map(f => `${f.nombre || f.codigo} (${f.puesto}/${f.turno})`).join(', ')}.</span>
+            </div>` : ''}
+          <table style="border-collapse:collapse;width:100%;font-family:Arial,Helvetica,sans-serif;font-size:11px;border:1px solid #e2e8f0;">
+            <thead>
+              <tr style="background:#eef2ff;">
+                <th style="padding:7px 10px;text-align:left;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Puesto</th>
+                <th style="padding:7px 10px;text-align:left;font-size:9px;color:#0ea5e9;text-transform:uppercase;letter-spacing:0.05em;">HR</th>
+                <th style="padding:7px 10px;text-align:left;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Turno</th>
+                <th style="padding:7px 10px;text-align:right;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Producci&oacute;n</th>
+                <th style="padding:7px 10px;text-align:right;font-size:9px;color:#dc2626;text-transform:uppercase;letter-spacing:0.05em;">H. Requeridas</th>
+                <th style="padding:7px 10px;text-align:right;font-size:9px;color:#059669;text-transform:uppercase;letter-spacing:0.05em;">H. Disponibles</th>
+                <th style="padding:7px 10px;text-align:right;font-size:9px;color:#be185d;text-transform:uppercase;letter-spacing:0.05em;">Horas Cita M&eacute;dica</th>
+                <th style="padding:7px 10px;text-align:left;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">C&oacute;digo</th>
+                <th style="padding:7px 10px;text-align:left;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Nombre</th>
+                <th style="padding:7px 10px;text-align:center;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Calificaci&oacute;n</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${personalAsignadoResumen.filas.map((f, idx) => {
+                const alerta = !f.encontrado || f.calificacion <= 0;
+                const bg = alerta ? '#fef2f2' : (idx % 2 === 0 ? '#ffffff' : '#f8fafc');
+                return `
+                <tr style="background:${bg};">
+                  <td style="${td}font-weight:bold;color:#0f172a;">${f.puesto}</td>
+                  <td style="${td}font-family:monospace;color:#0ea5e9;">${f.hr}</td>
+                  <td style="${td}">${f.turno}</td>
+                  <td style="${td}text-align:right;font-family:monospace;font-weight:bold;">${fmtCant(f.produccion)}</td>
+                  <td style="${td}text-align:right;font-family:monospace;font-weight:bold;color:${f.horasRequeridas !== null && f.horasDisponibles !== null && f.horasRequeridas > f.horasDisponibles ? '#dc2626' : '#334155'};">${f.horasRequeridas === null ? '—' : f.horasRequeridas.toFixed(2) + 'h'}</td>
+                  <td style="${td}text-align:right;font-family:monospace;font-weight:bold;color:#059669;">${f.horasDisponibles === null ? '—' : f.horasDisponibles.toFixed(2) + 'h'}</td>
+                  <td style="${td}text-align:right;font-family:monospace;font-weight:bold;color:${f.citasMedicasHoras > 0.01 && f.esAcolchado ? '#92400e' : '#be185d'};">${f.citasMedicasHoras > 0.01 ? f.citasMedicasHoras.toFixed(2) + 'h' + (f.esAcolchado ? ' (reemplazo)' : '') : '—'}</td>
+                  <td style="${td}font-family:monospace;">${f.codigo}</td>
+                  <td style="${td}">${f.nombre || '—'}</td>
+                  <td style="${td}text-align:center;">${f.encontrado ? calificacionChip(f.calificacion) : '<span style="color:#dc2626;font-weight:bold;font-size:10px;">&#9888; Sin calificaci&oacute;n</span>'}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>`;
 
       const cuerpo = `
         <div style="font-family:Arial,Helvetica,sans-serif;">
           <div style="padding:18px 22px;background:#1e1b4b;border-radius:10px 10px 0 0;">
             <p style="margin:0;color:#c7d2fe;font-size:10px;font-weight:bold;letter-spacing:0.12em;text-transform:uppercase;">Plan Táctico Forros</p>
             <h2 style="margin:4px 0 0;color:#ffffff;font-size:19px;">Horarios y Turnos &mdash; Salud de Planta</h2>
-            <p style="margin:6px 0 0;color:#a5b4fc;font-size:12px;">Fecha: ${formatFechaLarga(techStartDate)} &nbsp;&middot;&nbsp; ${totalPuestos} puesto(s) con plan aceptado</p>
+            <p style="margin:6px 0 0;color:#a5b4fc;font-size:12px;">Fecha del plan: ${fechaPlanCorreo} &nbsp;&middot;&nbsp; Generado el: ${fechaGeneracionCorreo} &nbsp;&middot;&nbsp; ${totalPuestos} puesto(s) con plan aceptado</p>
           </div>
+          ${heroHtml}
+          ${trasladoGyeHtml}
+          ${jornadaHtml}
           <table style="border-collapse:collapse;width:100%;font-family:Arial,Helvetica,sans-serif;font-size:12px;border:1px solid #e2e8f0;border-top:none;">
             <thead>
               <tr style="background:#eef2ff;">
-                <th style="padding:8px 12px;text-align:left;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Puesto</th>
-                <th style="padding:8px 12px;text-align:left;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">HR</th>
-                <th style="padding:8px 12px;text-align:center;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">D&iacute;a</th>
-                <th style="padding:8px 12px;text-align:center;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Noche</th>
-                <th style="padding:8px 12px;text-align:center;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">S&aacute;bado</th>
-                <th style="padding:8px 12px;text-align:center;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">M&aacute;q.</th>
-                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Cant. Total</th>
-                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">T. Requerido</th>
-                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Capacidad</th>
-                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">% Ocup.</th>
+                <th style="padding:8px 10px;text-align:left;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Puesto</th>
+                <th style="padding:8px 10px;text-align:left;font-size:9px;color:#0ea5e9;text-transform:uppercase;letter-spacing:0.05em;">HR</th>
+                <th style="padding:8px 10px;text-align:center;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">D&iacute;a</th>
+                <th style="padding:8px 10px;text-align:center;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Noche</th>
+                <th style="padding:8px 10px;text-align:center;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">S&aacute;bado</th>
+                <th style="padding:8px 10px;text-align:center;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">M&aacute;q.</th>
+                <th style="padding:8px 10px;text-align:right;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Cant. Total</th>
+                <th style="padding:8px 10px;text-align:right;font-size:9px;color:#b45309;text-transform:uppercase;letter-spacing:0.05em;">Cant. D&iacute;a</th>
+                <th style="padding:8px 10px;text-align:right;font-size:9px;color:#3730a3;text-transform:uppercase;letter-spacing:0.05em;">Cant. Noche</th>
+                <th style="padding:8px 10px;text-align:right;font-size:9px;color:#065f46;text-transform:uppercase;letter-spacing:0.05em;">Cant. S&aacute;bado</th>
+                <th style="padding:8px 10px;text-align:right;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;background:#e0e7ff;">T. Requerido</th>
+                <th style="padding:8px 10px;text-align:right;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Capacidad</th>
+                <th style="padding:8px 10px;text-align:center;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">% Ocup.</th>
+                <th style="padding:8px 10px;text-align:center;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Mant.</th>
+                <th style="padding:8px 10px;text-align:center;font-size:9px;color:#be185d;text-transform:uppercase;letter-spacing:0.05em;">Citas M&eacute;d.</th>
+                <th style="padding:8px 10px;text-align:center;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Pend.</th>
+                <th style="padding:8px 10px;text-align:left;font-size:9px;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;">Personal</th>
               </tr>
             </thead>
-            <tbody>${filas}</tbody>
+            <tbody>${filas}${filaTotales}</tbody>
           </table>
           <p style="margin:10px 2px 0;color:#94a3b8;font-size:10px;">Solo se listan los puestos con plan ya aceptado en Plan Final.</p>
+          ${personalCalificacionHtml}
         </div>`;
+      // Fecha del PLAN ("Planificación para"), no la de hoy — ver fechaPlanCorreo arriba.
+      return { asunto: `PLAN DE PRODUCCIÓN: ${fechaPlanCorreo}`, cuerpo, totalPuestos };
+    }
+  }, [resumenAceptadosConTotales, personalAsignadoResumen, planningDateFormatted, formatFechaLarga, resumenFbaseForroHero, getRangoFbaseForroPuesto, trasladoGyeResumenPorAlmacen, trabajaEnFeriado, jornadaFeriadoSel, jornadaDiurnaSel, jornadaNocturnaSel, jornadaFinSemanaSel, esDiaFeriado, feriadoVigente]);
+
+  const [correoPreviewOpen, setCorreoPreviewOpen] = useState(false);
+  const handleAbrirPreviewCorreo = useCallback(() => {
+    if (correosPlanDestinatarios.length === 0) {
+      addNotification('warning', 'No hay destinatarios configurados. Crea la restricción "CORREOS_PLAN" (grupo Forros) en Parámetros → Grupos → Restricciones, con los correos separados por "&" o ",".');
+      return;
+    }
+    if (!correoResumenPreview) {
+      addNotification('warning', 'No hay puestos con plan aceptado todavía — acepta al menos una máquina (botón "Aceptar Plan"/"Aceptar Ajuste") antes de enviar el correo.');
+      return;
+    }
+    setCorreoPreviewOpen(true);
+  }, [correosPlanDestinatarios, correoResumenPreview, addNotification]);
+
+  const handleConfirmarEnvioCorreoResumen = useCallback(async () => {
+    if (!correoResumenPreview) return;
+    setIsEnviandoCorreoResumen(true);
+    try {
       const res = await serviciosService.enviarCorreo({
         destino: correosPlanDestinatarios.join(','),
-        asunto: `Reporte de Producción — Horarios y Turnos / Salud de Planta (${formatFechaLarga(techStartDate)})`,
-        cuerpo,
+        asunto: correoResumenPreview.asunto,
+        cuerpo: correoResumenPreview.cuerpo,
         nota: 'Este correo fue generado automáticamente, favor no responder.'
       });
       addNotification('success', `Correo enviado a: ${res.destinatarios.join(', ')}`);
+      setCorreoPreviewOpen(false);
     } catch (error: any) {
       addNotification('error', `Error al enviar el correo: ${error.message}`);
     } finally {
       setIsEnviandoCorreoResumen(false);
     }
-  }, [correosPlanDestinatarios, ocupacionPorHR, addNotification, techStartDate, uniquePuestos, workstationConfigs, capacidadPuesto, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal, mapToHojaRutaInternal]);
+  }, [correoResumenPreview, correosPlanDestinatarios, addNotification]);
+
+  // Consulta de planes guardados (.txt en la carpeta compartida) desde "Planificación para":
+  // se elige cualquier fecha objetivo — incluidas las pasadas — y se muestra el archivo tal cual.
+  // Es un estado aparte de `planningDate` para no alterar los cálculos de la sesión actual.
+  const [planTxtDialogOpen, setPlanTxtDialogOpen] = useState(false);
+  const [planTxtFecha, setPlanTxtFecha] = useState<string>('');
+  const [planTxtFechasDisponibles, setPlanTxtFechasDisponibles] = useState<string[]>([]);
+  const [planTxtResultado, setPlanTxtResultado] = useState<{ ruta: string; fechaModificacion: string; contenido: string; snapshot: PlanTxtSnapshot | null } | null>(null);
+  const [planTxtError, setPlanTxtError] = useState<string | null>(null);
+  const [isCargandoPlanTxt, setIsCargandoPlanTxt] = useState(false);
+  const [confirmRestaurarPlanTxt, setConfirmRestaurarPlanTxt] = useState(false);
+
+  // Función inversa del respaldo .txt: vuelve a cargar en pantalla fechas, jornada, Personal &
+  // Turnos y las órdenes de Plan Final tal como se guardaron (con eso el Resumen se recalcula solo,
+  // porque `ocupacionPorHR.yaAceptado` sale de planFinalOrders).
+  // Los "Aceptar Plan" de la sesión se limpian a propósito: sus efectos de sincronización rehacen
+  // las filas de Plan Final con los datos VIGENTES de SAP y pisarían el plan restaurado. Para
+  // volver a ajustar una máquina basta con aceptarla de nuevo (reemplaza solo sus propias filas).
+  const restaurarPlanDesdeSnapshot = useCallback((s: PlanTxtSnapshot) => {
+    setAcolchadoAceptadoPuestos(new Set());
+    setTapaAceptadoPuestos(new Set());
+    setForrosAceptadoPuestos(new Set());
+    setOtrosInterioresAceptadoPuestos(new Set());
+    setBordBandAcceptedMachines(new Set());
+    setCorteAcceptedMachines(new Set());
+    setBscAcceptedMachines(new Set());
+    setIntpfAcceptedMachines(new Set());
+    setTtchnAcceptedMachines(new Set());
+    setAjusteBandasAceptado(false);
+    setAjusteRmtbAceptado(false);
+
+    if (s.recuperacionPasoFecha) setRecuperacionPasoFecha(s.recuperacionPasoFecha);
+    if (s.techStartDate) setTechStartDate(s.techStartDate);
+    if (s.techEndDate) setTechEndDate(s.techEndDate);
+    if (s.rangoFbaseForroPorPuesto) setRangoFbaseForroPorPuesto(new Map(s.rangoFbaseForroPorPuesto));
+    if (s.jornadaDiurnaSel) setJornadaDiurnaSel(s.jornadaDiurnaSel);
+    if (s.jornadaNocturnaSel) setJornadaNocturnaSel(s.jornadaNocturnaSel);
+    if (s.jornadaFinSemanaSel) setJornadaFinSemanaSel(s.jornadaFinSemanaSel);
+    setEsDiaFeriado(!!s.esDiaFeriado);
+    if (s.jornadaFeriadoSel) setJornadaFeriadoSel(s.jornadaFeriadoSel);
+    if (Array.isArray(s.feriadoFechasManuales)) setFeriadoFechasManuales(s.feriadoFechasManuales);
+    if (s.citasMedicasPorPersona) setCitasMedicasPorPersona(s.citasMedicasPorPersona);
+    if (s.workstationConfigs) setWorkstationConfigs(s.workstationConfigs as Record<string, WorkstationConfig>);
+
+    // VALIDAR PLAN: recupera el traslado GYE, la reparación y el stock confirmado de ESE día
+    // (si el .txt es viejo y no los trae, `[]` los deja vacíos — no es un error).
+    setTrasladoGyePorForro(new Map(s.trasladoGyePorForro || []));
+    setTrasladoGyeBloqueado(new Set(s.trasladoGyeBloqueado || []));
+    setReparacionTrasladoPorForro(new Map(s.reparacionTrasladoPorForro || []));
+    setStockConfirmadoPorClave(new Map(s.stockConfirmadoPorClave || []));
+    setTrasladoGyeChn(typeof s.trasladoGyeChn === 'number' ? s.trasladoGyeChn : 0);
+    setTrasladoGyeBase(typeof s.trasladoGyeBase === 'number' ? s.trasladoGyeBase : 0);
+
+    // Evita el aviso "Plan Final se actualizó solo" — esto es una carga explícita, no un resync.
+    planFinalPrimeraCargaRef.current = true;
+    setPlanFinalOrders(Array.isArray(s.planFinalOrders) ? s.planFinalOrders : []);
+    // Lo restaurado aún no es "lo guardado en base" de esta sesión: para enviar a SAP hay que
+    // presionar "Guardar Plan" otra vez (que además genera una nueva versión del .txt).
+    setPlanFinalGuardado(false);
+    setSapEnviado(false);
+
+    setConfirmRestaurarPlanTxt(false);
+    setPlanTxtDialogOpen(false);
+    // Esta restauración explícita desde el .txt reemplaza cualquier borrador local pendiente de
+    // "Aceptar Plan" (ya no corresponde a lo que acaba de quedar en pantalla).
+    try { localStorage.removeItem(ACEPTAR_PLAN_DRAFT_STORAGE_KEY); } catch { /* localStorage no disponible */ }
+    addNotification('success', `Plan del ${formatFechaLarga(s.fechaObjetivo)} restaurado: ${(s.planFinalOrders || []).length} orden(es) en Plan Final, jornada y Personal & Turnos cargados.`);
+  }, [addNotification, formatFechaLarga]);
+
+  const consultarPlanTxt = useCallback(async (fecha: string) => {
+    setPlanTxtFecha(fecha);
+    setPlanTxtResultado(null);
+    setPlanTxtError(null);
+    setConfirmRestaurarPlanTxt(false);
+    if (!fecha) return;
+    setIsCargandoPlanTxt(true);
+    try {
+      const res = await planesTxtService.obtener(fecha, planTxtGrupo, planFinalCentro);
+      if (res) setPlanTxtResultado(res);
+      else setPlanTxtError(`No hay un plan guardado para el ${formatFechaLarga(fecha)} (grupo ${planTxtGrupo}, centro ${planFinalCentro}).`);
+    } catch (error: any) {
+      setPlanTxtError(error.message);
+    } finally {
+      setIsCargandoPlanTxt(false);
+    }
+  }, [planTxtGrupo, planFinalCentro, formatFechaLarga]);
+
+  const abrirConsultaPlanTxt = useCallback(async () => {
+    setPlanTxtDialogOpen(true);
+    consultarPlanTxt(planTxtFecha || planningDate || '');
+    try {
+      setPlanTxtFechasDisponibles(await planesTxtService.listarFechas(planTxtGrupo, planFinalCentro));
+    } catch (error: any) {
+      setPlanTxtFechasDisponibles([]);
+      setPlanTxtError(error.message);
+    }
+  }, [consultarPlanTxt, planTxtFecha, planningDate, planTxtGrupo, planFinalCentro]);
 
   if (!isMounted) {
     return (
@@ -10546,10 +14332,87 @@ useEffect(() => {
                   {planningDateFormatted}
                 </p>
               </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={abrirConsultaPlanTxt}
+                className="h-8 rounded-xl text-[9px] font-black uppercase tracking-widest border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+                title="Consultar planes guardados (.txt) por fecha objetivo"
+              >
+                <History className="w-3.5 h-3.5 mr-1.5" /> Planes guardados
+              </Button>
             </div>
           </div>
         </div>
       </div>
+
+      <Dialog open={planTxtDialogOpen} onOpenChange={setPlanTxtDialogOpen}>
+        <DialogContent className="max-w-6xl w-[95vw] max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="font-black uppercase tracking-tight">Planes guardados — {planTxtGrupo} · Centro {planFinalCentro}</DialogTitle>
+            <DialogDescription>Elige la fecha de "Planificación para" para ver el plan guardado (Resumen + Plan Final) en la carpeta compartida.</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Planificación para:</span>
+            <input
+              type="date"
+              value={planTxtFecha}
+              onChange={(e) => consultarPlanTxt(e.target.value)}
+              className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 focus:ring-indigo-500 outline-none"
+            />
+            {isCargandoPlanTxt && <Loader2 className="w-4 h-4 animate-spin text-indigo-600" />}
+          </div>
+          {planTxtFechasDisponibles.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+              {planTxtFechasDisponibles.map(f => (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => consultarPlanTxt(f)}
+                  className={cn(
+                    'px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-colors',
+                    f === planTxtFecha ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-indigo-50'
+                  )}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
+          )}
+          {planTxtError && (
+            <div className="flex items-center gap-2 text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" /> {planTxtError}
+            </div>
+          )}
+          {planTxtResultado && (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-[10px] text-slate-500 font-mono break-all flex-1 min-w-0">
+                  {planTxtResultado.ruta} · actualizado {new Date(planTxtResultado.fechaModificacion).toLocaleString('es-EC', { timeZone: 'America/Guayaquil' })}
+                </p>
+                {planTxtResultado.snapshot ? (
+                  confirmRestaurarPlanTxt ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-amber-700">Reemplaza el Plan Final, jornada y Personal & Turnos actuales.</span>
+                      <Button size="sm" variant="outline" onClick={() => setConfirmRestaurarPlanTxt(false)} className="h-8 rounded-xl text-[9px] font-black uppercase">Cancelar</Button>
+                      <Button size="sm" onClick={() => restaurarPlanDesdeSnapshot(planTxtResultado.snapshot!)} className="h-8 rounded-xl text-[9px] font-black uppercase bg-amber-600 hover:bg-amber-700 text-white">Confirmar</Button>
+                    </div>
+                  ) : (
+                    <Button size="sm" onClick={() => setConfirmRestaurarPlanTxt(true)} className="h-8 rounded-xl text-[9px] font-black uppercase tracking-widest bg-indigo-600 hover:bg-indigo-700 text-white">
+                      <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Restaurar en pantalla
+                    </Button>
+                  )
+                ) : (
+                  <span className="text-[10px] font-bold text-slate-400">Archivo sin datos de restauración (guardado antes de esta función)</span>
+                )}
+              </div>
+              <pre className="flex-1 overflow-auto text-[11px] leading-snug font-mono bg-slate-950 text-slate-100 rounded-xl p-4 whitespace-pre">
+                {planTxtResultado.contenido}
+              </pre>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Tabs
         value={activeMainTab}
@@ -10563,6 +14426,7 @@ useEffect(() => {
             if (tabValue === 'ordenes-fert' && ordenesFert.length === 0) fetchOrdenesFert();
             else if (tabValue === 'lista-materiales' && listaMaterialesData.length === 0) fetchListaMateriales();
             else if ((tabValue === 'mantenimientos-preventivos' || tabValue === 'personal-turnos') && !hasFetchedMantenimientos) fetchMantenimientos();
+            if (tabValue === 'personal-turnos' && !hasFetchedHabilidadesEstacion) fetchHabilidadesEstacion();
           }
         }}
       >
@@ -10606,8 +14470,19 @@ useEffect(() => {
                     Factibilidad y ajuste por etapa: Acolchado & Tapas, Proceso Bandas, Interiores & Corte, Forros Finales
                   </CardDescription>
                 </div>
-                <div className="bg-indigo-600 p-3 rounded-2xl text-white shadow-lg">
-                  <Settings2 className="w-6 h-6" />
+                <div className="flex items-center gap-3">
+                  <Button
+                    onClick={fetchOrdenesPrevisionales}
+                    disabled={isLoadingPrevisionales}
+                    variant="outline"
+                    className="font-black uppercase tracking-widest text-[10px] px-5 py-6 rounded-2xl border-2 border-indigo-200 text-indigo-700 hover:bg-indigo-50 flex items-center gap-2"
+                  >
+                    {isLoadingPrevisionales ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                    Actualizar Órdenes Previsionales
+                  </Button>
+                  <div className="bg-indigo-600 p-3 rounded-2xl text-white shadow-lg">
+                    <Settings2 className="w-6 h-6" />
+                  </div>
                 </div>
               </div>
             </CardHeader>
@@ -10616,12 +14491,17 @@ useEffect(() => {
           {renderDateFilterHeaderInternal()}
 
           <Tabs
-            defaultValue="acolchado-tapas"
+            value={activeAjusteSubTab}
             className="w-full"
             onValueChange={(tabValue) => {
+              setActiveAjusteSubTab(tabValue);
               if (!loadedTabs.has(tabValue)) {
                 setLoadedTabs(prev => new Set([...prev, tabValue]));
-                if (tabValue === 'forros' && ordenesFert.length === 0) fetchOrdenesFert();
+                // "Resumen" también necesita `ordenesFert` cargado (columna PENDIENTES y las
+                // órdenes FERT del día dentro de las tarjetas de Ajuste de Producción) — sin esto,
+                // si el usuario entra directo a Resumen sin pasar antes por Forros Finales u
+                // Órdenes FERT, esas dos columnas/secciones se veían vacías hasta recargar.
+                if ((tabValue === 'forros' || tabValue === 'resumen-produccion') && ordenesFert.length === 0) fetchOrdenesFert();
               }
             }}
           >
@@ -10638,8 +14518,17 @@ useEffect(() => {
               <TabsTrigger value="forros" className="px-6 py-3 data-[state=active]:bg-indigo-600 data-[state=active]:text-white rounded-2xl transition-all text-[10px] font-black uppercase tracking-widest text-slate-500">
                 <LayoutGrid className="w-4 h-4 mr-2" /> 4. Forros Finales
               </TabsTrigger>
+              <TabsTrigger value="traslado-gye" className="px-6 py-3 data-[state=active]:bg-indigo-600 data-[state=active]:text-white rounded-2xl transition-all text-[10px] font-black uppercase tracking-widest text-slate-500">
+                <Truck className="w-4 h-4 mr-2" /> Traslado a GYE
+              </TabsTrigger>
               <TabsTrigger value="resumen-produccion" className="px-6 py-3 data-[state=active]:bg-indigo-600 data-[state=active]:text-white rounded-2xl transition-all text-[10px] font-black uppercase tracking-widest text-slate-500">
                 <BarChart3 className="w-4 h-4 mr-2" /> Resumen
+              </TabsTrigger>
+              <TabsTrigger value="consumo-espuma" className="px-6 py-3 data-[state=active]:bg-indigo-600 data-[state=active]:text-white rounded-2xl transition-all text-[10px] font-black uppercase tracking-widest text-slate-500">
+                <Layers className="w-4 h-4 mr-2" /> Consumo Espuma
+              </TabsTrigger>
+              <TabsTrigger value="validar-plan" className="px-6 py-3 data-[state=active]:bg-indigo-600 data-[state=active]:text-white rounded-2xl transition-all text-[10px] font-black uppercase tracking-widest text-slate-500">
+                <ShieldCheck className="w-4 h-4 mr-2" /> Validar Plan
               </TabsTrigger>
               <TabsTrigger value="plan-final" className="px-6 py-3 data-[state=active]:bg-indigo-600 data-[state=active]:text-white rounded-2xl transition-all text-[10px] font-black uppercase tracking-widest text-slate-500">
                 <TableIcon className="w-4 h-4 mr-2" /> Plan Final
@@ -10947,13 +14836,39 @@ useEffect(() => {
                     ))}
                   </div>
                 )}
+                {/* Cuando hay una corrección "Tapa→Acolchado" aplicada (botón "Corregir" de la
+                    validación de arriba), `techFilteredOrdenesParaAcolchado` CONSOLIDA las
+                    órdenes reales de SAP en filas sintéticas con la cantidad calculada desde la
+                    demanda de Tapa (línea ~7710) — eso es lo que de verdad termina en Plan Final.
+                    La tarjeta de abajo sigue usando `techFilteredOrdenes` (cantidad cruda de SAP)
+                    a propósito, para que las órdenes bloqueadas se tachen en vez de desaparecer
+                    (confirmado con el usuario en un fix anterior) — pero eso significa que, con
+                    una corrección activa, el % que muestra la tarjeta puede NO coincidir con el
+                    que termina en Resumen tras "Aceptar Plan". Se avisa en vez de mostrar un
+                    número silenciosamente distinto (auditoría confirmada: no hay forma de
+                    reconciliar ambos sin volver a esconder las órdenes bloqueadas). */}
+                {Array.from(acolchadoCorreccionesAplicadas).some(k => k.startsWith(`${suffix}|`)) && (
+                  <div className="rounded-2xl border border-violet-300 bg-violet-50 px-5 py-3 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-violet-600 shrink-0 mt-0.5" />
+                    <p className="text-[10px] font-bold text-violet-800 leading-tight">
+                      Esta célula tiene una corrección Tapa→Acolchado aplicada ("Corregir" arriba) — el % de la tarjeta de Acolchado sigue mostrando la cantidad de SAP, no la corregida. El número real que se va a producir es el que verás en Plan Final/Resumen después de "Aceptar Plan".
+                    </p>
+                  </div>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
                   {achNames.length > 0 && (
                     <MachineCard
                       puestoName={achNames[0]}
-                      orders={techFilteredOrdenesParaAcolchado}
+                      orders={techFilteredOrdenes}
                       calculateProductionTime={calculateProductionTime}
                       config={workstationConfigs[achNames[0]] || { machine: achNames[0], isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(achNames[0])}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                       horasNetasDiurnas={horasNetasDiurnasVal}
                       horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                       mapToHojaRuta={mapToHojaRutaInternal}
@@ -10965,6 +14880,9 @@ useEffect(() => {
                       blockedOrderKeys={acolchadoOrdenesBloqueadasPorPuesto.get(achNames[0])}
                       onToggleBlock={(o) => handleToggleBloqueoOrdenAcolchado(achNames[0], o)}
                       qtyOverrideByKey={acolchadoQtyOverridePorOrden}
+                      manualOrders={manualOrdersPorPuesto.get(achNames[0]) || []}
+                      onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(achNames[0], material, cantidad, motivo)}
+                      onEliminarManual={(id) => handleEliminarProduccionManual(achNames[0], id)}
                     />
                   )}
                   {pefNames.length > 0 && (
@@ -10973,6 +14891,13 @@ useEffect(() => {
                       orders={techFilteredOrdenes}
                       calculateProductionTime={calculateProductionTime}
                       config={workstationConfigs[pefNames[0]] || { machine: pefNames[0], isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pefNames[0])}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                       horasNetasDiurnas={horasNetasDiurnasVal}
                       horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                       mapToHojaRuta={mapToHojaRutaInternal}
@@ -10982,6 +14907,9 @@ useEffect(() => {
                       splitRemainderOrders={tapaCascadaDesdeAcolchado.splitRemaindersPorPuesto.get(pefNames[0])}
                       blockedOrderKeys={tapaOrdenesBloqueadasPorPuesto.get(pefNames[0])}
                       onToggleBlock={(o) => handleToggleBloqueoOrdenTapa(pefNames[0], o)}
+                      manualOrders={manualOrdersPorPuesto.get(pefNames[0]) || []}
+                      onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pefNames[0], material, cantidad, motivo)}
+                      onEliminarManual={(id) => handleEliminarProduccionManual(pefNames[0], id)}
                     />
                   )}
                 </div>
@@ -11203,6 +15131,13 @@ useEffect(() => {
                   orders={techFilteredOrdenes}
                   calculateProductionTime={calculateProductionTime}
                   config={workstationConfigs[pName] || { machine: pName, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pName)}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                   horasNetasDiurnas={horasNetasDiurnasVal}
                   horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                   mapToHojaRuta={mapToHojaRutaInternal}
@@ -11215,6 +15150,9 @@ useEffect(() => {
                   qtyOverrideByKey={manualQtyOverridePorOrden}
                   qtyEditable
                   onQtyEdit={handleManualQtyEdit}
+                  manualOrders={manualOrdersPorPuesto.get(pName) || []}
+                  onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pName, material, cantidad, motivo)}
+                  onEliminarManual={(id) => handleEliminarProduccionManual(pName, id)}
                 />
                 {/* Mismo botón que el del encabezado — duplicado aquí para que quede a la vista
                     justo bajo la tarjeta, igual criterio que el resto de secciones de esta pestaña
@@ -11291,6 +15229,7 @@ useEffect(() => {
             {uniquePuestos.filter(BORD_BAND_PUESTOS_FILTER).map((pName) => {
               const mSum = bordBandAdjustSummary.machines.find(m => m.name === pName);
               const isAccepted = !!mSum && bordBandAcceptedMachines.has(mSum.hrCode);
+              const mkBord = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
               return (
                 <div key={pName} className="flex flex-col gap-3">
                   <MachineCard
@@ -11299,16 +15238,31 @@ useEffect(() => {
                     orders={techFilteredOrdenes}
                     calculateProductionTime={calculateProductionTime}
                     config={workstationConfigs[pName] || { machine: pName, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pName)}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                     horasNetasDiurnas={horasNetasDiurnasVal}
                     horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                     mapToHojaRuta={mapToHojaRutaInternal}
                     normalizeMaterialCode={normalizeMaterialCode}
-                    excessOrderKeys={isBordBandAdjustActive ? bordBandExcessKeys : undefined}
+                    // `bordBandAdjustSummary` EN VIVO (no el snapshot `bordBandExcessKeys`, que solo
+                    // se congelaba al activar el ajuste) — el handler de aceptación YA recalculaba
+                    // el exceso en vivo en ese mismo momento; la tarjeta se había quedado con el
+                    // valor viejo si se editaba/bloqueaba algo después de activar el ajuste y antes
+                    // de aceptar (auditoría confirmada).
+                    excessOrderKeys={isBordBandAdjustActive ? new Set((mSum?.excessOrders || []).map(mkBord)) : undefined}
                     blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
                     qtyOverrideByKey={manualQtyOverridePorOrden}
                     qtyEditable
                     onQtyEdit={handleManualQtyEdit}
+                    manualOrders={manualOrdersPorPuesto.get(pName) || []}
+                    onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pName, material, cantidad, motivo)}
+                    onEliminarManual={(id) => handleEliminarProduccionManual(pName, id)}
                   />
                   {/* Botón directo bajo la tarjeta — antes solo estaba dentro del panel de
                       "Análisis de Capacidad" más abajo, desconectado visualmente de su máquina. */}
@@ -11532,29 +15486,8 @@ useEffect(() => {
                   aquí para no duplicar el mismo botón dos veces en la misma pantalla. */}
             </div>
           </div>
-          {isRmtbAjusteActivo && (
-            <div className="flex items-center justify-between gap-3 px-6 py-3 bg-white border border-slate-200 rounded-2xl shadow-sm mb-2">
-              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                <Layers className="w-4 h-4 text-indigo-500" /> Estrategia de ajuste (RMTB1/2/3)
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  onClick={() => setModoAjusteRmtb('optimo')}
-                  className={cn('text-[9px] font-black uppercase tracking-widest px-4 py-2 rounded-xl', modoAjusteRmtb === 'optimo' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}
-                >
-                  Óptimo (Versión SAP)
-                </Button>
-                <Button
-                  onClick={() => setModoAjusteRmtb('equilibrado')}
-                  className={cn('text-[9px] font-black uppercase tracking-widest px-4 py-2 rounded-xl', modoAjusteRmtb === 'equilibrado' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}
-                >
-                  Equilibrado (más holgura)
-                </Button>
-              </div>
-            </div>
-          )}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-            {uniquePuestos.filter(p => p.includes('RMTB')).map((pName) => {
+            {rmtbPuestosParaTarjetas.map((pName) => {
               const isM = pName.toUpperCase().includes('RMTBM') || pName.toUpperCase().includes('RMTB-M');
               return (
                 <div key={pName} className="flex flex-col gap-3">
@@ -11564,6 +15497,13 @@ useEffect(() => {
                     orders={techFilteredOrdenes}
                     calculateProductionTime={calculateProductionTime}
                     config={workstationConfigs[pName] || { machine: pName, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pName)}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                     horasNetasDiurnas={horasNetasDiurnasVal}
                     horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                     mapToHojaRuta={mapToHojaRutaInternal}
@@ -11571,12 +15511,21 @@ useEffect(() => {
                     adjustedInOrders={isM || !isRmtbAjusteActivo ? undefined : rmtbAdjustedInPorPuesto.get(pName)}
                     excludeOrderKeys={isM || !isRmtbAjusteActivo ? undefined : rmtbExcludeKeysPorPuesto.get(pName)}
                     splitRemainderOrders={isM || !isRmtbAjusteActivo ? undefined : rmtbSplitRemaindersPorPuesto.get(pName)}
-                    excessOrderKeys={isM ? rmtbmInfo?.excessOrderKeys : undefined}
+                    /* RMTBM SIEMPRE manda el 100% de sus órdenes a Plan Final, sin excluir el
+                       exceso (regla de negocio explícita en handleAceptarAjusteRmtb — "no se
+                       redistribuye ni se recorta por capacidad"). Antes la tarjeta SÍ restaba el
+                       exceso de su propio %, mostrando un número menor al que terminaba en
+                       Resumen (auditoría confirmada) — ya no se excluye acá, para que el % de la
+                       tarjeta sea el mismo que el de Resumen (puede marcar "Sobrecapacidad", que
+                       es la realidad: si hay exceso, igual se produce todo). */
                     blockedOrderKeys={bloqueoEfectivoPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
                     qtyOverrideByKey={manualQtyOverridePorOrden}
                     qtyEditable
                     onQtyEdit={handleManualQtyEdit}
+                    manualOrders={manualOrdersPorPuesto.get(pName) || []}
+                    onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pName, material, cantidad, motivo)}
+                    onEliminarManual={(id) => handleEliminarProduccionManual(pName, id)}
                   />
                   {/* Mismo botón que el del encabezado — acepta RMTB1/2/3+RMTBM como grupo (no hay
                       aceptación por máquina individual aquí), duplicado bajo cada tarjeta para que
@@ -11769,16 +15718,33 @@ useEffect(() => {
 
           {/* Otras máquinas de interiores (sin grupos de ajuste) — una sola máquina por hoja de
               ruta, nunca compiten por capacidad con otra, así que no hay nada que redistribuir;
-              el botón "Aceptar Plan" está siempre disponible, igual criterio que Forros Finales. */}
+              el botón "Aceptar Plan" está siempre disponible, igual criterio que Forros Finales.
+              HR-MTBS1 recuperó su rango de fechas independiente a pedido del usuario (ver
+              `esPuestoRangoIndependienteFbaseForro`) — el resto sigue con el rango global de la
+              pestaña (`techFilteredOrdenes`/`techStartDate`/`techEndDate`), sin cambios. */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
             {uniquePuestos.filter(OTROS_INTERIORES_PUESTOS_FILTER).map((pName) => (
               <div key={pName} className="flex flex-col gap-3">
+                {esPuestoRangoIndependienteFbaseForro(pName) && (() => {
+                  const { desde, hasta } = getRangoFbaseForroPuesto(pName);
+                  return renderRangoIndependienteFbaseForro(
+                    desde, (v: string) => handleSetRangoFbaseForroPuesto(pName, 'desde', v),
+                    hasta, (v: string) => handleSetRangoFbaseForroPuesto(pName, 'hasta', v),
+                  );
+                })()}
                 <MachineCard
                   puestoName={pName}
                   small
-                  orders={techFilteredOrdenes}
+                  orders={techFilteredOrdenesParaPuesto(pName)}
                   calculateProductionTime={calculateProductionTime}
                   config={workstationConfigs[pName] || { machine: pName, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pName)}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                   horasNetasDiurnas={horasNetasDiurnasVal}
                   horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                   mapToHojaRuta={mapToHojaRutaInternal}
@@ -11788,6 +15754,9 @@ useEffect(() => {
                   qtyOverrideByKey={manualQtyOverridePorOrden}
                   qtyEditable
                   onQtyEdit={handleManualQtyEdit}
+                  manualOrders={manualOrdersPorPuesto.get(pName) || []}
+                  onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pName, material, cantidad, motivo)}
+                  onEliminarManual={(id) => handleEliminarProduccionManual(pName, id)}
                 />
                 <Button
                   onClick={() => handleAceptarPlanOtrosInteriores(pName)}
@@ -11826,6 +15795,13 @@ useEffect(() => {
               const makeKey = (o: any) => `${o['ORDEN'] || o['ORDENPREVISIONAL'] || ''}|${String(o['MATERIAL'] || o['CodMaterial'] || '')}|${String(o['CANTIDAD'] || o['CANTPROGRAMADA'] || '')}`;
               const movedInOrders = isCorteAdjustActive ? corteMovedOrders.filter(m => m.toHR === hrCode).map(m => m.order) : [];
               const excludeKeys = isCorteAdjustActive ? new Set(corteMovedOrders.filter(m => m.fromHR === hrCode).map(m => makeKey(m.order))) : undefined;
+              // El % de la tarjeta debe descontar el mismo "exceso" (órdenes que no caben en la
+              // capacidad) que ya excluye `handleAcceptCorteAdjustForMachine` al construir Plan
+              // Final — si no, la tarjeta muestra un % más alto del que termina en Resumen
+              // (auditoría confirmada: la capacidad "real" solo se veía en el panel de abajo).
+              const excessKeysCard = isCorteAdjustActive
+                ? new Set((corteAdjustSummary?.machines.find(m => m.hrCode === hrCode)?.excessOrders || []).map(makeKey))
+                : undefined;
               const yaAceptadaCorte = corteAcceptedMachines.has(hrCode);
               return (
                 <div key={pName} className="flex flex-col gap-3">
@@ -11835,17 +15811,28 @@ useEffect(() => {
                     orders={techFilteredOrdenes}
                     calculateProductionTime={calculateProductionTime}
                     config={workstationConfigs[pName] || { machine: pName, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pName)}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                     horasNetasDiurnas={horasNetasDiurnasVal}
                     horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                     mapToHojaRuta={mapToHojaRutaInternal}
                     normalizeMaterialCode={normalizeMaterialCode}
                     adjustedInOrders={movedInOrders}
                     excludeOrderKeys={excludeKeys}
+                    excessOrderKeys={excessKeysCard}
                     blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
                     qtyOverrideByKey={manualQtyOverridePorOrden}
                     qtyEditable
                     onQtyEdit={handleManualQtyEdit}
+                    manualOrders={manualOrdersPorPuesto.get(pName) || []}
+                    onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pName, material, cantidad, motivo)}
+                    onEliminarManual={(id) => handleEliminarProduccionManual(pName, id)}
                   />
                   {/* Antes solo el candado vivía junto a la tarjeta — el botón de aceptar (con o sin
                       ajuste) estaba solo en el panel "Análisis de Capacidad" más abajo, desconectado
@@ -11888,15 +15875,28 @@ useEffect(() => {
                 <div key={pName} className="flex flex-col gap-3">
                   <MachineCard puestoName={pName} small orders={techFilteredOrdenes} calculateProductionTime={calculateProductionTime}
                     config={workstationConfigs[pName] || { machine: pName, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pName)}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                     horasNetasDiurnas={horasNetasDiurnasVal} horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                     mapToHojaRuta={mapToHojaRutaInternal} normalizeMaterialCode={normalizeMaterialCode}
                     adjustedInOrders={isBscAdjustActive ? bscMovedOrders.filter(m => m.toHR === hrCode).map(m => m.order) : []}
                     excludeOrderKeys={isBscAdjustActive ? new Set(bscMovedOrders.filter(m => m.fromHR === hrCode).map(m => mk(m.order))) : undefined}
+                    // Mismo % que termina en Resumen: `computeFinalOrdsGrupo` excluye este exceso al
+                    // aceptar (auditoría confirmada), así que la tarjeta debe descontarlo también.
+                    excessOrderKeys={isBscAdjustActive ? new Set((bscAdjustSummary.machines.find(m => m.hrCode === hrCode)?.excessOrders || []).map(mk)) : undefined}
                     blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
                     qtyOverrideByKey={manualQtyOverridePorOrden}
                     qtyEditable
                     onQtyEdit={handleManualQtyEdit}
+                    manualOrders={manualOrdersPorPuesto.get(pName) || []}
+                    onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pName, material, cantidad, motivo)}
+                    onEliminarManual={(id) => handleEliminarProduccionManual(pName, id)}
                   />
                   <Button
                     onClick={() => handleAcceptBscForMachine(hrCode, pName)}
@@ -11934,15 +15934,26 @@ useEffect(() => {
                 <div key={pName} className="flex flex-col gap-3">
                   <MachineCard puestoName={pName} small orders={techFilteredOrdenes} calculateProductionTime={calculateProductionTime}
                     config={workstationConfigs[pName] || { machine: pName, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pName)}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                     horasNetasDiurnas={horasNetasDiurnasVal} horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                     mapToHojaRuta={mapToHojaRutaInternal} normalizeMaterialCode={normalizeMaterialCode}
                     adjustedInOrders={isIntpfAdjustActive ? intpfMovedOrders.filter(m => m.toHR === hrCode).map(m => m.order) : []}
                     excludeOrderKeys={isIntpfAdjustActive ? new Set(intpfMovedOrders.filter(m => m.fromHR === hrCode).map(m => mk(m.order))) : undefined}
+                    excessOrderKeys={isIntpfAdjustActive ? new Set((intpfAdjustSummary.machines.find(m => m.hrCode === hrCode)?.excessOrders || []).map(mk)) : undefined}
                     blockedOrderKeys={bloqueoEfectivoPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
                     qtyOverrideByKey={manualQtyOverridePorOrden}
                     qtyEditable
                     onQtyEdit={handleManualQtyEdit}
+                    manualOrders={manualOrdersPorPuesto.get(pName) || []}
+                    onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pName, material, cantidad, motivo)}
+                    onEliminarManual={(id) => handleEliminarProduccionManual(pName, id)}
                   />
                   <Button
                     onClick={() => handleAcceptIntpfForMachine(hrCode, pName)}
@@ -12108,15 +16119,26 @@ useEffect(() => {
                 <div key={pName} className="flex flex-col gap-3">
                   <MachineCard puestoName={pName} small orders={techFilteredOrdenes} calculateProductionTime={calculateProductionTime}
                     config={workstationConfigs[pName] || { machine: pName, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pName)}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                     horasNetasDiurnas={horasNetasDiurnasVal} horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                     mapToHojaRuta={mapToHojaRutaInternal} normalizeMaterialCode={normalizeMaterialCode}
                     adjustedInOrders={isTtchnAdjustActive ? ttchnMovedOrders.filter(m => m.toHR === hrCode).map(m => m.order) : []}
                     excludeOrderKeys={isTtchnAdjustActive ? new Set(ttchnMovedOrders.filter(m => m.fromHR === hrCode).map(m => mk(m.order))) : undefined}
+                    excessOrderKeys={isTtchnAdjustActive ? new Set((ttchnAdjustSummary.machines.find(m => m.hrCode === hrCode)?.excessOrders || []).map(mk)) : undefined}
                     blockedOrderKeys={ordenesBloqueadasPorPuesto.get(pName)}
                     onToggleBlock={(o) => handleToggleBloqueoOrden(pName, o)}
                     qtyOverrideByKey={manualQtyOverridePorOrden}
                     qtyEditable
                     onQtyEdit={handleManualQtyEdit}
+                    manualOrders={manualOrdersPorPuesto.get(pName) || []}
+                    onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pName, material, cantidad, motivo)}
+                    onEliminarManual={(id) => handleEliminarProduccionManual(pName, id)}
                   />
                   <Button
                     onClick={() => handleAcceptTtchnForMachine(hrCode, pName)}
@@ -12153,15 +16175,35 @@ useEffect(() => {
             </CardHeader>
           </Card>
 
+          {/* FBASE y FORRO-COLCHONES (HR-FORRO) usan un rango de fechas independiente del general —
+              confirmado con el usuario: CADA puesto tiene su PROPIO rango (ya no uno solo
+              compartido entre todos), así que el control va dentro de la tarjeta de cada puesto,
+              no uno único arriba de la grilla. La clasificación es por la HR real ya resuelta
+              (ver esPuestoRangoIndependienteFbaseForro), así que FORRO-BASE-BCAMAS entra aquí si
+              su maestro KPI lo resuelve a HR-FBASE (confirmado con una captura real). */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
             {uniquePuestos.filter(p => p.includes('FORRO') || p.includes('FBASE')).map((pName) => (
               <div key={pName} className="flex flex-col gap-3">
+                {esPuestoRangoIndependienteFbaseForro(pName) && (() => {
+                  const { desde, hasta } = getRangoFbaseForroPuesto(pName);
+                  return renderRangoIndependienteFbaseForro(
+                    desde, (v: string) => handleSetRangoFbaseForroPuesto(pName, 'desde', v),
+                    hasta, (v: string) => handleSetRangoFbaseForroPuesto(pName, 'hasta', v),
+                  );
+                })()}
                 <MachineCard
                   puestoName={pName}
                   small
-                  orders={techFilteredOrdenes}
+                  orders={techFilteredOrdenesParaPuesto(pName)}
                   calculateProductionTime={calculateProductionTime}
                   config={workstationConfigs[pName] || { machine: pName, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 }}
+                      resolverEmpleado={resolverEmpleadoParaPuesto}
+                      mantenimientoHorasPorPuesto={mantenimientoHorasPorPuesto}
+                      citasMedicasPorPersona={citasMedicasPorPersona}
+                      mantenimientoDetallePorPuesto={mantenimientoDetallePorPuesto}
+                      workstationConfigsCompletas={workstationConfigs}
+                      equipoCompartidoResumen={equipoCompartidoResumenPorPuesto.get(pName)}
+                      fertDelDiaPorMaquina={fertDelDiaPorMaquina}
                   horasNetasDiurnas={horasNetasDiurnasVal}
                   horasNetasNocturnas={horasNetasNocturnasVal} horasNetasFinSemana={horasNetasFinSemanaVal}
                   mapToHojaRuta={mapToHojaRutaInternal}
@@ -12171,6 +16213,9 @@ useEffect(() => {
                   qtyOverrideByKey={manualQtyOverridePorOrden}
                   qtyEditable
                   onQtyEdit={handleManualQtyEdit}
+                  manualOrders={manualOrdersPorPuesto.get(pName) || []}
+                  onAgregarManual={(material, cantidad, motivo) => handleAgregarProduccionManual(pName, material, cantidad, motivo)}
+                  onEliminarManual={(id) => handleEliminarProduccionManual(pName, id)}
                 />
                 {/* Aceptar por máquina — esta pestaña no redistribuye nada, así que el botón está
                     siempre disponible: acepta el plan tal cual, menos lo bloqueado con el candado. */}
@@ -12189,17 +16234,191 @@ useEffect(() => {
           </div>
         </TabsContent>
 
+        <TabsContent value="traslado-gye" className="space-y-6 pb-20">
+          <Card className="rounded-[2rem] bg-white ring-1 ring-slate-100 overflow-hidden shadow-sm border-none">
+            <CardHeader className="bg-slate-50/50 border-b border-slate-200 p-6">
+              <div className="flex items-center gap-3">
+                <div className="bg-indigo-600 p-2.5 rounded-xl text-white shadow-lg shrink-0">
+                  <Truck className="w-5 h-5" />
+                </div>
+                <div>
+                  <CardTitle className="text-lg font-black text-slate-900 uppercase">Traslado a GYE</CardTitle>
+                  <CardDescription className="text-slate-400 font-bold uppercase text-[9px] tracking-widest mt-0.5">
+                    Carga manual del total enviado a GYE, por almacén — sin detalle de órdenes
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5 block">{TRASLADO_GYE_ALMACEN_NOMBRE['2008']}</label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={trasladoGyeChn || ''}
+                    onChange={(e) => setTrasladoGyeChn(Math.max(0, Number(e.target.value) || 0))}
+                    placeholder="0"
+                    className="font-mono text-lg font-black h-12"
+                  />
+                </div>
+                <div>
+                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5 block">{TRASLADO_GYE_ALMACEN_NOMBRE['2011']}</label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={trasladoGyeBase || ''}
+                    onChange={(e) => setTrasladoGyeBase(Math.max(0, Number(e.target.value) || 0))}
+                    placeholder="0"
+                    className="font-mono text-lg font-black h-12"
+                  />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Totales por almacén — informativo, se repite en Resumen y en el correo. */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {([
+              { key: '2008', label: TRASLADO_GYE_ALMACEN_NOMBRE['2008'], val: trasladoGyeResumenPorAlmacen.total2008, from: 'from-indigo-600', to: 'to-violet-700' },
+              { key: '2011', label: TRASLADO_GYE_ALMACEN_NOMBRE['2011'], val: trasladoGyeResumenPorAlmacen.total2011, from: 'from-amber-600', to: 'to-orange-700' },
+            ] as const).map(t => (
+              <div key={t.key} className={cn('rounded-[2rem] p-6 text-white shadow-xl bg-gradient-to-br', t.from, t.to)}>
+                <p className="text-[10px] font-black uppercase tracking-widest text-white/70 mb-1">{t.label}</p>
+                <p className="font-mono font-black text-3xl">{t.val.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+              </div>
+            ))}
+          </div>
+        </TabsContent>
+
         <TabsContent value="resumen-produccion">
           {renderDateFilterHeaderInternal()}
 
-          {/* Dashboard de Horarios y Turnos: resumen de solo lectura de lo configurado en "Personal
-              y Turnos" — para verlo de un vistazo sin tener que entrar a esa pestaña. */}
-          <Card className="rounded-[2.5rem] bg-white ring-1 ring-slate-100 overflow-hidden shadow-sm mb-8">
-            <CardHeader className="bg-slate-50/50 border-b border-slate-200 p-10">
-              <CardTitle className="text-2xl font-black text-slate-900 uppercase">Horarios y Turnos</CardTitle>
-              <CardDescription className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">
-                Jornadas elegidas hoy y turnos activos por puesto de trabajo
-              </CardDescription>
+          {/* Tarjetas Hero de HR-FORRO / HR-FBASE — ver `resumenFbaseForroHero`. Van primero,
+              antes de la tabla general, porque son las dos únicas HR con rango de fechas propio
+              (independiente del resto del plan) y conviene verlas de un vistazo. */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            {([
+              { label: 'HR-FORRO', data: resumenFbaseForroHero.forro, icon: <LayoutGrid className="w-6 h-6" />, from: 'from-indigo-600', to: 'to-violet-700', ring: 'ring-indigo-300', bar: 'bg-indigo-400', chip: 'bg-indigo-500/30 text-indigo-100' },
+              { label: 'HR-FBASE', data: resumenFbaseForroHero.fbase, icon: <Boxes className="w-6 h-6" />, from: 'from-amber-600', to: 'to-orange-700', ring: 'ring-amber-300', bar: 'bg-amber-400', chip: 'bg-amber-500/30 text-amber-100' },
+            ] as const).map(({ label, data, icon, from, to, ring, bar, chip }) => (
+              <div key={label} className={cn('rounded-[2rem] p-7 text-white shadow-xl bg-gradient-to-br overflow-hidden relative', from, to)}>
+                <div className="flex items-center justify-between gap-3 mb-1">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-white/15 p-2.5 rounded-xl shadow-inner">{icon}</div>
+                    <h3 className="text-lg font-black uppercase tracking-tight">{label}</h3>
+                  </div>
+                  {data && (
+                    <span className={cn('font-mono font-black text-2xl', data.utilization > 100 ? 'text-red-200' : data.utilization >= 90 ? 'text-emerald-200' : 'text-white')}>
+                      {data.utilization.toFixed(0)}%
+                    </span>
+                  )}
+                </div>
+                <p className={cn('inline-flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-lg mb-5', chip)}>
+                  <CalendarIcon className="w-3 h-3" />
+                  {/* Cada puesto tiene su PROPIO rango — si hay varios y no coinciden, se avisa en
+                      vez de mostrar uno solo engañoso (ver tarjeta de cada puesto para el detalle). */}
+                  {(() => {
+                    if (!data || data.puestos.length === 0) return 'Rango: —';
+                    const rangos = data.puestos.map(p => getRangoFbaseForroPuesto(p));
+                    const [primero, ...resto] = rangos;
+                    const todosIguales = resto.every(r => r.desde === primero.desde && r.hasta === primero.hasta);
+                    return todosIguales
+                      ? `Rango: ${formatFechaLarga(primero.desde)} – ${formatFechaLarga(primero.hasta)}`
+                      : `Rango: varía por puesto (${data.puestos.length})`;
+                  })()}
+                </p>
+
+                {!data ? (
+                  <p className="text-[12px] font-bold text-white/70 italic">Sin plan aceptado todavía para {label}.</p>
+                ) : (
+                  <>
+                    <div className="flex items-end justify-between gap-3 mb-1.5">
+                      <span className="text-[10px] font-black uppercase tracking-widest text-white/70">Cant. Total</span>
+                      <span className="font-mono font-black text-3xl leading-none">{data.totalUnits.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                    </div>
+                    <div className="w-full bg-white/20 h-2.5 rounded-full overflow-hidden mb-5 ring-1 ring-inset ring-white/10">
+                      <div className={cn('h-full rounded-full transition-all duration-500', bar)} style={{ width: `${Math.min(100, data.utilization)}%` }} />
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 mb-5">
+                      {([
+                        { icon: <Sun className="w-3.5 h-3.5" />, label: 'Día', val: data.cantDia },
+                        { icon: <Moon className="w-3.5 h-3.5" />, label: 'Noche', val: data.cantNoche },
+                        { icon: <CalendarIcon className="w-3.5 h-3.5" />, label: 'Sáb', val: data.cantSabado },
+                      ] as const).map(t => {
+                        const pct = data.totalUnits > 0 ? (t.val / data.totalUnits) * 100 : 0;
+                        return (
+                          <div key={t.label} className="bg-white/10 rounded-xl px-2.5 py-2">
+                            <div className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-white/70 mb-0.5">
+                              {t.icon} {t.label}
+                            </div>
+                            <p className="font-mono font-black text-sm leading-none">{t.val.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+                            <p className="text-[9px] font-bold text-white/60 mt-0.5">{pct.toFixed(0)}%</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <p className="text-[10px] font-bold text-white/70">
+                      T. Req {data.totalTimeHours.toFixed(1)}h · Cap {data.capacidadTotal.toFixed(1)}h · {data.puestos.length} puesto{data.puestos.length === 1 ? '' : 's'}
+                    </p>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Traslado a GYE — mismo modelo de tarjeta Hero que HR-FORRO/HR-FBASE de arriba (a
+              pedido del usuario), con el total cargado a mano por almacén (CHN/BASES, sin detalle
+              de órdenes). Informativo — no alimenta ningún cálculo de capacidad. */}
+          {TRASLADO_GYE_MOSTRAR_EN_RESUMEN_Y_CORREO && trasladoGyeResumenPorAlmacen.filas > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+              {([
+                { key: '2008', label: TRASLADO_GYE_ALMACEN_NOMBRE['2008'], total: trasladoGyeResumenPorAlmacen.total2008, from: 'from-indigo-600', to: 'to-violet-700' },
+                { key: '2011', label: TRASLADO_GYE_ALMACEN_NOMBRE['2011'], total: trasladoGyeResumenPorAlmacen.total2011, from: 'from-amber-600', to: 'to-orange-700' },
+              ] as const).map(t => (
+                <div key={t.key} className={cn('rounded-[2rem] p-7 text-white shadow-xl bg-gradient-to-br overflow-hidden relative', t.from, t.to)}>
+                  <div className="flex items-center justify-between gap-3 mb-1">
+                    <div className="flex items-center gap-3">
+                      <div className="bg-white/15 p-2.5 rounded-xl shadow-inner"><Truck className="w-6 h-6" /></div>
+                      <h3 className="text-lg font-black uppercase tracking-tight">{t.label}</h3>
+                    </div>
+                  </div>
+                  <div className="flex items-end justify-between gap-3 mb-1.5 mt-5">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-white/70">Cant. Total</span>
+                    <span className="font-mono font-black text-3xl leading-none">{t.total.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Pestaña Resumen: ANTES había dos tarjetas con información repetida (una tabla con
+              Día/Noche/Sábado/Máquinas por puesto, y otra con Cant./T.Requerido/%Ocupación por
+              puesto) — ahora es UNA sola tabla, la misma que ya arma `construirResumenAceptados`
+              (idéntica a la que recibe el correo "Enviar Correo", para no tener dos versiones de
+              la misma información), con todas las columnas juntas y un total de personas por
+              turno al final. */}
+          <Card className="rounded-[2.5rem] bg-white ring-1 ring-slate-100 overflow-hidden shadow-sm">
+            <CardHeader className="bg-slate-50/50 border-b border-slate-200 p-10 flex flex-row items-start justify-between gap-4">
+              <div>
+                <CardTitle className="text-2xl font-black text-slate-900 uppercase">Horarios y Turnos — Salud de Planta</CardTitle>
+                <CardDescription className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">
+                  Solo puestos con plan ya aceptado — misma tabla que recibe &quot;Enviar Correo&quot;
+                </CardDescription>
+              </div>
+              {/* Destinatarios en la restricción "CORREOS_PLAN" (grupo Forros) — sin UI de captura
+                  nueva, se crea/edita en Parámetros → Grupos → Restricciones. */}
+              <Button
+                onClick={handleAbrirPreviewCorreo}
+                disabled={isEnviandoCorreoResumen}
+                title={correosPlanDestinatarios.length > 0 ? `Destinatarios: ${correosPlanDestinatarios.join(', ')}` : 'Sin destinatarios — crea la restricción CORREOS_PLAN'}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase tracking-widest text-[10px] px-5 py-2.5 rounded-xl shadow-lg flex items-center gap-2 disabled:opacity-50 shrink-0"
+              >
+                {isEnviandoCorreoResumen ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
+                Vista Previa Correo
+              </Button>
             </CardHeader>
             <CardContent className="p-10 space-y-8">
               <div className="flex flex-wrap gap-4">
@@ -12244,169 +16463,463 @@ useEffect(() => {
               </div>
 
               <div className="space-y-6">
-                {workstationGroups.map((group, gIdx) => {
-                  const items = group.items.filter(p => uniquePuestos.includes(p));
-                  if (items.length === 0) return null;
-                  return (
-                    <div key={gIdx} className="space-y-3">
-                      <div className="flex items-center gap-3">
-                        <div className="h-5 w-1 bg-indigo-600 rounded-full" />
-                        <h3 className="text-sm font-black text-indigo-950 uppercase tracking-tight">{group.title}</h3>
-                      </div>
-                      <div className="overflow-x-auto rounded-2xl border border-slate-200">
-                        <table className="w-full text-[11px] border-collapse">
-                          <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 text-left uppercase tracking-widest font-black">
-                            <tr>
-                              <th className="px-5 py-3">Puesto</th>
-                              <th className="px-5 py-3 text-sky-400">HR</th>
-                              <th className="px-5 py-3 text-center">Día</th>
-                              <th className="px-5 py-3 text-center">Noche</th>
-                              <th className="px-5 py-3 text-center">Sábado</th>
-                              <th className="px-5 py-3 text-center">Máquinas</th>
-                              <th className="px-5 py-3 text-right">Capacidad (h)</th>
-                              <th className="px-5 py-3 text-center min-w-[160px]">% Ocupación</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {items.map(p => {
-                              const config = workstationConfigs[p] || { machine: p, isDayActive: true, isNightActive: false, isSaturdayActive: false, peopleDay: 0, peopleNight: 0, peopleWeekend: 0, machines: 1 };
-                              const capacidadTotal = capacidadPuesto(p, config, horasNetasDiurnasVal, horasNetasNocturnasVal, horasNetasFinSemanaVal);
-                              // Mismo % que "Salud de Planta": si este puesto comparte Hoja de Ruta
-                              // con otro (pool), el % es del grupo completo, no de este puesto solo.
-                              const ocupacion = ocupacionPorHR.get(p);
-                              const utilization = ocupacion?.utilization ?? 0;
-                              const turnoBadge = (activo: boolean, personas: number, colorActivo: string) => (
-                                <Badge className={cn(
-                                  'font-black text-[9px] uppercase tracking-wider px-2 py-1 rounded-lg border',
-                                  activo ? colorActivo : 'bg-slate-50 text-slate-400 border-slate-200'
-                                )}>
-                                  {activo ? `${personas} pers.` : 'Inactivo'}
-                                </Badge>
-                              );
-                              return (
-                                <tr key={p} className="hover:bg-slate-50 transition-all">
-                                  <td className="px-5 py-3 font-black text-slate-900 uppercase whitespace-nowrap">{p}</td>
-                                  <td className="px-5 py-3 font-mono font-bold text-indigo-700 uppercase whitespace-nowrap">{mapToHojaRutaInternal(p) || 'S/HR'}</td>
-                                  <td className="px-5 py-3 text-center">{turnoBadge(config.isDayActive, config.peopleDay || 0, 'bg-amber-50 text-amber-700 border-amber-200')}</td>
-                                  <td className="px-5 py-3 text-center">{turnoBadge(config.isNightActive, config.peopleNight || 0, 'bg-indigo-50 text-indigo-700 border-indigo-200')}</td>
-                                  <td className="px-5 py-3 text-center">{turnoBadge(config.isSaturdayActive, config.peopleWeekend || 0, 'bg-emerald-50 text-emerald-700 border-emerald-200')}</td>
-                                  <td className="px-5 py-3 text-center font-mono font-bold text-slate-700">{config.machines || 1}</td>
-                                  <td className="px-5 py-3 text-right font-mono font-black text-slate-900">{capacidadTotal.toFixed(2)}h</td>
-                                  <td className="px-5 py-3 text-center">
-                                    <div className="flex items-center justify-center gap-2 w-full">
-                                      <div className="flex-1 bg-slate-100 h-2 rounded-full overflow-hidden border border-slate-200 shadow-inner max-w-[80px]">
-                                        <div
-                                          className={cn(
-                                            "h-full transition-all duration-500",
-                                            utilization > 100 ? "bg-red-500" : utilization >= 90 ? "bg-green-500" : "bg-yellow-400"
-                                          )}
-                                          style={{ width: `${Math.min(utilization, 100)}%` }}
-                                        />
-                                      </div>
-                                      <span className={cn(
-                                        "font-mono font-black text-[10px] min-w-[32px] text-right",
-                                        utilization > 100 ? "text-red-600" : utilization >= 90 ? "text-green-700" : "text-yellow-600"
-                                      )}>
-                                        {utilization.toFixed(0)}%
-                                      </span>
+                {resumenAceptadosConTotales.grupos.map((group, gIdx) => (
+                  <div key={gIdx} className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <div className="h-5 w-1 bg-indigo-600 rounded-full" />
+                      <h3 className="text-sm font-black text-indigo-950 uppercase tracking-tight">{group.title}</h3>
+                    </div>
+                    <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                      <table className="w-full text-[11px] border-collapse">
+                        <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 text-left uppercase tracking-widest font-black">
+                          <tr>
+                            <th className="px-5 py-3">Puesto</th>
+                            <th className="px-5 py-3 text-sky-400">HR</th>
+                            <th className="px-5 py-3 text-center">Día</th>
+                            <th className="px-5 py-3 text-center">Noche</th>
+                            <th className="px-5 py-3 text-center">Sábado</th>
+                            <th className="px-5 py-3 text-center">Máquinas</th>
+                            <th className="px-5 py-3 text-right">Cant. Total</th>
+                            <th className="px-5 py-3 text-right text-amber-500">Cant. Día</th>
+                            <th className="px-5 py-3 text-right text-indigo-400">Cant. Noche</th>
+                            <th className="px-5 py-3 text-right text-emerald-500">Cant. Sábado</th>
+                            <th className="px-5 py-3 text-right bg-indigo-950/10">T. Requerido (h)</th>
+                            <th className="px-5 py-3 text-right">Capacidad (h)</th>
+                            <th className="px-5 py-3 text-center min-w-[160px]">% Ocupación</th>
+                            <th className="px-5 py-3 text-center">Mantenimiento</th>
+                            <th className="px-5 py-3 text-center">Citas Médicas</th>
+                            <th className="px-5 py-3 text-center">Pendientes</th>
+                            <th className="px-5 py-3 text-left min-w-[200px]">Personal</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {group.items.map(item => {
+                            const { puesto: p, hr, config, capacidadTotal, totalUnits, totalTimeHours, utilization, cantDia, cantNoche, cantSabado, mantenimientoHoras, citasMedicasHoras, esAcolchado, pendientes, personal } = item;
+                            // Sin redondear a entero — el reparto por proporción de horas (ver
+                            // `repartoProduccionPorTurno`) da resultados con decimales (ej. 620.57),
+                            // y Math.round los perdía (confirmado por el usuario: deben respetarse).
+                            const fmtCantTurno = (v: number | null) => v === null ? '—' : v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+                            // Meta diaria por turno — a pedido del usuario: la Cant. Día/Noche/
+                            // Sábado (ya calculada más arriba en esta misma fila) también se ve
+                            // junto a los nombres del equipo de ESE turno, para que cada equipo
+                            // tenga su meta a la vista sin cruzar con otra columna. Es la meta del
+                            // turno completo (no dividida por persona).
+                            const personalTurnos = ([
+                              { label: 'D', lista: personal.dia, color: 'text-amber-600', metaBg: 'bg-amber-100 text-amber-700', meta: cantDia },
+                              { label: 'N', lista: personal.noche, color: 'text-indigo-600', metaBg: 'bg-indigo-100 text-indigo-700', meta: cantNoche },
+                              { label: 'S', lista: personal.sabado, color: 'text-emerald-600', metaBg: 'bg-emerald-100 text-emerald-700', meta: cantSabado },
+                            ] as const).filter(t => t.lista.length > 0);
+                            const personalizado = !!config.horarioPersonalizadoActivo;
+                            const parEquipo = resumenAceptadosConTotales.paresEquipoCompartido.get(p);
+                            // Modo "préstamo" — no arma fila combinada (cada lado ya es correcto por
+                            // su cuenta, capacidad/% ya incluyen el ajuste vía `capacidadPuesto`),
+                            // pero sí necesita indicarse en la fila para que se vea de dónde viene el
+                            // ajuste (a pedido del usuario: "que la fila de INTPF indique
+                            // visualmente el préstamo").
+                            const prestamo = config.equipoCompartidoCon && config.equipoCompartidoModo === 'prestamo' ? config : null;
+                            const turnoBadge = (activo: boolean, personas: number, colorActivo: string) => (
+                              <Badge className={cn(
+                                'font-black text-[9px] uppercase tracking-wider px-2 py-1 rounded-lg border',
+                                activo ? colorActivo : 'bg-slate-50 text-slate-400 border-slate-200'
+                              )}>
+                                {activo ? `${personas} pers.` : 'Inactivo'}
+                              </Badge>
+                            );
+                            const barra = (pct: number) => (
+                              <div className="flex items-center justify-center gap-2 w-full">
+                                <div className="flex-1 bg-slate-100 h-2 rounded-full overflow-hidden border border-slate-200 shadow-inner max-w-[80px]">
+                                  <div
+                                    className={cn("h-full transition-all duration-500", pct > 100 ? "bg-red-500" : pct >= 90 ? "bg-green-500" : "bg-yellow-400")}
+                                    style={{ width: `${Math.min(pct, 100)}%` }}
+                                  />
+                                </div>
+                                <span className={cn("font-mono font-black text-[10px] min-w-[32px] text-right", pct > 100 ? "text-red-600" : pct >= 90 ? "text-green-700" : "text-yellow-600")}>
+                                  {pct.toFixed(0)}%
+                                </span>
+                              </div>
+                            );
+                            return (
+                              <React.Fragment key={p}>
+                              <tr className={cn('hover:bg-slate-50 transition-all', (parEquipo || prestamo) && 'bg-sky-50/40')}>
+                                <td className="px-5 py-3 font-black text-slate-900 uppercase whitespace-nowrap">
+                                  {p}
+                                  {parEquipo && (
+                                    <span className="ml-2 inline-flex items-center gap-1 text-[8px] font-black uppercase tracking-wider text-sky-600 align-middle">
+                                      <Users className="w-2.5 h-2.5" /> Equipo con {parEquipo.pareja}
+                                    </span>
+                                  )}
+                                  {prestamo && (
+                                    <span className={cn(
+                                      'ml-2 inline-flex items-center gap-1 text-[8px] font-black uppercase tracking-wider align-middle',
+                                      prestamo.equipoCompartidoEsPrestamista ? 'text-amber-600' : 'text-emerald-600'
+                                    )}>
+                                      <Users className="w-2.5 h-2.5" />
+                                      {prestamo.equipoCompartidoEsPrestamista
+                                        ? `-${(prestamo.equipoCompartidoHorasPrestadas ?? 0).toFixed(2)}h prestadas a ${prestamo.equipoCompartidoCon}`
+                                        : `+${(prestamo.equipoCompartidoHorasPrestadas ?? 0).toFixed(2)}h recibidas de ${prestamo.equipoCompartidoCon}`}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-5 py-3 font-mono font-bold text-indigo-700 uppercase whitespace-nowrap">{hr}</td>
+                                {personalizado ? (
+                                  // Horario Personalizado reemplaza los 3 turnos fijos — mostrar
+                                  // "0" en Día/Noche/Sábado sería engañoso (sí hay gente, solo que
+                                  // en un horario libre), así que se listan sus propios turnos acá.
+                                  <td className="px-5 py-3 text-center" colSpan={3}>
+                                    <div className="flex flex-wrap items-center justify-center gap-1">
+                                      {(config.turnosPersonalizados || []).length === 0 ? (
+                                        <span className="text-slate-400 text-[10px] italic">Personalizado sin turnos</span>
+                                      ) : config.turnosPersonalizados!.map((t, i) => (
+                                        <Badge key={i} className="bg-violet-50 text-violet-700 border-violet-200 font-black text-[9px] px-2 py-1 rounded-lg">
+                                          {t.horaInicio}-{t.horaFin}: {t.personas || 0} pers.
+                                        </Badge>
+                                      ))}
                                     </div>
                                   </td>
+                                ) : parEquipo ? (
+                                  // Equipo Compartido reemplaza igual los 3 turnos fijos — se
+                                  // muestran las horas de ESTE lado del reparto y con quién.
+                                  <td className="px-5 py-3 text-center" colSpan={3}>
+                                    <Badge className="bg-sky-50 text-sky-700 border-sky-200 font-black text-[9px] px-2 py-1 rounded-lg">
+                                      {parEquipo.horasPropias.toFixed(2)}h aquí · {parEquipo.horasPareja.toFixed(2)}h en {parEquipo.pareja} · {parEquipo.personas} pers.
+                                    </Badge>
+                                  </td>
+                                ) : (
+                                  <>
+                                    <td className="px-5 py-3 text-center">{turnoBadge(config.isDayActive, config.peopleDay || 0, 'bg-amber-50 text-amber-700 border-amber-200')}</td>
+                                    <td className="px-5 py-3 text-center">{turnoBadge(config.isNightActive, config.peopleNight || 0, 'bg-indigo-50 text-indigo-700 border-indigo-200')}</td>
+                                    <td className="px-5 py-3 text-center">{turnoBadge(config.isSaturdayActive, config.peopleWeekend || 0, 'bg-emerald-50 text-emerald-700 border-emerald-200')}</td>
+                                  </>
+                                )}
+                                <td className="px-5 py-3 text-center font-mono font-bold text-slate-700">{config.machines || 1}</td>
+                                <td className="px-5 py-3 text-right font-mono font-black text-slate-800">{totalUnits.toLocaleString()}</td>
+                                <td className="px-5 py-3 text-right font-mono font-bold text-amber-600">{fmtCantTurno(cantDia)}</td>
+                                <td className="px-5 py-3 text-right font-mono font-bold text-indigo-600">{fmtCantTurno(cantNoche)}</td>
+                                <td className="px-5 py-3 text-right font-mono font-bold text-emerald-600">{fmtCantTurno(cantSabado)}</td>
+                                <td className="px-5 py-3 text-right font-mono font-black text-indigo-700 bg-indigo-50/30">{totalTimeHours.toFixed(2)}h</td>
+                                <td className="px-5 py-3 text-right font-mono font-black text-slate-900">{capacidadTotal.toFixed(2)}h</td>
+                                <td className="px-5 py-3 text-center">{barra(utilization)}</td>
+                                <td className="px-5 py-3 text-center">
+                                  {mantenimientoHoras > 0.01 ? (
+                                    <Badge className="bg-rose-50 text-rose-700 border border-rose-200 font-black text-[9px] px-2 py-1 rounded-lg inline-flex items-center gap-1">
+                                      <Wrench className="w-2.5 h-2.5" /> {mantenimientoHoras.toFixed(2)}h
+                                    </Badge>
+                                  ) : (
+                                    <span className="text-slate-300 text-[10px] font-bold">—</span>
+                                  )}
+                                </td>
+                                <td className="px-5 py-3 text-center">
+                                  {citasMedicasHoras > 0.01 ? (
+                                    esAcolchado ? (
+                                      <Badge className="bg-amber-50 text-amber-700 border border-amber-200 font-black text-[9px] px-2 py-1 rounded-lg inline-flex items-center gap-1">
+                                        <Stethoscope className="w-2.5 h-2.5" /> {citasMedicasHoras.toFixed(2)}h — reemplazo
+                                      </Badge>
+                                    ) : (
+                                      <Badge className="bg-pink-50 text-pink-700 border border-pink-200 font-black text-[9px] px-2 py-1 rounded-lg inline-flex items-center gap-1">
+                                        <Stethoscope className="w-2.5 h-2.5" /> {citasMedicasHoras.toFixed(2)}h
+                                      </Badge>
+                                    )
+                                  ) : (
+                                    <span className="text-slate-300 text-[10px] font-bold">—</span>
+                                  )}
+                                </td>
+                                <td className="px-5 py-3 text-center">
+                                  {pendientes > 0.01 ? (() => {
+                                    // Detalle por orden en el tooltip — para validar línea por
+                                    // línea contra SAP, en vez de confiar a ciegas en el total.
+                                    const detalle = hr
+                                      ? hr.split(' / ').flatMap(code => pendientesDetallePorHR[code.trim().toUpperCase()] || [])
+                                      : [];
+                                    const tooltip = `Órdenes con fecha hasta hoy (${fechaPendientes}) con cantidad pendiente de entregar:\n` +
+                                      detalle.map(d => `· Orden ${d.orden} (${d.material}): ${d.cantProgramada.toLocaleString()} prog. → ${d.cantidad.toLocaleString()} pend.`).join('\n');
+                                    return (
+                                      <Badge className="bg-amber-50 text-amber-700 border border-amber-200 font-black text-[9px] px-2 py-1 rounded-lg inline-flex items-center gap-1" title={tooltip}>
+                                        <AlertTriangle className="w-2.5 h-2.5" /> {pendientes.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                      </Badge>
+                                    );
+                                  })() : (
+                                    <span className="text-slate-300 text-[10px] font-bold">—</span>
+                                  )}
+                                </td>
+                                <td className="px-5 py-3 text-left">
+                                  {personalTurnos.length === 0 ? (
+                                    <span className="text-slate-300 text-[10px] font-bold">—</span>
+                                  ) : (
+                                    <div className="space-y-1">
+                                      {personalTurnos.map(t => (
+                                        <div key={t.label} className="flex flex-wrap items-center gap-1 leading-tight">
+                                          <span className={cn('text-[9px] font-black uppercase mr-0.5', t.color)}>{t.label}:</span>
+                                          {t.meta !== null && (
+                                            <Badge className={cn('font-mono font-black text-[8px] px-1.5 py-0 rounded-md border-none shrink-0', t.metaBg)} title="Meta diaria de este turno">
+                                              Meta {t.meta.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                            </Badge>
+                                          )}
+                                          {t.lista.map((e, i) => (
+                                            e.encontrado ? (
+                                              <span key={i} className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-md pl-1.5 pr-0.5 py-0.5">
+                                                <span className="text-[9px] font-bold text-slate-600 truncate max-w-[100px]">{e.nombre || e.codigo}</span>
+                                                <Badge className={cn(
+                                                  'font-mono font-black text-[8px] px-1 py-0 rounded border-none shrink-0',
+                                                  e.calificacion >= 80 ? 'bg-emerald-100 text-emerald-700' :
+                                                  e.calificacion >= 50 ? 'bg-amber-100 text-amber-700' :
+                                                  'bg-red-100 text-red-700'
+                                                )}>
+                                                  {e.calificacion}%
+                                                </Badge>
+                                              </span>
+                                            ) : (
+                                              <span key={i} className="text-[9px] font-bold text-red-500">{e.codigo} ⚠</span>
+                                            )
+                                          ))}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                              {/* Fila combinada del Equipo Compartido — una sola vez por par (solo
+                                  del lado marcado `primero`), justo debajo de las dos máquinas. */}
+                              {parEquipo?.primero && (
+                                <tr className="bg-sky-100/60">
+                                  <td className="px-5 py-2.5 font-black text-sky-800 uppercase text-[10px]" colSpan={6}>
+                                    <Users className="w-3 h-3 inline mr-1.5 -mt-0.5" /> Equipo combinado ({p} + {parEquipo.pareja})
+                                  </td>
+                                  <td className="px-5 py-2.5 text-right font-mono font-black text-sky-800">{parEquipo.unidadesCombinadas.toLocaleString()}</td>
+                                  <td className="px-5 py-2.5 text-right font-mono text-sky-400" colSpan={3}>—</td>
+                                  <td className="px-5 py-2.5 text-right font-mono font-black text-sky-800 bg-sky-200/40">{parEquipo.tiempoCombinado.toFixed(2)}h</td>
+                                  <td className="px-5 py-2.5 text-right font-mono font-black text-sky-800">{parEquipo.capacidadCombinada.toFixed(2)}h</td>
+                                  <td className="px-5 py-2.5 text-center">{barra(parEquipo.utilizacionCombinada)}</td>
+                                  <td className="px-5 py-2.5 text-center text-sky-400 text-[10px]">—</td>
+                                  <td className="px-5 py-2.5 text-center text-sky-400 text-[10px]">—</td>
+                                  <td className="px-5 py-2.5 text-center text-sky-400 text-[10px]">—</td>
+                                  <td className="px-5 py-2.5 text-center text-sky-400 text-[10px]">—</td>
                                 </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
+                              )}
+                              </React.Fragment>
+                            );
+                          })}
+                        </tbody>
+                      </table>
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
+              </div>
+
+              {/* Totales al final — "número de personas por turno" a pedido del usuario. El total
+                  de Personalizado va aparte porque esas personas no están en Día/Noche/Sábado. */}
+              <div className="rounded-2xl bg-slate-900 px-8 py-6 flex flex-wrap items-center gap-x-8 gap-y-4">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 shrink-0">Total Personas por Turno</p>
+                <div className="flex items-center gap-2">
+                  <Sun className="w-4 h-4 text-amber-400" />
+                  <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.personasDia}</span>
+                  <span className="text-[10px] font-black uppercase text-slate-400">Día</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Moon className="w-4 h-4 text-indigo-400" />
+                  <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.personasNoche}</span>
+                  <span className="text-[10px] font-black uppercase text-slate-400">Noche</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <CalendarIcon className="w-4 h-4 text-emerald-400" />
+                  <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.personasSabado}</span>
+                  <span className="text-[10px] font-black uppercase text-slate-400">Sábado</span>
+                </div>
+                {resumenAceptadosConTotales.totales.personasPersonalizado > 0 && (
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-violet-400" />
+                    <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.personasPersonalizado}</span>
+                    <span className="text-[10px] font-black uppercase text-slate-400">Personalizado</span>
+                  </div>
+                )}
+                {resumenAceptadosConTotales.totales.personasEquipoCompartido > 0 && (
+                  <div className="flex items-center gap-2">
+                    <Users className="w-4 h-4 text-sky-400" />
+                    <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.personasEquipoCompartido}</span>
+                    <span className="text-[10px] font-black uppercase text-slate-400">Equipo Compartido</span>
+                  </div>
+                )}
+                <div className="flex-1" />
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-black uppercase text-slate-400">Cant. Total</span>
+                  <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.totalCantidad.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-black uppercase text-slate-400">T. Requerido</span>
+                  <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.totalTiempo.toFixed(2)}h</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-black uppercase text-slate-400">Capacidad</span>
+                  <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.totalCapacidad.toFixed(2)}h</span>
+                </div>
+                {resumenAceptadosConTotales.totales.totalMantenimiento > 0.01 && (
+                  <div className="flex items-center gap-2">
+                    <Wrench className="w-4 h-4 text-rose-400" />
+                    <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.totalMantenimiento.toFixed(2)}h</span>
+                    <span className="text-[10px] font-black uppercase text-slate-400">Mantenimiento</span>
+                  </div>
+                )}
+                {resumenAceptadosConTotales.totales.totalCitasMedicas > 0.01 && (
+                  <div className="flex items-center gap-2">
+                    <Stethoscope className="w-4 h-4 text-pink-400" />
+                    <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.totalCitasMedicas.toFixed(2)}h</span>
+                    <span className="text-[10px] font-black uppercase text-slate-400">Citas Médicas</span>
+                  </div>
+                )}
+                {resumenAceptadosConTotales.totales.totalPendientes > 0.01 && (
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    <span className="font-mono font-black text-lg text-white">{resumenAceptadosConTotales.totales.totalPendientes.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                    <span className="text-[10px] font-black uppercase text-slate-400">Pendientes ({fechaPendientes})</span>
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
 
+          {/* Resumen de personas al final de Resumen — a pedido del usuario: quién quedó
+              asignado a cada puesto/turno y la calificación encontrada en Habilidades por
+              Estación, con alerta explícita cuando no se encontró calificación. */}
           <Card className="rounded-[2.5rem] bg-white ring-1 ring-slate-100 overflow-hidden shadow-sm">
-            <CardHeader className="bg-slate-50/50 border-b border-slate-200 p-10 flex flex-row items-center justify-between gap-4">
-              <CardTitle className="text-2xl font-black text-slate-900 uppercase">Salud de Planta (Órdenes Previsionales)</CardTitle>
-              {/* Destinatarios en la restricción "CORREOS_PLAN" (grupo Forros) — sin UI de captura
-                  nueva, se crea/edita en Parámetros → Grupos → Restricciones. */}
-              <Button
-                onClick={handleEnviarCorreoResumen}
-                disabled={isEnviandoCorreoResumen}
-                title={correosPlanDestinatarios.length > 0 ? `Destinatarios: ${correosPlanDestinatarios.join(', ')}` : 'Sin destinatarios — crea la restricción CORREOS_PLAN'}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase tracking-widest text-[10px] px-5 py-2.5 rounded-xl shadow-lg flex items-center gap-2 disabled:opacity-50 shrink-0"
-              >
-                {isEnviandoCorreoResumen ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Mail className="w-3.5 h-3.5" />}
-                Enviar Correo
-              </Button>
+            <CardHeader className="bg-slate-50/50 border-b border-slate-200 p-10">
+              <CardTitle className="text-2xl font-black text-slate-900 uppercase">Personal Asignado — Calificación por Puesto</CardTitle>
+              <CardDescription className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">
+                Quién quedó asignado a cada puesto/turno y su calificación en Habilidades por Estación
+              </CardDescription>
             </CardHeader>
-            <CardContent className="p-0">
-              <div className="overflow-x-auto">
-                <table className="w-full text-[12px] border-collapse">
-                  <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 text-left uppercase tracking-widest font-black">
-                    <tr>
-                      <th className="px-8 py-5">Puesto de Trabajo</th>
-                      <th className="px-8 py-5 text-sky-400">HOJA DE RUTA</th>
-                      <th className="px-8 py-5 text-right">Cant. Total</th>
-                      <th className="px-8 py-5 text-right bg-indigo-950/20">T. Requerido (h)</th>
-                      <th className="px-8 py-5 text-right">Capacidad (h)</th>
-                      <th className="px-8 py-5 text-center min-w-[200px]">% Ocupación</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {Array.from(new Set(ocupacionPorHR.values())).map((grupo, idx) => {
-                      const isUnified = grupo.puestos.length > 1;
-                      const displayName = isUnified ? `${grupo.puestos[0]} (POOL)` : grupo.puestos[0];
-                      return (
-                        <tr key={idx} className="hover:bg-slate-50 transition-all">
-                          <td className="px-8 py-5 font-black text-slate-900 uppercase whitespace-nowrap">
-                            {displayName}
-                            {grupo.yaAceptado && (
-                              <span className="ml-2 inline-block text-[8px] font-black uppercase tracking-wider text-emerald-600 align-middle">
-                                · Ajustado (Plan Final)
+            <CardContent className="p-10 space-y-6">
+              {personalAsignadoResumen.sinCalificacion.length > 0 && (
+                <div className="rounded-2xl bg-red-50 border border-red-200 px-5 py-4 flex items-center gap-3">
+                  <AlertTriangle className="w-5 h-5 text-red-500 shrink-0" />
+                  <p className="text-xs font-bold text-red-700">
+                    ⚠ {personalAsignadoResumen.sinCalificacion.length} persona(s) sin calificación registrada para su puesto — revisar antes de enviar el plan.
+                  </p>
+                </div>
+              )}
+              {/* Acolchadoras con cita médica: NO se descuenta capacidad (a pedido del usuario),
+                  así que hay que conseguir un reemplazo a mano — se destaca aparte para que no se
+                  pierda entre las filas. */}
+              {personalAsignadoResumen.necesitaReemplazo.length > 0 && (
+                <div className="rounded-2xl bg-amber-50 border border-amber-200 px-5 py-4 flex items-center gap-3">
+                  <Stethoscope className="w-5 h-5 text-amber-500 shrink-0" />
+                  <p className="text-xs font-bold text-amber-700">
+                    ⚕ {personalAsignadoResumen.necesitaReemplazo.length} persona(s) con cita médica en acolchadora — buscar reemplazo (no se descontó capacidad): {personalAsignadoResumen.necesitaReemplazo.map(f => `${f.nombre || f.codigo} (${f.puesto}/${f.turno})`).join(', ')}.
+                  </p>
+                </div>
+              )}
+              {personalAsignadoResumen.filas.length === 0 ? (
+                <p className="text-xs font-bold text-slate-400">No hay personal con código asignado todavía.</p>
+              ) : (
+                <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                  <table className="w-full text-[11px] border-collapse">
+                    <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 text-left uppercase tracking-widest font-black">
+                      <tr>
+                        <th className="px-5 py-3">Puesto</th>
+                        <th className="px-5 py-3 text-sky-400">HR</th>
+                        <th className="px-5 py-3">Turno</th>
+                        <th className="px-5 py-3 text-right">Producción</th>
+                        <th className="px-5 py-3 text-right">H. Requeridas</th>
+                        <th className="px-5 py-3 text-right">H. Disponibles</th>
+                        <th className="px-5 py-3 text-right text-pink-500">Horas Cita Médica</th>
+                        <th className="px-5 py-3">Código</th>
+                        <th className="px-5 py-3">Nombre</th>
+                        <th className="px-5 py-3 text-center">Calificación</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {personalAsignadoResumen.filas.map((f, idx) => (
+                        <tr key={idx} className={cn(!f.encontrado || f.calificacion <= 0 ? 'bg-red-50/60' : undefined)}>
+                          <td className="px-5 py-2.5 font-black text-slate-800">{f.puesto}</td>
+                          <td className="px-5 py-2.5 font-mono text-sky-500">{f.hr}</td>
+                          <td className="px-5 py-2.5">{f.turno}</td>
+                          <td className="px-5 py-2.5 text-right font-mono font-bold text-slate-700">{f.produccion === null ? '—' : f.produccion.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                          <td className={cn('px-5 py-2.5 text-right font-mono font-bold',
+                            f.horasRequeridas !== null && f.horasDisponibles !== null && f.horasRequeridas > f.horasDisponibles ? 'text-red-600' : 'text-slate-700'
+                          )}>{f.horasRequeridas === null ? '—' : `${f.horasRequeridas.toFixed(2)}h`}</td>
+                          <td className="px-5 py-2.5 text-right font-mono font-bold text-emerald-600">{f.horasDisponibles === null ? '—' : `${f.horasDisponibles.toFixed(2)}h`}</td>
+                          {/* Solo VISUALIZA — se configura en Personal y Turnos, no acá (a pedido
+                              del usuario). Acolchadoras: no se descuenta, se marca "reemplazo". */}
+                          <td className="px-5 py-2.5 text-right">
+                            {f.citasMedicasHoras <= 0.01 ? (
+                              <span className="text-slate-300 text-[10px] font-bold">—</span>
+                            ) : f.esAcolchado ? (
+                              <Badge className="bg-amber-50 text-amber-700 border border-amber-200 font-black text-[9px] px-2 py-1 rounded-lg inline-flex items-center gap-1">
+                                <Stethoscope className="w-2.5 h-2.5" /> {f.citasMedicasHoras.toFixed(2)}h — reemplazo
+                              </Badge>
+                            ) : (
+                              <Badge className="bg-pink-50 text-pink-700 border border-pink-200 font-black text-[9px] px-2 py-1 rounded-lg inline-flex items-center gap-1">
+                                <Stethoscope className="w-2.5 h-2.5" /> {f.citasMedicasHoras.toFixed(2)}h
+                              </Badge>
+                            )}
+                          </td>
+                          <td className="px-5 py-2.5 font-mono">{f.codigo}</td>
+                          <td className="px-5 py-2.5">{f.nombre || '—'}</td>
+                          <td className="px-5 py-2.5 text-center">
+                            {f.encontrado ? (
+                              <Badge className={cn('font-mono font-black text-[10px] px-2 py-0.5 rounded-md border-none',
+                                f.calificacion >= 80 ? 'bg-emerald-100 text-emerald-700' :
+                                f.calificacion >= 50 ? 'bg-amber-100 text-amber-700' :
+                                'bg-red-100 text-red-700')}>
+                                {f.calificacion}%
+                              </Badge>
+                            ) : (
+                              <span className="flex items-center justify-center gap-1 text-red-600 font-bold text-[10px]">
+                                <AlertTriangle className="w-3 h-3" /> Sin calificación
                               </span>
                             )}
                           </td>
-                          <td className="px-8 py-5 font-mono font-black text-indigo-700 uppercase whitespace-nowrap">
-                            <Badge className="bg-indigo-50 text-indigo-700 border-indigo-200 font-bold px-3 py-1 rounded-lg">
-                              {grupo.hrCode}
-                            </Badge>
-                          </td>
-                          <td className="px-8 py-5 text-right font-mono font-black text-slate-800">{grupo.totalUnits.toLocaleString()}</td>
-                          <td className="px-8 py-5 text-right font-mono font-black text-indigo-700 bg-indigo-50/40">{grupo.totalTimeHours.toFixed(2)}h</td>
-                          <td className="px-8 py-5 text-right font-mono font-bold text-slate-900">{grupo.totalCapacityHours.toFixed(2)}h</td>
-                          <td className="px-8 py-5 text-center">
-                             <div className="flex flex-col items-center justify-center gap-1">
-                               <div className="flex items-center justify-center gap-3 w-full">
-                                 <div className="flex-1 bg-slate-100 h-2.5 rounded-full overflow-hidden border border-slate-200 shadow-inner">
-                                   <div
-                                     className={cn(
-                                       "h-full transition-all duration-500",
-                                       grupo.utilization > 100 ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.3)]" :
-                                       grupo.utilization >= 90 ? "bg-green-500" :
-                                       "bg-yellow-400"
-                                     )}
-                                     style={{ width: `${Math.min(grupo.utilization, 100)}%` }}
-                                   />
-                                 </div>
-                                 <span className={cn(
-                                   "font-mono font-black text-[10px] min-w-[35px] text-right",
-                                   grupo.utilization > 100 ? "text-red-600" :
-                                   grupo.utilization >= 90 ? "text-green-700" :
-                                   "text-yellow-600"
-                                 )}>
-                                   {grupo.utilization.toFixed(0)}%
-                                 </span>
-                               </div>
-                             </div>
-                          </td>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </CardContent>
           </Card>
+
+          {/* Vista previa del correo — se arma 100% en el cliente (correoResumenPreview, sin
+              tocar la API) y solo al confirmar acá se dispara el envío real
+              (handleConfirmarEnvioCorreoResumen). Mismo criterio que "Vista Previa SAP". */}
+          <Dialog open={correoPreviewOpen} onOpenChange={setCorreoPreviewOpen}>
+            <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Eye className="w-5 h-5 text-indigo-600" /> Vista Previa — Correo de Resumen
+                </DialogTitle>
+                <DialogDescription>
+                  Así se va a ver el correo. Revisa antes de confirmar — se envía a: {correosPlanDestinatarios.join(', ')}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5">
+                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 mr-2">Asunto</span>
+                  <span className="text-[13px] font-black text-slate-800">{correoResumenPreview?.asunto}</span>
+                </div>
+                <div className="rounded-xl border border-slate-200 overflow-hidden">
+                  {correoResumenPreview && (
+                    <div dangerouslySetInnerHTML={{ __html: correoResumenPreview.cuerpo }} />
+                  )}
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  disabled={isEnviandoCorreoResumen}
+                  onClick={() => setCorreoPreviewOpen(false)}
+                  className="font-black uppercase tracking-widest text-[9px]"
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  disabled={isEnviandoCorreoResumen || !correoResumenPreview}
+                  onClick={handleConfirmarEnvioCorreoResumen}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase tracking-widest text-[9px] flex items-center gap-2"
+                >
+                  {isEnviandoCorreoResumen ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Mail className="w-3.5 h-3.5" />}
+                  Confirmar y Enviar Correo
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
 
         <TabsContent value="plan-final" className="space-y-6 pb-20">
@@ -12457,6 +16970,14 @@ useEffect(() => {
                 >
                   {isPreparandoSap ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
                   {sapEnviado ? 'Generado ✓' : 'Vista Previa SAP'}
+                </Button>
+                <Button
+                  onClick={() => setActiveAjusteSubTab('validar-plan')}
+                  disabled={planFinalOrders.length === 0}
+                  title="Revisa si Acolchado/Tapa alcanzan para el Forro planificado, y si el Forro planificado cubre la necesidad real"
+                  className="bg-amber-600 hover:bg-amber-700 text-white font-black uppercase tracking-widest text-[9px] px-4 py-2 rounded-xl disabled:opacity-40 flex items-center gap-2"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" /> Validar Plan
                 </Button>
                 <Button
                   onClick={handleDescargarPlanFinalExcel}
@@ -12608,65 +17129,118 @@ useEffect(() => {
             open={sapPreviewOpen}
             onOpenChange={(open) => { if (!open && !isEnviandoSapConfirmado) setSapPreviewOpen(false); }}
           >
-            <DialogContent className="max-w-6xl max-h-[90vh] flex flex-col">
+            <DialogContent className="max-w-[96vw] xl:max-w-7xl max-h-[90vh] flex flex-col">
               <DialogHeader>
                 <DialogTitle>Vista previa — Generar SAP</DialogTitle>
                 <DialogDescription>
-                  {sapPreviewRows.length} orden(es) para el {formatFechaSAP(planFinalFechaPlanificada)}. Puedes corregir Cantidad, Versión, Puesto u Observaciones antes de confirmar — el resto de campos (mandante, fechas, estados) van fijos.
+                  {sapPreviewRows.length} orden(es) para el {formatFechaSAP(planFinalFechaPlanificada)} — se muestran los 23 campos que se envían a SAP (`InsertarSolicitudProduccionHB`).
+                  Puedes corregir Cantidad, Versión, Puesto u Observaciones, y presionar la "X" en cualquier fila para quitarla de esta tanda (se queda a la vista, tachada, para enviarla después si hace falta — vuelve a presionar la X para restaurarla).
+                  Fecha/Hora Carga quedan en blanco aquí porque se calculan recién al presionar "Confirmar y Enviar" (hora real de Ecuador en ese momento); Número de Orden SAP, Fecha/Hora Proceso los completa SAP cuando procesa el registro, nunca esta app.
                 </DialogDescription>
               </DialogHeader>
-              <div className="flex-1 overflow-y-auto rounded-xl border border-slate-200">
+              <div className="flex-1 overflow-auto rounded-xl border border-slate-200">
                 <table className="w-full text-[11px] border-collapse">
                   <thead className="bg-slate-50 text-slate-500 sticky top-0 uppercase tracking-widest font-black text-left z-10">
                     <tr>
+                      <th className="px-3 py-2 text-center">Quitar</th>
                       <th className="px-3 py-2">Cod. Orden</th>
+                      <th className="px-3 py-2">Mandante</th>
+                      <th className="px-3 py-2">Clase Orden</th>
                       <th className="px-3 py-2">Material</th>
                       <th className="px-3 py-2">Centro</th>
                       <th className="px-3 py-2 text-right">Cantidad</th>
                       <th className="px-3 py-2">Versión</th>
                       <th className="px-3 py-2">Puesto</th>
-                      <th className="px-3 py-2 whitespace-nowrap">Fecha (07:00–23:00)</th>
+                      <th className="px-3 py-2 whitespace-nowrap">Fecha Inicio</th>
+                      <th className="px-3 py-2 whitespace-nowrap">Hora Inicio</th>
+                      <th className="px-3 py-2 whitespace-nowrap">Fecha Fin</th>
+                      <th className="px-3 py-2 whitespace-nowrap">Hora Fin</th>
+                      <th className="px-3 py-2">Pedido Comercial</th>
+                      <th className="px-3 py-2">Posición Pedido</th>
+                      <th className="px-3 py-2 text-center">Estado Registro</th>
                       <th className="px-3 py-2">Observaciones</th>
+                      <th className="px-3 py-2 whitespace-nowrap text-slate-400">Fecha Carga</th>
+                      <th className="px-3 py-2 whitespace-nowrap text-slate-400">Hora Carga</th>
+                      <th className="px-3 py-2 text-center">Estado Carga</th>
+                      <th className="px-3 py-2 whitespace-nowrap text-slate-400">N° Orden SAP</th>
+                      <th className="px-3 py-2 whitespace-nowrap text-slate-400">Fecha Proceso</th>
+                      <th className="px-3 py-2 whitespace-nowrap text-slate-400">Hora Proceso</th>
+                      <th className="px-3 py-2">Usuario Proceso</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {sapPreviewRows.map((r, i) => (
-                      <tr key={r.CodigoOrdenExterna || i} className="hover:bg-slate-50">
-                        <td className="px-3 py-1.5 font-mono font-bold text-indigo-700 whitespace-nowrap">{r.CodigoOrdenExterna}</td>
-                        <td className="px-3 py-1.5 font-mono whitespace-nowrap">{r.CodigoMaterial}</td>
+                    {sapPreviewRows.map((r, i) => {
+                      const omitida = sapPreviewExcluidas.has(i);
+                      return (
+                      <tr key={r.CodigoOrdenExterna || i} className={cn('hover:bg-slate-50', omitida && 'opacity-40 bg-slate-50')}>
+                        <td className="px-3 py-1.5 text-center">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleOmitirFilaSap(i)}
+                            title={omitida ? 'Restaurar — volver a incluir en el envío' : 'Quitar esta orden del envío'}
+                            className={cn(
+                              'w-5 h-5 rounded-full border flex items-center justify-center mx-auto transition-colors',
+                              omitida ? 'bg-red-500 border-red-600 text-white' : 'border-slate-300 text-slate-300 hover:border-red-400 hover:text-red-400'
+                            )}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </td>
+                        <td className={cn('px-3 py-1.5 font-mono font-bold text-indigo-700 whitespace-nowrap', omitida && 'line-through')}>{r.CodigoOrdenExterna}</td>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap text-slate-500">{r.Mandante}</td>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap text-slate-500">{r.ClaseOrden}</td>
+                        <td className={cn('px-3 py-1.5 font-mono whitespace-nowrap', omitida && 'line-through')}>{r.CodigoMaterial}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap">{r.Centro}</td>
                         <td className="px-3 py-1.5">
                           <Input
                             type="number"
+                            disabled={omitida}
                             value={r.CantidadPlanificada}
                             onChange={(e) => actualizarFilaSapPreview(i, 'CantidadPlanificada', Number(e.target.value))}
-                            className="h-7 text-right text-[11px] w-24"
+                            className="h-7 text-right text-[11px] w-24 disabled:opacity-50"
                           />
                         </td>
                         <td className="px-3 py-1.5">
                           <Input
+                            disabled={omitida}
                             value={r.VersionFabricacion}
                             onChange={(e) => actualizarFilaSapPreview(i, 'VersionFabricacion', e.target.value)}
-                            className="h-7 text-[11px] w-16"
+                            className="h-7 text-[11px] w-16 disabled:opacity-50"
                           />
                         </td>
                         <td className="px-3 py-1.5">
                           <Input
+                            disabled={omitida}
                             value={r.PuestoTrabajo}
                             onChange={(e) => actualizarFilaSapPreview(i, 'PuestoTrabajo', e.target.value)}
-                            className="h-7 text-[11px] w-32"
+                            className="h-7 text-[11px] w-32 disabled:opacity-50"
                           />
                         </td>
                         <td className="px-3 py-1.5 font-mono whitespace-nowrap text-slate-500">{r.FechaInicioProgramada}</td>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap text-slate-500">{r.HoraInicioProgramada}</td>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap text-slate-500">{r.FechaFinProgramada}</td>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap text-slate-500">{r.HoraFinProgramada}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-slate-400">{r.PedidoComercial}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-slate-400">{r.PosicionPedido}</td>
+                        <td className="px-3 py-1.5 text-center font-mono text-slate-500">{r.EstadoRegistro}</td>
                         <td className="px-3 py-1.5">
                           <Input
+                            disabled={omitida}
                             value={r.Observaciones}
                             onChange={(e) => actualizarFilaSapPreview(i, 'Observaciones', e.target.value)}
-                            className="h-7 text-[11px] w-36"
+                            className="h-7 text-[11px] w-36 disabled:opacity-50"
                           />
                         </td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-slate-300 italic">se completa al enviar</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-slate-300 italic">se completa al enviar</td>
+                        <td className="px-3 py-1.5 text-center font-mono text-slate-500">{r.EstadoCarga}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-slate-300 italic">lo llena SAP</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-slate-300 italic">lo llena SAP</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-slate-300 italic">lo llena SAP</td>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap text-slate-500">{r.UsuarioProceso}</td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -12680,16 +17254,500 @@ useEffect(() => {
                   Cancelar
                 </Button>
                 <Button
-                  disabled={isEnviandoSapConfirmado || sapPreviewRows.length === 0}
+                  disabled={isEnviandoSapConfirmado || sapPreviewRows.length - sapPreviewExcluidas.size <= 0}
                   onClick={handleConfirmarEnvioSap}
                   className="bg-violet-600 hover:bg-violet-700 text-white font-black uppercase tracking-widest text-[9px] flex items-center gap-2"
                 >
                   {isEnviandoSapConfirmado ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-                  Confirmar y Enviar a SAP ({sapPreviewRows.length})
+                  Confirmar y Enviar a SAP ({sapPreviewRows.length - sapPreviewExcluidas.size}{sapPreviewExcluidas.size > 0 ? ` de ${sapPreviewRows.length}` : ''})
                 </Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
+
+        </TabsContent>
+
+        <TabsContent value="consumo-espuma" className="space-y-6 pb-20">
+          <Card className="rounded-[2.5rem] bg-white ring-1 ring-slate-100 overflow-hidden shadow-sm border-none">
+            <CardHeader className="bg-slate-50/50 border-b border-slate-200 p-8">
+              <div className="flex items-center gap-3">
+                <div className="bg-indigo-600 p-2.5 rounded-xl text-white shadow-lg shrink-0">
+                  <Layers className="w-5 h-5" />
+                </div>
+                <div>
+                  <CardTitle className="text-lg font-black text-slate-900 uppercase">Consumo Espuma</CardTitle>
+                  <CardDescription className="text-slate-400 font-bold uppercase text-[9px] tracking-widest mt-0.5">
+                    Distribución del consumo de Lámina (Nivel 4) por máquina Acolchadora — solo Acolchado ya aceptado en Plan Final
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-8">
+              {acolchadoMaterialesEnPlanFinal.length === 0 ? (
+                <p className="text-[12px] text-slate-400 font-bold italic text-center py-10">
+                  Todavía no hay Acolchado aceptado en Plan Final — acepta al menos una célula en &quot;Acolchado &amp; Tapas&quot; para ver su consumo de espuma acá.
+                </p>
+              ) : (
+                <>
+                  {acolchadosResolviendoRatioLamina.size > 0 && (
+                    <p className="text-[11px] text-sky-600 font-bold italic mb-4 flex items-center gap-2">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Consultando BOM en SAP para {acolchadosResolviendoRatioLamina.size} material(es) de Acolchado…
+                    </p>
+                  )}
+                  {consumoEspumaPorMaterial.size === 0 ? (
+                    <p className="text-[12px] text-slate-400 font-bold italic text-center py-10">
+                      Ninguno de los Acolchados aceptados tiene un componente LÁMINA identificado en su BOM (Nivel 1) todavía.
+                    </p>
+                  ) : (
+                    <table className="w-full text-[11px] border-collapse">
+                      <thead className="bg-slate-50 text-slate-500 uppercase tracking-widest font-black text-left">
+                        <tr>
+                          <th className="px-4 py-3">Material</th>
+                          <th className="px-4 py-3">Denominación</th>
+                          <th className="px-4 py-3 text-right">Cantidad</th>
+                          <th className="px-4 py-3 text-center"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {Array.from(consumoEspumaPorMaterial.entries())
+                          .sort((a, b) => b[1].total - a[1].total)
+                          .map(([mat, info]) => {
+                            const porMaquina = Array.from(info.porMaquina.entries()).sort((a, b) => b[1] - a[1]);
+                            const expandido = consumoEspumaExpandido.has(mat);
+                            return (
+                              <React.Fragment key={mat}>
+                                <tr className="hover:bg-slate-50 transition-colors">
+                                  <td className="px-4 py-3 font-mono font-bold text-indigo-700">{mat}</td>
+                                  <td className="px-4 py-3 font-bold text-slate-700 uppercase">{info.nombre}</td>
+                                  <td className="px-4 py-3 text-right font-mono font-black text-slate-900">{info.total.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                                  <td className="px-4 py-3 text-center">
+                                    <button
+                                      onClick={() => setConsumoEspumaExpandido(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(mat)) next.delete(mat); else next.add(mat);
+                                        return next;
+                                      })}
+                                      className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg px-2.5 py-1 transition-colors"
+                                    >
+                                      {expandido ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                                      {porMaquina.length} máq.
+                                    </button>
+                                  </td>
+                                </tr>
+                                {expandido && (
+                                  <tr>
+                                    <td colSpan={4} className="px-4 pb-3 pt-0">
+                                      <div className="bg-slate-50 border border-slate-100 rounded-xl p-2.5 space-y-1">
+                                        {porMaquina.map(([hr, cantidad]) => {
+                                          const puestoNombre = uniquePuestos.find(p => mapToHojaRutaInternal(p).trim().toUpperCase() === hr) || hr;
+                                          return (
+                                            <div key={hr} className="flex items-center justify-between gap-2 text-[10px]">
+                                              <span className="flex items-center gap-1.5">
+                                                <Badge className="bg-indigo-600 text-white border-none font-mono text-[8px] uppercase font-bold px-1.5 py-0 rounded shadow-sm">{hr}</Badge>
+                                                <span className="font-bold text-slate-600 uppercase">{puestoNombre}</span>
+                                              </span>
+                                              <span className="font-mono font-black text-slate-800 shrink-0">{cantidad.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )}
+                              </React.Fragment>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  )}
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="validar-plan" className="space-y-6 pb-20">
+          <Card className="rounded-[2.5rem] bg-white ring-1 ring-slate-100 overflow-hidden shadow-sm border-none">
+            <CardHeader className="bg-slate-50/50 border-b border-slate-200 p-8">
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="bg-amber-600 p-2.5 rounded-xl text-white shadow-lg shrink-0">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <CardTitle className="text-lg font-black text-slate-900 uppercase">Validar Plan</CardTitle>
+                    <CardDescription className="text-slate-400 font-bold uppercase text-[9px] tracking-widest mt-0.5">
+                      Control de cobertura sobre el Plan Final ({planFinalOrders.length} orden(es), centro {planFinalCentro}) — excluye lo bloqueado con candado en todos los niveles.
+                    </CardDescription>
+                  </div>
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={handleCopiarResumenEnsamblado}
+                  disabled={validacionPlan.resumenEnsamblado.length === 0}
+                  className="font-black uppercase tracking-widest text-[10px] disabled:opacity-40"
+                >
+                  <ClipboardList className="w-3.5 h-3.5 mr-1.5" /> Copiar Resumen para Ensamblado
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="p-8 space-y-10">
+              {/* Es una CADENA (confirmado con el usuario): sin componentes no hay Forro, sin
+                  Forro no hay Colchón. Por eso el orden de las secciones sigue el flujo real de
+                  trabajo — 1) cargar traslado a GYE y validar que el Forro planificado cubra
+                  Quito+GYE, 2) recién con eso OK, validar que los componentes alcancen para ESE
+                  Forro — en vez del orden anterior (componentes primero), que no reflejaba cómo
+                  se valida el plan en la práctica. */}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 flex items-start gap-3">
+                <ShieldAlert className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-slate-500">
+                  Es una cadena: si no hay <strong>componentes</strong> (Acolchado, Banda en Metros, Tapa, Banda, Otros Interiores), no hay <strong>Forro</strong>; si no hay Forro, no hay <strong>Colchón</strong>. Primero se valida Forro vs. demanda (Quito + GYE), luego componentes vs. Forro — cualquier déficit sin marcar &quot;tengo stock&quot; se reporta en cascada hasta el % de cumplimiento final.
+                </p>
+              </div>
+
+              {/* ── PASO 1: Necesidades — FERT Quito (UIO) + Traslado GYE, UN SOLO cálculo ──────
+                  Antes el botón "Calcular Demanda Quito" vivía después de la tabla de Traslados a
+                  GYE, así que esa tabla aparecía primero pero vacía/inútil hasta presionar un botón
+                  que estaba más abajo — confuso (reportado por el usuario: "eso debería ser antes
+                  para hacer un solo cálculo de necesidades de FERT UIO + traslados GYE"). Ahora el
+                  botón abre la sección y las dos tablas (traslado manual + detalle) quedan debajo,
+                  ya como resultado de ese único cálculo. */}
+              <div>
+                <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
+                  <h3 className="font-black uppercase tracking-widest text-[11px] text-slate-700">
+                    1. Necesidades — FERT Quito (UIO) + Traslado GYE
+                  </h3>
+                  <Button
+                    onClick={handleCalcularDemandaQuito}
+                    disabled={validarPlanDemandaQuitoPending || isLoadingFert || isLoadingExplosion}
+                    className="bg-sky-600 hover:bg-sky-700 text-white font-black uppercase tracking-widest text-[9px] px-4 py-2 rounded-xl disabled:opacity-40 flex items-center gap-2 shrink-0"
+                  >
+                    {(validarPlanDemandaQuitoPending || isLoadingFert || isLoadingExplosion) ? (
+                      <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Calculando…</>
+                    ) : (
+                      <><Database className="w-3.5 h-3.5" /> {resumenForros.length > 0 ? 'Recalcular Demanda Quito (FERT)' : 'Calcular Demanda Quito (FERT)'}</>
+                    )}
+                  </Button>
+                </div>
+                <p className="text-[11px] text-slate-400 mb-3">
+                  Un solo plan (centro 1000): el Forro planificado tiene que alcanzar para la necesidad real de Colchón de Quito (órdenes FERT reales, centro 1000{planFinalFechaPlanificada && <>, fecha <span className="font-mono text-slate-500">{formatFechaSAP(planFinalFechaPlanificada)}</span></>}) MÁS lo que se traslada a GYE (sin FERT propio allá, se carga a mano abajo) — ambas compiten por el mismo Forro, no son alternativas.
+                </p>
+                {resumenForros.length === 0 && (
+                  <p className="text-[11px] text-amber-600 italic font-bold mb-3">Presiona &quot;Calcular Demanda Quito (FERT)&quot; arriba para traer la necesidad real de Colchón en Quito y poder cargar los traslados a GYE.</p>
+                )}
+
+                <h4 className="font-black uppercase tracking-widest text-[10px] text-slate-500 mb-2 mt-4">1a. Traslados a GYE (ingreso manual — sin FERT allá)</h4>
+                <p className="text-[11px] text-slate-400 mb-3">
+                  Carga diaria: cuánto de cada Forro se traslada a GYE. Se suma a la demanda de Colchón de Quito en la tabla de abajo.
+                </p>
+                {validacionPlan.check2.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 italic">No hay Forro planificado.</p>
+                ) : (
+                  <table className="w-full text-[11px] border-collapse">
+                    <thead className="bg-slate-50 text-slate-500 uppercase tracking-widest font-black text-left">
+                      <tr>
+                        <th className="px-3 py-2">Código</th>
+                        <th className="px-3 py-2">Descripción</th>
+                        <th className="px-3 py-2 text-right">Cantidad</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {validacionPlan.check2.map(row => {
+                        const gyeBloqueado = trasladoGyeBloqueado.has(row.material);
+                        return (
+                          <tr key={row.material}>
+                            <td className="px-3 py-2 font-mono font-bold text-slate-700">{row.material}</td>
+                            <td className="px-3 py-2 text-slate-600">{row.nombre}</td>
+                            <td className="px-3 py-2 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <Input
+                                  type="number"
+                                  min={0}
+                                  disabled={gyeBloqueado}
+                                  defaultValue={row.trasladoGye || ''}
+                                  placeholder="0"
+                                  onBlur={(e) => handleSetTrasladoGye(row.material, e.target.value)}
+                                  className="h-7 w-24 text-right font-mono text-[11px] disabled:opacity-60"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleTrasladoGyeBloqueado(row.material)}
+                                  title={gyeBloqueado ? 'Desbloquear traslado' : 'Bloquear traslado de hoy'}
+                                  className="text-slate-400 hover:text-indigo-600 shrink-0"
+                                >
+                                  {gyeBloqueado ? <Lock className="w-3 h-3 text-indigo-600" /> : <Unlock className="w-3 h-3" />}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+
+                <h4 className="font-black uppercase tracking-widest text-[10px] text-slate-500 mb-2 mt-6">1b. Forro planificado → Demanda (detalle Colchón/FERT Quito + Traslado GYE)</h4>
+                <p className="text-[11px] text-slate-400 mb-3">
+                  ¿Cubre el Forro planificado ambas necesidades (Quito + GYE) sin producir de más (en vano)?
+                </p>
+                {validacionPlan.check2.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 italic">No hay Forro planificado ni demanda registrada.</p>
+                ) : (
+                  <table className="w-full text-[11px] border-collapse">
+                    <thead className="bg-slate-50 text-slate-500 uppercase tracking-widest font-black text-left">
+                      <tr>
+                        <th className="px-3 py-2">Material</th>
+                        <th className="px-3 py-2">Nombre</th>
+                        <th className="px-3 py-2 text-right">Planificado</th>
+                        <th className="px-3 py-2 text-right">Demanda Colchón (Quito)</th>
+                        <th className="px-3 py-2 text-right">Traslado GYE</th>
+                        <th className="px-3 py-2 text-right bg-indigo-950/10">Demanda Total</th>
+                        <th className="px-3 py-2 text-right">Resultado</th>
+                        <th className="px-3 py-2">¿Traslado de reparación?</th>
+                        <th className="px-3 py-2"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {validacionPlan.check2.map(row => {
+                        const clave = `forro2:${row.material}`;
+                        return (
+                        <tr key={row.material} className={row.deficit > 0.01 ? 'bg-red-50' : row.superavit > 0.01 ? 'bg-amber-50' : ''}>
+                          <td className="px-3 py-2 font-mono font-bold text-slate-700">{row.material}</td>
+                          <td className="px-3 py-2 text-slate-600">{row.nombre}</td>
+                          <td className="px-3 py-2 text-right font-mono">{row.planeado.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right font-mono text-slate-500">{row.demandaColchon.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right font-mono text-slate-500">{row.trasladoGye.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right font-mono font-black bg-indigo-50/30">{row.demanda.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right font-mono font-black">
+                            {row.deficit > 0.01 ? (
+                              <span className="text-red-600">Falta {row.pctNoCubierto.toFixed(0)}% · {Math.round(row.deficit).toLocaleString()}</span>
+                            ) : row.superavit > 0.01 ? (
+                              <span className="text-amber-600">En vano · {Math.round(row.superavit).toLocaleString()}</span>
+                            ) : (
+                              <span className="text-emerald-600 flex items-center justify-end gap-1"><CheckCircle2 className="w-3 h-3" /> cubierto</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2">
+                            {row.sinExplicar && (
+                              <div className="flex items-center gap-1.5">
+                                <ShieldAlert className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                                <Input
+                                  type="number"
+                                  min={0}
+                                  max={row.planeado}
+                                  defaultValue={reparacionTrasladoPorForro.get(row.material) || ''}
+                                  placeholder="cantidad"
+                                  onBlur={(e) => handleSetReparacionTraslado(row.material, e.target.value)}
+                                  className="h-7 w-20 text-right font-mono text-[11px]"
+                                />
+                                <span className="text-slate-400 text-[10px]">uds. de reparación</span>
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-3 py-2">{row.deficit > 0.01 && <StockCheckCell clave={clave} />}</td>
+                        </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {/* ── PASO 2: Componentes vs Forro — SOLO tiene sentido revisarlo una vez que el
+                  paso 1 (Forro vs Demanda) está OK; igual se muestra siempre, no se bloquea, para
+                  no esconder una alerta real. */}
+              <div>
+                <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
+                  <h3 className="font-black uppercase tracking-widest text-[11px] text-slate-700">
+                    2. Componentes → Forro (Acolchado · Banda en Metros · Tapa · Banda · Otros Interiores)
+                  </h3>
+                  <Button
+                    onClick={handleCalcularCoberturaValidarPlan}
+                    disabled={validarPlanCoberturaPending || isLoadingPlanGrupo || autoChainStep > 0}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase tracking-widest text-[9px] px-4 py-2 rounded-xl disabled:opacity-40 flex items-center gap-2 shrink-0"
+                  >
+                    {(validarPlanCoberturaPending || isLoadingPlanGrupo || autoChainStep > 0) ? (
+                      <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Calculando…</>
+                    ) : (
+                      <><Database className="w-3.5 h-3.5" /> {hasFetchedNivelExplosion ? 'Recalcular Cobertura' : 'Calcular Cobertura'}</>
+                    )}
+                  </Button>
+                </div>
+                <p className="text-[11px] text-slate-400 mb-3">
+                  ¿Los 5 componentes (Acolchado, Banda en Metros, Tapa, Banda y Otros Interiores — no solo Acolchado/Bandas) alcanzan para el Forro planificado, una vez repartida la capacidad real entre todos los Forros que la comparten? Calcula el BOM para la fecha de producción de este Plan Final
+                  {planFinalFechaPlanificada && <> (<span className="font-mono font-black text-slate-500">{formatFechaSAP(planFinalFechaPlanificada)}</span>)</>}.
+                </p>
+                {!hasFetchedNivelExplosion && (
+                  <p className="text-[11px] text-amber-600 italic font-bold mb-3">Presiona &quot;Calcular Cobertura&quot; para traer el BOM de componentes.</p>
+                )}
+
+                <h4 className="font-black uppercase tracking-widest text-[10px] text-slate-500 mb-2 mt-4">2a. Balance por componente — todo deficit o excedente, por material</h4>
+                <p className="text-[11px] text-slate-400 mb-3">¿Cada material alcanza para lo que su siguiente nivel tiene planificado? Se muestra tanto si falta (rojo) como si sobra (ámbar — material ya producido, no se pierde ni se redirige; queda como inventario y puede estar cubriendo una necesidad de días anteriores — revisar en SAP).</p>
+                {validacionPlan.balance.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 italic">Sin diferencias: todos los componentes cuadran exacto con lo que su siguiente nivel necesita.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {validacionPlan.balance.map(row => {
+                      const clave = `bal:${row.nivel}:${row.material}`;
+                      const esDeficit = row.deficit > 0.01;
+                      const pctCubierto = row.necesidad > 0 ? (row.planeado / row.necesidad) * 100 : 100;
+                      return (
+                        <div key={clave} className={cn('rounded-2xl border p-4', esDeficit ? 'border-red-200 bg-red-50/70' : 'border-amber-200 bg-amber-50/70')}>
+                          <div className="flex items-center justify-between gap-3 mb-2.5 flex-wrap">
+                            <div className="flex items-center gap-2 min-w-0">
+                              {esDeficit ? <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" /> : <TrendingUp className="w-4 h-4 text-amber-500 shrink-0" />}
+                              <Badge className="bg-slate-800 text-white border-none text-[8px] font-black uppercase px-2 py-0.5 rounded-lg shrink-0">{row.nivel}</Badge>
+                              <span className="font-mono font-black text-slate-800 text-[13px]">{row.material}</span>
+                              {row.nombre && <span className="text-slate-500 text-[11px] truncate">{row.nombre}</span>}
+                            </div>
+                            <StockCheckCell clave={clave} label={esDeficit ? 'Stock SAP' : 'Verificado SAP'} />
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono font-black text-[11px] text-slate-700 shrink-0 w-14 text-right">{row.planeado.toLocaleString()}</span>
+                            <BarraCobertura pct={pctCubierto} tono={esDeficit ? 'rojo' : 'ambar'} />
+                            <span className="font-mono text-[11px] text-slate-400 shrink-0 w-14">{Math.round(row.necesidad).toLocaleString()}</span>
+                          </div>
+                          <div className="flex items-center justify-between mt-1.5">
+                            <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">Planificado · Necesidad</span>
+                            <p className={cn('text-[12px] font-black', esDeficit ? 'text-red-600' : 'text-amber-600')}>
+                              {esDeficit
+                                ? `Falta ${row.pctNoCubierto.toFixed(0)}% · ${Math.round(row.deficit).toLocaleString()} unidades`
+                                : `Sobra ${Math.round(row.excedente).toLocaleString()} unidades — revisar en SAP`}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <h4 className="font-black uppercase tracking-widest text-[10px] text-slate-500 mb-2 mt-6">2b. Forro producible — según toda la cascada de componentes</h4>
+                <p className="text-[11px] text-slate-400 mb-3">De los Forros planificados, ¿cuáles puntualmente se van a quedar cortos una vez repartida la capacidad real de Tapa/Banda/Otros entre todos los Forros que la comparten?</p>
+                {validacionPlan.check1.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 italic">No hay Forro planificado en este Plan Final.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {validacionPlan.check1.map(row => {
+                      const clave = `forro1:${row.material}`;
+                      const esDeficit = row.deficit > 0.01;
+                      const pctCubierto = row.planeado > 0 ? (row.producible / row.planeado) * 100 : 100;
+                      return (
+                        <div key={row.material} className={cn('rounded-2xl border p-4', esDeficit ? 'border-red-200 bg-red-50/70' : 'border-emerald-200 bg-emerald-50/40')}>
+                          <div className="flex items-center justify-between gap-3 mb-2.5 flex-wrap">
+                            <div className="flex items-center gap-2 min-w-0">
+                              {esDeficit ? <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" /> : <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />}
+                              <span className="font-mono font-black text-slate-800 text-[13px]">{row.material}</span>
+                              {row.nombre && <span className="text-slate-500 text-[11px] truncate">{row.nombre}</span>}
+                            </div>
+                            {esDeficit && <StockCheckCell clave={clave} />}
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono font-black text-[11px] text-slate-700 shrink-0 w-14 text-right">{row.sinDatoBom ? '—' : Math.round(row.producible).toLocaleString()}</span>
+                            <BarraCobertura pct={row.sinDatoBom ? 100 : pctCubierto} tono={esDeficit ? 'rojo' : 'verde'} />
+                            <span className="font-mono text-[11px] text-slate-400 shrink-0 w-14">{row.planeado.toLocaleString()}</span>
+                          </div>
+                          <div className="flex items-center justify-between mt-1.5">
+                            <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">Producible · Planificado</span>
+                            {esDeficit ? (
+                              <p className="text-[12px] font-black text-red-600">
+                                {row.pctNoCubierto.toFixed(0)}% · {Math.round(row.deficit).toLocaleString()} forros sin componente
+                                {row.limitante && <span className="text-red-400"> (por falta de {row.limitante}{row.limitanteNombre ? ` — ${row.limitanteNombre}` : ''})</span>}
+                              </p>
+                            ) : row.sinDatoBom ? (
+                              <p className="text-[11px] text-slate-400 italic">Sin BOM de Tapa/Banda/Otros vinculado</p>
+                            ) : (
+                              <p className="text-[12px] font-black text-emerald-600 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> Cubierto</p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* ── VEREDICTO FINAL: sintetiza pasos 1+2+3 por Forro — cuánto se necesita, cuánto
+                  se va a entregar realmente (mínimo entre planificado y producible) y por qué si
+                  no llega al 100%. */}
+              <div>
+                <h3 className="font-black uppercase tracking-widest text-[11px] text-slate-700 mb-2">3. Veredicto — necesidad vs. cumplimiento por Forro</h3>
+                <p className="text-[11px] text-slate-400 mb-3">Por cada Forro: cuánto se necesita (demanda), cuánto se va a entregar realmente (lo mínimo entre lo planificado y lo producible según sus componentes) y el porqué si no se cubre al 100%.</p>
+                {!hasFetchedNivelExplosion && resumenForros.length === 0 ? (
+                  <p className="text-[11px] text-amber-600 italic font-bold">Corre los pasos 2 y 3 arriba para calcular el veredicto final.</p>
+                ) : validacionPlan.resumenForros.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 italic">No hay Forro planificado ni demanda registrada.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {validacionPlan.resumenForros.map(row => (
+                      <div key={row.material} className={cn('rounded-2xl border p-4', row.cubierto ? 'border-emerald-200 bg-emerald-50/40' : 'border-red-200 bg-red-50/70')}>
+                        <div className="flex items-center justify-between gap-3 mb-2.5 flex-wrap">
+                          <div className="flex items-center gap-2 min-w-0">
+                            {row.cubierto ? <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" /> : <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />}
+                            <span className="font-mono font-black text-slate-800 text-[13px]">{row.material}</span>
+                            {row.nombre && <span className="text-slate-500 text-[11px] truncate">{row.nombre}</span>}
+                          </div>
+                          <span className={cn('text-[12px] font-black', row.cubierto ? 'text-emerald-600' : 'text-red-600')}>{row.cumplimientoPct.toFixed(0)}%</span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="font-mono font-black text-[11px] text-slate-700 shrink-0 w-14 text-right">{Math.round(row.entregaReal).toLocaleString()}</span>
+                          <BarraCobertura pct={row.cumplimientoPct} tono={row.cubierto ? 'verde' : 'rojo'} />
+                          <span className="font-mono text-[11px] text-slate-400 shrink-0 w-14">{Math.round(row.demanda).toLocaleString()}</span>
+                        </div>
+                        <div className="flex items-center justify-between mt-1.5">
+                          <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">Entrega real · Demanda</span>
+                          <p className={cn('text-[11px] font-black text-right', row.cubierto ? 'text-emerald-600' : 'text-red-600')}>{row.porque}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* RESUMEN PARA ENSAMBLADO — lo único que le importa al área afectada: qué Forro,
+                  cuánto no llega y por qué material. Pensado para compartir (botón "Copiar"
+                  arriba del Card), no para quedarse solo en pantalla. */}
+              <div>
+                <h3 className="font-black uppercase tracking-widest text-[11px] text-slate-700 mb-2 flex items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 text-rose-600" /> Resumen para Ensamblado — Forros que no se van a entregar completos
+                </h3>
+                {validacionPlan.resumenEnsamblado.length === 0 ? (
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-5 flex items-center gap-3">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                    <p className="text-[12px] font-bold text-emerald-700">Todos los Forros planificados se van a poder entregar completos — nada que avisar a Ensamblado.</p>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-rose-200 bg-rose-50/60 overflow-hidden">
+                    <div className="px-5 py-3 bg-rose-600 text-white flex items-center justify-between gap-3 flex-wrap">
+                      <p className="font-black text-[12px] uppercase tracking-wide">
+                        {validacionPlan.resumenEnsambladoTotales.forrosAfectados} forro(s) afectado(s)
+                      </p>
+                      <p className="font-mono font-black text-[12px]">
+                        {Math.round(validacionPlan.resumenEnsambladoTotales.unidadesNoEntregables).toLocaleString()} de {Math.round(validacionPlan.resumenEnsambladoTotales.unidadesPlaneadas).toLocaleString()} unidades no entregables
+                      </p>
+                    </div>
+                    <div className="divide-y divide-rose-100">
+                      {validacionPlan.resumenEnsamblado.map(row => (
+                        <div key={row.material} className="px-5 py-3.5 flex items-center justify-between gap-4 flex-wrap">
+                          <div className="min-w-0">
+                            <p className="font-mono font-black text-slate-800 text-[13px]">{row.material} <span className="text-slate-500 font-sans font-normal text-[11px]">{row.nombre}</span></p>
+                            {row.limitante && (
+                              <p className="text-[10px] text-rose-500 font-bold uppercase tracking-wide mt-0.5">
+                                Por falta de {row.limitante}{row.limitanteNombre ? ` — ${row.limitanteNombre}` : ''} ({row.limitanteNivel})
+                              </p>
+                            )}
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="font-mono font-black text-rose-600 text-lg leading-none">{Math.round(row.noEntregable).toLocaleString()}</p>
+                            <p className="text-[9px] font-black uppercase text-rose-400 tracking-wide">de {Math.round(row.planeado).toLocaleString()} · {row.pctNoCubierto.toFixed(0)}% sin cubrir</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
           </Tabs>
         </TabsContent>
@@ -12702,162 +17760,17 @@ useEffect(() => {
             </div>
           ) : (
             <div className="space-y-8">
-              {/* Botón y Resumen de Forros CHN */}
-              <div className="flex flex-col space-y-6">
-                <div className="flex justify-end">
-                  <Button
-                    onClick={handleExplodeFerts}
-                    disabled={isLoadingExplosion || (fert1000.length === 0 && fert2000.length === 0)}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase tracking-widest text-xs px-8 py-4 rounded-2xl shadow-lg flex items-center gap-3"
-                  >
-                    {isLoadingExplosion ? (
-                      <><Loader2 className="w-4 h-4 animate-spin" /> Consultando Lista de Materiales {explosionProgress}%</>
-                    ) : (
-                      <><Database className="w-4 h-4" /> Consultar Lista de Materiales y Generar Resumen</>
-                    )}
-                  </Button>
-                </div>
-
-                {/* RESUMEN FORROS — necesidades por referencia y centro */}
-                <Card className="rounded-3xl border-none shadow-sm ring-1 ring-slate-100 overflow-hidden bg-white">
-                  <div className="px-6 py-3 bg-emerald-800 text-white font-black text-[10px] uppercase tracking-widest flex items-center gap-2">
-                    <Boxes className="w-4 h-4" /> Resumen Forros — Necesidades por Referencia
-                  </div>
-                  <CardContent className="p-0">
-                    {resumenForros.length > 0 ? (
-                      <table className="w-full text-[11px] border-collapse">
-                        <thead className="bg-slate-50 text-slate-500 uppercase font-black tracking-widest border-b sticky top-0">
-                          <tr>
-                            <th className="px-6 py-4 text-left">CÓDIGO FORRO</th>
-                            <th className="px-6 py-4 text-left">DESCRIPCIÓN</th>
-                            <th className="px-6 py-4 text-right">CENTRO 1000 (UIO)</th>
-                            <th className="px-6 py-4 text-right">CENTRO 2000 (GYE)</th>
-                            <th className="px-6 py-4 text-right">TOTAL</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {resumenForros.map((row, i) => (
-                            <tr key={i} className="hover:bg-emerald-50/30 transition-colors">
-                              <td className="px-6 py-3 font-mono font-black text-slate-800">{row.material}</td>
-                              <td className="px-6 py-3 text-slate-600">{row.nombre}</td>
-                              <td className="px-6 py-3 text-right font-mono font-black text-slate-700">
-                                {row.total1000 > 0 ? Math.round(row.total1000).toLocaleString() : '—'}
-                              </td>
-                              <td className="px-6 py-3 text-right font-mono font-black text-indigo-700">
-                                {row.total2000 > 0 ? Math.round(row.total2000).toLocaleString() : '—'}
-                              </td>
-                              <td className="px-6 py-3 text-right font-mono font-black text-emerald-700 bg-emerald-50/40">
-                                {Math.round(row.total1000 + row.total2000).toLocaleString()}
-                              </td>
-                            </tr>
-                          ))}
-                          <tr className="bg-slate-50 border-t-2 border-slate-200">
-                            <td colSpan={2} className="px-6 py-4 font-black text-slate-600 uppercase text-[10px] tracking-widest">Total General</td>
-                            <td className="px-6 py-4 text-right font-mono font-black text-slate-800">
-                              {Math.round(resumenForros.reduce((s, r) => s + r.total1000, 0)).toLocaleString()}
-                            </td>
-                            <td className="px-6 py-4 text-right font-mono font-black text-indigo-800">
-                              {Math.round(resumenForros.reduce((s, r) => s + r.total2000, 0)).toLocaleString()}
-                            </td>
-                            <td className="px-6 py-4 text-right font-mono font-black text-emerald-800 bg-emerald-50/40">
-                              {Math.round(resumenForros.reduce((s, r) => s + r.total1000 + r.total2000, 0)).toLocaleString()}
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    ) : (
-                      <div className="py-12 text-center">
-                        {isLoadingExplosion ? (
-                          <div className="flex flex-col items-center gap-3">
-                            <Loader2 className="w-8 h-8 animate-spin text-emerald-600" />
-                            <span className="text-[11px] font-black uppercase text-slate-400 tracking-widest">Consultando lista de materiales {explosionProgress}%...</span>
-                          </div>
-                        ) : (
-                          <span className="text-slate-400 uppercase font-black tracking-widest text-[10px] opacity-50">
-                            Presiona &quot;Consultar Lista de Materiales&quot; para calcular las necesidades de FORROS
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-
-                {/* Resumen de Forros CHN por Centro y RESPCTRLPROD */}
-                <Card className="rounded-3xl border-none shadow-sm ring-1 ring-slate-100 overflow-hidden bg-white">
-                  <div className="px-6 py-3 bg-slate-50 border-b border-slate-200 text-slate-700 font-black text-[10px] uppercase tracking-widest flex items-center gap-2">
-                    <Boxes className="w-4 h-4 text-indigo-600" /> Resumen de Forros (Insumos CHN) por Centro y Responsable
-                  </div>
-                  <CardContent className="p-0">
-                    {resumenPorCentroResp.length > 0 ? (
-                      <table className="w-full text-[11px] border-collapse">
-                        <thead className="bg-slate-50 text-slate-500 uppercase font-black tracking-widest border-b sticky top-0">
-                          <tr>
-                            <th className="px-6 py-4 text-left">CENTRO</th>
-                            <th className="px-6 py-4 text-left">RESPCTRLPROD</th>
-                            <th className="px-6 py-4 text-right">CANT. ÓRDENES FERT</th>
-                            <th className="px-6 py-4 text-right">INSUMOS CHN (M/UN)</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {resumenPorCentroResp.map((row, i) => {
-                            const centroLabel = row.centro === '1000' ? 'UIO 1000' : row.centro === '2000' ? 'GYE 2000' : row.centro;
-                            const isNewCentro = i === 0 || resumenPorCentroResp[i - 1].centro !== row.centro;
-                            return (
-                              <tr key={i} className={cn("hover:bg-indigo-50/30 transition-colors", isNewCentro && i > 0 && "border-t-2 border-slate-200")}>
-                                <td className="px-6 py-4">
-                                  {isNewCentro ? (
-                                    <Badge className={cn(
-                                      "font-black text-[10px] px-3 py-1 rounded-lg border-none",
-                                      row.centro === '1000' ? "bg-sky-50 text-sky-700 border border-sky-200" : "bg-indigo-700 text-white"
-                                    )}>
-                                      {centroLabel}
-                                    </Badge>
-                                  ) : null}
-                                </td>
-                                <td className="px-6 py-4 font-bold text-slate-700">
-                                  Responsable {row.resp}
-                                </td>
-                                <td className="px-6 py-4 text-right font-mono font-black text-indigo-600">
-                                  {Math.round(row.totalForros).toLocaleString()}
-                                </td>
-                                <td className="px-6 py-4 text-right font-mono font-black text-emerald-700 bg-emerald-50/30">
-                                  {row.totalInsumos.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                          <tr className="bg-slate-50 border-t-2 border-slate-200">
-                            <td colSpan={2} className="px-6 py-4 font-black text-slate-600 uppercase text-[10px] tracking-widest">Total General</td>
-                            <td className="px-6 py-4 text-right font-mono font-black text-indigo-800">
-                              {Math.round(resumenPorCentroResp.reduce((s, r) => s + r.totalForros, 0)).toLocaleString()}
-                            </td>
-                            <td className="px-6 py-4 text-right font-mono font-black text-emerald-800 bg-emerald-50/30">
-                              {resumenPorCentroResp.reduce((s, r) => s + r.totalInsumos, 0).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    ) : (
-                      <div className="py-20 text-center">
-                        {isLoadingExplosion ? (
-                          <div className="flex flex-col items-center gap-3">
-                            <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
-                            <span className="text-[11px] font-black uppercase text-slate-400 tracking-widest">Consultando lista de materiales {explosionProgress}%...</span>
-                          </div>
-                        ) : (
-                          <span className="text-slate-400 uppercase font-black tracking-widest text-[10px] opacity-50">
-                            Presiona &quot;Consultar Lista de Materiales&quot; para generar el resumen
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
-
-              {/* Fert Tables */}
-              {renderFertTableInternal(fert1000, summary1000, "Órdenes FERT - Centro 1000 (UIO)", targetDate1000, setTargetDate1000, "bg-sky-600")}
-              {renderFertTableInternal(fert2000, summary2000, "Órdenes FERT - Centro 2000 (GYE)", targetDate2000, setTargetDate2000, "bg-indigo-700")}
+              {/* El botón "Consultar Lista de Materiales y Generar Resumen" y las dos tarjetas de
+                  resumen (Necesidades por Referencia, Insumos CHN por Centro y Responsable) se
+                  quitaron de esta pestaña a pedido del usuario — esta vista ahora es solo la lista
+                  de órdenes FERT. El cálculo de explosión (`handleExplodeFerts`/`resumenForros`)
+                  sigue intacto y se sigue pudiendo disparar desde Validar Plan ("Calcular Demanda
+                  Quito (FERT)", ver `handleCalcularDemandaQuito`) — no se tocó esa lógica, solo se
+                  dejó de mostrar acá. `fert1000`/`fert2000` (filtrados por un solo día, Centro 1000
+                  y 2000) siguen existiendo igual que antes, exclusivamente para ese cálculo. Esta
+                  vista es SOLO Centro 1000 (a pedido del usuario), agrupada por MÁQUINA y ordenada
+                  por FECHA ascendente dentro de cada grupo — ver `fertVista1000PorMaquina`. */}
+              {renderFertTableInternal(fertVista1000PorMaquina, "Órdenes FERT - Centro 1000 (UIO)", "bg-sky-600")}
             </div>
           )}
         </TabsContent>
@@ -13111,44 +18024,71 @@ useEffect(() => {
                    )}
 
                    <div className="space-y-1.5">
-                     {/* Calendario para elegir el día: los feriados nacionales de Ecuador van
-                         sombreados en rosa, pero se puede marcar CUALQUIER día como no laborable
-                         (paro, cierre de planta, mantenimiento mayor), no solo los oficiales. */}
+                     {/* Calendario para marcar días NO laborables — puede ser MÁS DE UNO a la vez
+                         (paro de varios días, mantenimiento mayor, o un feriado distinto al que ya
+                         sombrea el calendario oficial de Ecuador en rosa). Marcar aquí NO mueve la
+                         fecha del plan por sí solo: solo arma la lista que se excluye de los
+                         cálculos de día hábil (N1/N2N3/P2/P3, y de aquí en adelante al guardar el
+                         plan) — mover la fecha del plan actual es un paso aparte, el botón
+                         "Aplicar feriado detectado" de abajo. */}
                      <Popover open={isFeriadoCalendarOpen} onOpenChange={setIsFeriadoCalendarOpen}>
                        <PopoverTrigger asChild>
                          <Button
                            disabled={isJornadaEstablecida}
                            className={cn(
                              'w-full font-black uppercase tracking-widest text-[9px] px-3 py-2 rounded-lg shadow-sm flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed',
-                             esDiaFeriado ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-white hover:bg-slate-50 text-slate-500 border border-slate-200'
+                             feriadoFechasManuales.length > 0 ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-white hover:bg-slate-50 text-slate-500 border border-slate-200'
                            )}
                          >
                            <CalendarIcon className="w-3 h-3" />
-                           {esDiaFeriado && feriadoVigente
-                             ? new Date(`${feriadoVigente.fecha}T00:00:00`).toLocaleDateString('es-EC', { day: '2-digit', month: 'short' })
-                             : 'Marcar Día Feriado'}
+                           {feriadoFechasManuales.length > 0
+                             ? `${feriadoFechasManuales.length} día(s) no laborable(s)`
+                             : 'Marcar Días No Laborables'}
                          </Button>
                        </PopoverTrigger>
                        <PopoverContent className="w-auto p-0" align="start">
                          <DatePickerCalendar
-                           mode="single"
-                           selected={esDiaFeriado && feriadoVigente ? new Date(`${feriadoVigente.fecha}T00:00:00`) : undefined}
-                           onSelect={(date) => { if (date) handleSeleccionarFechaFeriado(toIsoLocal(date)); }}
+                           mode="multiple"
+                           selected={feriadoFechasManuales.map(f => new Date(`${f}T00:00:00`))}
+                           onSelect={(dates) => setFeriadoFechasManuales((dates || []).map(toIsoLocal).sort())}
                            modifiers={{ feriadoNacional: (date) => feriadosPorFecha.has(toIsoLocal(date)) }}
                            modifiersClassNames={{ feriadoNacional: 'font-black text-rose-700 shadow-[inset_0_0_0_9999px_rgba(244,63,94,0.16)] rounded-md' }}
                          />
-                         <div className="px-4 pb-3 space-y-1">
+                         <div className="px-4 pb-3 space-y-1.5">
                            <div className="flex items-center gap-2 text-[9px] font-bold text-slate-400 uppercase tracking-wider">
                              <span className="inline-block w-3 h-3 rounded bg-rose-200" /> Feriado nacional (Ecuador)
                            </div>
-                           {feriadoVigente && (
-                             <p className="text-[9px] font-black text-slate-700 capitalize leading-tight">
-                               {formatFechaLarga(feriadoVigente.fecha)} · <span className="font-bold text-slate-500">{feriadoVigente.nombre}</span>
-                             </p>
+                           {feriadoFechasManuales.length === 0 ? (
+                             <p className="text-[9px] font-bold text-slate-400 leading-tight">Ningún día marcado todavía.</p>
+                           ) : (
+                             <div className="flex flex-wrap gap-1">
+                               {feriadoFechasManuales.map(f => (
+                                 <button
+                                   key={f}
+                                   onClick={() => setFeriadoFechasManuales(prev => prev.filter(x => x !== f))}
+                                   className="flex items-center gap-1 text-[9px] font-black text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-1.5 py-0.5 capitalize hover:bg-rose-100"
+                                   title="Quitar"
+                                 >
+                                   {new Date(`${f}T00:00:00`).toLocaleDateString('es-EC', { day: '2-digit', month: 'short' })} ×
+                                 </button>
+                               ))}
+                             </div>
                            )}
                          </div>
                        </PopoverContent>
                      </Popover>
+                     {/* Feriado "vigente" (detectado automáticamente: oficial de Ecuador o alguno de
+                         los marcados a mano arriba) que SÍ puede mover la fecha del plan actual —
+                         paso explícito, independiente de marcar/desmarcar días en el calendario. */}
+                     {feriadoVigente && !esDiaFeriado && (
+                       <Button
+                         onClick={handleToggleDiaFeriado}
+                         disabled={isJornadaEstablecida}
+                         className="w-full font-black uppercase tracking-widest text-[8px] px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 shadow-none disabled:opacity-50 disabled:cursor-not-allowed capitalize"
+                       >
+                         Aplicar feriado: {formatFechaLarga(feriadoVigente.fecha)}
+                       </Button>
+                     )}
                      {esDiaFeriado && (
                        <Button
                          onClick={handleToggleDiaFeriado}
@@ -13235,6 +18175,39 @@ useEffect(() => {
                 </CardContent>
               </Card>
 
+              {/* Citas médicas total del día — base cargada en "Personal asignado" de cada tarjeta.
+                  Separa lo que SÍ resta capacidad de lo que no (acolchadoras: se busca reemplazo en
+                  vez de descontar, ver `esHRAcolchado`), a pedido del usuario. */}
+              <Card className="rounded-[1.5rem] bg-white border-none shadow-sm ring-1 ring-pink-100 overflow-hidden">
+                <CardContent className="p-3.5 flex items-center gap-3 bg-pink-50">
+                  <div className="bg-pink-500 p-2 rounded-xl text-white shadow-md shadow-pink-200 shrink-0">
+                    <Stethoscope className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[8px] font-black uppercase text-pink-500 tracking-[0.15em] leading-tight">Citas Médicas Total</p>
+                    <p className="font-black text-pink-700 leading-none mt-1">
+                      <span className="text-xl">{citasMedicasResumen.horas.toFixed(1)}</span>
+                      <span className="text-[10px] ml-1">h</span>
+                    </p>
+                    <p className="text-[7px] font-bold uppercase text-pink-400 tracking-tighter mt-0.5 leading-none">
+                      {citasMedicasResumen.horas > 0
+                        ? `en ${citasMedicasResumen.puestos} puesto(s)`
+                        : 'Sin citas médicas registradas'}
+                    </p>
+                    {citasMedicasResumen.horas > 0 && (
+                      <p className="text-[7px] font-bold uppercase tracking-tighter mt-1 leading-tight space-x-1.5">
+                        {citasMedicasResumen.horasDescontadas > 0 && (
+                          <span className="text-rose-600">− {citasMedicasResumen.horasDescontadas.toFixed(1)}h capacidad</span>
+                        )}
+                        {citasMedicasResumen.horasReemplazo > 0 && (
+                          <span className="text-amber-600">⚕ {citasMedicasResumen.horasReemplazo.toFixed(1)}h reemplazo</span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+
               {/* Resumen de dotación por turno — cuenta solo las personas de puestos con ESE turno
                   activo, así el número refleja quién trabaja de verdad y no lo que quedó cargado en
                   un turno apagado. El de fin de semana solo aparece si la jornada está habilitada. */}
@@ -13309,7 +18282,7 @@ useEffect(() => {
               </div>
 
               {workstationGroups.map((group, gIdx) => {
-                const availableItems = group.items.filter(item => uniquePuestos.includes(item));
+                const availableItems = group.items.filter(item => uniquePuestosSet.has(item));
                 if (availableItems.length === 0) return null;
                 return (
                   <div key={gIdx} className="space-y-4">
@@ -13324,8 +18297,61 @@ useEffect(() => {
                         const mantenimientoHoras = hrCode
                           ? hrCode.split(' / ').reduce((sum, code) => sum + (mantenimientoHorasPorPuesto[code.trim().toUpperCase()] || 0), 0)
                           : 0;
+                        // Detalle por OT — para poder validar contra SISMAC (a pedido del usuario,
+                        // caso HR-ACH10) en vez de confiar a ciegas en el total ya sumado.
+                        const mantenimientoDetalle = hrCode
+                          ? hrCode.split(' / ').flatMap(code => mantenimientoDetallePorPuesto[code.trim().toUpperCase()] || [])
+                          : [];
+                        // Mismo detalle, pero AGRUPADO por máquina SISMAC (ID_MAQUINA) — a pedido
+                        // del usuario: ver en la tarjeta misma, sin tooltip, en qué máquina está
+                        // cada hora de mantenimiento (un puesto puede tener varias, ej. HR-COS3D
+                        // con CR01/CR02/EB01/EB02/OB01/OB02). `tieneDato` distingue "0h porque
+                        // SISMAC de verdad mandó 0/una duración insignificante" de "0h porque no
+                        // hay NINGÚN dato de duración (ni Duracion_Minutos ni FECHA_OT_PRG_FIN)" —
+                        // para que no se vea como un bug cuando en realidad es el dato real.
+                        const mantenimientoPorMaquina = mantenimientoDetalle.reduce((acc, d) => {
+                          if (!acc[d.idMaquina]) acc[d.idMaquina] = { horas: 0, tieneDato: false };
+                          acc[d.idMaquina].horas += d.horas;
+                          if (d.origen !== 'sin_dato') acc[d.idMaquina].tieneDato = true;
+                          return acc;
+                        }, {} as Record<string, { horas: number; tieneDato: boolean }>);
+                        // Acolchadoras: la cita médica NO descuenta capacidad acá (ver el mismo
+                        // criterio en MachineCard/Resumen) — en su lugar se marca "buscar
+                        // reemplazo", a pedido explícito del usuario.
+                        const esAcolchado = esPuestoAcolchado((hrCode || p).toUpperCase());
+                        // Máquina(s) de SISMAC (ID_MAQUINA) que alimentan esta Hoja de Ruta, según
+                        // la restricción MAQUINA_SISMAC_<PUESTO> (ver `sismacMaquinasPorHR` arriba)
+                        // — se muestra en la tarjeta para poder cruzar a simple vista contra SISMAC,
+                        // a pedido del usuario.
+                        const maquinasSismac = hrCode
+                          ? Array.from(new Set(hrCode.split(' / ').flatMap(code => sismacMaquinasPorHR.get(code.trim().toUpperCase()) || [])))
+                          : [];
                         const esPuestoPersonas = PUESTOS_CAPACIDAD_POR_PERSONAS.has(p);
                         const tieneHorarioPersonalizado = !!config.horarioPersonalizadoActivo;
+                        // Equipo Compartido: ya NO está limitado a Acolchadoras entre sí (a pedido
+                        // del usuario) — la pareja puede ser CUALQUIER puesto del plan, de cualquier
+                        // grupo, porque lo que define si tiene sentido es la habilidad real de la
+                        // persona (si está capacitada para ambos puestos), no que sean máquinas
+                        // "parecidas". La app no valida esa habilidad — el criterio queda en manos
+                        // de quien planifica, igual que el resto de Personal y Turnos. Candidatos:
+                        // cualquier otro puesto activo que no esté YA repartido con una TERCERA
+                        // máquina (la pareja actual de `p`, si tiene una, siempre se deja
+                        // seleccionable para poder editar el reparto sin desvincular primero).
+                        const tieneEquipoCompartido = !!config.equipoCompartidoCon;
+                        const parejasDisponibles = workstationGroups
+                          .flatMap(g => g.items)
+                          .filter(o => uniquePuestosSet.has(o) && o !== p && (!workstationConfigs[o]?.equipoCompartidoCon || workstationConfigs[o]?.equipoCompartidoCon === p));
+                        // Total disponible del equipo — mismo criterio que `handleSetEquipoCompartido`:
+                        // unión de turnos activos entre `p` y su pareja actual (Día/Noche/Sábado, cada
+                        // uno contado una sola vez). Sin pareja todavía (antes de activar), se usa la
+                        // Jornada Diurna neta de `p` sola como estimado inicial — en cuanto se activa,
+                        // `handleSetEquipoCompartido` recalcula el total real con la pareja elegida.
+                        const parejaConfigEquipo = config.equipoCompartidoCon ? workstationConfigs[config.equipoCompartidoCon] : undefined;
+                        const jornadaTotalEquipo = parejaConfigEquipo
+                          ? ((config.isDayActive || parejaConfigEquipo.isDayActive) ? horasNetasDiurnasVal : 0) +
+                            ((config.isNightActive || parejaConfigEquipo.isNightActive) ? horasNetasNocturnasVal : 0) +
+                            ((config.isSaturdayActive || parejaConfigEquipo.isSaturdayActive) ? horasNetasFinSemanaVal : 0)
+                          : (horasNetasDiurnasVal > 0 ? horasNetasDiurnasVal : 8);
                         // Horas disponibles netas: se calculan por turno (día usa peopleDay/máquinas, noche
                         // usa peopleNight/máquinas — ver capacidadPuesto), restando el mantenimiento
                         // preventivo agendado para el puesto ese día. Solo se usan para el desglose visual
@@ -13346,6 +18372,24 @@ useEffect(() => {
                                 {hrCode || 'S/HR'}
                               </Badge>
                               <h4 className="font-black text-indigo-950 uppercase text-lg leading-tight break-words">{p}</h4>
+                              {/* Máquina(s) de SISMAC (ID_MAQUINA) que alimentan esta Hoja de Ruta
+                                  — restricción única MAQUINA_SISMAC del grupo Forros (Parámetros →
+                                  Grupos → Restricciones), campo `hoja_ruta` de cada entrada del JSON,
+                                  para cruzar a simple vista contra SISMAC/Mantenimiento. */}
+                              {maquinasSismac.length > 0 ? (
+                                <div className="mt-1 flex flex-wrap items-center gap-1" title="Máquina(s) de SISMAC asociadas a esta Hoja de Ruta">
+                                  <span className="text-[7px] font-black uppercase text-slate-400 tracking-tighter">SISMAC:</span>
+                                  {maquinasSismac.map(m => (
+                                    <Badge key={m} className="bg-slate-100 text-slate-600 border border-slate-200 font-mono text-[8px] px-1.5 py-0 rounded-md">
+                                      {m}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="mt-1 text-[7px] font-bold uppercase text-amber-500 tracking-tighter" title={`Ninguna entrada del JSON de la restricción MAQUINA_SISMAC (Parámetros → Grupos → Restricciones, grupo Forros) tiene "hoja_ruta": "${hrCode || p}" — sin eso, el mantenimiento preventivo no se le atribuye a este puesto.`}>
+                                  ⚠ Sin máquina SISMAC mapeada
+                                </p>
+                              )}
 
                               {/* ── RECURSOS: lo que SUMA capacidad ──────────────────────────────
                                   En los puestos que miden por máquinas, las personas se muestran
@@ -13470,6 +18514,140 @@ useEffect(() => {
                                 ))}
                               </div>
 
+                              {/* Personal asignado por nombre — cruza contra Habilidades por Estación
+                                  (getMaestroCuboHabilidadesCrudos) por código de empleado,
+                                  EXACTO por PuestoTrabajo = Hoja de Ruta de esta tarjeta. Una fila
+                                  por cada persona ya contada en el turno (el contador +/- de arriba
+                                  sigue mandando sobre la capacidad; esto es solo para saber QUIÉN
+                                  es). Si el código no existe, o existe pero no tiene fila para este
+                                  puesto exacto, se avisa en vez de bloquear — la decisión final la
+                                  confirma quien lo está cargando. */}
+                              {(() => {
+                                const turnosConGente = ([
+                                  { campo: 'empleadosDia' as const, cantidad: config.isDayActive ? (config.peopleDay || 0) : 0, label: 'Día', clase: 'amber' },
+                                  { campo: 'empleadosNoche' as const, cantidad: config.isNightActive ? (config.peopleNight || 0) : 0, label: 'Noche', clase: 'indigo' },
+                                  { campo: 'empleadosSabado' as const, cantidad: (config.isSaturdayActive && horasNetasFinSemanaVal > 0) ? (config.peopleWeekend || 0) : 0, label: 'Sábado', clase: 'emerald' },
+                                ]).filter(t => t.cantidad > 0);
+                                if (turnosConGente.length === 0) return null;
+                                return (
+                                  <div className="mt-3 space-y-2">
+                                    <p className="text-[7px] font-black uppercase text-slate-400 tracking-[0.2em] flex items-center gap-1">
+                                      <span className="inline-block w-1 h-1 rounded-full bg-sky-400" /> Personal asignado (Habilidades por Estación)
+                                    </p>
+                                    {isLoadingHabilidadesEstacion ? (
+                                      <p className="text-[9px] font-bold text-sky-600 bg-sky-50 border border-sky-200 rounded-lg px-2 py-1 flex items-center gap-1.5">
+                                        <Loader2 className="w-3 h-3 animate-spin" /> Cargando Habilidades por Estación…
+                                      </p>
+                                    ) : errorHabilidadesEstacion && (
+                                      <p className="text-[9px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-lg px-2 py-1">
+                                        ⚠ Habilidades por Estación incompleto: {errorHabilidadesEstacion} Por eso varios códigos van a salir "no encontrado" aunque sí existan en la base. Vuelve a cargar la página; si persiste, revisa el backend.
+                                      </p>
+                                    )}
+                                    <div className="space-y-2">
+                                      {turnosConGente.map(t => (
+                                        <div key={t.campo} className="space-y-1">
+                                          <span className={cn('text-[7px] font-black uppercase tracking-tighter',
+                                            t.clase === 'amber' && 'text-amber-500', t.clase === 'indigo' && 'text-indigo-400', t.clase === 'emerald' && 'text-emerald-500')}>
+                                            {t.label}
+                                          </span>
+                                          {Array.from({ length: t.cantidad }).map((_, idx) => {
+                                            const codigo = (config[t.campo]?.[idx]) || '';
+                                            const resuelto = resolverEmpleadoParaPuesto(codigo, p, idx);
+                                            return (
+                                              <div key={idx} className="flex items-center gap-1.5 bg-sky-50 border border-sky-200 rounded-lg px-2 py-1">
+                                                <Input
+                                                  disabled={isPlanPersonalEstablecido}
+                                                  value={codigo}
+                                                  placeholder="Código empleado"
+                                                  onChange={(e) => handleSetEmpleadoTurno(p, t.campo, idx, e.target.value)}
+                                                  className="h-6 text-[10px] w-28 shrink-0"
+                                                />
+                                                {/* Horas de cita médica de ESTA persona — la "base" que se llena acá
+                                                    (Personal y Turnos), no en Resumen (que solo la visualiza). Se
+                                                    descuenta de la capacidad del puesto SALVO que sea una
+                                                    acolchadora: ahí no se resta, se marca "buscar reemplazo". */}
+                                                {codigo && (() => {
+                                                  const cod = normalizarCodigoEmpleado(codigo);
+                                                  const horas = cod ? (citasMedicasPorPersona[cod] || 0) : 0;
+                                                  return (
+                                                    <div className="flex items-center gap-1 shrink-0" title={esAcolchado ? 'Acolchadora: no se descuenta capacidad — buscar un reemplazo' : 'Se descuenta de la capacidad disponible de este puesto'}>
+                                                      <Stethoscope className="w-3 h-3 text-pink-500" />
+                                                      <input
+                                                        type="number"
+                                                        min={0}
+                                                        step={0.5}
+                                                        value={horas || ''}
+                                                        placeholder="0h"
+                                                        onChange={(e) => {
+                                                          if (!cod) return;
+                                                          const valor = Number(e.target.value);
+                                                          setCitasMedicasPorPersona(prev => {
+                                                            const next = { ...prev };
+                                                            if (!valor || valor <= 0) delete next[cod];
+                                                            else next[cod] = valor;
+                                                            return next;
+                                                          });
+                                                        }}
+                                                        className="w-11 h-6 text-[10px] text-right font-mono font-bold text-pink-700 bg-pink-50 border border-pink-200 rounded-md px-1 focus:outline-none focus:ring-2 focus:ring-pink-400"
+                                                      />
+                                                      {horas > 0.01 && (
+                                                        <span className={cn('text-[8px] font-black uppercase', esAcolchado ? 'text-amber-600' : 'text-pink-600')}>
+                                                          {esAcolchado ? '⚠ buscar reemplazo' : '− capacidad'}
+                                                        </span>
+                                                      )}
+                                                    </div>
+                                                  );
+                                                })()}
+                                                {codigo && resuelto && (
+                                                  resuelto.encontrado ? (
+                                                    <span className={cn('flex items-center gap-1.5 text-[9px] font-bold truncate', resuelto.coincideExacto ? 'text-sky-700' : 'text-amber-600')}>
+                                                      <span className="truncate">{resuelto.nombre || '(sin nombre)'}</span>
+                                                      <Badge className={cn(
+                                                        'font-mono font-black text-[9px] px-1.5 py-0 rounded-md border-none shrink-0',
+                                                        resuelto.calificacion >= 80 ? 'bg-emerald-100 text-emerald-700' :
+                                                        resuelto.calificacion >= 50 ? 'bg-amber-100 text-amber-700' :
+                                                        'bg-red-100 text-red-700'
+                                                      )}>
+                                                        {resuelto.calificacion}%
+                                                      </Badge>
+                                                      {resuelto.coincideExacto ? <span className="truncate">· {resuelto.etiqueta}</span> : <span className="truncate">· ⚠ sin calificación registrada para este puesto exacto, verificar</span>}
+                                                    </span>
+                                                  ) : (() => {
+                                                    const hrPuesto = puestoTrabajoParaIndice(p, idx);
+                                                    const registrados = habilidadesPorPuestoTrabajo.get(hrPuesto) || [];
+                                                    // Si este puesto específico no tiene nada, mostrar qué puestos SÍ trajo la
+                                                    // consulta — si la lista no incluye el puesto buscado pese a existir en la
+                                                    // base real, es evidencia de que el backend está devolviendo un subconjunto
+                                                    // parcial (sin paginar), no un problema de esta pantalla.
+                                                    const puestosDisponibles = Array.from(habilidadesPorPuestoTrabajo.keys()).sort();
+                                                    // Si hay filas cargadas pero CERO puestos distintos, la extracción de
+                                                    // PUESTOTRABAJO está fallando para TODAS — probablemente el endpoint
+                                                    // nuevo cambió el nombre de esa columna. Mostrar las columnas reales
+                                                    // de la primera fila ahorra otra vuelta de ida y vuelta para depurarlo.
+                                                    const columnasReales = (puestosDisponibles.length === 0 && habilidadesEstacionData.length > 0)
+                                                      ? Object.keys(habilidadesEstacionData[0])
+                                                      : [];
+                                                    return (
+                                                      <span className="text-[9px] font-bold text-red-500">
+                                                        ⚠ código no encontrado en Habilidades por Estación ({habilidadesEstacionData.length} fila(s) cargadas, {puestosDisponibles.length} puesto(s) distintos).{' '}
+                                                        {registrados.length === 0
+                                                          ? <>Este puesto ({hrPuesto}) no tiene NINGÚN operador en esas filas. Puestos que SÍ llegaron: {puestosDisponibles.slice(0, 15).join(', ')}{puestosDisponibles.length > 15 ? '…' : ''}.</>
+                                                          : <>Códigos que SÍ existen para {hrPuesto}: {registrados.slice(0, 8).map(r => r.codigo).join(', ')}{registrados.length > 8 ? '…' : ''}.</>}
+                                                        {columnasReales.length > 0 && <> Columnas reales de la respuesta: {columnasReales.join(', ')}.</>}
+                                                      </span>
+                                                    );
+                                                  })()
+                                                )}
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
                               {/* ── DESCUENTOS: lo que RESTA horas disponibles ───────────────── */}
                               <p className="mt-3 mb-1.5 text-[7px] font-black uppercase text-slate-400 tracking-[0.2em] flex items-center gap-1">
                                 <span className="inline-block w-1 h-1 rounded-full bg-violet-400" /> Descuentos · restan horas
@@ -13532,9 +18710,14 @@ useEffect(() => {
                                     className="w-full text-[9px] font-bold text-violet-700 bg-violet-50 border border-violet-200 rounded-lg px-2 py-1 outline-none focus:ring-1 focus:ring-violet-400 disabled:opacity-50 disabled:cursor-not-allowed placeholder:text-violet-300 placeholder:font-normal"
                                   />
                                 </div>
-                                {/* Mantenimiento Preventivo — SOLO LECTURA: viene agendado desde SISMAC. */}
+                                {/* Mantenimiento Preventivo — SOLO LECTURA: viene agendado desde SISMAC.
+                                    El tooltip desglosa cada OT (fecha/horas/origen del dato) para poder
+                                    validar el total contra SISMAC en vez de confiar a ciegas en la suma. */}
                                 <div
-                                  title="Mantenimiento preventivo agendado para esta fecha (viene de SISMAC, no se edita aquí)."
+                                  title={mantenimientoDetalle.length > 0
+                                    ? `Mantenimiento preventivo agendado para esta fecha (${hrCode}):\n` +
+                                      mantenimientoDetalle.map(d => `· ${d.fecha} — ${d.horas.toFixed(2)}h (${d.origen === 'sismac' ? 'duración SISMAC' : 'sin dato de duración en SISMAC'})`).join('\n')
+                                    : 'Mantenimiento preventivo agendado para esta fecha (viene de SISMAC, no se edita aquí).'}
                                   className="flex flex-col items-center justify-center bg-orange-50 border-2 border-dashed border-orange-300 w-16 rounded-xl shadow-inner shrink-0 py-1.5"
                                 >
                                   <div className="flex items-center gap-0.5">
@@ -13547,38 +18730,220 @@ useEffect(() => {
                                   <span className="text-[6px] font-black uppercase text-orange-400 tracking-tighter text-center leading-none">Mantenimiento</span>
                                 </div>
                               </div>
+                              {/* Desglose del Mantenimiento POR MÁQUINA SISMAC — visible en la
+                                  tarjeta (no solo en el tooltip), a pedido del usuario: un puesto
+                                  puede tener varias máquinas SISMAC (ej. HR-COS3D con CR01/CR02/
+                                  EB01/EB02/OB01/OB02) y hay que ver en cuál está cada hora. */}
+                              {Object.keys(mantenimientoPorMaquina).length > 0 && (
+                                <div className="mt-2 flex flex-wrap items-center gap-1">
+                                  {Object.entries(mantenimientoPorMaquina)
+                                    .sort((a, b) => b[1].horas - a[1].horas)
+                                    .map(([maquina, info]) => (
+                                      <Badge
+                                        key={maquina}
+                                        title={info.tieneDato ? undefined : 'SISMAC no trae Duracion_Minutos ni FECHA_OT_PRG_FIN para esta OT — no hay con qué calcular horas reales (no es un error de la app, falta el dato en SISMAC).'}
+                                        className={cn(
+                                          'font-mono font-black text-[8px] px-1.5 py-0.5 rounded-md inline-flex items-center gap-1 border',
+                                          info.tieneDato ? 'bg-orange-50 text-orange-700 border-orange-200' : 'bg-slate-100 text-slate-500 border-slate-200'
+                                        )}
+                                      >
+                                        <Wrench className="w-2 h-2" /> {maquina}: {info.horas.toFixed(2)}h{!info.tieneDato ? ' (sin dato)' : ''}
+                                      </Badge>
+                                    ))}
+                                </div>
+                              )}
 
                             </div>
 
                             <div className="space-y-4 mt-auto">
                               <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
-                                <div className="flex justify-between items-center text-[9px] text-slate-400 uppercase font-black tracking-widest mb-2">
-                                  <span>{tieneHorarioPersonalizado ? 'Turnos Personalizados' : 'Turnos Activos'}</span>
-                                  {/* Horario Personalizado: reemplaza los 3 turnos fijos de Jornada Global
-                                      por una lista propia de turnos con horario libre, solo para este
-                                      puesto — pensado para el caso de una máquina con horario distinto al
-                                      resto de la planta (turno diferente, paro parcial, etc.). */}
-                                  <button
-                                    disabled={isPlanPersonalEstablecido}
-                                    onClick={() => setWorkstationConfigs(prev => ({
-                                      ...prev,
-                                      [p]: {
-                                        ...config,
-                                        horarioPersonalizadoActivo: !tieneHorarioPersonalizado,
-                                        turnosPersonalizados: !tieneHorarioPersonalizado && (config.turnosPersonalizados || []).length === 0
-                                          ? [{ horaInicio: '07:00', horaFin: '15:45', personas: 0 }]
-                                          : config.turnosPersonalizados,
-                                      },
-                                    }))}
-                                    className={cn(
-                                      'font-black uppercase tracking-[0.1em] text-[7px] px-2 py-1 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
-                                      tieneHorarioPersonalizado ? 'bg-fuchsia-600 text-white border-fuchsia-700' : 'bg-white text-slate-400 border-slate-200 hover:border-fuchsia-300'
+                                <div className="flex justify-between items-center text-[9px] text-slate-400 uppercase font-black tracking-widest mb-2 gap-2">
+                                  <span className="shrink-0">
+                                    {tieneEquipoCompartido
+                                      ? (config.equipoCompartidoModo === 'prestamo' ? 'Préstamo de Horas' : 'Equipo Compartido')
+                                      : tieneHorarioPersonalizado ? 'Turnos Personalizados' : 'Turnos Activos'}
+                                  </span>
+                                  <div className="flex items-center gap-1">
+                                    {/* Dos modos de Equipo Compartido, situaciones distintas (confirmado
+                                        con el usuario: "deben ser ambos modos, porque son situaciones
+                                        diferentes"):
+                                        "Reparto" — UN equipo insuficiente reparte SU jornada entre dos
+                                        puestos (ej. ACH07/ACH10, "por falta de personal"); reemplaza los
+                                        3 turnos fijos de AMBOS lados.
+                                        "Préstamo" — cada puesto conserva su capacidad propia normal;
+                                        uno presta horas de capacidad EXTRA al otro sin perder nada de lo
+                                        suyo (ej. HR-TTSUP con tiempo libre ayuda a HR-INTPF, que sigue
+                                        contando con su propio equipo completo — reportado por el
+                                        usuario: "me estás quitando disponibilidad... debería sumarse a
+                                        la capacidad, no reemplazarla"). Disponible en CUALQUIER puesto;
+                                        la app no valida la habilidad real de la persona, el criterio
+                                        queda en manos de quien planifica. */}
+                                    {tieneEquipoCompartido ? (
+                                      <button
+                                        disabled={isPlanPersonalEstablecido}
+                                        onClick={() => (config.equipoCompartidoModo === 'prestamo'
+                                          ? handleSetEquipoCompartidoPrestamo(p, null, 0)
+                                          : handleSetEquipoCompartido(p, null, 0))}
+                                        className="font-black uppercase tracking-[0.1em] text-[7px] px-2 py-1 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-sky-600 text-white border-sky-700"
+                                      >
+                                        Volver a Jornada Global
+                                      </button>
+                                    ) : (
+                                      <>
+                                        <button
+                                          disabled={isPlanPersonalEstablecido || parejasDisponibles.length === 0}
+                                          title={parejasDisponibles.length === 0 ? 'No hay otro puesto disponible' : undefined}
+                                          onClick={() => handleSetEquipoCompartido(p, parejasDisponibles[0] || null, jornadaTotalEquipo / 2)}
+                                          className="font-black uppercase tracking-[0.1em] text-[7px] px-2 py-1 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-white text-slate-400 border-slate-200 hover:border-sky-300"
+                                        >
+                                          Reparto
+                                        </button>
+                                        <button
+                                          disabled={isPlanPersonalEstablecido || parejasDisponibles.length === 0}
+                                          title={parejasDisponibles.length === 0 ? 'No hay otro puesto disponible' : undefined}
+                                          onClick={() => handleSetEquipoCompartidoPrestamo(p, parejasDisponibles[0] || null, 0)}
+                                          className="font-black uppercase tracking-[0.1em] text-[7px] px-2 py-1 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-white text-slate-400 border-slate-200 hover:border-emerald-300"
+                                        >
+                                          Préstamo
+                                        </button>
+                                      </>
                                     )}
-                                  >
-                                    {tieneHorarioPersonalizado ? 'Volver a Jornada Global' : 'Horario Personalizado'}
-                                  </button>
+                                    {/* Horario Personalizado: reemplaza los 3 turnos fijos de Jornada Global
+                                        por una lista propia de turnos con horario libre, solo para este
+                                        puesto — pensado para el caso de una máquina con horario distinto al
+                                        resto de la planta (turno diferente, paro parcial, etc.). Oculto
+                                        mientras Equipo Compartido esté activo (son mutuamente excluyentes). */}
+                                    {!tieneEquipoCompartido && (
+                                      <button
+                                        disabled={isPlanPersonalEstablecido}
+                                        onClick={() => setWorkstationConfigs(prev => ({
+                                          ...prev,
+                                          [p]: {
+                                            ...config,
+                                            horarioPersonalizadoActivo: !tieneHorarioPersonalizado,
+                                            turnosPersonalizados: !tieneHorarioPersonalizado && (config.turnosPersonalizados || []).length === 0
+                                              ? [{ horaInicio: '07:00', horaFin: '15:45', personas: 0 }]
+                                              : config.turnosPersonalizados,
+                                          },
+                                        }))}
+                                        className={cn(
+                                          'font-black uppercase tracking-[0.1em] text-[7px] px-2 py-1 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+                                          tieneHorarioPersonalizado ? 'bg-fuchsia-600 text-white border-fuchsia-700' : 'bg-white text-slate-400 border-slate-200 hover:border-fuchsia-300'
+                                        )}
+                                      >
+                                        {tieneHorarioPersonalizado ? 'Volver a Jornada Global' : 'Horario Personalizado'}
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
-                                {tieneHorarioPersonalizado ? (
+                                {tieneEquipoCompartido && config.equipoCompartidoModo === 'prestamo' ? (() => {
+                                  const esPrestamista = !!config.equipoCompartidoEsPrestamista;
+                                  const horasPrestamo = config.equipoCompartidoHorasPrestadas ?? 0;
+                                  const parejaPrestamo = config.equipoCompartidoCon || '';
+                                  // `p` siempre es el primer argumento de `handleSetEquipoCompartidoPrestamo`
+                                  // cuando RECIBE, o el segundo cuando PRESTA — el handler es direccional
+                                  // (puestoQueRecibe, puestoQuePresta), así que hay que armar los
+                                  // argumentos según el rol actual de `p` en el par.
+                                  const aplicarPrestamo = (nuevaPareja: string, nuevasHoras: number, nuevoEsPrestamista: boolean) => {
+                                    if (nuevoEsPrestamista) handleSetEquipoCompartidoPrestamo(nuevaPareja, p, nuevasHoras);
+                                    else handleSetEquipoCompartidoPrestamo(p, nuevaPareja, nuevasHoras);
+                                  };
+                                  return (
+                                    <div className="space-y-2">
+                                      <div className="flex items-center gap-1.5 bg-white rounded-xl border border-emerald-200 p-2 shadow-sm">
+                                        <Users className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                                        <select
+                                          disabled={isPlanPersonalEstablecido}
+                                          value={parejaPrestamo}
+                                          onChange={(e) => aplicarPrestamo(e.target.value, horasPrestamo, esPrestamista)}
+                                          className="flex-1 text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-1.5 py-1 outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-50"
+                                        >
+                                          {parejaPrestamo && !parejasDisponibles.includes(parejaPrestamo) && (
+                                            <option value={parejaPrestamo}>{parejaPrestamo}</option>
+                                          )}
+                                          {parejasDisponibles.map(o => <option key={o} value={o}>{o}</option>)}
+                                        </select>
+                                      </div>
+                                      {/* Dirección del préstamo: quién presta y quién recibe — a diferencia
+                                          de "Reparto" (donde ambos lados ceden jornada), acá uno mantiene su
+                                          capacidad propia y el otro se la resta para dársela. */}
+                                      <button
+                                        disabled={isPlanPersonalEstablecido}
+                                        onClick={() => aplicarPrestamo(parejaPrestamo, horasPrestamo, !esPrestamista)}
+                                        className={cn(
+                                          'w-full text-[8px] font-black uppercase tracking-widest px-2 py-1.5 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+                                          esPrestamista ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                        )}
+                                      >
+                                        {esPrestamista ? `Este puesto PRESTA a ${parejaPrestamo || '—'}` : `Este puesto RECIBE de ${parejaPrestamo || '—'}`}
+                                      </button>
+                                      <div className="flex items-center gap-1.5 bg-white rounded-xl border border-emerald-200 p-2 shadow-sm">
+                                        <span className="text-[8px] font-black uppercase text-emerald-500 shrink-0">Horas {esPrestamista ? 'prestadas' : 'recibidas'}</span>
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          step={0.5}
+                                          disabled={isPlanPersonalEstablecido}
+                                          value={horasPrestamo}
+                                          onChange={(e) => aplicarPrestamo(parejaPrestamo, Number(e.target.value) || 0, esPrestamista)}
+                                          className="w-16 text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-1.5 py-1 outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-50 text-right ml-auto"
+                                        />
+                                        <span className="text-[9px] font-mono font-black text-emerald-600">h</span>
+                                      </div>
+                                      <p className="text-[8px] text-slate-400 font-bold px-1">
+                                        {esPrestamista
+                                          ? `Tu capacidad propia baja ${horasPrestamo.toFixed(2)}h (se las lleva ${parejaPrestamo || 'la pareja'}).`
+                                          : `Tu capacidad propia sube ${horasPrestamo.toFixed(2)}h extra (prestadas por ${parejaPrestamo || 'la pareja'}) — no reemplaza tu equipo normal.`}
+                                      </p>
+                                    </div>
+                                  );
+                                })() : tieneEquipoCompartido ? (
+                                  <div className="space-y-2">
+                                    <div className="flex items-center gap-1.5 bg-white rounded-xl border border-sky-200 p-2 shadow-sm">
+                                      <Users className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+                                      <select
+                                        disabled={isPlanPersonalEstablecido}
+                                        value={config.equipoCompartidoCon || ''}
+                                        onChange={(e) => handleSetEquipoCompartido(p, e.target.value, config.equipoCompartidoHoras ?? jornadaTotalEquipo / 2)}
+                                        className="flex-1 text-[10px] font-black text-sky-700 bg-sky-50 border border-sky-200 rounded-lg px-1.5 py-1 outline-none focus:ring-1 focus:ring-sky-400 disabled:opacity-50"
+                                      >
+                                        {config.equipoCompartidoCon && !parejasDisponibles.includes(config.equipoCompartidoCon) && (
+                                          <option value={config.equipoCompartidoCon}>{config.equipoCompartidoCon}</option>
+                                        )}
+                                        {parejasDisponibles.map(o => <option key={o} value={o}>{o}</option>)}
+                                      </select>
+                                    </div>
+                                    <div className="flex items-center gap-1.5 bg-white rounded-xl border border-sky-200 p-2 shadow-sm">
+                                      <span className="text-[8px] font-black uppercase text-sky-400 shrink-0">Horas aquí</span>
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        max={jornadaTotalEquipo}
+                                        step={0.5}
+                                        disabled={isPlanPersonalEstablecido}
+                                        value={config.equipoCompartidoHoras ?? 0}
+                                        onChange={(e) => handleSetEquipoCompartido(p, config.equipoCompartidoCon!, Number(e.target.value) || 0)}
+                                        className="w-16 text-[11px] font-black text-sky-700 bg-sky-50 border border-sky-200 rounded-lg px-1.5 py-1 outline-none focus:ring-1 focus:ring-sky-400 disabled:opacity-50 text-right"
+                                      />
+                                      <span className="text-[9px] font-mono font-black text-sky-600">h</span>
+                                      <span className="text-[8px] text-sky-400 font-bold ml-auto">
+                                        {Math.max(0, jornadaTotalEquipo - (config.equipoCompartidoHoras ?? 0)).toFixed(2)}h en {config.equipoCompartidoCon}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-1.5 bg-white rounded-xl border border-sky-200 p-2 shadow-sm">
+                                      <Users className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+                                      <span className="text-[8px] font-black uppercase text-sky-400 shrink-0">Personas del equipo</span>
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        disabled={isPlanPersonalEstablecido}
+                                        value={config.equipoCompartidoPersonas ?? 0}
+                                        onChange={(e) => handleSetEquipoCompartidoPersonas(p, Math.max(0, Number(e.target.value) || 0))}
+                                        className="w-14 text-[11px] font-black text-sky-700 bg-sky-50 border border-sky-200 rounded-lg px-1.5 py-1 outline-none focus:ring-1 focus:ring-sky-400 disabled:opacity-50 text-right ml-auto"
+                                      />
+                                    </div>
+                                  </div>
+                                ) : tieneHorarioPersonalizado ? (
                                   <div className="space-y-2">
                                     {(config.turnosPersonalizados || []).map((turno, tIdx) => (
                                       <div key={tIdx} className="flex items-center gap-1.5 bg-white rounded-xl border border-fuchsia-200 p-2 shadow-sm">
@@ -13704,7 +19069,14 @@ useEffect(() => {
                                     {capPuestoTotal.toFixed(2)} H Disponibles
                                   </span>
                                 </div>
-                                {tieneHorarioPersonalizado ? (
+                                {tieneEquipoCompartido ? (
+                                  <span className="text-[8px] text-emerald-500 font-black font-mono text-center leading-tight">
+                                    {(config.equipoCompartidoHoras ?? 0).toFixed(2)}h×{config.machines || 1}máq (equipo con {config.equipoCompartidoCon})
+                                    {capacitacionHorasPuesto > 0 ? ` − ${(config.capacitacionHoras || 0).toFixed(1)}h capac.` : ''}
+                                    {config.disponibilidad !== undefined && config.disponibilidad < 1 ? ` × ${(config.disponibilidad * 100).toFixed(0)}% disp.` : ''}
+                                    {mantenimientoHoras > 0 ? ` − ${mantenimientoHoras.toFixed(2)}h mant.` : ''}
+                                  </span>
+                                ) : tieneHorarioPersonalizado ? (
                                   <span className="text-[8px] text-emerald-500 font-black font-mono text-center leading-tight">
                                     {(config.turnosPersonalizados || [])
                                       .map(t => `${horasNetasTurnoPersonalizado(t.horaInicio, t.horaFin).toFixed(2)}h×${esPuestoPersonas ? (t.personas || 0) : (config.machines || 1)}${esPuestoPersonas ? 'pers' : 'máq'}`)
