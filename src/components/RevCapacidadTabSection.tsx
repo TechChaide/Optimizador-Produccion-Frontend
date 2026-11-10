@@ -3,6 +3,8 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { serviciosService } from '@/services/servicios.service';
 import { grupoService } from '@/services/grupo.service';
+import { restriccionService } from '@/services/restriccion.service';
+import type { Restriccion } from '@/types/interfaces';
 import { useRuntimeInspector } from '@/services/RuntimeInspector';
 import { useAppContext } from '@/context/AppProvider';
 import { 
@@ -18,6 +20,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from '@/lib/utils';
 import * as XLSX from 'xlsx';
 import { useTiempoFinalPorPuesto, useCantidadFinalPorPuesto, useTiempoInicialPorPuesto, useCantidadInicialPorPuesto, publishOcupacionPorCentroLinea, publishResumenCapacidad } from '@/hooks/useProgTiemposCapacidad';
+import { planEnsambladoTxtService, nombreGrupoEnsambladoPorCentro } from '@/services/planEnsambladoTxt.service';
 
 interface SummaryRow {
   linea: string;
@@ -123,8 +126,18 @@ export const RevCapacidadTabSection: React.FC = () => {
     '2000': { L1: 1.05, L2: 1.08, L3: 1.05, L5: 1.05 }
   });
 
+  // Puestos objetivo leídos de Restricciones (clave "centro|LINEA|PUESTO" normalizada). Vacío =
+  // todavía no cargó o no hay restricciones: se usan los valores por defecto RESTRICCIONES_PUESTOS.
+  const [puestosObjetivoDb, setPuestosObjetivoDb] = useState<Record<string, number>>({});
   const [editablePuestosT1, setEditablePuestosT1] = useState<Record<string, number>>({});
   const [editablePuestosT2, setEditablePuestosT2] = useState<Record<string, number>>({});
+
+  // Nombre del Grupo "Ensamblado" por Centro (ver nombreGrupoEnsambladoPorCentro) — carpeta usada al
+  // guardar/leer el plan en .txt (ruta_planes).
+  const [grupoNombrePorCentro, setGrupoNombrePorCentro] = useState<Record<string, string>>({});
+  // Combinaciones "centro|fecha" para las que ya se consultó si existe un plan guardado — evita
+  // repetir la lectura en cada render mientras no cambie la fecha de ese centro.
+  const fechasConsultadasRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setIsMounted(true);
@@ -147,11 +160,30 @@ export const RevCapacidadTabSection: React.FC = () => {
   const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [groupsRes, fertRes, prevRes] = await Promise.all([
+      const [groupsRes, fertRes, prevRes, restriccionesRes] = await Promise.all([
         grupoService.getAll(),
         serviciosService.getOrdenesFert(1, 10000),
-        serviciosService.OrdenesProvisionalesAlphaPaginados(1, 10000)
+        serviciosService.OrdenesProvisionalesAlphaPaginados(1, 10000),
+        // Si falla no bloquea la pantalla: se usan los valores por defecto del código.
+        restriccionService.getAll().catch(() => ({ data: [] as Restriccion[] })),
       ]);
+
+      // Puestos objetivo desde Restricciones: nombre "PUESTOS_OBJETIVO|<LINEA>|<Puesto>" (ej.
+      // "PUESTOS_OBJETIVO|LINEA 1|Armado"), valor = número entero, asociada a un Grupo "Ensamblado"
+      // del Centro correspondiente (el Centro se toma del grupo).
+      const grupoPorCodigo = new Map<number, any>((groupsRes?.data || []).map((g: any) => [g.codigo_grupo, g]));
+      const objetivos: Record<string, number> = {};
+      (restriccionesRes?.data || []).forEach((r: Restriccion) => {
+        const [prefijo, linea, puesto] = String(r.nombre_restriccion || '').split('|').map(s => s.trim());
+        if (normalizeKey(prefijo) !== 'PUESTOS_OBJETIVO' || !linea || !puesto) return;
+        const grupo = grupoPorCodigo.get(r.codigo_grupo);
+        if (!grupo || !String(grupo.nombre_grupo || '').toLowerCase().includes('ensamblado')) return;
+        const valor = Number(r.valor_restriccion);
+        if (!Number.isFinite(valor) || valor < 0) return;
+        objetivos[`${String(grupo.centro).trim()}|${normalizeKey(linea)}|${normalizeKey(puesto)}`] = valor;
+      });
+      setPuestosObjetivoDb(objetivos);
+      setGrupoNombrePorCentro(nombreGrupoEnsambladoPorCentro(groupsRes?.data || []));
 
       const centers = [...new Set((groupsRes?.data || []).map((g: any) => String(g.centro).trim()))].sort();
       setAvailableCenters(centers);
@@ -249,7 +281,7 @@ export const RevCapacidadTabSection: React.FC = () => {
           tiempoOrdFab: 0, tiempoOrdPrev: 0,
           totalCantidad: 0, totalTiempo: 0,
           cantInicial: 0, tiempoInicial: 0,
-          puestosObjetivo: RESTRICCIONES_PUESTOS[key] || 0
+          puestosObjetivo: puestosObjetivoDb[`${center}|${lineNormalized}|${normalizeKey(puestoRaw)}`] ?? RESTRICCIONES_PUESTOS[key] ?? 0
         });
       }
 
@@ -298,7 +330,7 @@ export const RevCapacidadTabSection: React.FC = () => {
     });
 
     return result.sort((a, b) => a.linea.localeCompare(b.linea) || a.puesto.localeCompare(b.puesto));
-  }, [technicalData, progDates, rendimientosByCenter, computeFertSumMap, computePrevSumMap, tiempoFinalPorPuesto, cantidadFinalPorPuesto, tiempoInicialPorPuesto, cantidadInicialPorPuesto]);
+  }, [technicalData, progDates, rendimientosByCenter, puestosObjetivoDb, computeFertSumMap, computePrevSumMap, tiempoFinalPorPuesto, cantidadFinalPorPuesto, tiempoInicialPorPuesto, cantidadInicialPorPuesto]);
 
   const summaryDataByCenter = useMemo(() => {
     const centers = availableCenters.length > 0 ? availableCenters : ['1000', '2000'];
@@ -333,6 +365,9 @@ export const RevCapacidadTabSection: React.FC = () => {
           puestosT1,
           puestosT2,
           ocupacion,
+          horasT1,
+          horasT2,
+          rendimiento: getRendFactor(row.linea, rends),
         };
       });
     });
@@ -351,6 +386,43 @@ export const RevCapacidadTabSection: React.FC = () => {
       localStorage.setItem('sim_rendimientos_by_center', JSON.stringify(rendimientosByCenter));
     }
   }, [editablePuestosT1, editablePuestosT2, horasT1ByCenter, horasT2ByCenter, progDates, rendimientosByCenter, isMounted]);
+
+  // Restaurar plan guardado por fecha objetivo — al elegir (o abrir con) un "Día Prog" que ya tiene un
+  // .txt guardado para ese Centro (ver "Guardar Plan" en Resumen Plan Final), se reemplazan Horas T1/T2,
+  // Rendimientos y Puestos T1/T2 de ESE centro por lo que quedó guardado, para reabrir la pantalla tal
+  // como estaba. Si no existe un plan guardado para esa fecha, se deja intacto lo que ya trae
+  // localStorage. Se consulta una sola vez por combinación Centro+Fecha (fechasConsultadasRef).
+  useEffect(() => {
+    if (!isMounted) return;
+    Object.keys(grupoNombrePorCentro).forEach(center => {
+      const fechaObjetivo = progDates[center];
+      const grupo = grupoNombrePorCentro[center];
+      if (!fechaObjetivo || !grupo) return;
+      const cacheKey = `${center}|${fechaObjetivo}`;
+      if (fechasConsultadasRef.current.has(cacheKey)) return;
+      fechasConsultadasRef.current.add(cacheKey);
+
+      planEnsambladoTxtService.leerParametrizacion({ grupo, centro: center, fechaObjetivo })
+        .then(data => {
+          if (!data) return; // no hay plan guardado para esa fecha — se deja lo que ya había
+          setHorasT1ByCenter(prev => ({ ...prev, [center]: data.horasT1 }));
+          setHorasT2ByCenter(prev => ({ ...prev, [center]: data.horasT2 }));
+          setRendimientosByCenter(prev => ({ ...prev, [center]: data.rendimientos }));
+          setEditablePuestosT1(prev => {
+            const next = { ...prev };
+            data.puestos.forEach(p => { next[`${center}|${p.linea}|${p.puesto}`] = p.puestosT1; });
+            return next;
+          });
+          setEditablePuestosT2(prev => {
+            const next = { ...prev };
+            data.puestos.forEach(p => { next[`${center}|${p.linea}|${p.puesto}`] = p.puestosT2; });
+            return next;
+          });
+          addNotification('success', `Se restauró el plan guardado del Centro ${center} para la fecha ${fechaObjetivo}.`);
+        })
+        .catch(err => addNotification('error', `Error al buscar plan guardado del Centro ${center}: ${(err as Error).message}`));
+    });
+  }, [isMounted, progDates, grupoNombrePorCentro, addNotification]);
 
   // Inicializar puestos vacíos — para AMBOS centros (no solo el visible en el selector), así el
   // Centro no visitado también arranca con sus Puestos T1 objetivo en vez de quedar en 0/undefined

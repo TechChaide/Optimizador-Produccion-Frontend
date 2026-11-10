@@ -1,16 +1,18 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
-import { Loader2, ClipboardCheck, Mail, Send } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Loader2, ClipboardCheck, Mail, Send, Save } from 'lucide-react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { useResumenCapacidad } from '@/hooks/useProgTiemposCapacidad';
+import { useResumenCapacidad, lineaKeyFromNombre } from '@/hooks/useProgTiemposCapacidad';
 import { usePlanFinalData } from '@/hooks/usePlanFinalData';
 import { useAppContext } from '@/context/AppProvider';
 import { serviciosService, type SolicitudProduccionHBPayload } from '@/services/servicios.service';
+import { grupoService } from '@/services/grupo.service';
+import { planEnsambladoTxtService, nombreGrupoEnsambladoPorCentro } from '@/services/planEnsambladoTxt.service';
 import type { Restriccion } from '@/types/interfaces';
 
 const CENTROS = ['1000', '2000'];
@@ -39,6 +41,9 @@ export const ResumenPlanFinalTabSection: React.FC<ResumenPlanFinalTabSectionProp
   const [selectedCenter, setSelectedCenter] = useState('1000');
   const [isSendingReporte, setIsSendingReporte] = useState(false);
   const [isSendingSap, setIsSendingSap] = useState(false);
+  const [isSavingPlan, setIsSavingPlan] = useState(false);
+  // Nombre del Grupo "Ensamblado" por Centro — carpeta usada al guardar el plan en .txt (ruta_planes).
+  const [grupoNombrePorCentro, setGrupoNombrePorCentro] = useState<Record<string, string>>({});
   const [sapProgress, setSapProgress] = useState({ enviadas: 0, total: 0 });
   const [isSapDialogOpen, setIsSapDialogOpen] = useState(false);
   // TEMPORAL: checkbox para pruebas — ignora la exclusión de filas que ya tienen OrdFab asignado.
@@ -50,6 +55,12 @@ export const ResumenPlanFinalTabSection: React.FC<ResumenPlanFinalTabSectionProp
     groups[center] = resumen.filter(row => row.centro === center);
     return groups;
   }, {}), [resumen]);
+
+  useEffect(() => {
+    grupoService.getAll()
+      .then(res => setGrupoNombrePorCentro(nombreGrupoEnsambladoPorCentro(res?.data || [])))
+      .catch(() => {}); // si falla, "Guardar Plan" cae al nombre por defecto (ver handleGuardarPlan)
+  }, []);
 
   // Destinatarios del correo — restricción "CORREOS_DESTINO" (grupo Ensamblado, Parámetros → Grupos
   // → Restricciones), mismo patrón que "CORREOS_PLAN" en Forros: sin UI de captura nueva, se
@@ -81,9 +92,16 @@ export const ResumenPlanFinalTabSection: React.FC<ResumenPlanFinalTabSectionProp
         <td align="right" style="padding:8px 10px;font-size:11px;font-weight:700;color:${row.ocupacion > 100 ? '#dc2626' : '#7c3aed'};border-bottom:1px solid #f3f4f6;font-variant-numeric:tabular-nums;">${row.ocupacion.toFixed(1)}%</td>
       </tr>`).join('');
 
+    // Horas por turno del Centro (filtros "Horas T1"/"Horas T2" de Rev Capacidad), publicadas junto
+    // con cada fila; iguales para todas las filas de un mismo Centro.
+    const horasLabel = rows.length > 0
+      ? `Horas T1: <b>${rows[0].horasT1}</b> h · Horas T2: <b>${rows[0].horasT2}</b> h`
+      : 'Horas T1/T2: sin datos';
+
     return `
     <td style="padding:18px 28px 4px;">
-      <p style="margin:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Centro ${center} · ${NOMBRE_CENTRO[center] || center}</p>
+      <p style="margin:0 0 4px;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Centro ${center} · ${NOMBRE_CENTRO[center] || center}</p>
+      <p style="margin:0 0 10px;font-size:11px;color:#374151;">${horasLabel}</p>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
         <tr style="background:#f9fafb;">
           <td style="padding:8px 10px;font-size:9px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #e5e7eb;">Linea</td>
@@ -103,6 +121,11 @@ export const ResumenPlanFinalTabSection: React.FC<ResumenPlanFinalTabSectionProp
   // Táctica (Espuma, Corte y Laminado).
   const construirReporteHtmlResumen = (): string => {
     const fechaLabel = format(new Date(), "EEEE d 'de' MMMM 'de' yyyy", { locale: es });
+    // "Día programación" de Plan Final (YYYY-MM-DD, fecha calendario local sin zona horaria).
+    const [anio, mes, dia] = String(diaProgramacion || '').split('-').map(Number);
+    const diaProgLabel = anio && mes && dia
+      ? format(new Date(anio, mes - 1, dia), "EEEE d 'de' MMMM 'de' yyyy", { locale: es })
+      : '—';
     const tablasHtml = CENTROS.map(center => `<tr>${construirTablaCentroHtml(center)}</tr>`).join('');
 
     return `
@@ -122,6 +145,7 @@ export const ResumenPlanFinalTabSection: React.FC<ResumenPlanFinalTabSectionProp
       <p style="margin:0;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7280;">Ensamblado · Todos los centros · Reporte diario</p>
       <h1 style="margin:4px 0 0;font-size:20px;font-weight:700;color:#111827;">Resumen Plan Final — Revisión de Capacidad</h1>
       <p style="margin:6px 0 0;font-size:12px;color:#6b7280;text-transform:capitalize;">${fechaLabel} · Correo automático, no responder</p>
+      <p style="margin:10px 0 0;font-size:13px;color:#111827;">Día de programación: <b style="text-transform:capitalize;">${diaProgLabel}</b></p>
     </td>
   </tr>
   ${tablasHtml}
@@ -154,6 +178,58 @@ export const ResumenPlanFinalTabSection: React.FC<ResumenPlanFinalTabSectionProp
       addNotification('error', `Error al enviar el reporte: ${(error as Error).message}`);
     } finally {
       setIsSendingReporte(false);
+    }
+  };
+
+  // Guarda la parametrización de "Rev Capacidad" (Horas T1/T2, Rendimientos L1-L5, Puestos T1/T2 por
+  // Línea+Puesto) de AMBOS centros como .txt en `ruta_planes`, una por Centro, nombrado con la fecha
+  // objetivo (Día de programación) — ver RevCapacidadTabSection, que restaura automáticamente estos
+  // valores al reabrir esa misma fecha.
+  const handleGuardarPlan = async () => {
+    const fechaObjetivo = String(diaProgramacion || '');
+    if (!fechaObjetivo) {
+      addNotification('warning', 'No hay un "Día de programación" definido (pestaña Prog Tiempos / Rev Capacidad).');
+      return;
+    }
+
+    setIsSavingPlan(true);
+    const errores: string[] = [];
+    let guardados = 0;
+
+    for (const centro of CENTROS) {
+      const rows = rowsByCenter[centro] || [];
+      if (rows.length === 0) continue; // nada que guardar para este centro
+
+      const grupo = grupoNombrePorCentro[centro] || `Ensamblado ${NOMBRE_CENTRO[centro] || centro}`;
+      const rendimientos = { L1: 1, L2: 1, L3: 1, L5: 1 };
+      rows.forEach(r => {
+        const key = lineaKeyFromNombre(r.linea);
+        if (key) rendimientos[key] = r.rendimiento;
+      });
+
+      try {
+        await planEnsambladoTxtService.guardarParametrizacion({
+          grupo,
+          centro,
+          fechaObjetivo,
+          horasT1: rows[0].horasT1,
+          horasT2: rows[0].horasT2,
+          rendimientos,
+          puestos: rows.map(r => ({ linea: r.linea, puesto: r.puesto, puestosT1: r.puestosT1, puestosT2: r.puestosT2 })),
+        });
+        guardados++;
+      } catch (error) {
+        errores.push(`Centro ${centro}: ${(error as Error).message}`);
+      }
+    }
+
+    setIsSavingPlan(false);
+    if (errores.length === 0 && guardados > 0) {
+      addNotification('success', `Plan guardado (${guardados} centro(s)) para la fecha ${fechaObjetivo}.`);
+    } else if (errores.length > 0) {
+      addNotification('error', `Error al guardar el plan: ${errores.join(' | ')}`);
+    } else {
+      addNotification('warning', 'No hay datos de Rev Capacidad para guardar en ningún centro.');
     }
   };
 
@@ -273,6 +349,16 @@ export const ResumenPlanFinalTabSection: React.FC<ResumenPlanFinalTabSectionProp
             />
             Ignorar OrdFab (temporal)
           </label>
+          <Button
+            onClick={handleGuardarPlan}
+            disabled={isSavingPlan}
+            title="Guarda Horas/Rendimientos/Puestos de Rev Capacidad (ambos centros) en un .txt por fecha objetivo, para poder restaurarlos al reabrir esa fecha."
+            variant="outline"
+            size="sm"
+            className="border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50"
+          >
+            {isSavingPlan ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />} Guardar Plan
+          </Button>
           {/* Destinatarios en la restricción "CORREOS_DESTINO" (grupo Ensamblado) — sin UI de captura
               nueva, se crea/edita en Parámetros → Grupos → Restricciones. */}
           <Button
