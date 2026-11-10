@@ -320,8 +320,12 @@ export interface PlanGrupo {
     codigo_grupo: number;
     codigo_familia_grupo: number;
     valor: string;
-    fecha_inicio_plan: Date;
-    fecha_fin_plan: Date;
+    // Día calendario del plan (sin hora) — se guarda como string naive 'YYYY-MM-DDT00:00:00'
+    // (ver toDatetime2Medianoche en @/lib/fecha-ecuador) para que el backend no le aplique
+    // ninguna conversión de huso horario. Sigue aceptando Date para no romper lecturas ya
+    // existentes que construyen un Date a partir de lo que devuelve la API.
+    fecha_inicio_plan: Date | string;
+    fecha_fin_plan: Date | string;
     estado: string;
     fecha_creacion: Date;
     usuario_creacion: string;
@@ -476,6 +480,12 @@ export interface SolicitudProduccionHB {
   PosicionPedido?: string;
   EstadoRegistro?: string;
   Observaciones?: string;
+  // FECHA_CARGA/HORA_CARGA (doc oficial de la interfaz SAP ZPPT_ORDER_INT): fecha y hora en que el
+  // aplicativo externo carga el registro — responsabilidad de "el proceso externo de gestión de
+  // Carga", no las llena SAP. Opcionales acá porque no todos los módulos las completan todavía,
+  // pero Programación Táctica Forros siempre las envía (ver getFechaHoraCargaEcuador).
+  FechaCarga?: string;
+  HoraCarga?: string;
   EstadoCarga?: string;
   NumeroOrdenSap?: string;
   FechaProceso?: string;

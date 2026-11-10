@@ -13,7 +13,10 @@ const API_URL = `${environment.apiURL}/api/servicios`;
 // Muebles/Taller de Corte (SolicitudProduccionHB, usado por ProvisionalOrdersAlphaTab.tsx y
 // ProvisionalOrdersTallerCorteTab.tsx) en ramas de trabajo paralelas — unificado en un solo tipo real
 // al integrar ambas (2026-09-28) para no duplicar la definición, sin tener que tocar los 3 archivos
-// que ya importan este nombre.
+// que ya importan este nombre. Programación Táctica Forros (TacticalPlanForrosSection.tsx) también
+// lo consume directamente como SolicitudProduccionHB — FechaCarga/HoraCarga (ver esa interfaz en
+// @/types/interfaces) se agregaron a pedido de Forros, siguiendo el doc oficial de la interfaz SAP
+// ZPPT_ORDER_INT.
 export type SolicitudProduccionHBPayload = SolicitudProduccionHB;
 
 // Caché de la descarga compartida del maestro completo de TiemposEnsamblado (ver getTiemposEnsambladoCompleto)
@@ -438,7 +441,7 @@ export const serviciosService = {
   },
 
   async getProduccionEstimadaPorIntervalo(anio: string, mes: string, semana: string): Promise<BodyResponse<any>> {
-    const response = await fetchWithAuth(API_URL + "/ProduccionEstimadaPorAnioMesSemana", {
+    const response = await fetchWithAuth(API_URL + "/produccionEstimadaPorAnioMesSemana", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ anio: anio, mes: mes, semana: semana }),
@@ -669,11 +672,13 @@ export const serviciosService = {
   // Inserta una orden de producción externa en HANA (para que SAP la recoja). Ver SolicitudProduccionHB
   // en @/types/interfaces para el detalle de qué campos son obligatorios. Compartida por TODOS los
   // módulos con "Enviar a SAP": Programación Táctica Muebles/Taller de Corte (ProvisionalOrdersAlphaTab,
-  // ProvisionalOrdersTallerCorteTab) y Corte y Laminado/Venta Externa/Ensamblado
+  // ProvisionalOrdersTallerCorteTab), Corte y Laminado/Venta Externa/Ensamblado
   // (TacticalPlanCorteLaminadoSection, TacticalPlanEspumasSection, ResumenPlanFinalTabSection, que
-  // reciben el mismo tipo bajo el alias SolicitudProduccionHBPayload) — unificada en una sola
-  // implementación al integrar ambas ramas de trabajo (2026-09-28), quedándose con el manejo de errores
-  // más completo (revisa data.message/data.error anidado, no solo el nivel superior).
+  // reciben el mismo tipo bajo el alias SolicitudProduccionHBPayload) y Programación Táctica Forros
+  // (TacticalPlanForrosSection) — unificada en una sola implementación al integrar las ramas de
+  // trabajo paralelas (2026-09-28), quedándose con el manejo de errores más completo (revisa
+  // data.message/data.error anidado, no solo el nivel superior). El endpoint procesa UNA orden por
+  // llamada, no un lote — quien llama debe iterar y hacer un POST por cada orden.
   async insertarSolicitudProduccionHB(
     solicitud: SolicitudProduccionHB
   ): Promise<BodyResponse<{ success: boolean; message: string }>> {
