@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { TacticalSchedulingIcon } from '@/constants/constants';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -23,6 +23,12 @@ import { restriccionService } from '@/services/restriccion.service';
 import { serviciosService } from '@/services/servicios.service';
 import type { Grupo, Restriccion } from '@/types/interfaces';
 import { useAppContext } from '@/context/AppProvider';
+import { getTiemposManualesMuebles, TIEMPO_MANUAL_MUEBLES_PREFIJO, TIEMPO_MANUAL_MUEBLES_DESCRIPCION } from '@/lib/tiempos-manuales-muebles';
+
+const formatDateForSQLServer = (date: Date): string => {
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${date.getMilliseconds().toString().padStart(3, '0')}`;
+};
 
 // Componente para la tabla de Grupos
 const GruposTab: React.FC<{ grupos: Grupo[]; isLoading: boolean }> = ({ grupos, isLoading }) => {
@@ -111,7 +117,8 @@ export const TacticalPlanMueblesSection: React.FC = () => {
     const [gruposMuebles, setGruposMuebles] = useState<Grupo[]>([]);
     const [restriccionesMuebles, setRestriccionesMuebles] = useState<Restriccion[]>([]);
     const [isLoading, setIsLoading] = useState(true);
-    const [tiemposMueblesData, setTiemposMueblesData] = useState<any[]>([]);
+    // Tiempos tal como vienen del backend (PR2 + maestro completo, ver fetchTiemposData)
+    const [tiemposBackendData, setTiemposBackendData] = useState<any[]>([]);
     const [isTiemposLoading, setIsTiemposLoading] = useState(true);
     const [activeTab, setActiveTab] = useState('plan');
     const provisionalOrdersAlphaRef = useRef<ProvisionalOrdersAlphaTabHandle>(null);
@@ -190,21 +197,78 @@ export const TacticalPlanMueblesSection: React.FC = () => {
 
             const codigoGrupo = grupoMuebles.codigo_grupo;
 
-            try {
-                const response = await serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(centro, codigoGrupo);
-                if (response && response.data) {
-                    const dataArray = Array.isArray(response.data) ? response.data : [response.data];
-                    setTiemposMueblesData(dataArray);
-                }
-            } catch (error) {
-                console.error('Error al cargar tiempos de Muebles:', error);
-            } finally {
-                setIsTiemposLoading(false);
+            // Fuente 1: tiempos filtrados por grupo (PR2). Ese filtro depende de la clasificación de
+            // puestos en SAP y deja fuera materiales de Muebles que sí tienen tiempo (p. ej. puesto
+            // "Armado"), así que se complementa con el maestro completo de TiemposEnsamblado (todas sus
+            // páginas), filtrado al centro, solo para los materiales que PR2 no trae con tiempo > 0.
+            // Las filas de PR2 van primero: tienen prioridad en el cruce por material (primera con tiempo).
+            const [porGrupo, maestro] = await Promise.allSettled([
+                serviciosService.getTiemposEnsambladobyCentroyCodigoGrupo(centro, codigoGrupo),
+                serviciosService.getTiemposEnsambladoCompleto(),
+            ]);
+
+            const toArray = (data: unknown): any[] => (data == null ? [] : Array.isArray(data) ? data : [data]);
+            const materialDe = (item: any) => String(item.CodMaterial ?? item.MATERIAL ?? item.Material ?? '').trim().slice(-8);
+            const tiempoDe = (item: any) => Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
+
+            const filasGrupo = porGrupo.status === 'fulfilled' ? toArray(porGrupo.value?.data) : [];
+            if (porGrupo.status === 'rejected') console.error('Error al cargar tiempos de Muebles por grupo:', porGrupo.reason);
+
+            const conTiempo = new Set(filasGrupo.filter(it => tiempoDe(it) > 0).map(materialDe));
+            const filasMaestro = maestro.status === 'fulfilled'
+                ? maestro.value.filter(it => String(it.Centro ?? '').trim() === centro && tiempoDe(it) > 0 && !conTiempo.has(materialDe(it)))
+                : [];
+            if (maestro.status === 'rejected') console.error('Error al cargar el maestro completo de TiemposEnsamblado:', maestro.reason);
+
+            if (porGrupo.status === 'rejected' && maestro.status === 'rejected') {
+                addNotification('error', 'No se pudieron cargar los tiempos de fabricación de Muebles.');
+            } else {
+                setTiemposBackendData([...filasGrupo, ...filasMaestro]);
             }
+            setIsTiemposLoading(false);
         };
 
         fetchTiemposData();
-    }, [gruposMuebles, mounted]);
+    }, [gruposMuebles, mounted, addNotification]);
+
+    // TEMPORAL — tiempos manuales de materiales nuevos sin tiempo en el backend (ver
+    // @/lib/tiempos-manuales-muebles). Se agregan DESPUÉS de las filas del backend y solo para materiales
+    // que el backend no trae con tiempo > 0, así el backend siempre gana en el cruce por material.
+    const tiemposManualesMap = useMemo(() => getTiemposManualesMuebles(restriccionesMuebles), [restriccionesMuebles]);
+    const tiemposMueblesData = useMemo(() => {
+        const conTiempoBackend = new Set(
+            tiemposBackendData
+                .filter(it => Number(it.Tiempo_Min ?? it.Tiempo ?? 0) > 0)
+                .map(it => String(it.CodMaterial ?? it.MATERIAL ?? it.Material ?? '').trim().slice(-8))
+        );
+        const filasManuales = Array.from(tiemposManualesMap.entries())
+            .filter(([material]) => !conTiempoBackend.has(material))
+            .map(([material, t]) => ({ CodMaterial: material, Centro: '1000', Tiempo_Min: t.minutos, Origen: 'Manual (temporal)', Material: t.descripcion }));
+        return [...tiemposBackendData, ...filasManuales];
+    }, [tiemposBackendData, tiemposManualesMap]);
+
+    // Crea o actualiza el tiempo manual de un material (Restriccion del Grupo de Muebles, centro 1000)
+    const handleGuardarTiempoManual = useCallback(async (material: string, descripcion: string, minutos: number) => {
+        const grupo = gruposMuebles.find(g => g.centro === '1000' && g.nombre_grupo.toLowerCase().includes('muebles'));
+        if (!grupo) throw new Error('No se encontró el Grupo de Muebles (centro 1000) para guardar el tiempo.');
+        const existente = tiemposManualesMap.get(material);
+        const payload: any = {
+            codigo_grupo: grupo.codigo_grupo,
+            nombre_restriccion: `${TIEMPO_MANUAL_MUEBLES_PREFIJO}${material}`,
+            valor_restriccion: String(minutos),
+            descripcion: `${TIEMPO_MANUAL_MUEBLES_DESCRIPCION} — ${descripcion}`.slice(0, 250),
+            estado: 'A',
+            usuario_modificacion: 'admin',
+            fecha_modificacion: formatDateForSQLServer(new Date()),
+        };
+        if (existente) payload.codigo_restriccion = existente.codigoRestriccion;
+        const saved = await restriccionService.save(payload);
+        const guardada = { ...payload, codigo_restriccion: saved.data?.codigo_restriccion ?? existente?.codigoRestriccion ?? 0, grupo } as Restriccion;
+        setRestriccionesMuebles(prev => [
+            ...prev.filter(r => r.nombre_restriccion !== payload.nombre_restriccion),
+            guardada,
+        ]);
+    }, [gruposMuebles, tiemposManualesMap]);
 
   if (!mounted) {
     return (
@@ -358,6 +422,8 @@ export const TacticalPlanMueblesSection: React.FC = () => {
                         ref={provisionalOrdersAlphaRef}
                         restricciones={restriccionesMuebles}
                         tiemposData={tiemposMueblesData}
+                        tiemposManualesMap={tiemposManualesMap}
+                        onGuardarTiempoManual={handleGuardarTiempoManual}
                       />
                   </CardContent>
               </Card>

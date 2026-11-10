@@ -18,6 +18,30 @@ export type FetchOptions = RequestInit & {
   suppressAuthRedirect?: boolean;
 };
 
+// Esperas entre reintentos ante un error de red (fetch lanzó excepción). Lecturas: ~25 s en total, lo
+// que duran las caídas medidas del backend; escrituras: un solo reintento corto (comportamiento previo).
+const ESPERAS_REINTENTO_LECTURA_MS = [1000, 2000, 4000, 8000, 10000];
+const ESPERAS_REINTENTO_ESCRITURA_MS = [800];
+
+// POST que en realidad son CONSULTAS (no modifican nada) — endpoints de lectura del backend del
+// Optimizador y de Seguridades. Cualquier POST que no calce aquí se trata como escritura.
+const POST_LECTURA_REGEX = /\/(TiemposEnsamblado|tiemposEnsambladoByGrupoYCentroPR2|[A-Za-z]*Paginad[ao]s?|Cubo[A-Za-z]*|Maestro[A-Za-z]*|Presupuesto[A-Za-z]*|Diccionario[A-Za-z]*|Registros51Mb|ReporteExplosionMateriales|Tiempo[A-Za-z]*|tiemposCuradoBloqueFormulado|[Vv]ersiones[A-Za-z]*|detallesPlanGrupo|dataByCentroMaterial|dataMaterialesFull|Listar[A-Za-z]*|HabilidadesOperadorPorEstacion|Inventario[A-Za-z]*|KPIMaestro[A-Za-z]*|MaterialesBrutos[A-Za-z]*|ProduccionEstimada[A-Za-z]*|PlanesYSemanasActivasPorPlan|PlanPorCodigoPlanFamilia|AusentismoOperador|usuarioIDusuario|fichasUsuarios|Meses|Years|Centros|total|menu)(\?|$)/;
+
+const esLecturaReintentable = (url: string, method?: string): boolean => {
+  const metodo = (method || 'GET').toUpperCase();
+  if (metodo === 'GET' || metodo === 'HEAD') return true;
+  if (metodo !== 'POST') return false;
+  return POST_LECTURA_REGEX.test(url.split('#')[0]);
+};
+
+const hostDe = (url: string): string => {
+  try {
+    return new URL(url).host + new URL(url).pathname.split('/').slice(0, 2).join('/');
+  } catch {
+    return url;
+  }
+};
+
 /**
  * Fetch wrapper that automatically:
  * 1. Includes httpOnly cookies with credentials: 'include'
@@ -47,21 +71,34 @@ export async function fetchWithAuth(
   // a ciegas. Confirmado 2026-09-16 y 2026-09-22: mismo "Failed to fetch" genérico en fetchWithAuth con
   // el backend y CORS verificados sanos las dos veces — parece ser un corte de red intermitente real del
   // lado del cliente, no un bug de este código; reintentar es la mitigación razonable para ese caso.
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      ...restOptions,
-      credentials: skipAuth ? 'omit' : 'include', // 'include' para enviar cookies
-      cache: restOptions.cache ?? 'no-store',
-    });
-  } catch (networkError) {
-    console.warn('⚠️ Falló la conexión de red, reintentando una vez en 800ms…', networkError);
-    await new Promise(resolve => setTimeout(resolve, 800));
-    response = await fetch(url, {
-      ...restOptions,
-      credentials: skipAuth ? 'omit' : 'include',
-      cache: restOptions.cache ?? 'no-store',
-    });
+  //
+  // 2026-10-15: confirmado que el backend ProductionOptimizer_test cae por ráfagas de ~25 s respondiendo
+  // 502 Bad Gateway SIN cabeceras CORS (el navegador lo reporta como "Failed to fetch"/"NetworkError").
+  // Un solo reintento a los 800 ms no alcanzaba, así que las LECTURAS (ver esLecturaReintentable) se
+  // reintentan con espera creciente hasta cubrir ~25 s. Las ESCRITURAS mantienen un único reintento: si el
+  // corte ocurrió con la petición ya en el servidor, reintentarla podría duplicar un guardado o un envío a SAP.
+  const doFetch = () => fetch(url, {
+    ...restOptions,
+    credentials: skipAuth ? 'omit' : 'include', // 'include' para enviar cookies
+    cache: restOptions.cache ?? 'no-store',
+  });
+  const esperas = esLecturaReintentable(url, restOptions.method) ? ESPERAS_REINTENTO_LECTURA_MS : ESPERAS_REINTENTO_ESCRITURA_MS;
+  let response: Response | undefined;
+  let ultimoErrorRed: unknown = null;
+  for (let intento = 0; intento <= esperas.length; intento++) {
+    try {
+      response = await doFetch();
+      break;
+    } catch (networkError) {
+      ultimoErrorRed = networkError;
+      if (intento === esperas.length) break;
+      console.warn(`⚠️ Falló la conexión con ${hostDe(url)}, reintento ${intento + 1}/${esperas.length} en ${esperas[intento]} ms…`, networkError);
+      await new Promise(resolve => setTimeout(resolve, esperas[intento]));
+    }
+  }
+  if (!response) {
+    console.error(`❌ Sin conexión con ${hostDe(url)} tras ${esperas.length + 1} intentos:`, ultimoErrorRed);
+    throw new Error(`No se pudo conectar con el servidor (${hostDe(url)}). Puede estar caído o reiniciándose; espere unos segundos y vuelva a intentar.`);
   }
 
   // Si error de autenticación (401 Unauthorized o 403 Forbidden — algunos endpoints del backend

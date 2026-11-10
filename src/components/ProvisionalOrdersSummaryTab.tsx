@@ -188,25 +188,16 @@ export const ProvisionalOrdersSummaryTab: React.FC<ProvisionalOrdersSummaryTabPr
 
   const fetchTiempos = async () => {
     try {
-      const tiemposExplore = await serviciosService.getTiemposEnsamblado(1, 1);
-      const totalTiempos = tiemposExplore.totalRegistros || 0;
-      if (totalTiempos > 0) {
-        const BATCH = 20000;
-        const pages = Math.ceil(totalTiempos / BATCH);
+      const items = await serviciosService.getTiemposEnsambladoCompleto();
+      if (items.length > 0) {
         const tMap = new Map<string, number>();
-        for (let i = 1; i <= pages; i++) {
-          const res = await serviciosService.getTiemposEnsamblado(i, BATCH);
-          if (res.data) {
-            const items = Array.isArray(res.data) ? res.data : [res.data];
-            items.forEach((item: any) => {
-              const material = normalizeMaterialCode(item.CodMaterial || item.Material || '');
-              const tiempo = Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
-              if (material && tiempo > 0 && !tMap.has(material)) {
-                tMap.set(material, tiempo);
-              }
-            });
+        items.forEach((item: any) => {
+          const material = normalizeMaterialCode(item.CodMaterial || item.Material || '');
+          const tiempo = Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
+          if (material && tiempo > 0 && !tMap.has(material)) {
+            tMap.set(material, tiempo);
           }
-        }
+        });
         setGlobalTiemposMap(tMap);
       }
     } catch (error) {

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { serviciosService } from '@/services/servicios.service';
+import { planesArchivosService, getNombreGrupoPlanes, esRutaPlanesNoDisponible } from '@/services/planesArchivos.service';
 import { useAppContext } from '@/context/AppProvider';
 import { Package, Check, ChevronsUpDown, Loader2, BellRing, AlertTriangle, Clock, Calendar, CalendarDays, LayoutDashboard, History, ListChecks, ChevronUp, ChevronDown, Calculator, FileJson, Sparkles, CheckCircle2, PieChart, PackageSearch, Mail, ClipboardCheck } from 'lucide-react';
 import type { OrdenFert, ProvisionalOrder, Restriccion } from '@/types/interfaces';
@@ -15,6 +16,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { addBusinessDays, cargarDiasNoLaborables, feriadosNacionales, type DiasLaborablesConfig } from '@/lib/dias-laborables';
 
 const normalizeMaterialCode = (code: string | number): string => {
   const codeStr = String(code).trim();
@@ -173,6 +175,30 @@ const clasificarTipoMueble = (nombreRaw: string, tiempoUnitMin: number): TipoMue
 // PlazoEntregaPrevisto de cada uno) porque el usuario eligió explícitamente la opción más simple de
 // ampliar el valor fijo, no la variante dinámica.
 const INSUMO_VENTANA_DIAS = 14;
+
+// Quita los ceros a la izquierda de un código (orden/material) para mostrarlo; si todo son ceros, deja "0"
+const sinCerosIzquierda = (valor: unknown): string => {
+  const texto = String(valor ?? '').trim();
+  return texto ? (texto.replace(/^0+/, '') || '0') : texto;
+};
+
+// Fecha "YYYY-MM-DD" en hora LOCAL (no toISOString: en Ecuador, después de las 19:00 la fecha UTC ya es
+// el día siguiente y "hoy" se corría un día).
+const fechaLocalKey = (d: Date): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Fecha límite por defecto del Riesgo de Stock de Insumos = hoy + 13 días (ventana histórica de 14 días)
+const fechaLimiteRiesgoPorDefecto = (): string => {
+  const d = new Date();
+  d.setDate(d.getDate() + INSUMO_VENTANA_DIAS - 1);
+  return fechaLocalKey(d);
+};
+
+// "YYYY-MM-DD" -> "DD-MM-YYYY" para mostrar
+const fechaKeyLegible = (key: string): string => {
+  const [y, m, d] = key.split('-');
+  return y && m && d ? `${d}-${m}-${y}` : key;
+};
 
 // Prefijos de DESCRIPCION_COMPONENTE que identifican insumos comprados (no fabricados en planta) más
 // allá de Telas/Cascos — pedido explícito del usuario (2026-09-08) para ampliar la Alerta de Riesgo de
@@ -606,70 +632,168 @@ const buildDesglosePorFechaYMesaHtml = (planSummaryByDate: PlanSummaryDay[]): st
   }).join('');
 };
 
-// Aproximación del Gantt de pantalla (posicionamiento absoluto en %) usando <table> de ancho fijo por
-// mesa: se ordenan los ítems por hora de inicio y se intercalan celdas vacías (huecos) entre ellos —
-// el ancho de cada celda en px es proporcional a su duración en horas. No requiere CSS de layout
-// moderno, por lo que se ve razonablemente bien también en Outlook.
-const GANTT_EMAIL_WIDTH_PX = 640;
+// Gantt del correo, lo más fiel posible al de pantalla (PlanDiarioGanttSection) pero solo con <table> y
+// estilos inline (Outlook no soporta posicionamiento absoluto ni flexbox). La barra de cada mesa se
+// parte en tramos en cada inicio/fin de orden, en la hora de capacidad de la mesa y en la hora de fin de
+// turno; el ancho en px de cada tramo es proporcional a sus horas. Así se pueden dibujar, como bordes de
+// celda: la línea PUNTEADA de límite de capacidad por mesa (borde izquierdo dashed del tramo que empieza
+// en esa hora) y la línea SÓLIDA de fin de turno (mismo truco, repetido en todas las mesas y en el eje de
+// horas, para que se lea como una sola línea vertical). Mismos colores, leyenda y % de utilización por
+// mesa (con el mismo código de color) que la vista previa.
+const GANTT_EMAIL_WIDTH_PX = 600;
+const GANTT_EMAIL_LABEL_PX = 140;
+const GANTT_EMAIL_PCT_PX = 48;
+const GANTT_EMAIL_BAR_HEIGHT_PX = 30;
+const GANTT_EMAIL_CAPACIDAD_BORDER = '3px dashed #475569';
+const GANTT_EMAIL_TURNO_BORDER = '4px solid #0f172a';
+
+const utilizacionColorHex = (pct: number): string => (pct > 100 ? '#dc2626' : pct >= 90 ? '#047857' : '#4b5563');
+
+// Muestra de color/línea de la leyenda (tabla anidada: los <span> con borde no se respetan en Outlook)
+const leyendaMuestraHtml = (estilo: string, ancho = 12, alto = 12): string =>
+  `<table cellpadding="0" cellspacing="0" border="0"><tr><td width="${ancho}" height="${alto}" style="width:${ancho}px;height:${alto}px;font-size:1px;line-height:1px;${estilo}">&nbsp;</td></tr></table>`;
 
 const buildGanttHtml = (planSummaryByDate: PlanSummaryDay[]): string => {
   const diasConSnapshot = planSummaryByDate.filter(d => d.snapshot && d.mesas.length > 0);
   if (diasConSnapshot.length === 0) return '';
   const pxPerHour = GANTT_EMAIL_WIDTH_PX / GANTT_HOURS_SCALE;
+  const xPx = (horas: number) => Math.round(Math.min(Math.max(horas, 0), GANTT_HOURS_SCALE) * pxPerHour);
+  const mismaHora = (a: number, b: number) => Math.abs(a - b) < 0.001;
+  const enEscala = (h: number): boolean => h > 0 && h <= GANTT_HOURS_SCALE;
+  const fuente = 'font-family:Arial,sans-serif;';
+  const mono = "font-family:'Courier New',monospace;";
 
   const dias = diasConSnapshot.map(day => {
     const snapshot = day.snapshot!;
-    const mesasHtml = (['Línea 1 – Línea de Camas', 'Línea 2 – Línea de Muebles'] as const).map(linea => {
+    const finTurnoHoras = (parseHHMM(snapshot.shiftDisplayEndTime) - parseHHMM(snapshot.shiftStartTime)) / 60;
+    const finTurno = enEscala(finTurnoHoras) ? finTurnoHoras : null;
+
+    // Celdas de la barra 0..GANTT_HOURS_SCALE de una mesa, partida en todos los cortes relevantes
+    const construirBarra = (items: PlanDiarioSnapshotItem[], capacidad: number | null): string => {
+      const recortar = (h: number) => Math.max(0, Math.min(h, GANTT_HOURS_SCALE));
+      const cortes = new Set<number>([0, GANTT_HOURS_SCALE]);
+      items.forEach(it => { cortes.add(recortar(it.startHour)); cortes.add(recortar(it.endHour)); });
+      if (capacidad !== null) cortes.add(capacidad);
+      if (finTurno !== null) cortes.add(finTurno);
+      const puntos = Array.from(cortes).sort((a, b) => a - b);
+
+      const lineaEn = (h: number): string | null =>
+        finTurno !== null && mismaHora(h, finTurno) ? GANTT_EMAIL_TURNO_BORDER
+          : capacidad !== null && mismaHora(h, capacidad) ? GANTT_EMAIL_CAPACIDAD_BORDER
+          : null;
+
+      const celdas: string[] = [];
+      let lineaPendiente: string | null = null;
+      let bordeDerAnterior: string | null = null;
+      let pxAcumulado = 0;
+      const grosorBorde = (borde: string | null) => (borde ? parseInt(borde, 10) || 0 : 0);
+      for (let i = 0; i < puntos.length - 1; i++) {
+        const a = puntos[i];
+        const b = puntos[i + 1];
+        const ancho = xPx(b) - xPx(a);
+        let bordeIzq = lineaEn(a);
+        if (ancho <= 0) {
+          // Tramo de 0 px tras el redondeo: su línea (si tiene) pasa al siguiente tramo visible
+          lineaPendiente = bordeIzq ?? lineaPendiente;
+          continue;
+        }
+        bordeIzq = bordeIzq ?? lineaPendiente;
+        lineaPendiente = null;
+
+        const medio = (a + b) / 2;
+        const item = items.find(it => it.startHour <= medio && it.endHour >= medio);
+        const estilos: string[] = [`height:${GANTT_EMAIL_BAR_HEIGHT_PX}px`, 'padding:0', 'overflow:hidden'];
+        let contenido = '<span style="font-size:1px;line-height:1px;">&nbsp;</span>';
+        let bordeDer: string | null = null;
+        let etiqueta: string | null = null;
+        if (item) {
+          const { bg, text, border } = tamanoColorHex(item.tamano);
+          const colorBorde = item.overflow ? '#dc2626' : border;
+          const grosor = item.overflow ? 2 : 1;
+          estilos.push(`background:${bg}`, `border-top:${grosor}px solid ${colorBorde}`, `border-bottom:${grosor}px solid ${colorBorde}`);
+          if (mismaHora(b, recortar(item.endHour)) && !lineaEn(b)) bordeDer = `${grosor}px solid ${colorBorde}`;
+          // Si el tramo anterior ya cerró una orden con borde derecho, no se duplica el borde aquí
+          if (!bordeIzq && !bordeDerAnterior && mismaHora(a, recortar(item.startHour))) bordeIzq = `${grosor}px solid ${colorBorde}`;
+          // Etiqueta solo en el primer tramo de la orden (se decide abajo si cabe en el ancho real)
+          if (mismaHora(a, recortar(item.startHour))) {
+            etiqueta = `<span style="font-size:8px;line-height:10px;font-weight:bold;color:${text};${fuente}white-space:nowrap;">&nbsp;${escapeHtml(item.material)}</span>`;
+          }
+        }
+        // Línea que cae justo al final de la escala: borde derecho del último tramo
+        if (mismaHora(b, GANTT_HOURS_SCALE)) bordeDer = lineaEn(GANTT_HOURS_SCALE) ?? bordeDer;
+        if (bordeIzq) estilos.push(`border-left:${bordeIzq}`);
+        if (bordeDer) estilos.push(`border-right:${bordeDer}`);
+        bordeDerAnterior = bordeDer;
+        // Los bordes suman ancho a la celda: cada tramo se ajusta para TERMINAR exactamente en xPx(b),
+        // descontando sus bordes y cualquier desfase acumulado de tramos anteriores (p. ej. órdenes tan
+        // cortas que sus bordes miden más que ellas), así todas las barras miden GANTT_EMAIL_WIDTH_PX y
+        // la línea de fin de turno cae en el mismo píxel en todas las mesas.
+        const bordesPx = grosorBorde(bordeIzq) + grosorBorde(bordeDer);
+        const anchoContenido = Math.max(xPx(b) - pxAcumulado - bordesPx, 1);
+        pxAcumulado += anchoContenido + bordesPx;
+        // En correo no hay "truncate" confiable: un texto más ancho que la celda la ensancharía y
+        // desalinearía las líneas, así que la etiqueta solo se muestra si cabe con holgura
+        if (etiqueta && anchoContenido >= 52) contenido = etiqueta;
+        estilos.unshift(`width:${anchoContenido}px`);
+        celdas.push(`<td width="${anchoContenido}" style="${estilos.join(';')};">${contenido}</td>`);
+      }
+      return `<table cellpadding="0" cellspacing="0" border="0" width="${GANTT_EMAIL_WIDTH_PX}" style="border-collapse:collapse;table-layout:fixed;width:${GANTT_EMAIL_WIDTH_PX}px;background:#f9fafb;"><tr>${celdas.join('')}</tr></table>`;
+    };
+
+    const lineas = (['Línea 1 – Línea de Camas', 'Línea 2 – Línea de Muebles'] as const).map(linea => {
       const mesasLinea = day.mesas.filter(m => m.linea === linea);
       if (mesasLinea.length === 0) return '';
       const filas = mesasLinea.map(mesa => {
-        const items = [...mesa.items].sort((a, b) => a.startHour - b.startHour);
-        let cursor = 0;
-        const celdas: string[] = [];
-        items.forEach((item, idx) => {
-          const gapHoras = item.startHour - cursor;
-          if (gapHoras > 0.05) {
-            celdas.push(`<td style="width:${Math.round(gapHoras * pxPerHour)}px;padding:0;border:none;"></td>`);
-          }
-          const anchoPx = Math.max(Math.round((item.endHour - item.startHour) * pxPerHour), 6);
-          const { bg, text, border } = tamanoColorHex(item.tamano);
-          celdas.push(`<td style="width:${anchoPx}px;height:26px;background:${bg};border:1px solid ${border};padding:0 2px;overflow:hidden;"><span style="font-size:8px;font-weight:600;color:${text};white-space:nowrap;">${escapeHtml(item.material)}</span></td>`);
-          cursor = item.endHour;
-        });
-        if (cursor < GANTT_HOURS_SCALE) {
-          celdas.push(`<td style="width:${Math.round((GANTT_HOURS_SCALE - cursor) * pxPerHour)}px;padding:0;border:none;"></td>`);
-        }
+        const capacidad = enEscala(mesa.capacityHours) ? mesa.capacityHours : null;
         const utilizacionPct = mesa.capacityHours > 0 ? (mesa.usedHours / mesa.capacityHours) * 100 : 0;
         return `
           <tr>
-            <td style="${CORREO_TD_STYLE}text-align:left;white-space:nowrap;width:130px;">
-              <span style="font-weight:bold;">${escapeHtml(mesa.tableName)}</span><br/>
-              <span style="font-family:monospace;font-size:10px;">${mesa.usedHours.toFixed(2)} / ${mesa.capacityHours.toFixed(2)} h</span>
+            <td width="${GANTT_EMAIL_LABEL_PX}" style="width:${GANTT_EMAIL_LABEL_PX}px;padding:3px 8px 3px 0;vertical-align:middle;white-space:nowrap;${fuente}">
+              <span style="font-size:11px;font-weight:bold;color:#1f2937;">${escapeHtml(mesa.tableName)}</span><br/>
+              <span style="font-size:12px;font-weight:bold;color:#111827;${mono}">${mesa.usedHours.toFixed(2)} / ${mesa.capacityHours.toFixed(2)} h</span>
             </td>
-            <td style="padding:2px;border:1px solid #e5e7eb;background:#f9fafb;">
-              <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:${GANTT_EMAIL_WIDTH_PX}px;"><tr>${celdas.join('')}</tr></table>
+            <td width="${GANTT_EMAIL_WIDTH_PX + 2}" style="width:${GANTT_EMAIL_WIDTH_PX + 2}px;padding:3px 0;vertical-align:middle;">
+              <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e5e7eb;"><tr><td style="padding:0;">${construirBarra(mesa.items, capacidad)}</td></tr></table>
             </td>
-            <td style="${CORREO_TD_STYLE}width:50px;font-weight:bold;${utilizacionPct > 100 ? 'color:#dc2626;' : 'color:#374151;'}">${utilizacionPct.toFixed(0)}%</td>
+            <td width="${GANTT_EMAIL_PCT_PX}" style="width:${GANTT_EMAIL_PCT_PX}px;padding:3px 0 3px 8px;vertical-align:middle;text-align:right;${fuente}font-size:12px;font-weight:bold;color:${utilizacionColorHex(utilizacionPct)};">${utilizacionPct.toFixed(0)}%</td>
           </tr>`;
       }).join('');
       return `
-        <p style="margin:10px 0 4px;font-size:11px;font-weight:bold;color:#4b5563;text-transform:uppercase;">${escapeHtml(linea)}</p>
-        <table style="border-collapse:collapse;" cellpadding="0" cellspacing="0">${filas}</table>`;
+        <tr><td colspan="3" style="padding:12px 0 4px;${fuente}font-size:11px;font-weight:bold;color:#4b5563;text-transform:uppercase;">${escapeHtml(linea)}</td></tr>
+        ${filas}`;
     }).join('');
 
-    const horasEje = Array.from({ length: GANTT_HOURS_SCALE + 1 }, (_, h) => h).filter(h => h % 2 === 0)
-      .map(h => `<td style="width:${Math.round(2 * pxPerHour)}px;font-size:9px;color:#9ca3af;font-family:monospace;">${formatShiftClockLabel(snapshot.shiftStartTime, h)}</td>`).join('');
+    // Eje de horas (cada 2 h), alineado con la barra (1 px del borde de la barra a la izquierda)
+    const ejeCeldas = Array.from({ length: GANTT_HOURS_SCALE / 2 }, (_, i) => i * 2).map(h => {
+      const ancho = xPx(h + 2) - xPx(h);
+      return `<td width="${ancho}" style="width:${ancho}px;padding:2px 0 0;font-size:9px;color:#9ca3af;${mono}white-space:nowrap;">${formatShiftClockLabel(snapshot.shiftStartTime, h)}</td>`;
+    }).join('');
+    const ejeHtml = `
+      <tr>
+        <td></td>
+        <td style="padding:0 0 0 1px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="${GANTT_EMAIL_WIDTH_PX}" style="border-collapse:collapse;table-layout:fixed;width:${GANTT_EMAIL_WIDTH_PX}px;"><tr>${ejeCeldas}</tr></table>
+        </td>
+        <td style="padding:2px 0 0 0;font-size:9px;color:#9ca3af;${mono}white-space:nowrap;">${formatShiftClockLabel(snapshot.shiftStartTime, GANTT_HOURS_SCALE)}</td>
+      </tr>`;
+
+    const leyenda = `
+      <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:6px;${fuente}font-size:11px;color:#4b5563;"><tr>
+        <td style="padding-right:4px;">${leyendaMuestraHtml('background:#fecaca;border:1px solid #fca5a5;')}</td><td style="padding-right:14px;">Grande</td>
+        <td style="padding-right:4px;">${leyendaMuestraHtml('background:#a7f3d0;border:1px solid #6ee7b7;')}</td><td style="padding-right:14px;">Mediano</td>
+        <td style="padding-right:4px;">${leyendaMuestraHtml('background:#bfdbfe;border:1px solid #93c5fd;')}</td><td style="padding-right:14px;">Pequeño</td>
+        <td style="padding-right:4px;">${leyendaMuestraHtml(`border-top:${GANTT_EMAIL_CAPACIDAD_BORDER};`, 16, 6)}</td><td style="padding-right:14px;">Límite de capacidad de la mesa</td>
+        <td style="padding-right:4px;">${leyendaMuestraHtml(`border-top:${GANTT_EMAIL_TURNO_BORDER};`, 16, 6)}</td><td>Fin de turno (${escapeHtml(snapshot.shiftDisplayEndTime)})</td>
+      </tr></table>`;
 
     return `
-      <div style="margin-bottom:20px;">
-        <h4 style="font-size:12px;font-weight:bold;color:#374151;border-bottom:1px dashed #d1d5db;padding-bottom:4px;">${escapeHtml(day.date)} — ${escapeHtml(snapshot.shiftLabel)} (fin de turno ${escapeHtml(snapshot.shiftDisplayEndTime)})</h4>
-        <p style="font-size:10px;color:#6b7280;">
-          <span style="background:#fecaca;border:1px solid #fca5a5;padding:1px 5px;">&nbsp;</span> Grande &nbsp;
-          <span style="background:#a7f3d0;border:1px solid #6ee7b7;padding:1px 5px;">&nbsp;</span> Mediano &nbsp;
-          <span style="background:#bfdbfe;border:1px solid #93c5fd;padding:1px 5px;">&nbsp;</span> Pequeño
-        </p>
-        ${mesasHtml}
-        <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-left:130px;"><tr>${horasEje}</tr></table>
+      <div style="margin-bottom:22px;">
+        <h4 style="font-size:12px;font-weight:bold;color:#374151;border-bottom:1px dashed #d1d5db;padding-bottom:4px;margin:0 0 8px;${fuente}text-transform:uppercase;">${escapeHtml(day.date)} — ${escapeHtml(snapshot.shiftLabel)}</h4>
+        ${leyenda}
+        <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+          ${lineas}
+          ${ejeHtml}
+        </table>
       </div>`;
   }).join('');
 
@@ -893,6 +1017,25 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
 
   const [selectedDates, setSelectedDates] = useState<string[]>([]);
   const [hasSetDefaultDate, setHasSetDefaultDate] = useState(false);
+  // Feriados nacionales por ley + calendario de la app (con excepciones "Jornada"). La fecha objetivo por
+  // defecto (hoy + 3 días hábiles) antes solo saltaba fines de semana: el 28-oct-2026 daba 02-nov (Difuntos)
+  // en vez de 04-nov, y quedaba seleccionada aunque no estuviera en la lista de fechas.
+  const [diasLaborables, setDiasLaborables] = useState<DiasLaborablesConfig | null>(null);
+  useEffect(() => {
+    let cancelado = false;
+    cargarDiasNoLaborables()
+      .catch((): DiasLaborablesConfig => {
+        const anio = new Date().getFullYear();
+        return { noLaborables: new Set([...feriadosNacionales(anio), ...feriadosNacionales(anio + 1)]), laborablesExtra: new Set() };
+      })
+      .then(cfg => { if (!cancelado) setDiasLaborables(cfg); });
+    return () => { cancelado = true; };
+  }, []);
+  // Fecha objetivo de planificación = hoy + 3 días hábiles (sin fines de semana ni feriados), "YYYY-MM-DD" local
+  const fechaObjetivoPlan = useMemo(() => {
+    if (!diasLaborables) return null;
+    return fechaLocalKey(addBusinessDays(new Date(), 3, diasLaborables.noLaborables, diasLaborables.laborablesExtra));
+  }, [diasLaborables]);
 
   // Estado para Explosión de Materiales
   const [explosionResults, setExplosionResults] = useState<ComponentExplosion[]>([]);
@@ -954,7 +1097,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   // vienen dentro de la prop `restricciones` (ya filtrada por el/los Grupo(s) de Muebles), solo hay que
   // separarlos por prefijo y parsear el JSON de `descripcion`. Fuente única de horario/mesas/personal/
   // Gantt para esta pestaña "PLAN" (ver punto 1 del pedido del usuario, 2026-08-25).
-  const planDiarioSnapshotsByDate = useMemo(() => {
+  const snapshotsDesdeRestriccion = useMemo(() => {
     const map = new Map<string, PlanDiarioSnapshot>();
     if (displayMode !== 'plan') return map;
     (restricciones || [])
@@ -969,6 +1112,88 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
       });
     return map;
   }, [restricciones, displayMode]);
+
+  // Planes Diarios guardados como .txt en `ruta_planes` (<AAAA>\<Mes>\<Nombre del grupo>\1000\<fecha>.txt, vía /api/planes).
+  // `planesArchivoFechas` alimenta el selector "Fecha(s):"; el contenido de cada archivo se pide solo
+  // al seleccionar esa fecha y se cachea en `planesArchivoSnapshots`.
+  const [planesArchivoFechas, setPlanesArchivoFechas] = useState<string[]>([]);
+  const [planesArchivoSnapshots, setPlanesArchivoSnapshots] = useState<Map<string, PlanDiarioSnapshot>>(new Map());
+  const planesArchivoSolicitadosRef = useRef<Set<string>>(new Set());
+  const respaldoPlanesEjecutadoRef = useRef(false);
+  const nombreGrupoPlanes = useMemo(() => getNombreGrupoPlanes(restricciones || []), [restricciones]);
+
+  useEffect(() => {
+    if (displayMode !== 'plan' || !nombreGrupoPlanes) return;
+    planesArchivosService.listarFechas(nombreGrupoPlanes)
+      .then(setPlanesArchivoFechas)
+      .catch(error => {
+        // console.warn (no console.error): en desarrollo console.error abre el overlay rojo de Next.js
+        console.warn('No se pudieron listar los planes guardados en archivo:', (error as Error).message);
+        if (esRutaPlanesNoDisponible(error)) {
+          addNotification('warning', 'La carpeta compartida de planes no está disponible en este momento (revise la conexión con el servidor de archivos). Se muestran los planes guardados en el sistema.');
+        } else {
+          addNotification('error', `No se pudieron listar los planes guardados en la ruta de planes: ${(error as Error).message}`);
+        }
+      });
+  }, [displayMode, nombreGrupoPlanes, addNotification]);
+
+  // Respaldo de días pasados: cada snapshot que hoy solo existe como Restriccion "PlanDiarioConfig:<fecha>"
+  // y aún no tiene .txt se escribe una sola vez a la ruta de planes. Corre una vez por montaje, cuando ya
+  // llegaron las restricciones.
+  useEffect(() => {
+    if (displayMode !== 'plan' || !nombreGrupoPlanes || respaldoPlanesEjecutadoRef.current || snapshotsDesdeRestriccion.size === 0) return;
+    respaldoPlanesEjecutadoRef.current = true;
+    (async () => {
+      try {
+        const existentes = new Set(await planesArchivosService.listarFechas(nombreGrupoPlanes));
+        const pendientes = Array.from(snapshotsDesdeRestriccion.entries()).filter(([fecha]) => !existentes.has(fecha));
+        const guardadas: string[] = [];
+        for (const [fecha, snapshot] of pendientes) {
+          try {
+            await planesArchivosService.guardar(fecha, snapshot, nombreGrupoPlanes);
+            guardadas.push(fecha);
+          } catch (error) {
+            console.error(`Error respaldando el plan ${fecha} a archivo:`, error);
+          }
+        }
+        if (guardadas.length > 0) {
+          setPlanesArchivoFechas(prev => Array.from(new Set([...prev, ...guardadas])).sort((a, b) => b.localeCompare(a)));
+          addNotification('success', `Se respaldaron ${guardadas.length} plan(es) de días anteriores en la ruta de planes.`);
+        }
+        if (guardadas.length < pendientes.length) {
+          addNotification('error', `No se pudieron respaldar ${pendientes.length - guardadas.length} plan(es) en la ruta de planes (ver consola).`);
+        }
+      } catch (error) {
+        // Si no se pudo ni listar la carpeta (p. ej. carpeta compartida caída), el aviso ya lo dio el efecto
+        // de arriba; el respaldo se reintenta en el próximo montaje.
+        console.warn('Respaldo de planes a archivo omitido:', (error as Error).message);
+      }
+    })();
+  }, [displayMode, nombreGrupoPlanes, snapshotsDesdeRestriccion, addNotification]);
+
+  useEffect(() => {
+    if (displayMode !== 'plan' || !nombreGrupoPlanes) return;
+    const porCargar = selectedDates.filter(f => planesArchivoFechas.includes(f) && !planesArchivoSolicitadosRef.current.has(f));
+    porCargar.forEach(fecha => {
+      planesArchivoSolicitadosRef.current.add(fecha);
+      planesArchivosService.obtener<PlanDiarioSnapshot>(fecha, nombreGrupoPlanes)
+        .then(snapshot => {
+          if (snapshot?.fecha) setPlanesArchivoSnapshots(prev => new Map(prev).set(fecha, snapshot));
+        })
+        .catch(error => {
+          planesArchivoSolicitadosRef.current.delete(fecha);
+          console.warn(`No se pudo leer el plan ${fecha} desde archivo:`, (error as Error).message);
+          if (!esRutaPlanesNoDisponible(error)) addNotification('error', `No se pudo leer el plan del ${fecha}: ${(error as Error).message}`);
+        });
+    });
+  }, [selectedDates, planesArchivoFechas, displayMode, nombreGrupoPlanes, addNotification]);
+
+  // El .txt tiene prioridad; la Restriccion queda como respaldo para fechas aún no leídas/respaldadas.
+  const planDiarioSnapshotsByDate = useMemo(() => {
+    const map = new Map(snapshotsDesdeRestriccion);
+    planesArchivoSnapshots.forEach((snapshot, fecha) => map.set(fecha, snapshot));
+    return map;
+  }, [snapshotsDesdeRestriccion, planesArchivoSnapshots]);
 
   // Capacidad diaria de referencia para "DÍAS CARGA" en CAPACIDAD CONSOLIDADA (TOTAL SISTEMA): promedio
   // de la capacidad total (suma de horas disponibles de todas las mesas) de los Planes Diarios ya
@@ -1152,20 +1377,9 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   }, [structuralFilteredOrders, tiemposMap]);
 
   const statusSummary = useMemo(() => {
-    const getTargetDateStr = () => {
-      const today = new Date();
-      let daysAdded = 0;
-      let result = new Date(today);
-      while (daysAdded < 3) {
-        result.setDate(result.getDate() + 1);
-        const day = result.getDay();
-        if (day !== 0 && day !== 6) daysAdded++;
-      }
-      return result.toISOString().split('T')[0];
-    };
-
-    const todayStr = new Date().toISOString().split('T')[0];
-    const targetPlanningDateStr = getTargetDateStr();
+    const todayStr = fechaLocalKey(new Date());
+    const targetPlanningDateStr = fechaObjetivoPlan
+      ?? fechaLocalKey(addBusinessDays(new Date(), 3, new Set(feriadosNacionales(new Date().getFullYear()))));
 
     let pastCant = 0, pastHours = 0;
     let todayCant = 0, todayHours = 0;
@@ -1192,32 +1406,27 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
     });
 
     return { pastCant, pastHours, todayCant, todayHours, futureCant, futureHours };
-  }, [structuralFilteredOrders, tiemposMap]);
+  }, [structuralFilteredOrders, tiemposMap, fechaObjetivoPlan]);
 
   const uniqueDates = useMemo(() => {
     const dates = new Set(structuralFilteredOrders.map(order => order.FECHA));
+    // En "PLAN" también se ofrecen las fechas con plan guardado en archivo (aunque ya no tengan órdenes)
+    if (displayMode === 'plan') planesArchivoFechas.forEach(f => dates.add(f));
     return Array.from(dates).sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
-  }, [structuralFilteredOrders]);
+  }, [structuralFilteredOrders, displayMode, planesArchivoFechas]);
 
   useEffect(() => {
-    if (!hasSetDefaultDate && uniqueDates.length > 0 && displayMode === 'plan') {
-      const getTargetDate = () => {
-        const today = new Date();
-        let daysAdded = 0;
-        let result = new Date(today);
-        while (daysAdded < 3) {
-          result.setDate(result.getDate() + 1);
-          const day = result.getDay();
-          if (day !== 0 && day !== 6) daysAdded++;
-        }
-        return result.toISOString().split('T')[0];
-      };
-
-      const target = getTargetDate();
-      setSelectedDates([target]);
+    if (!hasSetDefaultDate && uniqueDates.length > 0 && displayMode === 'plan' && fechaObjetivoPlan) {
+      // Solo se preselecciona una fecha que exista en la lista; si la fecha objetivo no tiene órdenes ni plan,
+      // la siguiente fecha disponible (o ninguna = todas).
+      const disponibles = [...uniqueDates].sort();
+      const target = disponibles.includes(fechaObjetivoPlan)
+        ? fechaObjetivoPlan
+        : disponibles.find(f => f > fechaObjetivoPlan);
+      setSelectedDates(target ? [target] : []);
       setHasSetDefaultDate(true);
     }
-  }, [uniqueDates, hasSetDefaultDate, displayMode]);
+  }, [uniqueDates, hasSetDefaultDate, displayMode, fechaObjetivoPlan]);
 
   const filteredOrders = useMemo(() => {
     return structuralFilteredOrders.filter(order => {
@@ -1343,7 +1552,12 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
   // costo que "Calcular Explosión" de más abajo). Cachea el Stock Actual (Cubo de Inventarios) tras la
   // primera vez que se calcula.
   const [materialStockActualMap, setMaterialStockActualMap] = useState<Map<string, number> | null>(null);
-  const [insumoStockState, setInsumoStockState] = useState<{ items: InsumoRiesgoItem[]; detalleMap: Map<string, InsumoOrdenDetalle[]>; loading: boolean; calculatedAt: string | null }>({ items: [], detalleMap: new Map(), loading: false, calculatedAt: null });
+  const [insumoStockState, setInsumoStockState] = useState<{ items: InsumoRiesgoItem[]; detalleMap: Map<string, InsumoOrdenDetalle[]>; loading: boolean; calculatedAt: string | null; fechaLimite: string | null }>({ items: [], detalleMap: new Map(), loading: false, calculatedAt: null, fechaLimite: null });
+  // Fecha límite elegida para el Riesgo de Stock de Insumos (pedido del usuario 2026-10-21): se calcula con
+  // TODAS las órdenes pendientes con FECHA hasta esta fecha inclusive — misma mecánica de siempre: las de
+  // antes de hoy son "consumo pasado" (se restan del Stock Actual) y las de hoy hasta la fecha elegida son
+  // la demanda. Por defecto hoy + 13 días (la ventana fija de 14 días que existía antes).
+  const [fechaLimiteRiesgo, setFechaLimiteRiesgo] = useState<string>(() => fechaLimiteRiesgoPorDefecto());
   // "GENERAR INFORME DE RIESGO": un solo botón/modal que detalla TODOS los insumos en riesgo calculados y,
   // para cada uno, las órdenes afectadas — no uno por insumo (a pedido explícito del usuario, 2026-09-08).
   const [informeRiesgoOpen, setInformeRiesgoOpen] = useState(false);
@@ -1379,22 +1593,28 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
     return stockActualMap;
   };
 
+  // Fechas disponibles para el Riesgo de Stock de Insumos: las FECHA de las órdenes con cantidad pendiente,
+  // más la fecha por defecto (hoy + 13 días), de la más próxima a la más lejana.
+  const opcionesFechaRiesgo = useMemo(() => {
+    const fechas = new Set<string>([fechaLimiteRiesgoPorDefecto()]);
+    structuralFilteredOrders.forEach(o => {
+      const fecha = String(o.FECHA || '').trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(fecha) && (Number(o.CANTPENDIENTE) || 0) > 0) fechas.add(fecha);
+    });
+    return Array.from(fechas).sort();
+  }, [structuralFilteredOrders]);
+
   // Kardex: Disponible Real = Stock Actual - Consumo de Órdenes Pasadas Pendientes (sin Producción
   // Propia Pendiente — Telas/Cascos son insumos comprados, no se fabrican en Muebles, mismo criterio ya
-  // establecido en "Plan Táctico (Alpha)"). Riesgo cuando Cantidad Neta Requerida (Necesario de la
-  // ventana de INSUMO_VENTANA_DIAS días - Disponible Real) > 0.
+  // establecido en "Plan Táctico (Alpha)"). Riesgo cuando Cantidad Neta Requerida (Necesario de hoy hasta
+  // la fecha elegida en "Calcular hasta" - Disponible Real) > 0.
   const handleCalcularRiesgoInsumos = async () => {
     setInsumoStockState(prev => ({ ...prev, loading: true }));
     try {
       const stockMap = await ensureStockMap();
 
-      const todayKey = new Date().toISOString().split('T')[0];
-      const ventanaKeys = new Set<string>();
-      for (let i = 0; i < INSUMO_VENTANA_DIAS; i++) {
-        const d = new Date();
-        d.setDate(d.getDate() + i);
-        ventanaKeys.add(d.toISOString().split('T')[0]);
-      }
+      const todayKey = fechaLocalKey(new Date());
+      const fechaLimite = fechaLimiteRiesgo;
 
       const demandMap = new Map<string, number>();
       const pastDemandMap = new Map<string, number>();
@@ -1410,7 +1630,8 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
         const pendiente = Number(o.CANTPENDIENTE) || 0;
         if (pendiente <= 0) return;
         const material = normalizeMaterialCode(o.MATERIAL);
-        if (ventanaKeys.has(fecha)) {
+        if (fecha > fechaLimite) return; // solo órdenes hasta la fecha elegida (inclusive)
+        if (fecha >= todayKey) {
           demandMap.set(material, (demandMap.get(material) || 0) + pendiente);
           if (!ordersByMaterialFuturo.has(material)) ordersByMaterialFuturo.set(material, []);
           ordersByMaterialFuturo.get(material)!.push(o);
@@ -1423,8 +1644,8 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
 
       const uniqueMaterials = Array.from(new Set([...demandMap.keys(), ...pastDemandMap.keys()]));
       if (uniqueMaterials.length === 0) {
-        setInsumoStockState({ items: [], detalleMap: new Map(), loading: false, calculatedAt: new Date().toLocaleString('es-EC') });
-        addNotification('info', `No hay órdenes pendientes en la ventana de ${INSUMO_VENTANA_DIAS} días ni en el histórico pasado.`);
+        setInsumoStockState({ items: [], detalleMap: new Map(), loading: false, calculatedAt: new Date().toLocaleString('es-EC'), fechaLimite });
+        addNotification('info', `No hay órdenes pendientes hasta el ${fechaKeyLegible(fechaLimite)}.`);
         return;
       }
 
@@ -1475,10 +1696,11 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
               const pedido = String(o.PEDIDO || '').trim();
               detalleList.push({
                 source: o._isPrevisional ? 'Previsional' : 'Fert',
-                id: String(o._displayId || ''),
+                // Orden y Material sin ceros a la izquierda en ambos informes (pedido del usuario 2026-10-21)
+                id: sinCerosIzquierda(o._displayId),
                 pedido,
                 posicion: String(o.POSICION || '').trim(),
-                material: String(o.MATERIAL || '').trim(),
+                material: sinCerosIzquierda(o.MATERIAL),
                 nombre: String(o.NOMBRE || '').trim(),
                 cliente: clienteMap.get(pedido) || clienteMap.get(pedido.replace(/^0+/, '')) || (pedido ? 'Cliente no identificado' : 'Sin Pedido (MTS)'),
                 fecha: String(o.FECHA || '').trim(),
@@ -1504,9 +1726,9 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
         detalleMap.get(item.componente)?.sort((a, b) => a.fecha.localeCompare(b.fecha));
       });
 
-      setInsumoStockState({ items: results, detalleMap, loading: false, calculatedAt: new Date().toLocaleString('es-EC') });
+      setInsumoStockState({ items: results, detalleMap, loading: false, calculatedAt: new Date().toLocaleString('es-EC'), fechaLimite });
       if (results.length === 0) {
-        addNotification('success', `Sin riesgo de faltante de insumos detectado para hoy y los próximos ${INSUMO_VENTANA_DIAS} días.`);
+        addNotification('success', `Sin riesgo de faltante de insumos detectado hasta el ${fechaKeyLegible(fechaLimite)}.`);
       } else {
         addNotification('warning', `${results.length} insumo(s) con riesgo de faltante detectado(s).`);
       }
@@ -1993,6 +2215,22 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
               <div className="border-t border-indigo-200 pt-3 space-y-2">
                 <div className="flex items-center justify-between gap-3 flex-wrap">
                   <p className="text-xs font-bold text-gray-700 uppercase tracking-tight">Riesgo de Stock — Insumos (Telas, Cascos, Cartón, Herrajes, etc.)</p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                  <label className="text-[11px] font-semibold text-gray-600">Calcular hasta:</label>
+                  <Select value={fechaLimiteRiesgo} onValueChange={setFechaLimiteRiesgo}>
+                    <SelectTrigger className="h-7 w-[230px] text-xs bg-white">
+                      <SelectValue placeholder="Seleccione una fecha" />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72">
+                      {opcionesFechaRiesgo.map(fecha => {
+                        const hoyKey = fechaLocalKey(new Date());
+                        const etiqueta = fecha === fechaLimiteRiesgoPorDefecto()
+                          ? `${fechaKeyLegible(fecha)} (predeterminado, 14 días)`
+                          : fecha === hoyKey ? `${fechaKeyLegible(fecha)} (hoy)` : fecha < hoyKey ? `${fechaKeyLegible(fecha)} (pasada)` : fechaKeyLegible(fecha);
+                        return <SelectItem key={fecha} value={fecha} className="text-xs">{etiqueta}</SelectItem>;
+                      })}
+                    </SelectContent>
+                  </Select>
                   <Button
                     onClick={handleCalcularRiesgoInsumos}
                     disabled={insumoStockState.loading}
@@ -2002,16 +2240,17 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
                     {insumoStockState.loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PackageSearch className="w-3.5 h-3.5" />}
                     {insumoStockState.calculatedAt ? 'Recalcular' : 'Calcular Riesgo de Insumos'}
                   </Button>
+                  </div>
                 </div>
                 {insumoStockState.calculatedAt === null ? (
                   <p className="text-[11px] text-gray-500">
-                    Calcula el riesgo de faltante de insumos comprados (Telas, Cascos, Cartón, Certificados, Etiquetas, Fundas, Garruchas, Herrajes, Niveladores, Padding, Patas, Placas, Plástico, Resbalones, Rodelas, Stickers, Tacos, Tornillos) para hoy y los próximos {INSUMO_VENTANA_DIAS} días, tomando el Stock Actual menos el consumo de todas las órdenes pasadas pendientes (explota materiales de las órdenes con demanda — puede tardar unos segundos).
+                    Calcula el riesgo de faltante de insumos comprados (Telas, Cascos, Cartón, Certificados, Etiquetas, Fundas, Garruchas, Herrajes, Niveladores, Padding, Patas, Placas, Plástico, Resbalones, Rodelas, Stickers, Tacos, Tornillos) de todas las órdenes pendientes hasta la fecha elegida en "Calcular hasta" (por defecto hoy + 13 días), tomando el Stock Actual menos el consumo de todas las órdenes pasadas pendientes (explota materiales de las órdenes con demanda — puede tardar unos segundos).
                   </p>
                 ) : insumoStockState.items.length === 0 ? (
                   <div className="flex items-center gap-2 text-emerald-700 bg-white/60 rounded-lg px-3 py-2">
                     <CheckCircle2 className="w-4 h-4 shrink-0" />
                     <p className="text-xs font-semibold">
-                      Sin riesgo de faltante de insumos para hoy y los próximos {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
+                      Sin riesgo de faltante de insumos hasta el {fechaKeyLegible(insumoStockState.fechaLimite ?? '')}. (calculado {insumoStockState.calculatedAt})
                     </p>
                   </div>
                 ) : (
@@ -2020,7 +2259,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
                       <div className="flex items-start gap-2">
                         <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                         <p className="text-xs font-semibold text-red-800">
-                          Hay {insumoStockState.items.length} insumo(s) con riesgo de faltante hoy o dentro de la ventana de {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
+                          Hay {insumoStockState.items.length} insumo(s) con riesgo de faltante hasta el {fechaKeyLegible(insumoStockState.fechaLimite ?? '')}. (calculado {insumoStockState.calculatedAt})
                         </p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
@@ -2431,7 +2670,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
               Informe de Riesgo de Insumos — {insumoStockState.items.length} insumo(s) en riesgo
             </DialogTitle>
             <DialogDescription>
-              Detalle, por cada insumo con riesgo de faltante, de las órdenes (Previsionales y Fert) que lo consumen — hoy o dentro de la ventana de {INSUMO_VENTANA_DIAS} días (demanda futura) o con consumo pasado pendiente. (calculado {insumoStockState.calculatedAt})
+              Detalle, por cada insumo con riesgo de faltante, de las órdenes (Previsionales y Fert) que lo consumen — de hoy hasta el {fechaKeyLegible(insumoStockState.fechaLimite ?? '')} (demanda) o con consumo pasado pendiente. (calculado {insumoStockState.calculatedAt})
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-6 overflow-y-auto flex-1 pr-1">
@@ -2450,7 +2689,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
                         <p className="text-sm font-bold text-gray-800">{item.stockActual !== null ? item.stockActual.toFixed(2) : '—'} {item.unidad}</p>
                       </div>
                       <div className="bg-white border border-gray-200 rounded-lg p-2 text-center">
-                        <p className="text-[10px] font-semibold text-gray-500 uppercase">Necesario ({INSUMO_VENTANA_DIAS} días)</p>
+                        <p className="text-[10px] font-semibold text-gray-500 uppercase">Necesario (hasta {fechaKeyLegible(insumoStockState.fechaLimite ?? '')})</p>
                         <p className="text-sm font-bold text-gray-800">{item.necesario.toFixed(2)} {item.unidad}</p>
                       </div>
                       <div className="bg-white border border-gray-200 rounded-lg p-2 text-center">
@@ -2536,7 +2775,7 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
             </DialogTitle>
             <DialogDescription>
               Pedidos con riesgo de retraso por falta de un insumo (Tela, Casco u otro comprado) para hoy o
-              dentro de los próximos {INSUMO_VENTANA_DIAS} días. (calculado {insumoStockState.calculatedAt})
+              hasta el {fechaKeyLegible(insumoStockState.fechaLimite ?? '')}. (calculado {insumoStockState.calculatedAt})
             </DialogDescription>
           </DialogHeader>
           <div className="overflow-auto flex-1 pr-1">

@@ -3,12 +3,15 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef, useImperativeHandle } from 'react';
 import * as XLSX from 'xlsx';
 import { serviciosService } from '@/services/servicios.service';
+import { formatMaterialSap, SAP_ESTATUS_REG_ORD_CARGADO, usuarioProcesoSap } from '@/lib/sap-material';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
+import { cargarDiasNoLaborables, feriadosNacionales } from '@/lib/dias-laborables';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { restriccionService } from '@/services/restriccion.service';
+import { planesArchivosService, getNombreGrupoPlanes, esRutaPlanesNoDisponible } from '@/services/planesArchivos.service';
 import { useAppContext } from '@/context/AppProvider';
-import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble, Send } from 'lucide-react';
+import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble, Send, SlidersHorizontal, Sofa } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,10 +25,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import type { Restriccion, Grupo, PlanGrupo, DetalleTactico, SolicitudProduccionHB } from '@/types/interfaces';
+import type { TiempoManualMueble } from '@/lib/tiempos-manuales-muebles';
+import { MaterialesSinTiempoMueblesPanel, type MaterialSinTiempoBackend } from './MaterialesSinTiempoMueblesPanel';
 
 interface ProvisionalOrdersAlphaTabProps {
   restricciones: Restriccion[];
   tiemposData?: any[];
+  // TEMPORAL — tiempos manuales de materiales sin tiempo en el backend (ver @/lib/tiempos-manuales-muebles)
+  tiemposManualesMap?: Map<string, TiempoManualMueble>;
+  onGuardarTiempoManual?: (material: string, descripcion: string, minutos: number) => Promise<void>;
 }
 
 // Handle imperativo expuesto al padre (TacticalPlanMueblesSection) para que otras pestañas hermanas
@@ -204,6 +212,10 @@ const formatSapTime = (date: Date): string => {
 
 // Columnas editables de la pantalla de revisión de "ENVIAR A SAP" (ver handleOpenSapPreview) — una
 // entrada por campo de SolicitudProduccionHB que tiene sentido revisar/corregir antes de enviar.
+// La clave interna de cada fila de "ENVIAR A SAP" es "<origen>-<orden>-<material>[-<posición>]"; en
+// pantalla solo se muestra el número de la orden (p. ej. 0145560978), pedido del usuario 2026-10-19.
+const numeroOrdenDeClave = (orderKey: string): string => orderKey.split('-')[1] || orderKey;
+
 const SAP_PREVIEW_COLUMNS: { field: keyof SolicitudProduccionHB; label: string; type?: 'number'; width: string }[] = [
     { field: 'Mandante', label: 'Mandante', width: 'w-16' },
     { field: 'CodigoOrdenExterna', label: 'Cód. Orden Externa', width: 'w-28' },
@@ -245,6 +257,20 @@ const toDateKey = (date: Date): string => {
     const m = String(date.getMonth() + 1).padStart(2, '0');
     const d = String(date.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
+};
+
+// Nombre de los feriados nacionales FIJOS (Código del Trabajo, art. 65) por "MM-DD", para etiquetar en la
+// Ventana de Fabricación los que agrega la línea base de @/lib/dias-laborables cuando la API externa no los
+// trae en esa fecha.
+const NOMBRE_FERIADO_NACIONAL_POR_FECHA: Record<string, string> = {
+    '01-01': 'Año Nuevo',
+    '05-01': 'Día del Trabajo',
+    '05-24': 'Batalla del Pichincha',
+    '08-10': 'Primer Grito de Independencia',
+    '10-09': 'Independencia de Guayaquil',
+    '11-02': 'Día de los Difuntos',
+    '11-03': 'Independencia de Cuenca',
+    '12-25': 'Navidad',
 };
 
 // Suma N días laborables (omite sábado y domingo) a una fecha
@@ -396,6 +422,18 @@ const resolveSectorReparacion = (nombre: string): string | null => {
 // "Habilitar para Camas"). Hoy aplica solo al plastificado ("MUEBLE DE REPARACIÓN PLAST.").
 const REPARACION_APOYO_CAMAS_KEYWORDS = ['PLAST'];
 
+// Sofás "Spring"/"Foam" (pedido del usuario 2026-10-21): producto terminado cuyo nombre contiene la palabra
+// SOFÁ/SOFA y además SPRING o FOAM — p. ej. "SOFÁ SPRING 101 ELEMENTA AGUA", "SOFÁ FOAM 135 ELEMENTA TRIGO",
+// "SOFÁ RESIFLEX SPRING 101", "SOFÁ CAMA FOAM BOX 112". Exige "SOFÁ" para NO incluir semielaborados que
+// también llevan SPRING/FOAM en el nombre (forros, tapas, láminas, paneles, estructuras pegadas). Se
+// verificó con las órdenes reales: 28 materiales, todos sofás. (No se usa \b: no reconoce la "Á" como letra.)
+const SOFA_PALABRA_REGEX = /(^|[^A-ZÁÉÍÓÚÑ])SOF[AÁ]([^A-ZÁÉÍÓÚÑ]|$)/;
+const SPRING_FOAM_REGEX = /SPRING|FOAM/;
+const esSofaSpringFoam = (nombre: string): boolean => {
+    const n = String(nombre || '').toUpperCase();
+    return SOFA_PALABRA_REGEX.test(n) && SPRING_FOAM_REGEX.test(n);
+};
+
 const esReparacionApoyoCamas = (nombre: string): boolean => {
     const descripcion = nombre.toUpperCase().trim();
     if (!REPARACION_PREFIX_REGEX.test(descripcion)) return false;
@@ -529,6 +567,20 @@ interface PlanningResult {
     // comporte como "Guardar Plan Final" (genera el PlanGrupo PFSM con el Detalle de Planificación
     // Ejecutada, sin volver a guardar P1.3/P1.5/P2).
     planningStepResult: 1 | 2 | 3;
+    // "Calibrar Capacidad" (Paso 2/3, solo con Déficit real): candidatas a mover para acercar la
+    // capacidad utilizada al 100% — NO incluye lo mandatorio (fecha propia = objetivo dentro de la
+    // ventana de prioridad) ni "movableOrders" (esas ya tienen su propio checkbox de simulación en vivo
+    // en "Órdenes que se Pueden Mover"). Ordenadas por fecha de entrega descendente (la más lejana
+    // primero = la más segura de mover sin incumplir una entrega).
+    calibrationCandidates: UnifiedOrder[];
+    // Subconjunto (prefijo) de calibrationCandidates recomendado para mover, calculado para que las horas
+    // restantes queden lo más cerca posible del 100% de la Capacidad Disponible — pedido explícito del
+    // usuario 2026-09-29: si hay que elegir entre quedar justo por debajo (ej. 99%) o justo por encima
+    // (ej. 101%) del 100%, se prefiere quedar por encima. Claves `${source}-${id}-${material}`.
+    calibrationRecommendedKeys: string[];
+    // Órdenes ya excluidas de immediateOrders en ESTE cálculo porque una calibración anterior (botón
+    // "Calibrar Capacidad" de una ejecución previa del Paso 2/3) las confirmó como "a mover".
+    calibratedOutOrders: UnifiedOrder[];
 }
 
 // Pedido de gran volumen (más de MTS_SEGREGATION_LIMIT unidades en una sola línea de un cliente/pedido)
@@ -648,6 +700,49 @@ function esDescripcionLaminaCilindrica(descripcion: string): boolean {
     return descripcion.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').startsWith('LAMINA CILINDRICA');
 }
 
+// Sufijos con los que se guarda el Plan de Grupo "P2" (Explosión de Materiales — Semielaborados de
+// Espuma), separado en DOS PlanGrupo independientes en vez de uno solo — pedido explícito del usuario
+// 2026-09-29, mismo corte que ya usa la pantalla (foamExplosionLaminaCilindrica/foamExplosionOtrasEspumas
+// más abajo) para poder revisar/gestionar cada grupo por separado en "Plan Grupo Recuperado" y afines.
+// Cortos a propósito ("P2 - LAMINA"/"P2 - ESPUMA", no los nombres completos "LAMINA CILINDRICA"/"ESPUMA
+// MUEBLES"): el campo `valor` del backend (PlanGrupo) trunca/rechaza con "String or binary data would be
+// truncated" a partir de cierto largo (confirmado 2026-09-30 — "Plan Táctico - Centro 1000 - P2 - LAMINA
+// CILINDRICA", 51 caracteres, ya lo rompía). Se usa el mismo largo (~11 caracteres de sufijo) que ya
+// funciona en producción para el PlanGrupo de RESPUESTA de "Corte y Laminado" (ej. "P2 - Rollos",
+// "P3 - Espuma", ver comentario de extractPlanSuffix en PlanGrupoRecuperadoTab.tsx).
+const P2_LAMINA_SUFIJO = 'P2 - LAMINA';
+const P2_ESPUMA_SUFIJO = 'P2 - ESPUMA';
+// Reconoce CUALQUIER PlanGrupo de espuma: el "P2" plano de antes de este cambio, los sufijos cortos
+// actuales, y los nombres largos que se intentaron guardar brevemente el 2026-09-29 (por si alguno
+// alcanzó a guardarse antes de detectar el límite de longitud del backend). Usado en expectedDateKeyFor
+// — todos necesitan la fecha especial de computeFechaP2() en vez de planningTargetDate.
+const P2_VALOR_REGEX = /P2(?:\s*-\s*(?:LAMINA(?:\s+CILINDRICA)?|ESPUMA(?:\s+MUEBLES)?))?\s*$/i;
+// Igual que P2_VALOR_REGEX pero combinado con los demás sufijos de PlanGrupo (P1.3/P1.5/PFSM) — usado
+// en handleChooseTables/handleDeleteExistingPlan para detectar y limpiar TODOS los planes hermanos de
+// una fecha, incluyendo ambos sub-planes de espuma.
+const PLAN_GRUPO_SUFIJOS_REGEX = /P1\.3\s*$|P1\.5\s*$|P2(?:\s*-\s*(?:LAMINA(?:\s+CILINDRICA)?|ESPUMA(?:\s+MUEBLES)?))?\s*$|PFSM\s*$|PFES\s*$/i;
+
+// "ORDENES PREVISIONALES DE ESTRUCTURAS" + "ENVIAR A SAP" de estructuras (pedido del usuario 2026-11-09):
+// Órdenes Previsionales del Responsable de Control de Producción '033' (ESTRUCTURA ...) con fecha inicio
+// extrema = hoy + 1 día hábil, que se crean en SAP con fecha hoy + 2 días hábiles, todas en la única hoja
+// de ruta HR-TAP00, puesto de trabajo PEGAD009 (sin distribución de mesas). Filtro: responsable '033' Y
+// descripción que empieza con "ESTRUCTURA". Mismo flujo que "ENVIAR A SAP" de Taller de Corte:
+// CodigoOrdenExterna = codigo_detalle_tactico de un PlanGrupo propio "PFES" (Plan Final de Estructuras),
+// separado del PFSM para no mezclar estructuras en lo que leen otros módulos (Ensamblado/PFF).
+const RESP_CTRL_PROD_ESTRUCTURAS = '033';
+const PUESTO_TRABAJO_ESTRUCTURAS = 'PEGAD009'; // confirmado por el usuario 2026-11-09 (hoja de ruta HR-TAP00)
+
+interface OrdenPrevisionalEstructura {
+    id: string;
+    material: string;
+    nombre: string;
+    cantidad: number;
+    fechaInicioExtrema: string; // "YYYY-MM-DD"
+    pedido: string;
+}
+
+const ordenEstructuraKey = (o: OrdenPrevisionalEstructura): string => `Previsional-${o.id}-${o.material}`;
+
 // Semielaborado de espuma (Lamina/Espuma) requerido, obtenido de la Explosión de Materiales
 interface FoamComponentNeed {
     componente: string;
@@ -727,7 +822,7 @@ const LOAD_STAGE_DEFS: Array<Pick<LoadStage, 'key' | 'label'>> = [
     { key: 'alpha', label: 'Órdenes Previsionales Alpha' },
 ];
 
-export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlphaTabHandle, ProvisionalOrdersAlphaTabProps>(({ restricciones, tiemposData = [] }, ref) => {
+export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlphaTabHandle, ProvisionalOrdersAlphaTabProps>(({ restricciones, tiemposData = [], tiemposManualesMap, onGuardarTiempoManual }, ref) => {
     const { addNotification } = useAppContext();
     const [allRawData, setAllRawData] = useState<any[]>([]); 
     const [inventoryMap, setInventoryMap] = useState<Map<string, number>>(new Map());
@@ -761,6 +856,11 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // CAMAS_OVERFLOW_MESA_IDS = [12, 13]). Configurable por el usuario con el botón "Habilitar para
     // Camas" junto a cada mesa de Línea 2, en vez de estar fijo en el código.
     const [camasOverflowMesaIds, setCamasOverflowMesaIds] = useState<Set<number>>(new Set(CAMAS_OVERFLOW_MESA_IDS));
+    // Mesas de Línea 1 (Camas, mesas 1–7) habilitadas con "HABILITAR SPRING/FOAM" para fabricar también
+    // sofás Spring/Foam (ver esSofaSpringFoam). Simétrico a camasOverflowMesaIds: válvula de alivio — un
+    // sofá Spring/Foam va primero a sus mesas de Muebles y solo usa estas mesas si en ninguna de Muebles
+    // cabe completo, para no quitarle capacidad a las camas sin necesidad.
+    const [springFoamMesaIds, setSpringFoamMesaIds] = useState<Set<number>>(new Set());
 
     // Estado para Horario de Trabajo seleccionado
     const [selectedShift, setSelectedShift] = useState<string>(SHIFT_SCHEDULES[0].id);
@@ -778,6 +878,16 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // Estado para Órdenes Fert, Tiempos de Ensamblado (global) y Sectores de Inventario, usados en la Ejecución de Planificación
     const [fertRawData, setFertRawData] = useState<any[]>([]);
     const [globalTiemposMap, setGlobalTiemposMap] = useState<Map<string, number>>(new Map());
+    // Tiempos usados para planificar: los del backend (globalTiemposMap) + los manuales TEMPORALES solo
+    // para materiales que el backend no trae (el backend siempre gana; ver @/lib/tiempos-manuales-muebles)
+    const effectiveTiemposMap = useMemo(() => {
+        if (!tiemposManualesMap || tiemposManualesMap.size === 0) return globalTiemposMap;
+        const map = new Map(globalTiemposMap);
+        tiemposManualesMap.forEach((t, material) => {
+            if (!map.has(material)) map.set(material, t.minutos);
+        });
+        return map;
+    }, [globalTiemposMap, tiemposManualesMap]);
     const [materialSectorMap, setMaterialSectorMap] = useState<Map<string, string>>(new Map());
     // Responsable de Control de Producción (RespCtrlProd) por Material, usado para clasificar semielaborados (ej. Forros)
     const [materialRespCtrlProdMap, setMaterialRespCtrlProdMap] = useState<Map<string, string>>(new Map());
@@ -825,6 +935,33 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         });
     };
 
+    // "Calibrar Capacidad" (Paso 2/3): selección editable (checkboxes) de la tabla de recomendación,
+    // arranca con la recomendación automática (calibrationRecommendedKeys) cada vez que hay una nueva
+    // planificación. Distinto de `calibratedMovedIds`: esto es solo el borrador visible en pantalla.
+    const [calibrationChecked, setCalibrationChecked] = useState<Set<string>>(new Set());
+    // Claves de órdenes que el usuario CONFIRMÓ mover con el botón "Calibrar Capacidad". A diferencia de
+    // `uncheckedMovableIds` (que se reinicia en cada ejecución y solo afecta el indicador en vivo), esta
+    // selección se aplica DE VERDAD (excluye las órdenes de immediateOrders, no solo del indicador) la
+    // siguiente vez que se presione "PASO 2/3: Ejecutar Planificación Recalculada", y persiste entre
+    // rondas sucesivas hasta que el usuario inicie una "Planificación Nueva".
+    const [calibratedMovedIds, setCalibratedMovedIds] = useState<Set<string>>(new Set());
+
+    const toggleCalibrationChecked = (key: string) => {
+        setCalibrationChecked(prev => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    };
+
+    const handleApplyCalibration = () => {
+        if (!planningResult) return;
+        setCalibratedMovedIds(new Set(calibrationChecked));
+        const pasoLabel = planningStep === 3 ? 'PASO 3 PLANIFICACIÓN FINAL' : 'PASO 2: RECALCULAR PLANIFICACIÓN AJUSTADA';
+        addNotification('info', `Calibración guardada: ${calibrationChecked.size} orden(es) se excluirán del cálculo real la próxima vez que presione "${pasoLabel}".`);
+    };
+
     // "Bloqueadas por Insumo": marca/desmarca una orden para forzar su inclusión pese a que su material
     // padre necesite un insumo que todavía no llega. No recalcula sola — el usuario debe presionar
     // "Forzar Inclusión y Recalcular" para que handleRunPlanning vuelva a correr con el nuevo criterio.
@@ -855,16 +992,24 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         const checkedHoras = planningResult.movableOrders.reduce((sum, o) => {
             return uncheckedMovableIds.has(movableOrderKey(o)) ? sum : sum + o.horas;
         }, 0);
-        const liveTotalHoursRequired = requiredBaseline + checkedHoras;
+        // Horas de "Calibrar Capacidad" marcadas en el borrador (aún sin confirmar con el botón): ya están
+        // incluidas en requiredBaseline (son parte de immediateOrders), así que se restan para que el
+        // usuario vea de inmediato qué tan cerca del 100% quedaría antes de presionar "Calibrar Capacidad".
+        const checkedCalibrationHoras = planningResult.calibrationCandidates.reduce((sum, o) => {
+            return calibrationChecked.has(movableOrderKey(o)) ? sum + o.horas : sum;
+        }, 0);
+        const liveTotalHoursRequired = requiredBaseline + checkedHoras - checkedCalibrationHoras;
         return {
             liveTotalHoursRequired,
             liveDeficit: planningResult.totalCapacityAvailable - liveTotalHoursRequired,
         };
-    }, [planningResult, uncheckedMovableIds]);
+    }, [planningResult, uncheckedMovableIds, calibrationChecked]);
 
     // Estado para la Distribución de Mesas (Diagrama de Gantt de capacidad)
     const [mesaDistribution, setMesaDistribution] = useState<Map<number, MesaDistributionEntry> | null>(null);
-    const [unassignedDistributionOrders, setUnassignedDistributionOrders] = useState<UnifiedOrder[]>([]);
+    // Órdenes que la Distribución de Mesas no pudo colocar: 'sin-mesa' = ninguna mesa escogida acepta su
+    // Sector/Tamaño; 'sin-capacidad' = hay mesas compatibles pero en ninguna cabe completa sin pasar del 100%.
+    const [unassignedDistributionOrders, setUnassignedDistributionOrders] = useState<{ order: UnifiedOrder; motivo: 'sin-mesa' | 'sin-capacidad' }[]>([]);
 
     // Estado para la Explosión de Materiales (semielaborados de espuma: Lamina/Espuma)
     const [foamExplosionResults, setFoamExplosionResults] = useState<FoamComponentNeed[]>([]);
@@ -921,6 +1066,13 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // pierde el estado de React, ya que DetalleTactico no guarda pedido/posición, solo material). Mapa
     // orderKey (`${source}-${id}-${material}`) -> codigo_detalle_tactico, poblado en handleSavePlanAndDetails.
     const [pfsmDetalleTacticoMap, setPfsmDetalleTacticoMap] = useState<Map<string, number>>(new Map());
+    // PFES (Plan Final de Estructuras): codigo_plan_grupo + codigo_detalle_tactico por orden de estructura
+    // (clave ordenEstructuraKey), creado al abrir "ENVIAR A SAP" de estructuras — ver handleOpenSapPreviewEstructuras.
+    const [pfesCodigoPlanGrupo, setPfesCodigoPlanGrupo] = useState<number | null>(null);
+    const [pfesDetalleTacticoMap, setPfesDetalleTacticoMap] = useState<Map<string, number>>(new Map());
+    const [isPreparingSapEstructuras, setIsPreparingSapEstructuras] = useState(false);
+    // Qué está mostrando la pantalla editable de "ENVIAR A SAP" (comparte diálogo y envío con Muebles)
+    const [sapPreviewModo, setSapPreviewModo] = useState<'muebles' | 'estructuras'>('muebles');
     // Pantalla editable de "ENVIAR A SAP": una fila por orden con la solicitud que se enviaría, para que
     // el usuario la revise y corrija ANTES de enviar nada (pedido explícito del usuario 2026-09-15) — ver
     // handleOpenSapPreview (la arma) y updateSapPreviewField (la edita).
@@ -1004,6 +1156,53 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             return true;
         });
     }, [allRawData, validRespCodes, forbiddenMachinesMap]);
+
+    // Suma N días hábiles a hoy: sin fines de semana ni feriados de la Ventana de Fabricación (holidaysMap),
+    // salvo los días que el usuario activó ahí. A diferencia del addBusinessDays de módulo (solo fines de semana).
+    const sumarDiasHabilesDesdeHoy = useCallback((dias: number): Date => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        let restantes = dias;
+        let guardia = 0;
+        while (restantes > 0 && guardia < 60) {
+            d.setDate(d.getDate() + 1);
+            guardia++;
+            const key = toDateKey(d);
+            const finDeSemana = d.getDay() === 0 || d.getDay() === 6;
+            const habil = activatedSpecialDays.has(key) || (!finDeSemana && !holidaysMap.has(key));
+            if (habil) restantes--;
+        }
+        return d;
+    }, [holidaysMap, activatedSpecialDays]);
+
+    const fechaInicioExtremaEstructuras = useMemo(() => toDateKey(sumarDiasHabilesDesdeHoy(1)), [sumarDiasHabilesDesdeHoy]);
+    const fechaCreacionEstructuras = useMemo(() => sumarDiasHabilesDesdeHoy(2), [sumarDiasHabilesDesdeHoy]);
+
+    // "ORDENES PREVISIONALES DE ESTRUCTURAS": Previsionales RespCtrlProd '033' del centro de Muebles con
+    // fecha inicio extrema (FECHAINICIO) = hoy + 1 día hábil. Solo informativo + fuente de "ENVIAR A SAP".
+    const ordenesPrevisionalesEstructuras = useMemo<OrdenPrevisionalEstructura[]>(() => {
+        const centro = String(mueblesGrupo?.centro || '1000').trim();
+        const result: OrdenPrevisionalEstructura[] = [];
+        allRawData.forEach(row => {
+            if (String(row.RESPCONTROLPROD || '').trim() !== RESP_CTRL_PROD_ESTRUCTURAS) return;
+            if (!String(row.NOMBRE || '').trim().toUpperCase().startsWith('ESTRUCTURA')) return;
+            const rowCentro = String(row.Centro || row.CENTRO || '').trim();
+            if (rowCentro && rowCentro !== centro) return;
+            const fecha = String(row.FECHAINICIO || '').trim().slice(0, 10);
+            if (fecha !== fechaInicioExtremaEstructuras) return;
+            const cantidad = Number(row.CANTIDAD) || 0;
+            if (cantidad <= 0) return;
+            result.push({
+                id: String(row.ORDENPREVISIONAL || '').trim(),
+                material: normalizeMaterialCode(row.MATERIAL || row.CodMaterial || ''),
+                nombre: String(row.NOMBRE || '').trim(),
+                cantidad,
+                fechaInicioExtrema: fecha,
+                pedido: String(row.PEDIDOVENTAS || '').trim().replace(/^0+/, ''),
+            });
+        });
+        return result.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es') || a.id.localeCompare(b.id));
+    }, [allRawData, mueblesGrupo, fechaInicioExtremaEstructuras]);
 
     // Órdenes Fert filtradas por restricciones de Muebles
     const mueblesFertOrders = useMemo(() => {
@@ -1152,6 +1351,17 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 resumen,
             };
 
+            // Además de la Restriccion, el mismo snapshot se escribe como .txt en la carpeta compartida
+            // `ruta_planes` (<AAAA>\<Mes>\<Nombre del grupo>\<centro 1000>\<fecha>.txt) — fuente que lee "PLAN".
+            // Independiente del guardado en Restriccion: si uno falla, el otro igual se intenta.
+            const nombreGrupoPlanes = getNombreGrupoPlanes(restricciones as (Restriccion & { grupo?: Grupo })[]);
+            if (nombreGrupoPlanes) planesArchivosService.guardar(fecha, snapshot, nombreGrupoPlanes).catch(error => {
+                console.warn('No se pudo guardar el archivo .txt del Plan Diario:', (error as Error).message);
+                addNotification(esRutaPlanesNoDisponible(error) ? 'warning' : 'error', esRutaPlanesNoDisponible(error)
+                    ? `El plan (${fecha}) se guardó en el sistema, pero no en la carpeta compartida de planes porque no está disponible. Se respaldará automáticamente al abrir la pestaña "PLAN" cuando vuelva la conexión.`
+                    : `No se pudo guardar el archivo del plan (${fecha}) en la ruta de planes: ${(error as Error).message}`);
+            });
+
             const existente = planDiarioSnapshotIds.get(fecha);
             const payload: any = {
                 codigo_grupo: mueblesGrupo.codigo_grupo,
@@ -1221,7 +1431,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             const sectorSAP = materialSectorMap.get(material);
             if (esSectorAjenoAMuebles(sectorSAP)) return;
             const sector = sectorSAP ?? resolveSectorReparacion(nombre);
-            const tiempoUnitMin = globalTiemposMap.get(material) ?? 0;
+            const tiempoUnitMin = effectiveTiemposMap.get(material) ?? 0;
 
             // El Centro de ENTREGA (destino Quito/Guayaquil) es el que rige la ventana de prioridad,
             // no el Centro de fabricación (siempre 1000); si no hay pedido (MTS) o no se encuentra en
@@ -1278,7 +1488,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             const sectorSAP = materialSectorMap.get(material);
             if (esSectorAjenoAMuebles(sectorSAP)) return;
             const sector = sectorSAP ?? resolveSectorReparacion(nombre);
-            const tiempoUnitMin = globalTiemposMap.get(material) ?? 0;
+            const tiempoUnitMin = effectiveTiemposMap.get(material) ?? 0;
 
             const posicionFert = String(row.POSICION || '').trim();
             // El Centro de ENTREGA (destino Quito/Guayaquil) es el que rige la ventana de prioridad,
@@ -1334,10 +1544,44 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         });
 
         return { orders: result, sinFechaEntrega };
-    }, [mueblesProvisionalOrders, mueblesFertOrders, materialSectorMap, globalTiemposMap, deliveryDatesMap, deliveryDatesByPositionMap, deliveryCentroMap, deliveryCentroByPositionMap]);
+    }, [mueblesProvisionalOrders, mueblesFertOrders, materialSectorMap, effectiveTiemposMap, deliveryDatesMap, deliveryDatesByPositionMap, deliveryCentroMap, deliveryCentroByPositionMap]);
 
     const unifiedOrders = unifiedOrdersResult.orders;
     const ordersMissingDeliveryDate = unifiedOrdersResult.sinFechaEntrega;
+
+    // TEMPORAL — materiales de las órdenes vigentes SIN tiempo en el backend (con o sin tiempo manual),
+    // para el panel "Materiales sin tiempo en el backend". Solo se evalúa cuando el maestro de tiempos ya
+    // cargó (si no, todos parecerían sin tiempo durante la carga).
+    const materialesSinTiempoBackend = useMemo<MaterialSinTiempoBackend[]>(() => {
+        if (globalTiemposMap.size === 0) return [];
+        const acc = new Map<string, MaterialSinTiempoBackend>();
+        unifiedOrders.forEach(o => {
+            if (globalTiemposMap.has(o.material)) return;
+            const prev = acc.get(o.material);
+            if (!prev) {
+                acc.set(o.material, {
+                    material: o.material,
+                    nombre: o.nombre,
+                    ordenes: 1,
+                    unidades: o.cantidadTotal,
+                    fechaEntregaMasProxima: o.fechaEntrega,
+                    fechaEntregaMasProximaDate: o.fechaEntregaDate,
+                });
+                return;
+            }
+            prev.ordenes += 1;
+            prev.unidades += o.cantidadTotal;
+            if (o.fechaEntregaDate.getTime() < prev.fechaEntregaMasProximaDate.getTime()) {
+                prev.fechaEntregaMasProxima = o.fechaEntrega;
+                prev.fechaEntregaMasProximaDate = o.fechaEntregaDate;
+            }
+        });
+        return Array.from(acc.values());
+    }, [unifiedOrders, globalTiemposMap]);
+    const materialesSinTiempoPendientes = useMemo(
+        () => materialesSinTiempoBackend.filter(m => !tiemposManualesMap?.has(m.material)),
+        [materialesSinTiempoBackend, tiemposManualesMap]
+    );
 
     // 4. Carga de Feriados (Ecuador) para el cálculo de la ventana de días laborables
     useEffect(() => {
@@ -1348,9 +1592,33 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 start.setDate(start.getDate() + 1);
                 const end = new Date(start);
                 end.setDate(end.getDate() + PLANNING_LOOKAHEAD_DAYS);
-                const holidays = await ecuadorHolidaysService.getHolidaysForRange(start, end);
+                // Dos fuentes, combinadas (2026-10-28): la API externa de feriados (nager.at) Y la línea base de
+                // feriados nacionales por ley + el calendario de la app (cargarDiasNoLaborables, mismo criterio
+                // que Espumas/Corte y Laminado/Venta Externa). Antes solo se usaba la API externa, que cambió sus
+                // datos y pasó la "Independencia de Cuenca" 2026 al lunes 02-nov (junto a Difuntos), dejando el
+                // martes 03-nov como laborable: la fecha objetivo salía 03-nov en vez de 04-nov. Un feriado de
+                // más se puede habilitar con "Activar" en la ventana; uno de menos daba un plan con fecha errada.
+                // Las fechas que el calendario de la app marca como "Jornada" anulan el feriado (se trabajan).
+                const [holidays, calendario] = await Promise.all([
+                    ecuadorHolidaysService.getHolidaysForRange(start, end).catch(() => []),
+                    cargarDiasNoLaborables().catch(() => null),
+                ]);
+                const startKey = toDateKey(start);
+                const endKey = toDateKey(end);
                 const map = new Map<string, string>();
                 holidays.forEach(h => map.set(h.date, h.name));
+                const nacionales = new Set([...feriadosNacionales(start.getFullYear()), ...feriadosNacionales(end.getFullYear())]);
+                (calendario?.noLaborables ?? nacionales).forEach(fecha => {
+                    if (fecha < startKey || fecha > endKey || map.has(fecha)) return;
+                    map.set(fecha, NOMBRE_FERIADO_NACIONAL_POR_FECHA[fecha.slice(5)] ?? (nacionales.has(fecha) ? 'Feriado nacional' : 'Día no laborable (Calendario)'));
+                });
+                // Los feriados fijos por ley se etiquetan siempre con su nombre legal (la API externa puede
+                // traer otro nombre en esa fecha, p. ej. dos feriados juntos en un mismo día)
+                map.forEach((_, fecha) => {
+                    const nombreLegal = NOMBRE_FERIADO_NACIONAL_POR_FECHA[fecha.slice(5)];
+                    if (nombreLegal && nacionales.has(fecha)) map.set(fecha, nombreLegal);
+                });
+                calendario?.laborablesExtra.forEach(fecha => map.delete(fecha));
                 setHolidaysMap(map);
             } catch (error) {
                 console.error('Error al cargar feriados para la ventana de fabricación:', error);
@@ -1949,32 +2217,19 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
 
             // Cargar Tiempos de Ensamblado (global, sin discriminar Previsional/Fert)
             updateLoadStage('tiempos', { status: 'loading' });
-            const tiemposExplore = await serviciosService.getTiemposEnsamblado(1, 1);
-            const totalTiempos = tiemposExplore.totalRegistros || 0;
-            updateLoadStage('tiempos', { total: totalTiempos });
-            if (totalTiempos > 0) {
-              const BATCH_TIEMPOS = 20000;
-              const pagesTiempos = Math.ceil(totalTiempos / BATCH_TIEMPOS);
-              const tMap = new Map<string, number>();
-              let processedTiempos = 0;
-              for (let i = 1; i <= pagesTiempos; i++) {
-                const res = await serviciosService.getTiemposEnsamblado(i, BATCH_TIEMPOS);
-                if (res.data) {
-                  const items = Array.isArray(res.data) ? res.data : [res.data];
-                  items.forEach((item: any) => {
-                    const material = normalizeMaterialCode(item.CodMaterial ?? item.MATERIAL ?? item.Material ?? '');
-                    const tiempo = Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
-                    if (material && tiempo > 0 && !tMap.has(material)) {
-                      tMap.set(material, tiempo);
-                    }
-                  });
-                  processedTiempos += items.length;
-                  updateLoadStage('tiempos', { current: processedTiempos });
-                }
+            const tiemposRows = await serviciosService.getTiemposEnsambladoCompleto(
+              (loaded, total) => updateLoadStage('tiempos', { total, current: loaded }),
+            );
+            const tMap = new Map<string, number>();
+            tiemposRows.forEach((item: any) => {
+              const material = normalizeMaterialCode(item.CodMaterial ?? item.MATERIAL ?? item.Material ?? '');
+              const tiempo = Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
+              if (material && tiempo > 0 && !tMap.has(material)) {
+                tMap.set(material, tiempo);
               }
-              setGlobalTiemposMap(tMap);
-            }
-            updateLoadStage('tiempos', { status: 'done', current: totalTiempos });
+            });
+            if (tiemposRows.length > 0) setGlobalTiemposMap(tMap);
+            updateLoadStage('tiempos', { status: 'done', current: tiemposRows.length });
 
             // Cargar Órdenes Fert
             updateLoadStage('fert', { status: 'loading' });
@@ -2207,6 +2462,15 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         });
     };
 
+    const toggleSpringFoam = (id: number) => {
+        setSpringFoamMesaIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
     const toggleCamasOverflow = (id: number) => {
         setCamasOverflowMesaIds(prev => {
             const next = new Set(prev);
@@ -2233,7 +2497,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // planningTargetDate; P2 usa computeFechaP2), para poder comparar cada plan contra la fecha que
     // realmente le corresponde en vez de comparar todos contra una sola fecha.
     const expectedDateKeyFor = useCallback((valor: string): string | null => {
-        if (/P2\s*$/i.test(valor.trim())) return toDateKey(computeFechaP2());
+        if (P2_VALOR_REGEX.test(valor.trim())) return toDateKey(computeFechaP2());
         if (!planningTargetDate) return null;
         return toDateKey(planningTargetDate);
     }, [computeFechaP2, planningTargetDate]);
@@ -2263,7 +2527,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 if (p.codigo_grupo !== mueblesGrupo.codigo_grupo) return false;
                 if (p.estado !== 'A') return false;
                 const valor = String(p.valor || '').trim();
-                if (!/P1\.3\s*$|P1\.5\s*$|P2\s*$|PFSM\s*$/i.test(valor)) return false;
+                if (!PLAN_GRUPO_SUFIJOS_REGEX.test(valor)) return false;
                 const expectedKey = expectedDateKeyFor(valor);
                 if (!expectedKey) return false;
                 return toDateKey(new Date(p.fecha_inicio_plan)) === expectedKey;
@@ -2353,7 +2617,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 if (p.codigo_grupo !== mueblesGrupo.codigo_grupo) return false;
                 if (p.estado !== 'A') return false;
                 const valor = String(p.valor || '').trim();
-                if (!/P1\.3\s*$|P1\.5\s*$|P2\s*$|PFSM\s*$/i.test(valor)) return false;
+                if (!PLAN_GRUPO_SUFIJOS_REGEX.test(valor)) return false;
                 const expectedKey = expectedDateKeyFor(valor);
                 if (!expectedKey) return false;
                 return toDateKey(new Date(p.fecha_inicio_plan)) === expectedKey;
@@ -2469,6 +2733,9 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         if (!planningTargetDate) {
             addNotification('warning', 'No se pudo determinar la fecha de programación de la Ventana de Fabricación.');
             return;
+        }
+        if (materialesSinTiempoPendientes.length > 0) {
+            addNotification('warning', `${materialesSinTiempoPendientes.length} material(es) sin tiempo en el backend ni tiempo manual: sus órdenes se calculan con 0 horas y la utilización de capacidad no es real. Ingrese los tiempos en el panel "Materiales sin tiempo en el backend".`);
         }
 
         // +1 día laborable (Quito/Centro 1000) y +2 días laborables (Guayaquil/Centro 2000), omitiendo
@@ -2629,11 +2896,122 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         // para ajustar por la capacidad real de espuma, así que debe reflejar igual de fielmente lo que
         // realmente hay en SAP para la fecha objetivo.
         const isRecalcLogic = planningStep >= 2;
+        let calibratedOutOrders: UnifiedOrder[] = [];
+        let calibrationCandidates: UnifiedOrder[] = [];
+        let calibrationRecommendedKeys: string[] = [];
         if (isRecalcLogic) {
             immediateOrders = [...immediateOrders, ...deferredByCapacity, ...movableOrders];
+
+            // Aplica la calibración de capacidad ya CONFIRMADA (botón "Calibrar Capacidad" de una ronda
+            // anterior de este mismo Paso 2/3): excluye de verdad esas órdenes de immediateOrders (no solo
+            // del indicador en vivo), para que Distribución de Mesas y Explosión de Materiales de este
+            // cálculo ya no las incluyan — el usuario decidió moverlas para acercar la capacidad utilizada
+            // al 100%.
+            if (calibratedMovedIds.size > 0) {
+                calibratedOutOrders = immediateOrders.filter(o => calibratedMovedIds.has(`${o.source}-${o.id}-${o.material}`));
+                if (calibratedOutOrders.length > 0) {
+                    const calibratedOutKeys = new Set(calibratedOutOrders.map(o => `${o.source}-${o.id}-${o.material}`));
+                    immediateOrders = immediateOrders.filter(o => !calibratedOutKeys.has(`${o.source}-${o.id}-${o.material}`));
+                }
+            }
+
             immediateIds = new Set(immediateOrders.map(o => `${o.source}-${o.id}-${o.material}`));
             finalDeferredByCapacity = [];
             totalHoursRequired = immediateOrders.reduce((s, o) => s + o.horas, 0);
+
+            // "Calibrar Capacidad": si tras aplicar lo ya confirmado sigue habiendo Déficit real, se arma
+            // una recomendación de qué más mover. Candidatas = lo que en este Paso 2/3 se tomó tal cual de
+            // SAP (keptPriority/deferredByCapacity) EXCLUYENDO lo mandatorio (fecha propia = objetivo
+            // dentro de la ventana de prioridad, ver mandatoryByFechaPropia) y lo ya calibrado — las
+            // "Órdenes que se Pueden Mover" (movableOrders) quedan fuera porque ya tienen su propio
+            // checkbox de simulación en vivo más abajo. Se ordenan por fecha de entrega DESCENDENTE (la
+            // más lejana primero = la más segura/conveniente de mover sin incumplir una entrega), misma
+            // lógica de priorización por fecha de entrega que ya usa "Órdenes que se Pueden Mover".
+            if (totalHoursRequired > totalCapacityAvailable) {
+                calibrationCandidates = [...keptPriority, ...deferredByCapacity]
+                    .filter(o => !calibratedMovedIds.has(`${o.source}-${o.id}-${o.material}`))
+                    .sort((a, b) => b.fechaEntregaDate.getTime() - a.fechaEntregaDate.getTime());
+
+                if (calibrationCandidates.length > 0) {
+                    let cumRemovedHoras = 0;
+                    const removedKeysSoFar: string[] = [];
+                    let lastAtOrAboveCapacity: { keys: string[]; remaining: number } = { keys: [], remaining: totalHoursRequired };
+                    let crossedBelow = false;
+                    for (const o of calibrationCandidates) {
+                        cumRemovedHoras += o.horas;
+                        removedKeysSoFar.push(`${o.source}-${o.id}-${o.material}`);
+                        const remaining = totalHoursRequired - cumRemovedHoras;
+                        if (remaining >= totalCapacityAvailable) {
+                            lastAtOrAboveCapacity = { keys: [...removedKeysSoFar], remaining };
+                        } else {
+                            crossedBelow = true;
+                            const diffAbove = Math.abs(lastAtOrAboveCapacity.remaining - totalCapacityAvailable);
+                            const diffBelow = Math.abs(remaining - totalCapacityAvailable);
+                            // Empate o "por encima" queda igual/más cerca -> se prefiere por encima del
+                            // 100% (ej. 101%) sobre quedar por debajo (ej. 99%), pedido explícito del usuario.
+                            calibrationRecommendedKeys = diffBelow < diffAbove ? [...removedKeysSoFar] : lastAtOrAboveCapacity.keys;
+                            break;
+                        }
+                    }
+                    // Ni moviendo TODAS las candidatas se alcanza el 100%: se recomienda moverlas todas —
+                    // es lo más cerca que se puede llegar solo con "Calibrar Capacidad" (falta más capacidad).
+                    if (!crossedBelow) {
+                        calibrationRecommendedKeys = lastAtOrAboveCapacity.keys;
+                    }
+                }
+            }
+        }
+
+        // TOPE DE CAPACIDAD (pedido del usuario 2026-10-14): en NINGÚN paso (1, 2 ni 3) lo planificado puede
+        // superar el 100% de la capacidad total disponible. Antes se pasaba del 100% por dos vías: en el Paso
+        // 1, las órdenes con fecha propia = fecha objetivo se incluían "sin excepción"; en los Pasos 2/3 se
+        // tomaba tal cual todo lo que había en SAP (la calibración solo recomendaba). Ahora, si lo incluido
+        // excede la capacidad, se sacan órdenes empezando por la MENOS urgente: primero las no obligatorias
+        // y, solo si aún no alcanza, las de fecha propia = objetivo; dentro de cada grupo, la de fecha de
+        // entrega más lejana primero (y a igual fecha, la de más horas). Luego se reintenta meter las sacadas
+        // más urgentes que todavía quepan, para no dejar huecos. Lo sacado pasa a "Órdenes Diferidas por
+        // Capacidad" (en Pasos 2/3: órdenes que hay que mover en SAP para que el plan cuadre).
+        const capacityTrimmedOrders: UnifiedOrder[] = [];
+        {
+            const horasDe = (list: UnifiedOrder[]) => list.reduce((s, o) => s + o.horas, 0);
+            const CAPACIDAD_EPS = 1e-6;
+            if (horasDe(immediateOrders) > totalCapacityAvailable + CAPACIDAD_EPS) {
+                const ordenDescarte = [...immediateOrders].sort((a, b) => {
+                    const ma = mandatoryIds.has(orderKey(a)) ? 1 : 0;
+                    const mb = mandatoryIds.has(orderKey(b)) ? 1 : 0;
+                    if (ma !== mb) return ma - mb;
+                    const porEntrega = b.fechaEntregaDate.getTime() - a.fechaEntregaDate.getTime();
+                    return porEntrega !== 0 ? porEntrega : b.horas - a.horas;
+                });
+                const sacadas: UnifiedOrder[] = [];
+                let horasIncluidas = horasDe(immediateOrders);
+                for (const o of ordenDescarte) {
+                    if (horasIncluidas <= totalCapacityAvailable + CAPACIDAD_EPS) break;
+                    sacadas.push(o);
+                    horasIncluidas -= o.horas;
+                }
+                // Re-inserta, de la más urgente a la menos urgente, las sacadas que sí quepan en el espacio que quedó
+                const reinsertadas = new Set<string>();
+                for (const o of [...sacadas].reverse()) {
+                    if (horasIncluidas + o.horas <= totalCapacityAvailable + CAPACIDAD_EPS) {
+                        reinsertadas.add(orderKey(o));
+                        horasIncluidas += o.horas;
+                    }
+                }
+                const sacadasFinal = sacadas.filter(o => !reinsertadas.has(orderKey(o)));
+                const sacadasKeys = new Set(sacadasFinal.map(orderKey));
+                immediateOrders = immediateOrders.filter(o => !sacadasKeys.has(orderKey(o)));
+                immediateIds = new Set(immediateOrders.map(orderKey));
+                capacityTrimmedOrders.push(...sacadasFinal);
+                finalDeferredByCapacity = [...finalDeferredByCapacity, ...sacadasFinal];
+                committedHours = horasDe(immediateOrders);
+            }
+            // Con el tope aplicado ya no queda déficit que "calibrar": la recomendación de Calibrar
+            // Capacidad (Pasos 2/3) se reemplaza por la exclusión automática de arriba.
+            if (isRecalcLogic) {
+                calibrationCandidates = [];
+                calibrationRecommendedKeys = [];
+            }
         }
 
         // Órdenes MTS, ordenadas por antigüedad, solo se incluyen si sobra capacidad (ya excluye las que
@@ -2715,12 +3093,33 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             largeOrders,
             movableOrders,
             planningStepResult: planningStep,
+            calibrationCandidates,
+            calibrationRecommendedKeys,
+            calibratedOutOrders,
         });
         // Una nueva planificación invalida cualquier distribución de mesas previa
         setMesaDistribution(null);
         setUnassignedDistributionOrders([]);
         // Reinicia la simulación de "Órdenes que se Pueden Mover" (todo vuelve a quedar marcado)
         setUncheckedMovableIds(new Set());
+        // Reinicia el borrador de "Calibrar Capacidad" con la nueva recomendación automática (NO reinicia
+        // calibratedMovedIds: lo ya confirmado con el botón sigue aplicándose en las próximas rondas).
+        setCalibrationChecked(new Set(calibrationRecommendedKeys));
+
+        if (calibratedOutOrders.length > 0) {
+            addNotification('info', `Calibración de capacidad aplicada: ${calibratedOutOrders.length} orden(es) confirmada(s) para mover quedaron excluidas de este cálculo.`);
+        }
+
+        if (calibrationRecommendedKeys.length > 0) {
+            addNotification('warning', `Déficit de capacidad tras la calibración ya aplicada: revise la tabla "Calibrar Capacidad" — se recomienda mover ${calibrationRecommendedKeys.length} orden(es) más para acercarse al 100%.`);
+        }
+
+        if (capacityTrimmedOrders.length > 0) {
+            const horasSacadas = capacityTrimmedOrders.reduce((s, o) => s + o.horas, 0);
+            addNotification('warning', isRecalcLogic
+                ? `Tope de capacidad (100%): ${capacityTrimmedOrders.length} orden(es) (${horasSacadas.toFixed(2)} h) no caben y se excluyeron del plan — muévalas en SAP a otra fecha. Vea "Órdenes Diferidas por Capacidad".`
+                : `Tope de capacidad (100%): las órdenes con fecha propia = fecha objetivo superaban la capacidad; ${capacityTrimmedOrders.length} orden(es) (${horasSacadas.toFixed(2)} h, las de entrega más lejana) se difirieron. Vea "Órdenes Diferidas por Capacidad".`);
+        }
 
         if (ptboAlerts.length > 0) {
             addNotification('warning', `Atención: ${ptboAlerts.length} material(es) con la sigla "PTBO" en su nombre requieren revisión.`);
@@ -2976,16 +3375,17 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             items.set(id, []);
         });
 
-        const unassigned: UnifiedOrder[] = [];
+        const unassigned: { order: UnifiedOrder; motivo: 'sin-mesa' | 'sin-capacidad' }[] = [];
 
-        // Se procesa de "Grande" a "Pequeño" (best-fit-decreasing) para acomodar primero lo más
-        // difícil de ubicar, y usar los materiales pequeños para rellenar los espacios restantes.
+        // Se procesa de "Grande" a "Pequeño" y, dentro de cada tamaño, de más a menos horas
+        // (first-fit-decreasing) para acomodar primero lo más difícil de ubicar y usar lo pequeño para
+        // rellenar los espacios restantes — importante ahora que ninguna mesa puede pasar del 100%.
         const tierRank: Record<MaterialSize, number> = { Grande: 0, Mediano: 1, Pequeño: 2 };
         const allOrders = [...planningResult.immediateOrders, ...planningResult.extraOrders];
         const sortedOrders = [...allOrders].sort((a, b) => {
             const ta = a.tamano ? tierRank[a.tamano] : 99;
             const tb = b.tamano ? tierRank[b.tamano] : 99;
-            return ta - tb;
+            return ta - tb || b.horas - a.horas;
         });
 
         sortedOrders.forEach(order => {
@@ -3004,7 +3404,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             // el botón "Habilitar para Camas" (camasOverflowMesaIds) como mesas adicionales para colocar
             // el excedente de camas.
             if (order.sector === SECTOR_CAMAS) {
-                const sinEspacioEnLinea1 = candidates.every(id => (remaining.get(id) ?? 0) <= 0);
+                const sinEspacioEnLinea1 = candidates.every(id => (remaining.get(id) ?? 0) < order.horas - 1e-6);
                 if (sinEspacioEnLinea1) {
                     camasOverflowMesaIds.forEach(mesaOverflowId => {
                         if (eligibleMesaIds.includes(mesaOverflowId) && !candidates.includes(mesaOverflowId)) {
@@ -3014,20 +3414,38 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 }
             }
 
+            // Válvula de alivio para sofás Spring/Foam: si en ninguna de sus mesas habituales (Muebles) cabe
+            // completo, se habilitan las mesas de Línea 1 marcadas con "HABILITAR SPRING/FOAM".
+            if (esSofaSpringFoam(order.nombre)) {
+                const cabeEnHabituales = candidates.some(id => (remaining.get(id) ?? 0) >= order.horas - 1e-6);
+                if (!cabeEnHabituales) {
+                    springFoamMesaIds.forEach(mesaSpringFoamId => {
+                        if (eligibleMesaIds.includes(mesaSpringFoamId) && !candidates.includes(mesaSpringFoamId)) {
+                            candidates = [...candidates, mesaSpringFoamId];
+                        }
+                    });
+                }
+            }
+
             if (candidates.length === 0) {
-                unassigned.push(order);
+                unassigned.push({ order, motivo: 'sin-mesa' });
                 return;
             }
 
-            // Se prioriza una mesa candidata donde el material quepa completo; si ninguna tiene
-            // espacio suficiente, se usa la que tenga más capacidad restante (para regular la carga).
-            const fitting = candidates.filter(id => (remaining.get(id) ?? 0) >= order.horas);
-            const pool = fitting.length > 0 ? fitting : candidates;
-            const chosen = pool.reduce((best, id) => ((remaining.get(id) ?? 0) > (remaining.get(best) ?? 0) ? id : best), pool[0]);
+            // TOPE 100% POR MESA (pedido del usuario 2026-10-14): solo se asigna a una mesa donde la orden
+            // quepa COMPLETA; entre esas, la de más capacidad restante (para regular la carga). Antes, si
+            // ninguna tenía espacio, se forzaba en la de más espacio y quedaba marcada "EXCEDE CAPACIDAD"
+            // (mesas al 105–115%); ahora se reporta aparte como "sin capacidad en mesa".
+            const fitting = candidates.filter(id => (remaining.get(id) ?? 0) >= order.horas - 1e-6);
+            if (fitting.length === 0) {
+                unassigned.push({ order, motivo: 'sin-capacidad' });
+                return;
+            }
+            const chosen = fitting.reduce((best, id) => ((remaining.get(id) ?? 0) > (remaining.get(best) ?? 0) ? id : best), fitting[0]);
 
             const mesaItems = items.get(chosen)!;
             const startHour = mesaItems.reduce((sum, it) => sum + (it.endHour - it.startHour), 0);
-            const overflow = order.horas > (remaining.get(chosen) ?? 0);
+            const overflow = false;
 
             mesaItems.push({
                 order,
@@ -3063,8 +3481,13 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         // Guarda el snapshot para "PLAN" (horario/mesas/personal/Gantt de esta fecha objetivo)
         savePlanDiarioSnapshot(distribution);
 
-        if (unassigned.length > 0) {
-            addNotification('warning', `${unassigned.length} material(es) no se pudieron asignar a ninguna mesa (Sector no clasificado o sin mesa disponible para ese Sector/Tamaño).`);
+        const sinMesa = unassigned.filter(u => u.motivo === 'sin-mesa').length;
+        const sinCapacidad = unassigned.filter(u => u.motivo === 'sin-capacidad');
+        if (sinMesa > 0) {
+            addNotification('warning', `${sinMesa} material(es) no se pudieron asignar a ninguna mesa (Sector no clasificado o sin mesa disponible para ese Sector/Tamaño).`);
+        }
+        if (sinCapacidad.length > 0) {
+            addNotification('warning', `Tope de capacidad por mesa (100%): ${sinCapacidad.length} orden(es) (${sinCapacidad.reduce((s, u) => s + u.order.horas, 0).toFixed(2)} h) no caben completas en ninguna mesa compatible y quedaron sin asignar. Revise el detalle bajo el Diagrama de Gantt.`);
         }
         addNotification('success', 'Distribución de mesas ejecutada. Revise el Diagrama de Gantt de capacidad.');
     };
@@ -3077,6 +3500,8 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         // Las reparaciones de plastificado no salen de las mesas de apoyo a la Línea de Camas
         if (esReparacionApoyoCamas(order.nombre)) return camasOverflowMesaIds.has(mesaId);
         if (mesaAcceptsMaterial(mesaId, order.sector, order.tamano)) return true;
+        // Mesas de Línea 1 habilitadas con "HABILITAR SPRING/FOAM" también reciben sofás Spring/Foam
+        if (esSofaSpringFoam(order.nombre) && springFoamMesaIds.has(mesaId)) return true;
         return order.sector === SECTOR_CAMAS && camasOverflowMesaIds.has(mesaId);
     };
 
@@ -3620,7 +4045,11 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         const executedOrders = planningResult ? [...planningResult.immediateOrders, ...planningResult.extraOrders] : [];
         const hayP13 = executedOrders.length > 0;
         const hayP15 = primerNivelExplosionResults.length > 0 || segundoNivelExplosionResults.length > 0;
-        const hayP2 = foamExplosionResults.length > 0;
+        // P2 se guarda como dos PlanGrupo separados (ver P2_LAMINA_SUFIJO/P2_ESPUMA_SUFIJO) — hayP2 sigue
+        // representando "hay algo de espuma que guardar", igual que antes.
+        const hayP2Lamina = foamExplosionLaminaCilindrica.length > 0;
+        const hayP2Espuma = foamExplosionOtrasEspumas.length > 0;
+        const hayP2 = hayP2Lamina || hayP2Espuma;
         // Paso 3 (Final): "Guardar Plan Táctico Final" NO vuelve a guardar P1.3/P1.5/P2 (ya se guardaron
         // en Paso 1/2) — únicamente guarda un Plan de Grupo "PFSM" (Plan Final de Semielaborados de
         // Muebles) con el Detalle de Planificación Ejecutada (mismo contenido que P1.3: cada orden de
@@ -3726,14 +4155,23 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     }
                 }
 
-                // 3. P2 — Explosión de Materiales: Semielaborados de Espuma. Fecha objetivo = el próximo
-                // día LABORABLE (no planningTargetDate, que es el 3er día laborable de la ventana — el
-                // área de espuma programa con horizonte propio, pero igual debe caer en día laborable,
-                // saltando fines de semana y feriados de Ecuador vía workingWindow/holidaysMap).
-                if (hayP2) {
-                    const codigoPlanGrupoP2 = await savePlanGrupo('P2', computeFechaP2());
-                    for (const comp of foamExplosionResults) {
-                        await saveDetalle(codigoPlanGrupoP2, Number(comp.componente) || 0, comp.cantidadNetaAConseguir, '');
+                // 3. P2 — Explosión de Materiales: Semielaborados de Espuma, en DOS PlanGrupo separados
+                // (pedido explícito del usuario 2026-09-29): "P2 - LAMINA CILINDRICA" y "P2 - ESPUMA
+                // MUEBLES", mismo corte que ya usa la pantalla (foamExplosionLaminaCilindrica/
+                // foamExplosionOtrasEspumas). Fecha objetivo = el próximo día LABORABLE (no
+                // planningTargetDate, que es el 3er día laborable de la ventana — el área de espuma
+                // programa con horizonte propio, pero igual debe caer en día laborable, saltando fines de
+                // semana y feriados de Ecuador vía workingWindow/holidaysMap) — igual para ambos.
+                if (hayP2Lamina) {
+                    const codigoPlanGrupoP2Lamina = await savePlanGrupo(P2_LAMINA_SUFIJO, computeFechaP2());
+                    for (const comp of foamExplosionLaminaCilindrica) {
+                        await saveDetalle(codigoPlanGrupoP2Lamina, Number(comp.componente) || 0, comp.cantidadNetaAConseguir, '');
+                    }
+                }
+                if (hayP2Espuma) {
+                    const codigoPlanGrupoP2Espuma = await savePlanGrupo(P2_ESPUMA_SUFIJO, computeFechaP2());
+                    for (const comp of foamExplosionOtrasEspumas) {
+                        await saveDetalle(codigoPlanGrupoP2Espuma, Number(comp.componente) || 0, comp.cantidadNetaAConseguir, '');
                     }
                 }
             }
@@ -3760,7 +4198,8 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 : [
                     hayP13 ? `P1.3 (${executedOrders.length} orden(es))` : null,
                     hayP15 ? `P1.5 (${primerNivelExplosionResults.length + segundoNivelExplosionResults.length} detalle(s))` : null,
-                    hayP2 ? `P2 (${foamExplosionResults.length} detalle(s))` : null,
+                    hayP2Lamina ? `P2 - Lámina Cilíndrica (${foamExplosionLaminaCilindrica.length} detalle(s))` : null,
+                    hayP2Espuma ? `P2 - Espuma Muebles (${foamExplosionOtrasEspumas.length} detalle(s))` : null,
                 ].filter(Boolean);
             addNotification('success', `${esPasoFinal ? 'Plan Táctico Final guardado' : 'Plan Táctico guardado'}: ${partes.join(', ')}.`);
 
@@ -3804,7 +4243,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             CodigoOrdenExterna: String(codigoDetalleTactico),
             ClaseOrden: '',
             Centro: '1000',
-            CodigoMaterial: item.order.material,
+            CodigoMaterial: formatMaterialSap(item.order.material),
             CantidadPlanificada: item.order.cantidadPlanificada,
             VersionFabricacion: '01',
             PuestoTrabajo: puestoTrabajo,
@@ -3814,7 +4253,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             HoraInicioProgramada: formatSapTime(horaInicio),
             PedidoComercial: pedido || '',
             PosicionPedido: pedido ? posicion : '',
-            EstadoRegistro: 'A',
+            EstadoRegistro: SAP_ESTATUS_REG_ORD_CARGADO,
             Observaciones: '',
             UsuarioProceso: usuarioProceso,
         };
@@ -3837,8 +4276,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         const fechaPlanificacion = addBusinessDays(planningResult.targetDate, 3);
         const fechaSap = formatSapDate(fechaPlanificacion);
         const shiftStartUTC = shiftTimeToUTC(planningTargetDate, selectedShiftConfig.startTime);
-        const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
-        const usuarioProceso = user?.usuario || user?.id_usuario || 'admin';
+        const usuarioProceso = usuarioProcesoSap(); // USUARIO es CHAR(08) en SAP
 
         const rows: { orderKey: string; solicitud: SolicitudProduccionHB }[] = [];
         Array.from(mesaDistribution.values())
@@ -3852,9 +4290,119 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 });
             });
 
+        setSapPreviewModo('muebles');
         setSapPreviewRows(rows);
         setSapSendState({ sending: false, results: new Map() });
         setEnviarSapDialogOpen(true);
+    };
+
+    // "ENVIAR A SAP" de ESTRUCTURAS — Paso 1: habilitado tras guardar el PFSM. Guarda (una sola vez por
+    // sesión, y solo las órdenes que aún no estén) el PlanGrupo "PFES" con un DetalleTactico por orden de
+    // estructura para obtener su CodigoOrdenExterna, y abre la misma pantalla editable de Muebles con fecha
+    // inicio/fin = hoy + 2 días hábiles en PEGAD009, horario del turno seleccionado.
+    const handleOpenSapPreviewEstructuras = async () => {
+        if (pfsmDetalleTacticoMap.size === 0) {
+            addNotification('warning', 'Debe guardar el "Plan Táctico Final" (PFSM) antes de enviar a SAP las estructuras.');
+            return;
+        }
+        if (ordenesPrevisionalesEstructuras.length === 0) {
+            addNotification('warning', `No hay órdenes previsionales de estructuras (responsable ${RESP_CTRL_PROD_ESTRUCTURAS}) con fecha inicio extrema ${fechaInicioExtremaEstructuras}.`);
+            return;
+        }
+        if (!mueblesGrupo) {
+            addNotification('error', 'No se pudo determinar el Grupo/Centro de Muebles para guardar el PFES.');
+            return;
+        }
+
+        setIsPreparingSapEstructuras(true);
+        try {
+            let codigoPlanGrupo = pfesCodigoPlanGrupo;
+            const nuevoMapa = new Map(pfesDetalleTacticoMap);
+            const pendientes = ordenesPrevisionalesEstructuras.filter(o => !nuevoMapa.has(ordenEstructuraKey(o)));
+            if (pendientes.length > 0 && !codigoPlanGrupo) {
+                const savedPlan = await planGrupoService.save({
+                    codigo_plan_grupo: 0,
+                    codigo_plan: null,
+                    codigo_grupo: mueblesGrupo.codigo_grupo,
+                    codigo_familia_grupo: null,
+                    valor: `Plan Táctico - Centro ${mueblesGrupo.centro} - PFES`,
+                    fecha_inicio_plan: planningTargetDate,
+                    fecha_fin_plan: planningTargetDate,
+                    estado: 'A',
+                    fecha_creacion: new Date(),
+                    usuario_creacion: 'Admin',
+                } as unknown as PlanGrupo);
+                codigoPlanGrupo = savedPlan?.data?.codigo_plan_grupo ?? null;
+                if (!codigoPlanGrupo) throw new Error('El backend no devolvió un código de Plan de Grupo válido para PFES.');
+                setPfesCodigoPlanGrupo(codigoPlanGrupo);
+            }
+            let sinCodigo = 0;
+            for (const o of pendientes) {
+                const savedDetalle = await detalleTacticoService.save({
+                    codigo_detalle_tactico: 0,
+                    codigo_plan_grupo: codigoPlanGrupo as number,
+                    codigo_material: Number(o.material) || 0,
+                    linea_produccion: '',
+                    cantidad_produccion_neta: o.cantidad.toFixed(2),
+                    resp_ctrl_prod: RESP_CTRL_PROD_ESTRUCTURAS,
+                    clase_aprovisionamiento: 'E',
+                    cantidad_aprovisionamiento: 0,
+                    estado: 'A',
+                    fecha_modificacion: new Date(),
+                    usuario_modificacion: 'Admin',
+                });
+                const codigoDetalleTactico = savedDetalle?.data?.codigo_detalle_tactico;
+                if (codigoDetalleTactico) nuevoMapa.set(ordenEstructuraKey(o), codigoDetalleTactico);
+                else sinCodigo++;
+            }
+            setPfesDetalleTacticoMap(nuevoMapa);
+            if (sinCodigo > 0) {
+                addNotification('warning', `${sinCodigo} orden(es) de estructuras no recibieron código de detalle táctico del backend y no se incluyen en el envío.`);
+            }
+
+            const fechaSap = formatSapDate(fechaCreacionEstructuras);
+            const horaInicio = `${selectedShiftConfig.startTime.replace(':', '')}00`;
+            const horaFin = `${selectedShiftConfig.displayEndTime.replace(':', '')}00`;
+            const usuarioProceso = usuarioProcesoSap(); // USUARIO es CHAR(08) en SAP
+            const rows: { orderKey: string; solicitud: SolicitudProduccionHB }[] = [];
+            ordenesPrevisionalesEstructuras.forEach(o => {
+                const orderKey = ordenEstructuraKey(o);
+                const codigoDetalleTactico = nuevoMapa.get(orderKey);
+                if (!codigoDetalleTactico) return;
+                rows.push({
+                    orderKey,
+                    solicitud: {
+                        Mandante: '300',
+                        CodigoOrdenExterna: String(codigoDetalleTactico),
+                        ClaseOrden: '',
+                        Centro: String(mueblesGrupo.centro || '1000'),
+                        CodigoMaterial: formatMaterialSap(o.material),
+                        CantidadPlanificada: o.cantidad,
+                        VersionFabricacion: '01',
+                        PuestoTrabajo: PUESTO_TRABAJO_ESTRUCTURAS,
+                        FechaFinProgramada: fechaSap,
+                        HoraFinProgramada: horaFin,
+                        FechaInicioProgramada: fechaSap,
+                        HoraInicioProgramada: horaInicio,
+                        PedidoComercial: '',
+                        PosicionPedido: '',
+                        EstadoRegistro: SAP_ESTATUS_REG_ORD_CARGADO,
+                        Observaciones: '',
+                        UsuarioProceso: usuarioProceso,
+                    },
+                });
+            });
+
+            setSapPreviewModo('estructuras');
+            setSapPreviewRows(rows);
+            setSapSendState({ sending: false, results: new Map() });
+            setEnviarSapDialogOpen(true);
+        } catch (error) {
+            console.error('Error al preparar ENVIAR A SAP de estructuras (PFES):', error);
+            addNotification('error', `Error al guardar el Plan Final de Estructuras (PFES): ${(error as Error).message}`);
+        } finally {
+            setIsPreparingSapEstructuras(false);
+        }
     };
 
     // Actualiza un solo campo de una sola fila de la pantalla editable, sin tocar las demás.
@@ -3885,7 +4433,12 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
 
         for (const { orderKey, solicitud } of rowsAEnviar) {
             try {
-                await serviciosService.insertarSolicitudProduccionHB(solicitud);
+                // El material siempre viaja con 18 caracteres (ceros a la izquierda), aunque se haya editado a mano
+                const respuesta = await serviciosService.insertarSolicitudProduccionHB({ ...solicitud, CodigoMaterial: formatMaterialSap(solicitud.CodigoMaterial) });
+                // Un HTTP 200 con success=false también es un rechazo (mismo criterio que el envío de Ensamblado)
+                if (respuesta?.data && respuesta.data.success === false) {
+                    throw new Error(respuesta.data.message || 'SAP no confirmó la creación de la solicitud.');
+                }
                 results.set(orderKey, { status: 'success', message: 'Enviado correctamente.' });
             } catch (error) {
                 results.set(orderKey, { status: 'error', message: (error as Error).message });
@@ -3908,11 +4461,15 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         setActiveTables(new Set(WORK_TABLES.map(t => t.id)));
         setCamasOverflowMesaIds(new Set(CAMAS_OVERFLOW_MESA_IDS));
         setUncheckedMovableIds(new Set());
+        setCalibrationChecked(new Set());
+        setCalibratedMovedIds(new Set());
         setSelectedShift(SHIFT_SCHEDULES[0].id);
         setChosenTables(null);
         setTableAssignments({});
         setExistingTacticalPlanDateKey(null);
         setPfsmDetalleTacticoMap(new Map());
+        setPfesCodigoPlanGrupo(null);
+        setPfesDetalleTacticoMap(new Map());
         setSapPreviewRows([]);
         setSapSendState({ sending: false, results: new Map() });
         setMaintenanceDecisions({});
@@ -4062,6 +4619,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                 {WORK_TABLES.map(table => {
                                     const isLinea2 = table.id > 7;
                                     const isCamasEnabled = camasOverflowMesaIds.has(table.id);
+                                    const isSpringFoamEnabled = springFoamMesaIds.has(table.id);
                                     return (
                                         <div key={table.id} className="flex flex-col gap-1 p-1 hover:bg-gray-50 rounded transition-colors group">
                                             <div className="flex items-center space-x-3">
@@ -4092,6 +4650,22 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                                 >
                                                     <BedDouble className="w-3 h-3" />
                                                     {isCamasEnabled ? 'Habilitada p/ Camas' : 'Habilitar p/ Camas'}
+                                                </button>
+                                            )}
+                                            {!isLinea2 && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggleSpringFoam(table.id)}
+                                                    title="Habilita esta mesa de Línea 1 (Camas) para fabricar también sofás Spring/Foam cuando ya no quepan en las mesas de Línea 2 (Muebles). Se refleja en la Distribución de Mesas, el Diagrama de Gantt y Modular Distribución de Mesas."
+                                                    className={cn(
+                                                        "ml-7 w-fit inline-flex items-center gap-1 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full border transition-colors",
+                                                        isSpringFoamEnabled
+                                                            ? "bg-amber-100 border-amber-300 text-amber-800 hover:bg-amber-200"
+                                                            : "bg-gray-50 border-gray-200 text-gray-400 hover:bg-gray-100"
+                                                    )}
+                                                >
+                                                    <Sofa className="w-3 h-3" />
+                                                    {isSpringFoamEnabled ? 'Habilitada Spring/Foam' : 'Habilitar Spring/Foam'}
                                                 </button>
                                             )}
                                         </div>
@@ -4159,6 +4733,15 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                         </div>
                     </div>
                 </div>
+
+                {onGuardarTiempoManual && tiemposManualesMap && (
+                    <MaterialesSinTiempoMueblesPanel
+                        materiales={materialesSinTiempoBackend}
+                        tiemposManualesMap={tiemposManualesMap}
+                        onGuardarTiempoManual={onGuardarTiempoManual}
+                        onNotify={addNotification}
+                    />
+                )}
 
                 {chosenTables && chosenTables.length > 0 && (
                     <div className="bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden">
@@ -4346,9 +4929,10 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                         {[...planningResult.immediateOrders, ...planningResult.extraOrders].reduce((s, o) => s + o.cantidadPlanificada, 0).toLocaleString()}
                                     </p>
                                     <p className="text-[10px] text-indigo-400">{planningResult.immediateOrders.length + planningResult.extraOrders.length} órdenes en total</p>
-                                    {(planningResult.deferredByCapacity.length > 0 || planningResult.movableOrders.length > 0) && (
+                                    {(planningResult.deferredByCapacity.length > 0 || planningResult.movableOrders.length > 0 || planningResult.calibratedOutOrders.length > 0) && (
                                         <p className="text-[9px] text-indigo-300 mt-1 pt-1 border-t border-indigo-100">
-                                            Ya excluye {planningResult.deferredByCapacity.length} diferida(s) y {planningResult.movableOrders.length} movible(s)
+                                            Ya excluye {planningResult.deferredByCapacity.length} diferida(s), {planningResult.movableOrders.length} movible(s)
+                                            {planningResult.calibratedOutOrders.length > 0 && <> y {planningResult.calibratedOutOrders.length} calibrada(s)</>}
                                         </p>
                                     )}
                                 </div>
@@ -4532,6 +5116,101 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                     </TableBody>
                                 </Table>
                             </div>
+                        </div>
+                    </div>
+                )}
+
+                {planningResult && (planningResult.calibrationCandidates.length > 0 || planningResult.calibratedOutOrders.length > 0) && (
+                    <div className="bg-white border border-orange-300 rounded-xl shadow-md overflow-hidden">
+                        <div className="flex items-center justify-between gap-2 px-6 py-4 bg-gradient-to-r from-orange-700 to-amber-600">
+                            <div className="flex items-center gap-2">
+                                <SlidersHorizontal className="w-5 h-5 text-orange-100" />
+                                <h3 className="text-sm font-bold text-white uppercase tracking-wide">Calibrar Capacidad (Déficit)</h3>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                {liveCapacityInfo && planningResult.totalCapacityAvailable > 0 && (
+                                    <p className="text-[11px] text-orange-100 font-semibold">
+                                        Con lo marcado quedaría en {((liveCapacityInfo.liveTotalHoursRequired / planningResult.totalCapacityAvailable) * 100).toFixed(1)}% de capacidad utilizada
+                                    </p>
+                                )}
+                                <Button
+                                    onClick={handleApplyCalibration}
+                                    size="sm"
+                                    className="h-8 bg-white text-orange-700 hover:bg-orange-50 gap-1.5 text-xs shrink-0 font-bold"
+                                >
+                                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                                    Calibrar Capacidad
+                                </Button>
+                            </div>
+                        </div>
+                        <div className="p-6 space-y-3">
+                            <p className="text-xs text-gray-600">
+                                Recomendación automática (marcada por defecto) de qué órdenes mover para quedar lo más
+                                cerca posible del 100% de la Capacidad Disponible — tomando en cuenta la fecha de
+                                entrega, misma lógica que "Órdenes que se Pueden Mover": se prioriza mover primero las
+                                de fecha de entrega más lejana. Si hay que elegir entre quedar justo por debajo (ej.
+                                99%) o justo por encima (ej. 101%) del 100%, se prioriza quedar por encima. Marque o
+                                desmarque órdenes y presione "Calibrar Capacidad" para confirmar la selección; luego
+                                presione nuevamente "{planningStep === 3 ? 'PASO 3 PLANIFICACIÓN FINAL' : 'PASO 2: RECALCULAR PLANIFICACIÓN AJUSTADA'}"
+                                para que el cálculo real (Distribución de Mesas, Explosión de Materiales) ya excluya
+                                las órdenes confirmadas.
+                            </p>
+                            {planningResult.calibratedOutOrders.length > 0 && (
+                                <p className="text-[11px] text-orange-800 bg-orange-50 border border-orange-200 rounded-md px-3 py-2 font-semibold">
+                                    Ya excluidas de este cálculo por una calibración confirmada anteriormente: {planningResult.calibratedOutOrders.length} orden(es) ({planningResult.calibratedOutOrders.reduce((s, o) => s + o.horas, 0).toFixed(2)} h).
+                                </p>
+                            )}
+                            {planningResult.calibrationCandidates.length > 0 ? (
+                                <div className="border border-gray-300 rounded-lg overflow-auto max-h-[40vh]">
+                                    <Table>
+                                        <TableHeader>
+                                            <TableRow className="bg-orange-50 hover:bg-orange-50 border-b-2 border-orange-200 sticky top-0">
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200 w-16">Mover</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Origen</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">N° Orden</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Pedido</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Material / Nombre</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Centro</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Fecha Entrega</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center">Horas</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {planningResult.calibrationCandidates.map((o, idx) => {
+                                                const key = `${o.source}-${o.id}-${o.material}`;
+                                                const isChecked = calibrationChecked.has(key);
+                                                const isRecommended = planningResult.calibrationRecommendedKeys.includes(key);
+                                                return (
+                                                    <TableRow key={`${key}-${idx}`} className={cn("border-b border-gray-200", idx % 2 === 1 && "bg-gray-50/70", isChecked && "bg-orange-50/60")}>
+                                                        <TableCell className="text-center border-r border-gray-200">
+                                                            <Checkbox
+                                                                checked={isChecked}
+                                                                onCheckedChange={() => toggleCalibrationChecked(key)}
+                                                                className="data-[state=checked]:bg-orange-600 border-gray-300"
+                                                            />
+                                                        </TableCell>
+                                                        <TableCell className="text-[11px] text-center border-r border-gray-200 font-semibold text-gray-600">{o.source}</TableCell>
+                                                        <TableCell className="text-[11px] border-r border-gray-200 font-mono text-gray-700">{o.id || '—'}</TableCell>
+                                                        <TableCell className="text-[11px] border-r border-gray-200 font-mono">{o.pedido || '—'}</TableCell>
+                                                        <TableCell className="text-[11px] border-r border-gray-200">
+                                                            <span className="font-semibold text-gray-800">{o.material}</span>
+                                                            <span className="block text-gray-500">{o.nombre}</span>
+                                                            {isRecommended && <Badge className="mt-0.5 text-[8px] bg-orange-100 text-orange-700 hover:bg-orange-100">Recomendado</Badge>}
+                                                        </TableCell>
+                                                        <TableCell className="text-[11px] text-center border-r border-gray-200">{o.centro}</TableCell>
+                                                        <TableCell className="text-[11px] text-center border-r border-gray-200 font-mono text-slate-700 font-bold">{o.fechaEntrega}</TableCell>
+                                                        <TableCell className="text-[11px] text-center font-mono font-bold text-blue-700">{o.horas.toFixed(2)}</TableCell>
+                                                    </TableRow>
+                                                );
+                                            })}
+                                        </TableBody>
+                                    </Table>
+                                </div>
+                            ) : (
+                                <p className="text-xs text-emerald-700 font-semibold">
+                                    No hay más órdenes candidatas para mover. Si aún queda Déficit de Capacidad, considere aumentar la capacidad (ver recomendación de mesas/horario arriba).
+                                </p>
+                            )}
                         </div>
                     </div>
                 )}
@@ -4909,6 +5588,15 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                                                     <div className="w-44 shrink-0 flex flex-col justify-center">
                                                                         <p className="text-xs font-bold text-gray-800">{WORK_TABLES.find(t => t.id === mesa.tableId)?.name ?? `MESA ${mesa.tableId}`}</p>
                                                                         <p className="text-sm font-extrabold text-gray-900 font-mono">{mesa.usedHours.toFixed(2)} / {mesa.capacityHours.toFixed(2)} h</p>
+                                                                        {springFoamMesaIds.has(mesa.tableId) && (
+                                                                            <span className="mt-0.5 w-fit inline-flex items-center gap-1 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full border bg-amber-100 border-amber-300 text-amber-800">
+                                                                                <Sofa className="w-3 h-3" /> Spring/Foam
+                                                                                {(() => {
+                                                                                    const sofas = mesa.items.filter(it => esSofaSpringFoam(it.order.nombre)).length;
+                                                                                    return sofas > 0 ? ` · ${sofas} sofá(s)` : '';
+                                                                                })()}
+                                                                            </span>
+                                                                        )}
                                                                     </div>
                                                                     <div className="flex-1">
                                                                         <div className="relative h-10 bg-gray-50 border border-gray-200 rounded-md overflow-hidden">
@@ -4976,10 +5664,20 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                 );
                             })()}
 
-                            {unassignedDistributionOrders.length > 0 && (
+                            {unassignedDistributionOrders.some(u => u.motivo === 'sin-capacidad') && (
+                                <div className="bg-red-50 border border-red-300 rounded-lg p-3">
+                                    <p className="text-xs font-bold text-red-800 mb-1">
+                                        {unassignedDistributionOrders.filter(u => u.motivo === 'sin-capacidad').length} orden(es) sin capacidad en mesa (ninguna mesa compatible puede recibirla completa sin pasar del 100%):
+                                    </p>
+                                    <p className="text-[11px] text-red-700">
+                                        {unassignedDistributionOrders.filter(u => u.motivo === 'sin-capacidad').map(u => `${u.order.source} ${u.order.id} — ${u.order.material} (${u.order.nombre}) — ${u.order.horas.toFixed(2)} h`).join(' · ')}
+                                    </p>
+                                </div>
+                            )}
+                            {unassignedDistributionOrders.some(u => u.motivo === 'sin-mesa') && (
                                 <div className="bg-amber-50 border border-amber-300 rounded-lg p-3">
-                                    <p className="text-xs font-bold text-amber-800 mb-1">{unassignedDistributionOrders.length} material(es) sin mesa asignada:</p>
-                                    <p className="text-[11px] text-amber-700">{unassignedDistributionOrders.map(o => `${o.material} (${o.nombre})`).join(', ')}</p>
+                                    <p className="text-xs font-bold text-amber-800 mb-1">{unassignedDistributionOrders.filter(u => u.motivo === 'sin-mesa').length} material(es) sin mesa compatible (Sector/Tamaño):</p>
+                                    <p className="text-[11px] text-amber-700">{unassignedDistributionOrders.filter(u => u.motivo === 'sin-mesa').map(u => `${u.order.material} (${u.order.nombre})`).join(', ')}</p>
                                 </div>
                             )}
                         </div>
@@ -5150,6 +5848,75 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                     </TableFooter>
                                 </Table>
                             </div>
+                        </div>
+                    </div>
+                )}
+
+                {planningResult && (
+                    <div className="bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden">
+                        <div className="flex items-center justify-between gap-2 px-6 py-4 bg-gradient-to-r from-amber-700 to-orange-700">
+                            <div className="flex items-center gap-2">
+                                <Boxes className="w-5 h-5 text-amber-100" />
+                                <div>
+                                    <h3 className="text-sm font-bold text-white uppercase tracking-wide">ORDENES PREVISIONALES DE ESTRUCTURAS</h3>
+                                    <p className="text-[11px] text-amber-100">
+                                        Responsable {RESP_CTRL_PROD_ESTRUCTURAS} · descripción "ESTRUCTURA..." · fecha inicio extrema {fechaInicioExtremaEstructuras} · se crean con fecha {toDateKey(fechaCreacionEstructuras)} en {PUESTO_TRABAJO_ESTRUCTURAS}
+                                    </p>
+                                </div>
+                            </div>
+                            <Button
+                                onClick={handleOpenSapPreviewEstructuras}
+                                size="sm"
+                                disabled={pfsmDetalleTacticoMap.size === 0 || ordenesPrevisionalesEstructuras.length === 0 || isPreparingSapEstructuras}
+                                title={pfsmDetalleTacticoMap.size === 0 ? 'Se habilita después de guardar el Plan Táctico Final (PFSM)' : undefined}
+                                className="h-8 bg-sky-600 hover:bg-sky-700 text-white gap-1.5 text-xs shrink-0"
+                            >
+                                {isPreparingSapEstructuras ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                                ENVIAR A SAP
+                            </Button>
+                        </div>
+                        <div className="p-6">
+                            {ordenesPrevisionalesEstructuras.length === 0 ? (
+                                <p className="text-xs text-gray-500 text-center py-4">
+                                    No hay órdenes previsionales de estructuras (responsable {RESP_CTRL_PROD_ESTRUCTURAS}) con fecha inicio extrema {fechaInicioExtremaEstructuras}.
+                                </p>
+                            ) : (
+                                <div className="border border-gray-300 rounded-lg overflow-auto max-h-[50vh]">
+                                    <Table>
+                                        <TableHeader>
+                                            <TableRow className="bg-gray-100 hover:bg-gray-100 border-b-2 border-gray-300 sticky top-0 z-10">
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Orden Previsional</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Material</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Descripción</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Cantidad</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Fecha Inicio Extrema</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center">Pedido</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {ordenesPrevisionalesEstructuras.map((o, idx) => (
+                                                <TableRow key={ordenEstructuraKey(o)} className={cn("border-b border-gray-200", idx % 2 === 1 && "bg-gray-50/70")}>
+                                                    <TableCell className="text-[11px] font-mono text-gray-700 border-r border-gray-200">{o.id.replace(/^0+/, '')}</TableCell>
+                                                    <TableCell className="text-[11px] font-mono font-semibold text-gray-800 border-r border-gray-200">{o.material}</TableCell>
+                                                    <TableCell className="text-[11px] text-gray-700 border-r border-gray-200">{o.nombre}</TableCell>
+                                                    <TableCell className="text-[11px] text-center font-mono text-gray-700 border-r border-gray-200">{o.cantidad.toLocaleString()}</TableCell>
+                                                    <TableCell className="text-[11px] text-center font-mono text-gray-600 border-r border-gray-200">{o.fechaInicioExtrema}</TableCell>
+                                                    <TableCell className="text-[11px] text-center font-mono text-gray-600">{o.pedido || '—'}</TableCell>
+                                                </TableRow>
+                                            ))}
+                                        </TableBody>
+                                        <TableFooter className="sticky bottom-0">
+                                            <TableRow className="bg-amber-50 hover:bg-amber-50 border-t-2 border-amber-300">
+                                                <TableCell colSpan={3} className="text-[11px] font-extrabold text-amber-900 uppercase text-right border-r border-amber-200">Total ({ordenesPrevisionalesEstructuras.length} orden(es))</TableCell>
+                                                <TableCell className="text-[11px] text-center font-mono font-extrabold text-amber-900 border-r border-amber-200">
+                                                    {ordenesPrevisionalesEstructuras.reduce((sum, o) => sum + o.cantidad, 0).toLocaleString()}
+                                                </TableCell>
+                                                <TableCell colSpan={2} />
+                                            </TableRow>
+                                        </TableFooter>
+                                    </Table>
+                                </div>
+                            )}
                         </div>
                     </div>
                 )}
@@ -5911,7 +6678,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     <DialogHeader>
                         <DialogTitle className="flex items-center gap-2">
                             <Send className="w-4 h-4 text-sky-600" />
-                            Enviar a SAP — Revisión antes de enviar ({sapPreviewRows.length} orden(es))
+                            Enviar a SAP{sapPreviewModo === 'estructuras' ? ' — Estructuras' : ''} — Revisión antes de enviar ({sapPreviewRows.length} orden(es))
                         </DialogTitle>
                         <DialogDescription>
                             Esta es la información exacta que se enviará a SAP (InsertarSolicitudProduccionHB), una
@@ -5948,7 +6715,9 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
 
                         {sapPreviewRows.length === 0 ? (
                             <div className="flex items-center gap-2 text-gray-500 bg-gray-50 px-3 py-4 justify-center rounded-lg">
-                                <p className="text-xs">No hay órdenes para enviar (revise que la Distribución de Mesas y el PFSM estén guardados).</p>
+                                <p className="text-xs">{sapPreviewModo === 'estructuras'
+                                    ? 'No hay órdenes de estructuras para enviar (revise que tengan código de detalle táctico del PFES).'
+                                    : 'No hay órdenes para enviar (revise que la Distribución de Mesas y el PFSM estén guardados).'}</p>
                             </div>
                         ) : (
                             <div className="border border-gray-200 rounded-lg overflow-auto max-h-[45vh]">
@@ -5967,7 +6736,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                             const resultado = sapSendState.results.get(row.orderKey);
                                             return (
                                                 <tr key={row.orderKey} className={resultado?.status === 'error' ? 'bg-red-50/40' : resultado?.status === 'success' ? 'bg-emerald-50/40' : undefined}>
-                                                    <td className="px-2 py-1 font-mono text-gray-500 whitespace-nowrap">{row.orderKey}</td>
+                                                    <td className="px-2 py-1 font-mono text-gray-500 whitespace-nowrap" title={row.orderKey}>{numeroOrdenDeClave(row.orderKey)}</td>
                                                     {SAP_PREVIEW_COLUMNS.map(col => (
                                                         <td key={col.field} className="px-1 py-1">
                                                             <Input
@@ -6000,7 +6769,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                                 <p className="text-xs font-bold text-red-800 mb-1">Errores al enviar:</p>
                                 <ul className="text-[11px] text-red-700 space-y-0.5">
                                     {Array.from(sapSendState.results.entries()).filter(([, r]) => r.status === 'error').map(([key, r]) => (
-                                        <li key={key}><span className="font-mono">{key}</span>: {r.message}</li>
+                                        <li key={key}><span className="font-mono">{numeroOrdenDeClave(key)}</span>: {r.message}</li>
                                     ))}
                                 </ul>
                             </div>

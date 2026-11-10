@@ -211,25 +211,14 @@ export const PlanGrupoEnsambladoPFFTab: React.FC<PlanGrupoEnsambladoPFFTabProps>
             const fetchTiemposUnitMinMap = async (): Promise<Map<string, number>> => {
                 const tiemposMap = new Map<string, number>();
                 try {
-                    const tiemposExplore = await serviciosService.getTiemposEnsamblado(1, 1);
-                    const totalTiempos = tiemposExplore.totalRegistros || 0;
-                    if (totalTiempos > 0) {
-                        const BATCH = 20000;
-                        const pages = Math.ceil(totalTiempos / BATCH);
-                        for (let i = 1; i <= pages; i++) {
-                            const res = await serviciosService.getTiemposEnsamblado(i, BATCH);
-                            if (res.data) {
-                                const items = Array.isArray(res.data) ? res.data : [res.data];
-                                items.forEach((item: any) => {
-                                    const material = normalizeMaterialCode(item.CodMaterial || item.Material || '');
-                                    const tiempo = Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
-                                    if (material && tiempo > 0 && !tiemposMap.has(material)) {
-                                        tiemposMap.set(material, tiempo);
-                                    }
-                                });
-                            }
+                    const items = await serviciosService.getTiemposEnsambladoCompleto();
+                    items.forEach((item: any) => {
+                        const material = normalizeMaterialCode(item.CodMaterial || item.Material || '');
+                        const tiempo = Number(item.Tiempo_Min ?? item.Tiempo ?? 0);
+                        if (material && tiempo > 0 && !tiemposMap.has(material)) {
+                            tiemposMap.set(material, tiempo);
                         }
-                    }
+                    });
                 } catch (error) {
                     console.error('Error al cargar Tiempos de Ensamblado:', error);
                 }

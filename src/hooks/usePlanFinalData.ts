@@ -147,15 +147,7 @@ export function usePlanFinalData() {
       const descByCentroMaterial = new Map<string, string>();
 
       if (detalles.length > 0) {
-        let allTiempos: any[] = [];
-        let page = 1;
-        let hasMore = true;
-        while (hasMore && page <= 10) {
-          const response = await serviciosService.getTiemposEnsamblado(page, 5000);
-          const raw = Array.isArray(response?.data) ? response.data : [];
-          allTiempos = [...allTiempos, ...raw];
-          if (raw.length < 5000) hasMore = false; else page++;
-        }
+        const allTiempos = await serviciosService.getTiemposEnsambladoCompleto();
 
         allTiempos.forEach(t => {
           const centro = String(t.Centro || '').trim();

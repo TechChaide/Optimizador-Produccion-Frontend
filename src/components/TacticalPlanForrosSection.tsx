@@ -90,6 +90,7 @@ import type { MaestroMaterialCentro } from '@/types/types';
 import { cn } from '@/lib/utils';
 import { useAppContext } from '@/context/AppProvider';
 import { calcularTiempoMantenimiento } from '@/components/MantenimientoProgramadoSection';
+import { fetchAllPages } from '@/lib/paginacion';
 
 // Constantes de configuración de jornada
 const DIURNA_OPTIONS = [
@@ -4843,28 +4844,21 @@ useEffect(() => {
     setIsLoadingTiempos(true);
     try {
       const centrosForros = new Set(forrosGruposList.map(g => String(g.centro || '').trim()));
-      const allData: any[] = [];
-      let totalRegistros = Infinity;
-      let pagina = 1;
-      while ((pagina - 1) * TIEMPOS_ENSAMBLADO_PAGE_SIZE < totalRegistros) {
+      // Cada página se reintenta hasta EXPLOSION_MAX_INTENTOS veces antes de dar por fallida la carga
+      const fetchPaginaConReintentos = async (pagina: number, filas: number) => {
         let ultimoError: any = null;
-        let ok = false;
-        for (let intento = 1; intento <= EXPLOSION_MAX_INTENTOS && !ok; intento++) {
+        for (let intento = 1; intento <= EXPLOSION_MAX_INTENTOS; intento++) {
           try {
-            const res = await serviciosService.getTiemposEnsamblado(pagina, TIEMPOS_ENSAMBLADO_PAGE_SIZE);
-            totalRegistros = Number(res.totalRegistros || 0);
-            (res.data || []).forEach((t: any) => {
-              if (centrosForros.has(String(t.Centro || '').trim())) allData.push(t);
-            });
-            ok = true;
+            return await serviciosService.getTiemposEnsamblado(pagina, filas);
           } catch (error) {
             ultimoError = error;
             if (intento < EXPLOSION_MAX_INTENTOS) await new Promise(r => setTimeout(r, EXPLOSION_BACKOFF_MS * intento));
           }
         }
-        if (!ok) throw ultimoError;
-        pagina++;
-      }
+        throw ultimoError;
+      };
+      const allData = (await fetchAllPages<any>(fetchPaginaConReintentos, { pageSize: TIEMPOS_ENSAMBLADO_PAGE_SIZE }))
+        .filter(t => centrosForros.has(String(t.Centro || '').trim()));
       setTiemposProduccion(allData);
       if (allData.length === 0) {
         addNotification('warning', 'No se encontraron tiempos estándar para el centro de Forros. Los cálculos de capacidad pueden salir vacíos.');

@@ -61,6 +61,11 @@ export const authService = {
       {
         method: "GET",
         headers: { "Content-Type": "application/json" },
+        // Este endpoint (servicio "seguridades", sin Guard) es público y responde CORS con
+        // `Access-Control-Allow-Origin: *`. El navegador PROHÍBE "*" en peticiones con credenciales,
+        // así que enviando cookies la petición se bloqueaba siempre ("NetworkError when attempting to
+        // fetch resource" en Firefox / "Failed to fetch" en Chrome). Sin cookies funciona igual.
+        skipAuth: true,
       },
     );
 

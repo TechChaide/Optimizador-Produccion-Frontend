@@ -54,13 +54,19 @@ export const ecuadorHolidaysService = {
       allHolidays.push(...holidays);
     }
     
-    // Filtrar por rango de fechas
-    return allHolidays.filter(holiday => {
-      const holidayDate = new Date(holiday.date);
-      return holidayDate >= startDate && holidayDate <= endDate;
-    });
+    // Filtrar por rango comparando fechas de calendario 'YYYY-MM-DD' en hora LOCAL. No usar
+    // `new Date(holiday.date)`: "2026-10-09" se interpreta como medianoche UTC = 08-oct 19:00 en Ecuador
+    // (UTC-5), y quedaba fuera de un rango que empieza el 09-oct 00:00 local — el feriado del primer día
+    // del rango se perdía (ventana de fabricación de Plan Táctico Alpha con el 09-oct-2026 como laborable).
+    const desde = toLocalDateKey(startDate);
+    const hasta = toLocalDateKey(endDate);
+    return allHolidays.filter(holiday => holiday.date >= desde && holiday.date <= hasta);
   }
 };
+
+function toLocalDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
 
 /**
  * Feriados fijos de Ecuador (como fallback)

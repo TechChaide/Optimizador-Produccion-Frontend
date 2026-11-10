@@ -61,24 +61,7 @@ async function loadTiemposFertData(): Promise<void> {
   patchStore({ isLoading: true });
 
   try {
-    let allTiempos: any[] = [];
-    let page = 1;
-    let hasMore = true;
-    const pageSize = 10000;
-
-    while (hasMore) {
-      const response = await serviciosService.getTiemposEnsamblado(page, pageSize);
-      const rawData = Array.isArray(response?.data) ? response.data : [];
-      allTiempos = [...allTiempos, ...rawData];
-
-      const total = (response as any)?.totalRegistros || (response as any)?.totalRecords || 0;
-      if (allTiempos.length >= total || rawData.length < pageSize || total === 0) {
-        hasMore = false;
-      } else {
-        page++;
-      }
-      if (page > 50) break;
-    }
+    const allTiempos = await serviciosService.getTiemposEnsambladoCompleto();
 
     const [fertResponse, prevResponse] = await Promise.all([
       serviciosService.getOrdenesFert(1, 10000),
