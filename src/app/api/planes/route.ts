@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { escribirPlan, esFechaValida, esSegmentoValido, getRutaArchivoPlan, leerPlan } from '@/lib/server/planes-archivos';
+import { describirErrorRuta, escribirPlan, esFechaValida, esSegmentoValido, getRutaArchivoPlan, leerPlan } from '@/lib/server/planes-archivos';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -23,8 +23,10 @@ export async function GET(req: NextRequest) {
     }
     return NextResponse.json({ data, ruta: getRutaArchivoPlan(fecha, grupo, centro) });
   } catch (error) {
-    console.error('Error leyendo plan:', error);
-    return NextResponse.json({ message: `Error al leer el plan: ${(error as Error).message}` }, { status: 500 });
+    const { status, detalle } = describirErrorRuta(error);
+    if (status === 503) console.warn('Planes: carpeta compartida no accesible al leer:', (error as Error).message);
+    else console.error('Error leyendo plan:', error);
+    return NextResponse.json({ message: `Error al leer el plan: ${detalle}` }, { status });
   }
 }
 
@@ -50,7 +52,9 @@ export async function POST(req: NextRequest) {
     const ruta = await escribirPlan(fecha, grupo, centro, body.contenido);
     return NextResponse.json({ ruta });
   } catch (error) {
-    console.error('Error escribiendo plan:', error);
-    return NextResponse.json({ message: `Error al guardar el plan: ${(error as Error).message}` }, { status: 500 });
+    const { status, detalle } = describirErrorRuta(error);
+    if (status === 503) console.warn('Planes: carpeta compartida no accesible al guardar:', (error as Error).message);
+    else console.error('Error escribiendo plan:', error);
+    return NextResponse.json({ message: `Error al guardar el plan: ${detalle}` }, { status });
   }
 }

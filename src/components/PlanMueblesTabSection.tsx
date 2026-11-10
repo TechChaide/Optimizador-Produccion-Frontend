@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { serviciosService } from '@/services/servicios.service';
-import { planesArchivosService, getNombreGrupoPlanes } from '@/services/planesArchivos.service';
+import { planesArchivosService, getNombreGrupoPlanes, esRutaPlanesNoDisponible } from '@/services/planesArchivos.service';
 import { useAppContext } from '@/context/AppProvider';
 import { Package, Check, ChevronsUpDown, Loader2, BellRing, AlertTriangle, Clock, Calendar, CalendarDays, LayoutDashboard, History, ListChecks, ChevronUp, ChevronDown, Calculator, FileJson, Sparkles, CheckCircle2, PieChart, PackageSearch, Mail, ClipboardCheck } from 'lucide-react';
 import type { OrdenFert, ProvisionalOrder, Restriccion } from '@/types/interfaces';
@@ -1127,8 +1127,13 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
     planesArchivosService.listarFechas(nombreGrupoPlanes)
       .then(setPlanesArchivoFechas)
       .catch(error => {
-        console.error('Error al listar los planes guardados en archivo:', error);
-        addNotification('error', `No se pudieron listar los planes guardados en la ruta de planes: ${(error as Error).message}`);
+        // console.warn (no console.error): en desarrollo console.error abre el overlay rojo de Next.js
+        console.warn('No se pudieron listar los planes guardados en archivo:', (error as Error).message);
+        if (esRutaPlanesNoDisponible(error)) {
+          addNotification('warning', 'La carpeta compartida de planes no está disponible en este momento (revise la conexión con el servidor de archivos). Se muestran los planes guardados en el sistema.');
+        } else {
+          addNotification('error', `No se pudieron listar los planes guardados en la ruta de planes: ${(error as Error).message}`);
+        }
       });
   }, [displayMode, nombreGrupoPlanes, addNotification]);
 
@@ -1159,7 +1164,9 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
           addNotification('error', `No se pudieron respaldar ${pendientes.length - guardadas.length} plan(es) en la ruta de planes (ver consola).`);
         }
       } catch (error) {
-        console.error('Error en el respaldo de planes a archivo:', error);
+        // Si no se pudo ni listar la carpeta (p. ej. carpeta compartida caída), el aviso ya lo dio el efecto
+        // de arriba; el respaldo se reintenta en el próximo montaje.
+        console.warn('Respaldo de planes a archivo omitido:', (error as Error).message);
       }
     })();
   }, [displayMode, nombreGrupoPlanes, snapshotsDesdeRestriccion, addNotification]);
@@ -1175,8 +1182,8 @@ export const PlanMueblesTabSection: React.FC<PlanMueblesTabSectionProps> = ({ re
         })
         .catch(error => {
           planesArchivoSolicitadosRef.current.delete(fecha);
-          console.error(`Error al leer el plan ${fecha} desde archivo:`, error);
-          addNotification('error', `No se pudo leer el plan del ${fecha}: ${(error as Error).message}`);
+          console.warn(`No se pudo leer el plan ${fecha} desde archivo:`, (error as Error).message);
+          if (!esRutaPlanesNoDisponible(error)) addNotification('error', `No se pudo leer el plan del ${fecha}: ${(error as Error).message}`);
         });
     });
   }, [selectedDates, planesArchivoFechas, displayMode, nombreGrupoPlanes, addNotification]);

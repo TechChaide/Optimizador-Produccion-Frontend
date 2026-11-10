@@ -9,7 +9,7 @@ import { cargarDiasNoLaborables, feriadosNacionales } from '@/lib/dias-laborable
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { restriccionService } from '@/services/restriccion.service';
-import { planesArchivosService, getNombreGrupoPlanes } from '@/services/planesArchivos.service';
+import { planesArchivosService, getNombreGrupoPlanes, esRutaPlanesNoDisponible } from '@/services/planesArchivos.service';
 import { useAppContext } from '@/context/AppProvider';
 import { Package, Loader2, Search, Clock, Calendar, CalendarDays, LayoutDashboard, History, PlayCircle, Settings2, CheckCircle2, Users, Percent, Wrench, Gauge, Boxes, TriangleAlert, ClipboardCheck, FileSpreadsheet, LayoutGrid, TimerOff, X, Plus, Layers, PackageSearch, Save, CalendarClock, Lightbulb, Building2, Copy, RefreshCw, RotateCcw, Circle, Download, BedDouble, Send, SlidersHorizontal, Sofa } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell } from '@/components/ui/table';
@@ -720,7 +720,28 @@ const P2_VALOR_REGEX = /P2(?:\s*-\s*(?:LAMINA(?:\s+CILINDRICA)?|ESPUMA(?:\s+MUEB
 // Igual que P2_VALOR_REGEX pero combinado con los demás sufijos de PlanGrupo (P1.3/P1.5/PFSM) — usado
 // en handleChooseTables/handleDeleteExistingPlan para detectar y limpiar TODOS los planes hermanos de
 // una fecha, incluyendo ambos sub-planes de espuma.
-const PLAN_GRUPO_SUFIJOS_REGEX = /P1\.3\s*$|P1\.5\s*$|P2(?:\s*-\s*(?:LAMINA(?:\s+CILINDRICA)?|ESPUMA(?:\s+MUEBLES)?))?\s*$|PFSM\s*$/i;
+const PLAN_GRUPO_SUFIJOS_REGEX = /P1\.3\s*$|P1\.5\s*$|P2(?:\s*-\s*(?:LAMINA(?:\s+CILINDRICA)?|ESPUMA(?:\s+MUEBLES)?))?\s*$|PFSM\s*$|PFES\s*$/i;
+
+// "ORDENES PREVISIONALES DE ESTRUCTURAS" + "ENVIAR A SAP" de estructuras (pedido del usuario 2026-11-09):
+// Órdenes Previsionales del Responsable de Control de Producción '033' (ESTRUCTURA ...) con fecha inicio
+// extrema = hoy + 1 día hábil, que se crean en SAP con fecha hoy + 2 días hábiles, todas en la única hoja
+// de ruta HR-TAP00, puesto de trabajo PEGAD009 (sin distribución de mesas). Filtro: responsable '033' Y
+// descripción que empieza con "ESTRUCTURA". Mismo flujo que "ENVIAR A SAP" de Taller de Corte:
+// CodigoOrdenExterna = codigo_detalle_tactico de un PlanGrupo propio "PFES" (Plan Final de Estructuras),
+// separado del PFSM para no mezclar estructuras en lo que leen otros módulos (Ensamblado/PFF).
+const RESP_CTRL_PROD_ESTRUCTURAS = '033';
+const PUESTO_TRABAJO_ESTRUCTURAS = 'PEGAD009'; // confirmado por el usuario 2026-11-09 (hoja de ruta HR-TAP00)
+
+interface OrdenPrevisionalEstructura {
+    id: string;
+    material: string;
+    nombre: string;
+    cantidad: number;
+    fechaInicioExtrema: string; // "YYYY-MM-DD"
+    pedido: string;
+}
+
+const ordenEstructuraKey = (o: OrdenPrevisionalEstructura): string => `Previsional-${o.id}-${o.material}`;
 
 // Semielaborado de espuma (Lamina/Espuma) requerido, obtenido de la Explosión de Materiales
 interface FoamComponentNeed {
@@ -1045,6 +1066,13 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // pierde el estado de React, ya que DetalleTactico no guarda pedido/posición, solo material). Mapa
     // orderKey (`${source}-${id}-${material}`) -> codigo_detalle_tactico, poblado en handleSavePlanAndDetails.
     const [pfsmDetalleTacticoMap, setPfsmDetalleTacticoMap] = useState<Map<string, number>>(new Map());
+    // PFES (Plan Final de Estructuras): codigo_plan_grupo + codigo_detalle_tactico por orden de estructura
+    // (clave ordenEstructuraKey), creado al abrir "ENVIAR A SAP" de estructuras — ver handleOpenSapPreviewEstructuras.
+    const [pfesCodigoPlanGrupo, setPfesCodigoPlanGrupo] = useState<number | null>(null);
+    const [pfesDetalleTacticoMap, setPfesDetalleTacticoMap] = useState<Map<string, number>>(new Map());
+    const [isPreparingSapEstructuras, setIsPreparingSapEstructuras] = useState(false);
+    // Qué está mostrando la pantalla editable de "ENVIAR A SAP" (comparte diálogo y envío con Muebles)
+    const [sapPreviewModo, setSapPreviewModo] = useState<'muebles' | 'estructuras'>('muebles');
     // Pantalla editable de "ENVIAR A SAP": una fila por orden con la solicitud que se enviaría, para que
     // el usuario la revise y corrija ANTES de enviar nada (pedido explícito del usuario 2026-09-15) — ver
     // handleOpenSapPreview (la arma) y updateSapPreviewField (la edita).
@@ -1128,6 +1156,53 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             return true;
         });
     }, [allRawData, validRespCodes, forbiddenMachinesMap]);
+
+    // Suma N días hábiles a hoy: sin fines de semana ni feriados de la Ventana de Fabricación (holidaysMap),
+    // salvo los días que el usuario activó ahí. A diferencia del addBusinessDays de módulo (solo fines de semana).
+    const sumarDiasHabilesDesdeHoy = useCallback((dias: number): Date => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        let restantes = dias;
+        let guardia = 0;
+        while (restantes > 0 && guardia < 60) {
+            d.setDate(d.getDate() + 1);
+            guardia++;
+            const key = toDateKey(d);
+            const finDeSemana = d.getDay() === 0 || d.getDay() === 6;
+            const habil = activatedSpecialDays.has(key) || (!finDeSemana && !holidaysMap.has(key));
+            if (habil) restantes--;
+        }
+        return d;
+    }, [holidaysMap, activatedSpecialDays]);
+
+    const fechaInicioExtremaEstructuras = useMemo(() => toDateKey(sumarDiasHabilesDesdeHoy(1)), [sumarDiasHabilesDesdeHoy]);
+    const fechaCreacionEstructuras = useMemo(() => sumarDiasHabilesDesdeHoy(2), [sumarDiasHabilesDesdeHoy]);
+
+    // "ORDENES PREVISIONALES DE ESTRUCTURAS": Previsionales RespCtrlProd '033' del centro de Muebles con
+    // fecha inicio extrema (FECHAINICIO) = hoy + 1 día hábil. Solo informativo + fuente de "ENVIAR A SAP".
+    const ordenesPrevisionalesEstructuras = useMemo<OrdenPrevisionalEstructura[]>(() => {
+        const centro = String(mueblesGrupo?.centro || '1000').trim();
+        const result: OrdenPrevisionalEstructura[] = [];
+        allRawData.forEach(row => {
+            if (String(row.RESPCONTROLPROD || '').trim() !== RESP_CTRL_PROD_ESTRUCTURAS) return;
+            if (!String(row.NOMBRE || '').trim().toUpperCase().startsWith('ESTRUCTURA')) return;
+            const rowCentro = String(row.Centro || row.CENTRO || '').trim();
+            if (rowCentro && rowCentro !== centro) return;
+            const fecha = String(row.FECHAINICIO || '').trim().slice(0, 10);
+            if (fecha !== fechaInicioExtremaEstructuras) return;
+            const cantidad = Number(row.CANTIDAD) || 0;
+            if (cantidad <= 0) return;
+            result.push({
+                id: String(row.ORDENPREVISIONAL || '').trim(),
+                material: normalizeMaterialCode(row.MATERIAL || row.CodMaterial || ''),
+                nombre: String(row.NOMBRE || '').trim(),
+                cantidad,
+                fechaInicioExtrema: fecha,
+                pedido: String(row.PEDIDOVENTAS || '').trim().replace(/^0+/, ''),
+            });
+        });
+        return result.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es') || a.id.localeCompare(b.id));
+    }, [allRawData, mueblesGrupo, fechaInicioExtremaEstructuras]);
 
     // Órdenes Fert filtradas por restricciones de Muebles
     const mueblesFertOrders = useMemo(() => {
@@ -1281,8 +1356,10 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
             // Independiente del guardado en Restriccion: si uno falla, el otro igual se intenta.
             const nombreGrupoPlanes = getNombreGrupoPlanes(restricciones as (Restriccion & { grupo?: Grupo })[]);
             if (nombreGrupoPlanes) planesArchivosService.guardar(fecha, snapshot, nombreGrupoPlanes).catch(error => {
-                console.error('Error al guardar el archivo .txt del Plan Diario:', error);
-                addNotification('error', `No se pudo guardar el archivo del plan (${fecha}) en la ruta de planes: ${(error as Error).message}`);
+                console.warn('No se pudo guardar el archivo .txt del Plan Diario:', (error as Error).message);
+                addNotification(esRutaPlanesNoDisponible(error) ? 'warning' : 'error', esRutaPlanesNoDisponible(error)
+                    ? `El plan (${fecha}) se guardó en el sistema, pero no en la carpeta compartida de planes porque no está disponible. Se respaldará automáticamente al abrir la pestaña "PLAN" cuando vuelva la conexión.`
+                    : `No se pudo guardar el archivo del plan (${fecha}) en la ruta de planes: ${(error as Error).message}`);
             });
 
             const existente = planDiarioSnapshotIds.get(fecha);
@@ -4213,9 +4290,119 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                 });
             });
 
+        setSapPreviewModo('muebles');
         setSapPreviewRows(rows);
         setSapSendState({ sending: false, results: new Map() });
         setEnviarSapDialogOpen(true);
+    };
+
+    // "ENVIAR A SAP" de ESTRUCTURAS — Paso 1: habilitado tras guardar el PFSM. Guarda (una sola vez por
+    // sesión, y solo las órdenes que aún no estén) el PlanGrupo "PFES" con un DetalleTactico por orden de
+    // estructura para obtener su CodigoOrdenExterna, y abre la misma pantalla editable de Muebles con fecha
+    // inicio/fin = hoy + 2 días hábiles en PEGAD009, horario del turno seleccionado.
+    const handleOpenSapPreviewEstructuras = async () => {
+        if (pfsmDetalleTacticoMap.size === 0) {
+            addNotification('warning', 'Debe guardar el "Plan Táctico Final" (PFSM) antes de enviar a SAP las estructuras.');
+            return;
+        }
+        if (ordenesPrevisionalesEstructuras.length === 0) {
+            addNotification('warning', `No hay órdenes previsionales de estructuras (responsable ${RESP_CTRL_PROD_ESTRUCTURAS}) con fecha inicio extrema ${fechaInicioExtremaEstructuras}.`);
+            return;
+        }
+        if (!mueblesGrupo) {
+            addNotification('error', 'No se pudo determinar el Grupo/Centro de Muebles para guardar el PFES.');
+            return;
+        }
+
+        setIsPreparingSapEstructuras(true);
+        try {
+            let codigoPlanGrupo = pfesCodigoPlanGrupo;
+            const nuevoMapa = new Map(pfesDetalleTacticoMap);
+            const pendientes = ordenesPrevisionalesEstructuras.filter(o => !nuevoMapa.has(ordenEstructuraKey(o)));
+            if (pendientes.length > 0 && !codigoPlanGrupo) {
+                const savedPlan = await planGrupoService.save({
+                    codigo_plan_grupo: 0,
+                    codigo_plan: null,
+                    codigo_grupo: mueblesGrupo.codigo_grupo,
+                    codigo_familia_grupo: null,
+                    valor: `Plan Táctico - Centro ${mueblesGrupo.centro} - PFES`,
+                    fecha_inicio_plan: planningTargetDate,
+                    fecha_fin_plan: planningTargetDate,
+                    estado: 'A',
+                    fecha_creacion: new Date(),
+                    usuario_creacion: 'Admin',
+                } as unknown as PlanGrupo);
+                codigoPlanGrupo = savedPlan?.data?.codigo_plan_grupo ?? null;
+                if (!codigoPlanGrupo) throw new Error('El backend no devolvió un código de Plan de Grupo válido para PFES.');
+                setPfesCodigoPlanGrupo(codigoPlanGrupo);
+            }
+            let sinCodigo = 0;
+            for (const o of pendientes) {
+                const savedDetalle = await detalleTacticoService.save({
+                    codigo_detalle_tactico: 0,
+                    codigo_plan_grupo: codigoPlanGrupo as number,
+                    codigo_material: Number(o.material) || 0,
+                    linea_produccion: '',
+                    cantidad_produccion_neta: o.cantidad.toFixed(2),
+                    resp_ctrl_prod: RESP_CTRL_PROD_ESTRUCTURAS,
+                    clase_aprovisionamiento: 'E',
+                    cantidad_aprovisionamiento: 0,
+                    estado: 'A',
+                    fecha_modificacion: new Date(),
+                    usuario_modificacion: 'Admin',
+                });
+                const codigoDetalleTactico = savedDetalle?.data?.codigo_detalle_tactico;
+                if (codigoDetalleTactico) nuevoMapa.set(ordenEstructuraKey(o), codigoDetalleTactico);
+                else sinCodigo++;
+            }
+            setPfesDetalleTacticoMap(nuevoMapa);
+            if (sinCodigo > 0) {
+                addNotification('warning', `${sinCodigo} orden(es) de estructuras no recibieron código de detalle táctico del backend y no se incluyen en el envío.`);
+            }
+
+            const fechaSap = formatSapDate(fechaCreacionEstructuras);
+            const horaInicio = `${selectedShiftConfig.startTime.replace(':', '')}00`;
+            const horaFin = `${selectedShiftConfig.displayEndTime.replace(':', '')}00`;
+            const usuarioProceso = usuarioProcesoSap(); // USUARIO es CHAR(08) en SAP
+            const rows: { orderKey: string; solicitud: SolicitudProduccionHB }[] = [];
+            ordenesPrevisionalesEstructuras.forEach(o => {
+                const orderKey = ordenEstructuraKey(o);
+                const codigoDetalleTactico = nuevoMapa.get(orderKey);
+                if (!codigoDetalleTactico) return;
+                rows.push({
+                    orderKey,
+                    solicitud: {
+                        Mandante: '300',
+                        CodigoOrdenExterna: String(codigoDetalleTactico),
+                        ClaseOrden: '',
+                        Centro: String(mueblesGrupo.centro || '1000'),
+                        CodigoMaterial: formatMaterialSap(o.material),
+                        CantidadPlanificada: o.cantidad,
+                        VersionFabricacion: '01',
+                        PuestoTrabajo: PUESTO_TRABAJO_ESTRUCTURAS,
+                        FechaFinProgramada: fechaSap,
+                        HoraFinProgramada: horaFin,
+                        FechaInicioProgramada: fechaSap,
+                        HoraInicioProgramada: horaInicio,
+                        PedidoComercial: '',
+                        PosicionPedido: '',
+                        EstadoRegistro: SAP_ESTATUS_REG_ORD_CARGADO,
+                        Observaciones: '',
+                        UsuarioProceso: usuarioProceso,
+                    },
+                });
+            });
+
+            setSapPreviewModo('estructuras');
+            setSapPreviewRows(rows);
+            setSapSendState({ sending: false, results: new Map() });
+            setEnviarSapDialogOpen(true);
+        } catch (error) {
+            console.error('Error al preparar ENVIAR A SAP de estructuras (PFES):', error);
+            addNotification('error', `Error al guardar el Plan Final de Estructuras (PFES): ${(error as Error).message}`);
+        } finally {
+            setIsPreparingSapEstructuras(false);
+        }
     };
 
     // Actualiza un solo campo de una sola fila de la pantalla editable, sin tocar las demás.
@@ -4281,6 +4468,8 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
         setTableAssignments({});
         setExistingTacticalPlanDateKey(null);
         setPfsmDetalleTacticoMap(new Map());
+        setPfesCodigoPlanGrupo(null);
+        setPfesDetalleTacticoMap(new Map());
         setSapPreviewRows([]);
         setSapSendState({ sending: false, results: new Map() });
         setMaintenanceDecisions({});
@@ -5663,6 +5852,75 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     </div>
                 )}
 
+                {planningResult && (
+                    <div className="bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden">
+                        <div className="flex items-center justify-between gap-2 px-6 py-4 bg-gradient-to-r from-amber-700 to-orange-700">
+                            <div className="flex items-center gap-2">
+                                <Boxes className="w-5 h-5 text-amber-100" />
+                                <div>
+                                    <h3 className="text-sm font-bold text-white uppercase tracking-wide">ORDENES PREVISIONALES DE ESTRUCTURAS</h3>
+                                    <p className="text-[11px] text-amber-100">
+                                        Responsable {RESP_CTRL_PROD_ESTRUCTURAS} · descripción "ESTRUCTURA..." · fecha inicio extrema {fechaInicioExtremaEstructuras} · se crean con fecha {toDateKey(fechaCreacionEstructuras)} en {PUESTO_TRABAJO_ESTRUCTURAS}
+                                    </p>
+                                </div>
+                            </div>
+                            <Button
+                                onClick={handleOpenSapPreviewEstructuras}
+                                size="sm"
+                                disabled={pfsmDetalleTacticoMap.size === 0 || ordenesPrevisionalesEstructuras.length === 0 || isPreparingSapEstructuras}
+                                title={pfsmDetalleTacticoMap.size === 0 ? 'Se habilita después de guardar el Plan Táctico Final (PFSM)' : undefined}
+                                className="h-8 bg-sky-600 hover:bg-sky-700 text-white gap-1.5 text-xs shrink-0"
+                            >
+                                {isPreparingSapEstructuras ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                                ENVIAR A SAP
+                            </Button>
+                        </div>
+                        <div className="p-6">
+                            {ordenesPrevisionalesEstructuras.length === 0 ? (
+                                <p className="text-xs text-gray-500 text-center py-4">
+                                    No hay órdenes previsionales de estructuras (responsable {RESP_CTRL_PROD_ESTRUCTURAS}) con fecha inicio extrema {fechaInicioExtremaEstructuras}.
+                                </p>
+                            ) : (
+                                <div className="border border-gray-300 rounded-lg overflow-auto max-h-[50vh]">
+                                    <Table>
+                                        <TableHeader>
+                                            <TableRow className="bg-gray-100 hover:bg-gray-100 border-b-2 border-gray-300 sticky top-0 z-10">
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Orden Previsional</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Material</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase border-r border-gray-200">Descripción</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Cantidad</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center border-r border-gray-200">Fecha Inicio Extrema</TableHead>
+                                                <TableHead className="text-[10px] font-extrabold text-gray-600 uppercase text-center">Pedido</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {ordenesPrevisionalesEstructuras.map((o, idx) => (
+                                                <TableRow key={ordenEstructuraKey(o)} className={cn("border-b border-gray-200", idx % 2 === 1 && "bg-gray-50/70")}>
+                                                    <TableCell className="text-[11px] font-mono text-gray-700 border-r border-gray-200">{o.id.replace(/^0+/, '')}</TableCell>
+                                                    <TableCell className="text-[11px] font-mono font-semibold text-gray-800 border-r border-gray-200">{o.material}</TableCell>
+                                                    <TableCell className="text-[11px] text-gray-700 border-r border-gray-200">{o.nombre}</TableCell>
+                                                    <TableCell className="text-[11px] text-center font-mono text-gray-700 border-r border-gray-200">{o.cantidad.toLocaleString()}</TableCell>
+                                                    <TableCell className="text-[11px] text-center font-mono text-gray-600 border-r border-gray-200">{o.fechaInicioExtrema}</TableCell>
+                                                    <TableCell className="text-[11px] text-center font-mono text-gray-600">{o.pedido || '—'}</TableCell>
+                                                </TableRow>
+                                            ))}
+                                        </TableBody>
+                                        <TableFooter className="sticky bottom-0">
+                                            <TableRow className="bg-amber-50 hover:bg-amber-50 border-t-2 border-amber-300">
+                                                <TableCell colSpan={3} className="text-[11px] font-extrabold text-amber-900 uppercase text-right border-r border-amber-200">Total ({ordenesPrevisionalesEstructuras.length} orden(es))</TableCell>
+                                                <TableCell className="text-[11px] text-center font-mono font-extrabold text-amber-900 border-r border-amber-200">
+                                                    {ordenesPrevisionalesEstructuras.reduce((sum, o) => sum + o.cantidad, 0).toLocaleString()}
+                                                </TableCell>
+                                                <TableCell colSpan={2} />
+                                            </TableRow>
+                                        </TableFooter>
+                                    </Table>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+
                 {segundoNivelExplosionResults.length > 0 && (
                     <div className="bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden">
                         <div className="flex items-center justify-between gap-2 px-6 py-4 bg-gradient-to-r from-slate-700 to-zinc-700">
@@ -6420,7 +6678,7 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     <DialogHeader>
                         <DialogTitle className="flex items-center gap-2">
                             <Send className="w-4 h-4 text-sky-600" />
-                            Enviar a SAP — Revisión antes de enviar ({sapPreviewRows.length} orden(es))
+                            Enviar a SAP{sapPreviewModo === 'estructuras' ? ' — Estructuras' : ''} — Revisión antes de enviar ({sapPreviewRows.length} orden(es))
                         </DialogTitle>
                         <DialogDescription>
                             Esta es la información exacta que se enviará a SAP (InsertarSolicitudProduccionHB), una
@@ -6457,7 +6715,9 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
 
                         {sapPreviewRows.length === 0 ? (
                             <div className="flex items-center gap-2 text-gray-500 bg-gray-50 px-3 py-4 justify-center rounded-lg">
-                                <p className="text-xs">No hay órdenes para enviar (revise que la Distribución de Mesas y el PFSM estén guardados).</p>
+                                <p className="text-xs">{sapPreviewModo === 'estructuras'
+                                    ? 'No hay órdenes de estructuras para enviar (revise que tengan código de detalle táctico del PFES).'
+                                    : 'No hay órdenes para enviar (revise que la Distribución de Mesas y el PFSM estén guardados).'}</p>
                             </div>
                         ) : (
                             <div className="border border-gray-200 rounded-lg overflow-auto max-h-[45vh]">

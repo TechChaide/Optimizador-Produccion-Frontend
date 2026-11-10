@@ -294,6 +294,57 @@ const formatShiftClockLabel = (shiftStartTime: string, offsetHours: number): str
 const PFTC_SUFIJO = 'PFTC';
 const PFTC_SUFIJO_REGEX = /PFTC\s*$/i;
 
+// "Acolchado Electrotek y FK" (pedido del usuario 2026-11-09): Órdenes Previsionales de los responsables
+// '037' y '042' con fecha inicio extrema = hoy + 1 día hábil, que se lanzan a SAP con esa MISMA fecha. Sin
+// distribución de máquinas: el Puesto de Trabajo sale de reglas por nombre (puestoTrabajoAcolchado) y, si
+// ninguna aplica, de la línea del maestro de tiempos (Taller Corte EK/FK). CodigoOrdenExterna =
+// codigo_detalle_tactico de un PlanGrupo propio "PFAC" (Plan Final Acolchado), separado del PFTC.
+const RESP_CTRL_PROD_ACOLCHADO = ['037', '042'];
+const PFAC_SUFIJO = 'PFAC';
+
+// Se excluyen las que empiezan con o contienen cualquiera de estos textos
+const EXCLUSIONES_ACOLCHADO = ['PET', 'TAPA MASCOTA', 'FUN', 'TAPA FOAM BOX', 'TAPA COMFY BOX', 'TAPA MUNICH BOX'];
+
+const normalizarNombre = (nombre: string): string => nombre.toUpperCase().replace(/\s+/g, ' ').trim();
+
+const esExcluidoAcolchado = (nombre: string): boolean => {
+    const n = normalizarNombre(nombre);
+    return EXCLUSIONES_ACOLCHADO.some(e => n.includes(e));
+};
+
+// Línea del maestro de tiempos (TiemposEnsamblado, centro 1000) -> Puesto de Trabajo SAP, solo como
+// respaldo cuando el nombre no cae en ninguna regla.
+const PUESTO_POR_LINEA_ACOLCHADO: Record<string, string> = {
+    'TALLER CORTE EK': 'TC-MQELK',
+    'TALLER CORTE FK': 'TC-MQFK',
+};
+
+// Reglas por nombre del usuario, en este orden (la más específica primero):
+// "TAPA AC." -> TC-MQELK; "TAPA BENCH"/"TAPA NAPOLES"/"TAPA SPRING" -> CORTE-TM;
+// cualquier otra "TAPA" ("TAPA CAMA", "TAPA C.", ...) o "PLUMON" -> TC-MQFK.
+const puestoTrabajoAcolchado = (nombre: string, lineaBackend: string | undefined): { puesto: string; origen: 'regla' | 'maestro' | 'sin-puesto' } => {
+    const n = normalizarNombre(nombre);
+    if (n.startsWith('TAPA AC.') || n.startsWith('TAPA AC ')) return { puesto: 'TC-MQELK', origen: 'regla' };
+    if (['TAPA BENCH', 'TAPA NAPOLES', 'TAPA SPRING'].some(pref => n.startsWith(pref))) return { puesto: 'CORTE-TM', origen: 'regla' };
+    if (n.startsWith('TAPA') || n.startsWith('PLUMON')) return { puesto: 'TC-MQFK', origen: 'regla' };
+    const porLinea = lineaBackend ? PUESTO_POR_LINEA_ACOLCHADO[normalizarNombre(lineaBackend)] : undefined;
+    if (porLinea) return { puesto: porLinea, origen: 'maestro' };
+    return { puesto: '', origen: 'sin-puesto' };
+};
+
+interface OrdenAcolchado {
+    id: string;
+    material: string;
+    nombre: string;
+    cantidad: number;
+    fecha: string; // fecha inicio extrema "YYYY-MM-DD" = fecha de lanzamiento
+    resp: string;
+    puesto: string;
+    origenPuesto: 'regla' | 'maestro' | 'sin-puesto';
+}
+
+const acolchadoOrderKey = (o: { id: string; material: string }) => `Acolchado-${o.id}-${o.material}`;
+
 // Clave de una orden dentro del PFTC (misma forma que la de Muebles: source-id-material). Cada orden
 // Previsional aparece una sola vez en la distribución, así que es única y no cambia al "Modular".
 const pftcOrderKey = (order: { source: string; id: string; material: string }) => `${order.source}-${order.id}-${order.material}`;
@@ -398,6 +449,14 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
     // igual que el PFSM de Muebles — antes (2026-09-21) era el ID de la orden Previsional, reemplazado a
     // pedido del usuario 2026-10-19. ClaseOrden queda editable sin valor fijo, mismo criterio que Muebles.
     const [enviarSapDialogOpen, setEnviarSapDialogOpen] = useState(false);
+    // Qué está mostrando la pantalla editable de "ENVIAR A SAP" (comparte diálogo y envío con el PFTC)
+    const [sapPreviewModo, setSapPreviewModo] = useState<'forros' | 'acolchado'>('forros');
+    // PFAC: codigo_plan_grupo + codigo_detalle_tactico por orden (acolchadoOrderKey), una vez por sesión
+    const [pfacCodigoPlanGrupo, setPfacCodigoPlanGrupo] = useState<number | null>(null);
+    const [pfacDetalleTacticoMap, setPfacDetalleTacticoMap] = useState<Map<string, number>>(new Map());
+    const [isPreparingSapAcolchado, setIsPreparingSapAcolchado] = useState(false);
+    // Línea del maestro de tiempos por material (centro 1000, solo Taller Corte EK/FK) — respaldo del puesto
+    const [lineaAcolchadoPorMaterial, setLineaAcolchadoPorMaterial] = useState<Map<string, string>>(new Map());
     const [sapPreviewRows, setSapPreviewRows] = useState<{ orderKey: string; solicitud: SolicitudProduccionHB }[]>([]);
     const [sapSendState, setSapSendState] = useState<{
         sending: boolean;
@@ -596,6 +655,48 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
 
         return result.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
     }, [allPrevisionalRaw, holidaysSet, tiemposManualMap]);
+
+    // Maestro de tiempos (descarga compartida/cacheada con la pestaña Tiempos) — solo para el respaldo del
+    // Puesto de Trabajo de "Acolchado Electrotek y FK". Si falla, quedan solo las reglas por nombre.
+    useEffect(() => {
+        let cancelado = false;
+        serviciosService.getTiemposEnsambladoCompleto()
+            .then(rows => {
+                if (cancelado) return;
+                const mapa = new Map<string, string>();
+                rows.forEach((row: any) => {
+                    if (String(row.Centro || '').trim() !== CENTRO_TC) return;
+                    const linea = String(row.Linea || '').trim();
+                    if (!PUESTO_POR_LINEA_ACOLCHADO[normalizarNombre(linea)]) return;
+                    const material = normalizeMaterialCode(row.CodMaterial || '');
+                    if (material && !mapa.has(material)) mapa.set(material, linea);
+                });
+                setLineaAcolchadoPorMaterial(mapa);
+            })
+            .catch(error => console.warn('No se pudo cargar el maestro de tiempos para Acolchado:', (error as Error).message));
+        return () => { cancelado = true; };
+    }, []);
+
+    const fechaAcolchadoKey = useMemo(() => getBusinessDateKeyOffset(1, holidaysSet), [holidaysSet]);
+
+    const ordenesAcolchado = useMemo<OrdenAcolchado[]>(() => {
+        const result: OrdenAcolchado[] = [];
+        allPrevisionalRaw.forEach((row: any) => {
+            const resp = String(row.RESPCONTROLPROD || '').trim();
+            if (!RESP_CTRL_PROD_ACOLCHADO.includes(resp)) return;
+            if (String(row.Centro || '').trim() !== CENTRO_TC) return;
+            const nombre = String(row.NOMBRE || '').trim();
+            if (esExcluidoAcolchado(nombre)) return;
+            const fecha = String(row.FECHAINICIO || '').trim().slice(0, 10);
+            if (fecha !== fechaAcolchadoKey) return;
+            const cantidad = Number(row.CANTIDAD) || 0;
+            if (cantidad <= 0) return;
+            const material = normalizeMaterialCode(row.MATERIAL || row.CodMaterial || '');
+            const { puesto, origen } = puestoTrabajoAcolchado(nombre, lineaAcolchadoPorMaterial.get(material));
+            result.push({ id: String(row.ORDENPREVISIONAL || '').trim(), material, nombre, cantidad, fecha, resp, puesto, origenPuesto: origen });
+        });
+        return result.sort((a, b) => a.puesto.localeCompare(b.puesto) || a.nombre.localeCompare(b.nombre, 'es'));
+    }, [allPrevisionalRaw, fechaAcolchadoKey, lineaAcolchadoPorMaterial]);
 
     // Reporta hacia arriba los materiales distintos detectados, para la pestaña "Tiempos"
     useEffect(() => {
@@ -1080,9 +1181,115 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
         if (ordenesSinCodigo > 0) {
             addNotification('warning', `${ordenesSinCodigo} orden(es) de la distribución no están en el PFTC guardado y se omitieron. Vuelva a guardar el Plan Final (PFTC) si deben enviarse.`);
         }
+        setSapPreviewModo('forros');
         setSapPreviewRows(rows);
         setSapSendState({ sending: false, results: new Map() });
         setEnviarSapDialogOpen(true);
+    };
+
+    // "ENVIAR A SAP" de "Acolchado Electrotek y FK" — Paso 1: guarda (una vez por sesión, y solo las órdenes
+    // que falten) el PlanGrupo "PFAC" con un DetalleTactico por orden para obtener su CodigoOrdenExterna, y
+    // abre la misma pantalla editable que el PFTC: fecha inicio/fin = fecha inicio extrema de la orden,
+    // horario del Turno Día seleccionado, Puesto de Trabajo según puestoTrabajoAcolchado.
+    const handleOpenSapPreviewAcolchado = async () => {
+        if (ordenesAcolchado.length === 0) {
+            addNotification('warning', `No hay órdenes previsionales de Acolchado (responsables ${RESP_CTRL_PROD_ACOLCHADO.join('/')}) con fecha inicio extrema ${fechaAcolchadoKey}.`);
+            return;
+        }
+        setIsPreparingSapAcolchado(true);
+        try {
+            let codigoPlanGrupo = pfacCodigoPlanGrupo;
+            const nuevoMapa = new Map(pfacDetalleTacticoMap);
+            const pendientes = ordenesAcolchado.filter(o => !nuevoMapa.has(acolchadoOrderKey(o)));
+            if (pendientes.length > 0 && !codigoPlanGrupo) {
+                const grupo = await obtenerOCrearGrupoTallerCorte();
+                const savedPlan = await planGrupoService.save({
+                    codigo_plan_grupo: 0,
+                    codigo_plan: null,
+                    codigo_grupo: grupo.codigo_grupo,
+                    codigo_familia_grupo: null,
+                    valor: `Plan Táctico - Centro ${grupo.centro} - ${PFAC_SUFIJO}`,
+                    fecha_inicio_plan: fechaKeyToLocalDate(fechaAcolchadoKey),
+                    fecha_fin_plan: fechaKeyToLocalDate(fechaAcolchadoKey),
+                    estado: 'A',
+                    fecha_creacion: new Date(),
+                    usuario_creacion: 'Admin',
+                } as unknown as PlanGrupo);
+                codigoPlanGrupo = savedPlan?.data?.codigo_plan_grupo ?? null;
+                if (!codigoPlanGrupo) throw new Error('El backend no devolvió un código de Plan de Grupo válido para el PFAC.');
+                setPfacCodigoPlanGrupo(codigoPlanGrupo);
+            }
+            let sinCodigo = 0;
+            for (const o of pendientes) {
+                const savedDetalle = await detalleTacticoService.save({
+                    codigo_detalle_tactico: 0,
+                    codigo_plan_grupo: codigoPlanGrupo as number,
+                    codigo_material: Number(o.material) || 0,
+                    linea_produccion: '',
+                    cantidad_produccion_neta: o.cantidad.toFixed(2),
+                    resp_ctrl_prod: o.resp,
+                    clase_aprovisionamiento: 'E',
+                    cantidad_aprovisionamiento: 0,
+                    estado: 'A',
+                    fecha_modificacion: new Date(),
+                    usuario_modificacion: 'Admin',
+                });
+                const codigoDetalleTactico = savedDetalle?.data?.codigo_detalle_tactico;
+                if (codigoDetalleTactico) nuevoMapa.set(acolchadoOrderKey(o), codigoDetalleTactico);
+                else sinCodigo++;
+            }
+            setPfacDetalleTacticoMap(nuevoMapa);
+            if (sinCodigo > 0) {
+                addNotification('warning', `${sinCodigo} orden(es) de Acolchado no recibieron código de detalle táctico del backend y no se incluyen en el envío.`);
+            }
+
+            const duracionDia = getShiftDurationsParaTC('dia').find(d => d.id === turnoDuration.dia) ?? SHIFT_DURATIONS_TC_DIA[0];
+            const horaInicio = getEffectiveStartTimeParaTurno('dia');
+            const horaFin = addHoursToTime(horaInicio, duracionDia.displayHours ?? duracionDia.hours);
+            const usuarioProceso = usuarioProcesoSap(); // USUARIO es CHAR(08) en SAP
+            const rows: { orderKey: string; solicitud: SolicitudProduccionHB }[] = [];
+            ordenesAcolchado.forEach(o => {
+                const orderKey = acolchadoOrderKey(o);
+                const codigoDetalleTactico = nuevoMapa.get(orderKey);
+                if (!codigoDetalleTactico) return;
+                rows.push({
+                    orderKey,
+                    solicitud: {
+                        Mandante: '300',
+                        CodigoOrdenExterna: String(codigoDetalleTactico),
+                        ClaseOrden: '',
+                        Centro: CENTRO_TC,
+                        CodigoMaterial: formatMaterialSap(o.material),
+                        CantidadPlanificada: o.cantidad,
+                        VersionFabricacion: '01',
+                        PuestoTrabajo: o.puesto,
+                        FechaFinProgramada: formatFechaKeyToSap(o.fecha),
+                        HoraFinProgramada: formatHoraToSap(horaFin),
+                        FechaInicioProgramada: formatFechaKeyToSap(o.fecha),
+                        HoraInicioProgramada: formatHoraToSap(horaInicio),
+                        PedidoComercial: '',
+                        PosicionPedido: '',
+                        EstadoRegistro: SAP_ESTATUS_REG_ORD_CARGADO,
+                        Observaciones: '',
+                        UsuarioProceso: usuarioProceso,
+                    },
+                });
+            });
+            const sinPuesto = ordenesAcolchado.filter(o => !o.puesto).length;
+            if (sinPuesto > 0) {
+                addNotification('warning', `${sinPuesto} orden(es) de Acolchado no tienen Puesto de Trabajo por regla ni en el maestro de tiempos — complételo en la pantalla antes de enviar.`);
+            }
+
+            setSapPreviewModo('acolchado');
+            setSapPreviewRows(rows);
+            setSapSendState({ sending: false, results: new Map() });
+            setEnviarSapDialogOpen(true);
+        } catch (error) {
+            console.error('Error al preparar ENVIAR A SAP de Acolchado (PFAC):', error);
+            addNotification('error', `Error al guardar el Plan Final de Acolchado (PFAC): ${(error as Error).message}`);
+        } finally {
+            setIsPreparingSapAcolchado(false);
+        }
     };
 
     const updateSapPreviewField = (orderKey: string, field: keyof SolicitudProduccionHB, value: string | number) => {
@@ -1102,6 +1309,10 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
         const sinClaseOrden = rowsAEnviar.find(r => !r.solicitud.ClaseOrden.trim());
         if (sinClaseOrden) {
             addNotification('warning', 'Todas las órdenes deben tener una Clase de Orden antes de enviar a SAP.');
+            return;
+        }
+        if (rowsAEnviar.some(r => !String(r.solicitud.PuestoTrabajo || '').trim())) {
+            addNotification('warning', 'Todas las órdenes deben tener un Puesto de Trabajo antes de enviar a SAP.');
             return;
         }
 
@@ -1398,6 +1609,92 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                 </div>
             </div>
 
+            {/* ACOLCHADO ELECTROTEK Y FK (037/042) — sin distribución, envío directo a SAP */}
+            <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+                <div className="flex items-center justify-between px-6 py-4 bg-gradient-to-r from-teal-800 to-emerald-800">
+                    <div className="flex items-center gap-2">
+                        <BedDouble className="w-5 h-5 text-emerald-200" />
+                        <h3 className="text-sm font-bold text-white uppercase tracking-wide">Acolchado Electrotek y FK</h3>
+                    </div>
+                    <Button
+                        onClick={handleOpenSapPreviewAcolchado}
+                        disabled={ordenesAcolchado.length === 0 || isPreparingSapAcolchado}
+                        size="sm"
+                        className="h-8 bg-sky-600 hover:bg-sky-700 text-white gap-1.5 text-xs"
+                    >
+                        {isPreparingSapAcolchado ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                        ENVIAR A SAP
+                    </Button>
+                </div>
+                <div className="p-4">
+                    <p className="text-[11px] text-gray-500 mb-3">
+                        Órdenes Previsionales — RespCtrlProd <span className="font-bold">{RESP_CTRL_PROD_ACOLCHADO.join(' y ')}</span>, Centro <span className="font-bold">{CENTRO_TC}</span>,
+                        fecha inicio extrema <span className="font-bold">{fechaAcolchadoKey}</span> (se lanzan con esa misma fecha), sin {EXCLUSIONES_ACOLCHADO.join(', ')}
+                        — {ordenesAcolchado.length} orden(es).
+                    </p>
+                    <div className="border rounded-lg overflow-auto max-h-[50vh]">
+                        <Table>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableHead className="text-center border-r border-dashed border-gray-300">Orden</TableHead>
+                                    <TableHead className="text-center border-r border-dashed border-gray-300">Resp.</TableHead>
+                                    <TableHead className="text-center border-r border-dashed border-gray-300">Material</TableHead>
+                                    <TableHead className="text-left border-r border-dashed border-gray-300">Descripción</TableHead>
+                                    <TableHead className="text-center border-r border-dashed border-gray-300">Fecha</TableHead>
+                                    <TableHead className="text-center border-r border-dashed border-gray-300">Cantidad</TableHead>
+                                    <TableHead className="text-center">Puesto de Trabajo</TableHead>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                                {ordenesAcolchado.map(o => (
+                                    <TableRow key={acolchadoOrderKey(o)}>
+                                        <TableCell className="text-center border-r border-dashed border-gray-300 font-mono text-xs">{o.id.replace(/^0+/, '')}</TableCell>
+                                        <TableCell className="text-center border-r border-dashed border-gray-300">{o.resp}</TableCell>
+                                        <TableCell className="text-center border-r border-dashed border-gray-300 font-mono">{o.material}</TableCell>
+                                        <TableCell className="text-left border-r border-dashed border-gray-300">{o.nombre}</TableCell>
+                                        <TableCell className="text-center border-r border-dashed border-gray-300">{o.fecha}</TableCell>
+                                        <TableCell className="text-center border-r border-dashed border-gray-300">{o.cantidad.toLocaleString()}</TableCell>
+                                        <TableCell className="text-center font-mono text-xs">
+                                            {o.puesto ? (
+                                                <span title={o.origenPuesto === 'maestro' ? 'Tomado de la línea del maestro de tiempos (ninguna regla por nombre aplicó)' : 'Regla por nombre'}>
+                                                    {o.puesto}{o.origenPuesto === 'maestro' ? ' *' : ''}
+                                                </span>
+                                            ) : (
+                                                <span className="inline-flex items-center gap-1 text-amber-600 font-semibold text-[11px]">
+                                                    <TriangleAlert className="w-3.5 h-3.5" /> Sin puesto
+                                                </span>
+                                            )}
+                                        </TableCell>
+                                    </TableRow>
+                                ))}
+                                {ordenesAcolchado.length === 0 && (
+                                    <TableRow>
+                                        <TableCell colSpan={7} className="text-center py-6 text-gray-400 text-xs">
+                                            No hay órdenes de Acolchado con fecha inicio extrema {fechaAcolchadoKey}.
+                                        </TableCell>
+                                    </TableRow>
+                                )}
+                            </TableBody>
+                            {ordenesAcolchado.length > 0 && (
+                                <TableFooter>
+                                    <TableRow>
+                                        <TableCell colSpan={5} className="text-right font-bold border-r border-dashed border-gray-300">Totales</TableCell>
+                                        <TableCell className="text-center font-bold border-r border-dashed border-gray-300">{ordenesAcolchado.reduce((sum, o) => sum + o.cantidad, 0).toLocaleString()}</TableCell>
+                                        <TableCell className="text-center text-[10px] text-gray-500">
+                                            {Object.entries(ordenesAcolchado.reduce<Record<string, number>>((acc, o) => { acc[o.puesto || 'Sin puesto'] = (acc[o.puesto || 'Sin puesto'] || 0) + 1; return acc; }, {}))
+                                                .map(([puesto, n]) => `${puesto}: ${n}`).join(' · ')}
+                                        </TableCell>
+                                    </TableRow>
+                                </TableFooter>
+                            )}
+                        </Table>
+                    </div>
+                    {ordenesAcolchado.some(o => o.origenPuesto === 'maestro') && (
+                        <p className="text-[10px] text-gray-500 mt-2">* Puesto tomado de la línea del maestro de tiempos (Taller Corte EK → TC-MQELK, Taller Corte FK → TC-MQFK) porque el nombre no coincide con ninguna regla.</p>
+                    )}
+                </div>
+            </div>
+
             {/* DIAGRAMA DE GANTT — DISTRIBUCIÓN DE MÁQUINAS DE COSER */}
             {machineDistribution && machineDistribution.size > 0 && (
                 <div className="bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden">
@@ -1543,7 +1840,7 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
                     <DialogHeader>
                         <DialogTitle className="flex items-center gap-2">
                             <Send className="w-4 h-4 text-sky-600" />
-                            Enviar a SAP — Revisión antes de enviar ({sapPreviewRows.length} orden(es))
+                            Enviar a SAP{sapPreviewModo === 'acolchado' ? ' — Acolchado Electrotek y FK' : ''} — Revisión antes de enviar ({sapPreviewRows.length} orden(es))
                         </DialogTitle>
                         <DialogDescription>
                             Esta es la información exacta que se enviará a SAP (InsertarSolicitudProduccionHB), una
@@ -1580,7 +1877,9 @@ export const ProvisionalOrdersTallerCorteTab: React.FC<ProvisionalOrdersTallerCo
 
                         {sapPreviewRows.length === 0 ? (
                             <div className="flex items-center gap-2 text-gray-500 bg-gray-50 px-3 py-4 justify-center rounded-lg">
-                                <p className="text-xs">No hay órdenes para enviar (revise que la Distribución de Máquinas de Coser esté ejecutada).</p>
+                                <p className="text-xs">{sapPreviewModo === 'acolchado'
+                                    ? 'No hay órdenes de Acolchado para enviar (revise que tengan código de detalle táctico del PFAC).'
+                                    : 'No hay órdenes para enviar (revise que la Distribución de Máquinas de Coser esté ejecutada).'}</p>
                             </div>
                         ) : (
                             <div className="border border-gray-200 rounded-lg overflow-auto max-h-[50vh]">

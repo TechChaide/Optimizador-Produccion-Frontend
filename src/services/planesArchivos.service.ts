@@ -19,6 +19,24 @@ export const getNombreGrupoPlanes = (restricciones: (Restriccion & { grupo?: Gru
 const getBasePath = (): string =>
   ((typeof window !== 'undefined' ? (window as any).__NEXT_DATA__?.basePath : '') || process.env.NEXT_PUBLIC_BASE_PATH || '').replace(/\/+$/, '');
 
+// La carpeta compartida `ruta_planes` no está accesible desde el servidor (HTTP 503 de /api/planes): es un
+// problema de red/permisos, no de la app. Los componentes lo muestran como advertencia y siguen trabajando
+// con los planes guardados en Restricciones.
+export class RutaPlanesNoDisponibleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RutaPlanesNoDisponibleError';
+  }
+}
+
+export const esRutaPlanesNoDisponible = (error: unknown): error is RutaPlanesNoDisponibleError =>
+  error instanceof RutaPlanesNoDisponibleError;
+
+const errorDeRespuesta = async (res: Response): Promise<Error> => {
+  const mensaje = await leerError(res);
+  return res.status === 503 ? new RutaPlanesNoDisponibleError(mensaje) : new Error(mensaje);
+};
+
 const leerError = async (res: Response): Promise<string> => {
   try {
     const body = await res.json();
@@ -35,7 +53,7 @@ export const planesArchivosService = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fecha, grupo, centro, contenido }),
     });
-    if (!res.ok) throw new Error(await leerError(res));
+    if (!res.ok) throw await errorDeRespuesta(res);
     return (await res.json()).ruta as string;
   },
 
@@ -44,14 +62,14 @@ export const planesArchivosService = {
     const params = new URLSearchParams({ fecha, grupo, centro });
     const res = await fetch(`${getBasePath()}/api/planes?${params}`, { cache: 'no-store' });
     if (res.status === 404) return null;
-    if (!res.ok) throw new Error(await leerError(res));
+    if (!res.ok) throw await errorDeRespuesta(res);
     return (await res.json()).data as T;
   },
 
   async listarFechas(grupo: string, centro = PLANES_CENTRO_PRODUCCION): Promise<string[]> {
     const params = new URLSearchParams({ grupo, centro });
     const res = await fetch(`${getBasePath()}/api/planes/fechas?${params}`, { cache: 'no-store' });
-    if (!res.ok) throw new Error(await leerError(res));
+    if (!res.ok) throw await errorDeRespuesta(res);
     return ((await res.json()).data || []) as string[];
   },
 };

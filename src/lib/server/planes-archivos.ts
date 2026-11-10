@@ -19,6 +19,29 @@ export const getRutaPlanes = (): string => {
   return ruta;
 };
 
+// Códigos de error de fs que significan "no se llega a la carpeta compartida" (servidor de archivos
+// apagado, sin red/VPN, unidad desconectada, sin permisos) — no un problema de los datos. Con una ruta
+// UNC caída, Windows suele devolver "UNKNOWN: unknown error, scandir ...".
+const CODIGOS_RUTA_INACCESIBLE = new Set([
+  'UNKNOWN', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTCONN', 'ECONNREFUSED', 'ECONNRESET',
+  'EACCES', 'EPERM', 'EBUSY', 'EIO', 'ENOTFOUND', 'EAI_AGAIN',
+]);
+
+// Status y mensaje para las rutas /api/planes: 503 con un mensaje entendible si la carpeta compartida no
+// está accesible, 500 con el mensaje original para cualquier otro error.
+export const describirErrorRuta = (error: unknown): { status: number; detalle: string } => {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (code && CODIGOS_RUTA_INACCESIBLE.has(code)) {
+    let ruta = '';
+    try { ruta = ` (${getRutaPlanes()})`; } catch { /* sin ruta configurada */ }
+    return {
+      status: 503,
+      detalle: `la carpeta compartida de planes${ruta} no está accesible desde el servidor [${code}]. Revise la conexión de red con el servidor de archivos o los permisos de la carpeta.`,
+    };
+  }
+  return { status: 500, detalle: (error as Error)?.message ?? String(error) };
+};
+
 export const esFechaValida = (fecha: unknown): fecha is string =>
   typeof fecha === 'string' && FECHA_REGEX.test(fecha) && !Number.isNaN(new Date(`${fecha}T00:00:00`).getTime());
 

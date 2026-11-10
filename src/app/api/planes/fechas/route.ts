@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { esSegmentoValido, listarFechasPlanes } from '@/lib/server/planes-archivos';
+import { describirErrorRuta, esSegmentoValido, listarFechasPlanes } from '@/lib/server/planes-archivos';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -17,7 +17,9 @@ export async function GET(req: NextRequest) {
   try {
     return NextResponse.json({ data: await listarFechasPlanes(grupo, centro) });
   } catch (error) {
-    console.error('Error listando planes:', error);
-    return NextResponse.json({ message: `Error al listar los planes: ${(error as Error).message}` }, { status: 500 });
+    const { status, detalle } = describirErrorRuta(error);
+    if (status === 503) console.warn('Planes: carpeta compartida no accesible al listar:', (error as Error).message);
+    else console.error('Error listando planes:', error);
+    return NextResponse.json({ message: `Error al listar los planes: ${detalle}` }, { status });
   }
 }
