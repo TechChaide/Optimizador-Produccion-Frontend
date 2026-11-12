@@ -41,7 +41,8 @@ import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { CUPULA_MAX_CM } from '@/lib/bloques-espuma';
 import { ventanaCorte } from '@/lib/ventana-corte';
-import { nextBusinessDay, addBusinessDays, laborablesHorizonte, cargarDiasNoLaborables, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { nextBusinessDay, previousBusinessDay, addBusinessDays, esDiaNoLaborable, laborablesHorizonte, cargarDiasNoLaborables, type DiasNoLaborables } from '@/lib/dias-laborables';
+import { buscarUltimoPlanTxt } from '@/lib/planes-txt';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 
@@ -294,6 +295,106 @@ const resumenConsumoHistorico = (movs: MovimientoConsumo[]) => {
     movimientos: movs.length,
   };
 };
+
+// Paso 3 · Plan de Reposición Leader (usuario 2026-11-12): misma regla que la hoja BASE del Excel
+// "NN Programación bloque formulados 2026.xlsx" (PRG LEADER), por Bloque Formulado de apertura:
+//   I  Stock [UN]        = stock Kg ÷ peso del bloque
+//   O  Meta consumo/día  = histórico (SEMANAS_META_CONSUMO semanas ÷ días hábiles), igual todos los días; editable
+//   V  Venta Externa     = Kg FERT 038 del paso 1 ÷ peso
+//   AL Plan día anterior = PLAN del último reporte guardado antes del día de producción
+//   AC Cobertura actual  = MTS (I + AL) ÷ O · HB (I − V + AL) ÷ O
+//   AD Horizonte         = restricción Cobertura_<material> (un valor o L;M;X;J;V), o
+//                          Formulacion_Cobertura_Dias, o 1 día de fabricación + 48 h de curado
+//   Reponer              = día de producción (DiasProduccion_<apertura>) y AC < AD (MTO: stock Kg < VE Kg)
+//   AI Sugerido          = (AD × O) − I + V − AL, a 1 decimal; fracción ≥ 0,3 sube, si no baja
+//   AJ PLAN              = sugerido, editable; tope = nichos (30) + autodescarga (6) opcional
+type EstrategiaReposicion = 'MTS' | 'MTO' | 'HB';
+const HORIZONTE_DEFAULT_DIAS = 1 + CURADO_DIAS_ESPERA;
+const NICHOS_MAX_DEFAULT = 30;
+const AUTODESCARGA_DEFAULT_UN = 6;
+const SEMANAS_META_CONSUMO = 4;
+
+// Lo que se calcula al generar (SAP + restricciones resueltas) y viaja en el respaldo del reporte.
+interface BaseReposicionRow {
+  blockCode: string; blockDesc: string; corrida: string; apertura: string; dens: string;
+  pesoBloque: number; pesoFuente: 'real' | 'lote' | 'sin dato';
+  stockKg: number; enCuradoKg: number;
+  metaKgDia: number; veKg: number; planAnteriorUN: number;
+  horizonteDias: number; horizonteRestriccion: boolean;
+  estrategia: EstrategiaReposicion; diaProduccion: boolean;
+}
+interface ReposicionLeader {
+  filas: BaseReposicionRow[];
+  diaProduccion: string;
+  planAnteriorFecha: string | null;
+  nichosMax: number;
+  autodescargaUN: number;
+  autodescarga: boolean;
+  // Ajustes del usuario por blockCode, en UN.
+  metaOverride: Record<string, number>;
+  planOverride: Record<string, number>;
+}
+interface FilaReposicion extends BaseReposicionRow {
+  stockUN: number; enCuradoUN: number; metaUNDia: number; veUN: number;
+  estrategiaEfectiva: EstrategiaReposicion;
+  coberturaActual: number | null; reponer: boolean; sugeridoUN: number;
+  planUN: number; planKg: number; coberturaPlan: number | null;
+  metaEditada: boolean; planEditado: boolean;
+}
+
+// ROUNDUP a 1 decimal y luego entero: fracción ≥ 0,3 sube, menor baja (columna AI del Excel).
+const redondeoReposicion = (x: number): number => {
+  if (!(x > 0)) return 0;
+  const r = Math.ceil(x * 10 - 1e-9) / 10;
+  return r - Math.trunc(r) >= 0.3 - 1e-9 ? Math.ceil(r) : Math.floor(r);
+};
+const numeroRestriccion = (v: string): number | null => {
+  const n = Number(v.trim().replace(',', '.'));
+  return v.trim() && !isNaN(n) ? n : null;
+};
+// "3.5" para todos los días o "3,5;3,5;3,5;4;4" (lunes a viernes); fin de semana usa el viernes.
+const horizonteDeRestriccion = (valor: string, diaSemana: number): number | null => {
+  const partes = valor.split(/[;|]/).map(s => s.trim()).filter(Boolean);
+  if (partes.length === 0) return null;
+  if (partes.length === 1) return numeroRestriccion(partes[0]);
+  const idx = diaSemana >= 1 && diaSemana <= 5 ? diaSemana - 1 : 4;
+  return numeroRestriccion(partes[Math.min(idx, partes.length - 1)]);
+};
+// "L,M,X,V" / "LUNES;MARTES" → días de getDay(). Vacío = null (todos los días hábiles).
+const DIA_POR_PREFIJO: Record<string, number> = { L: 1, LU: 1, M: 2, MA: 2, X: 3, MI: 3, J: 4, JU: 4, V: 5, VI: 5, S: 6, SA: 6, D: 0, DO: 0 };
+const diasProduccionDeRestriccion = (valor: string): Set<number> | null => {
+  const dias = valor.toUpperCase().split(/[,;|\s]+/).map(s => s.trim()).filter(Boolean)
+    .map(s => DIA_POR_PREFIJO[s] ?? DIA_POR_PREFIJO[s.slice(0, 2)]).filter((d): d is number => d !== undefined);
+  return dias.length ? new Set(dias) : null;
+};
+
+const calcularFilaReposicion = (b: BaseReposicionRow, metaOverrideUN?: number, planOverrideUN?: number): FilaReposicion => {
+  const peso = b.pesoBloque;
+  const aUN = (kg: number) => (peso > 0 ? kg / peso : 0);
+  const I = aUN(b.stockKg);
+  const V = aUN(b.veKg);
+  const AL = b.planAnteriorUN;
+  const O = metaOverrideUN ?? aUN(b.metaKgDia);
+  const AD = b.horizonteDias;
+  // Sin consumo no hay cobertura que medir: se repone solo contra Venta Externa (como MTO).
+  const estrategiaEfectiva: EstrategiaReposicion = O > 0 ? b.estrategia : 'MTO';
+  const cobertura = (extra: number): number | null => {
+    if (estrategiaEfectiva === 'MTO') return null;
+    return (estrategiaEfectiva === 'HB' ? I - V + AL + extra : I + AL + extra) / O;
+  };
+  const coberturaActual = cobertura(0);
+  const reponer = b.diaProduccion && (estrategiaEfectiva === 'MTO' ? b.stockKg < b.veKg : (coberturaActual ?? 0) < AD);
+  const bruto = (estrategiaEfectiva === 'MTO' ? 0 : AD * O) - I + V - AL;
+  const sugeridoUN = reponer ? redondeoReposicion(bruto) : 0;
+  const planUN = planOverrideUN ?? sugeridoUN;
+  return {
+    ...b, stockUN: I, enCuradoUN: aUN(b.enCuradoKg), metaUNDia: O, veUN: V, estrategiaEfectiva,
+    coberturaActual, reponer, sugeridoUN, planUN, planKg: Math.ceil(planUN * peso), coberturaPlan: cobertura(planUN),
+    metaEditada: metaOverrideUN !== undefined, planEditado: planOverrideUN !== undefined,
+  };
+};
+const planFinalReposicion = (r: ReposicionLeader | undefined | null): Record<string, number> =>
+  Object.fromEntries((r?.filas ?? []).map(b => [b.blockCode, calcularFilaReposicion(b, r?.metaOverride?.[b.blockCode], r?.planOverride?.[b.blockCode]).planUN]));
 
 // Materiales de PRUEBA (ej. "BLOQUE FORMULADO PRUEBAS MQ COFAMA") — el usuario confirmó que tanto
 // Leader como Cofama corren pruebas de máquina de vez en cuando, y esos bloques NO deben contarse
@@ -554,16 +655,19 @@ interface SnapshotFormulacion {
   curadoData: RawApiRow[];
   unifiedSummaryData: FormuladoSummaryRow[];
   consumoBloqueFormulado: ConsumoBloqueRow[];
+  reposicion?: ReposicionLeader | null;
 }
 
 // Respaldo de lo planificado guardado junto al TXT ({fecha}.estado.json), ver capturarEstadoPlan.
-// Cambiar su forma exige subir `version` (los respaldos viejos dejan de cargarse).
+// Cambiar su forma exige subir `version` (los respaldos viejos dejan de cargarse). `reposicion` es
+// opcional (2026-11-12): los respaldos anteriores siguen cargando, sin Plan de Reposición Leader.
 interface EstadoPlanFormulacion {
   tipo: 'formulacion-salida';
   version: 2;
   diaCorte: string;
   unifiedSummaryData: FormuladoSummaryRow[];
   consumoBloqueFormulado: ConsumoBloqueRow[];
+  reposicion?: ReposicionLeader | null;
 }
 
 export const TacticalPlanFormulacionSection: React.FC = () => {
@@ -617,6 +721,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   const [cargandoHistorico, setCargandoHistorico] = useState(false);
   const [baseConsumo, setBaseConsumo] = useState<'diario' | 'semanal' | 'mensual'>('diario');
   const [unifiedSummaryData, setUnifiedSummaryData] = useState<FormuladoSummaryRow[]>([]);
+  const [reposicion, setReposicion] = useState<ReposicionLeader | null>(null);
   // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
   const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
   const [consumoBloqueFormulado, setConsumoBloqueFormulado] = useState<ConsumoBloqueRow[]>([]);
@@ -710,6 +815,135 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     }, 0);
   }, [curadoData]);
 
+  // Paso 2 · Stock y Curado (usuario 2026-10-31, Excel de Leader): una fila de getTiemposCuradoBloqueFormulado
+  // = un bloque físico (Idbloque); CantidadStock = Kg que le quedan, peso = peso real al fabricarlo.
+  // Curado = fabricación + CURADO_DIAS_ESPERA. Por Bloque Formulado y por espacio (Leader / Cofama): bloques
+  // y Kg curados y en curado, peso real promedio, y el stock del cubo SAP al lado para comparar.
+  const stockCuradoPorEspacio = useMemo(() => {
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const sapKg = new Map<string, number>();
+    filteredInventario.forEach(inv => {
+      if (String(inv.Centro || '').trim() !== '1000') return;
+      const code = cleanCode(inv.Material);
+      sapKg.set(code, (sapKg.get(code) || 0) + inv.stockKg);
+    });
+    const porEspacio: Record<string, StockCuradoRow[]> = {};
+    CURADO_SPACES.forEach(space => {
+      const m = new Map<string, StockCuradoRow & { pesoSuma: number; pesoN: number }>();
+      curadoData.forEach(row => {
+        if (!matchesCuradoSpace(row, space)) return;
+        const code = cleanCode(getProp(row, ['CodMaterial', 'MATERIAL', 'CODMATERIAL']));
+        if (!code) return;
+        const info = extractMaterialInfo(row);
+        const r = m.get(code) ?? {
+          materialCode: code, descripcion: getProp(row, ['NomMaterial', 'NOMMATERIAL']) || '—', apertura: info.apertura, dens: info.dens,
+          curadosUN: 0, curadosKg: 0, enCuradoUN: 0, enCuradoKg: 0, pesoProm: 0, stockSapKg: sapKg.get(code) || 0, pesoSuma: 0, pesoN: 0,
+        };
+        const peso = safeNum(getProp(row, ['peso', 'PESO']));
+        if (peso > 0) { r.pesoSuma += peso; r.pesoN += 1; }
+        const kg = safeNum(getProp(row, ['CantidadStock', 'CANTIDADSTOCK', 'CANTIDAD_STOCK']));
+        const fab = parseFechaSAP(getProp(row, ['fecha', 'FECHA', 'FECHA_INICIO', 'FECHA_FABRICACION', 'FECHA_OT_PRG_INI']));
+        if (kg > 0 && fab) {
+          const disp = new Date(fab);
+          disp.setDate(disp.getDate() + CURADO_DIAS_ESPERA);
+          if (todayStr >= format(disp, 'yyyy-MM-dd')) { r.curadosUN += 1; r.curadosKg += kg; }
+          else { r.enCuradoUN += 1; r.enCuradoKg += kg; }
+        }
+        m.set(code, r);
+      });
+      porEspacio[space.key] = Array.from(m.values())
+        .map(({ pesoSuma, pesoN, ...r }) => ({ ...r, pesoProm: pesoN > 0 ? pesoSuma / pesoN : 0 }))
+        .sort(compareAperturaDensidad);
+    });
+    return porEspacio;
+  }, [curadoData, filteredInventario]);
+
+  // Paso 3 · Base del Plan de Reposición Leader (ver BaseReposicionRow): universo = Bloques Formulados de
+  // apertura del cubo, centro 1000. Resuelve aquí restricciones, peso, meta de consumo, VE y plan del día
+  // anterior para que el respaldo del reporte se recargue igual sin SAP. Completa movimientosCache.
+  const construirReposicion = useCallback(async (
+    movimientosCache: Map<string, MovimientoConsumo[]>,
+    consumoRows: ConsumoBloqueRow[],
+  ): Promise<ReposicionLeader> => {
+    const restr = (nombre: string): string =>
+      restricciones.find(r => String(r.nombre_restriccion || '').trim().toUpperCase() === nombre.toUpperCase())?.valor_restriccion?.trim() || '';
+    const extra = laborablesHorizonte(calendario.laborablesExtra);
+    const dProd = new Date(`${ventana.d}T12:00:00`);
+    const hoyPlan = previousBusinessDay(dProd, calendario.noLaborables, extra);
+
+    const universo = new Map<string, { desc: string; categoria: string; apertura: string; dens: string; stockKg: number; loteMin: number }>();
+    cuboInventarios.forEach(inv => {
+      const desc = String(inv.Descripcion || '');
+      if (String(inv.Centro || '').trim() !== '1000' || !/BLOQUE FORMULADO/i.test(desc) || esMaterialPrueba(desc)) return;
+      const info = extractMaterialInfo(inv as unknown as RawApiRow);
+      if (info.apertura === '—') return;
+      const code = cleanCode(inv.Material);
+      const u = universo.get(code) ?? { desc: desc.toUpperCase(), categoria: String(inv.Categoria || ''), apertura: info.apertura, dens: info.dens, stockKg: 0, loteMin: 0 };
+      u.stockKg += safeNum(inv.StockActual);
+      u.loteMin = Math.max(u.loteMin, safeNum(inv.TamLoteMin));
+      universo.set(code, u);
+    });
+
+    const faltantes = Array.from(universo.keys()).filter(c => !movimientosCache.has(c));
+    for (let i = 0; i < faltantes.length; i += 6) {
+      const lote = faltantes.slice(i, i + 6);
+      const res = await Promise.all(lote.map(fetchMovimientosConsumo));
+      lote.forEach((c, k) => movimientosCache.set(c, res[k]));
+    }
+    // Días hábiles (con jornadas de sábado) de la ventana del histórico, para la meta lineal por día.
+    const diasVentana = SEMANAS_META_CONSUMO * 7;
+    let diasHabiles = 0;
+    for (let i = 0; i < diasVentana; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      if (!esDiaNoLaborable(d, calendario.noLaborables, calendario.laborablesExtra)) diasHabiles++;
+    }
+
+    const veKg = new Map<string, number>();
+    consumoRows.forEach(r => { if (r.destino === 'VE' && r.un === 'KG') veKg.set(r.codFormulado, (veKg.get(r.codFormulado) || 0) + r.total); });
+
+    const fechasPrevias: string[] = [];
+    for (const d = new Date(hoyPlan); format(d, 'yyyy-MM-dd') < ventana.d; d.setDate(d.getDate() + 1)) fechasPrevias.push(format(d, 'yyyy-MM-dd'));
+    const previo = await buscarUltimoPlanTxt({ modulo: 'formulacion', centro: '1000', fechas: fechasPrevias }).catch(() => null);
+    const repPrevia = (previo?.estado as Partial<EstadoPlanFormulacion> | null)?.reposicion;
+    const planAnterior = planFinalReposicion(repPrevia);
+
+    const pesoReal = new Map((stockCuradoPorEspacio['leader'] ?? []).filter(r => r.pesoProm > 0).map(r => [r.materialCode, r.pesoProm]));
+    const horizonteGeneral = numeroRestriccion(restr('Formulacion_Cobertura_Dias')) ?? HORIZONTE_DEFAULT_DIAS;
+
+    const filas: BaseReposicionRow[] = [];
+    universo.forEach((u, code) => {
+      const real = pesoReal.get(code);
+      const pesoBloque = real ?? u.loteMin;
+      const metaKgDia = diasHabiles > 0 ? consumoUltimosDiasKg(movimientosCache.get(code) ?? [], diasVentana) / diasHabiles : 0;
+      const coberturaRestr = restr(`Cobertura_${code}`);
+      const horizonteMaterial = coberturaRestr ? horizonteDeRestriccion(coberturaRestr, hoyPlan.getDay()) : null;
+      const estrategiaRestr = restr(`Estrategia_${code}`).toUpperCase();
+      const diasProd = diasProduccionDeRestriccion(restr(`DiasProduccion_${u.apertura}`));
+      const fila: BaseReposicionRow = {
+        blockCode: code, blockDesc: u.desc, corrida: extraerCorridaCategoria(u.categoria), apertura: u.apertura, dens: u.dens,
+        pesoBloque, pesoFuente: real ? 'real' : u.loteMin > 0 ? 'lote' : 'sin dato',
+        stockKg: u.stockKg, enCuradoKg: getStockEnCurado(code),
+        metaKgDia, veKg: veKg.get(code) || 0, planAnteriorUN: planAnterior[code] || 0,
+        horizonteDias: horizonteMaterial ?? horizonteGeneral, horizonteRestriccion: horizonteMaterial !== null,
+        estrategia: estrategiaRestr === 'MTO' || estrategiaRestr === 'HB' ? estrategiaRestr : 'MTS',
+        diaProduccion: diasProd ? diasProd.has(dProd.getDay()) : true,
+      };
+      if (fila.stockKg > 0 || fila.metaKgDia > 0 || fila.veKg > 0 || fila.planAnteriorUN > 0 || fila.horizonteRestriccion) filas.push(fila);
+    });
+    filas.sort(compareAperturaDensidad);
+    return {
+      filas,
+      diaProduccion: ventana.d,
+      planAnteriorFecha: repPrevia ? previo?.fechaObjetivo ?? null : null,
+      nichosMax: numeroRestriccion(restr('Formulacion_Nichos_Max')) ?? NICHOS_MAX_DEFAULT,
+      autodescargaUN: numeroRestriccion(restr('Formulacion_Autodescarga_UN')) ?? AUTODESCARGA_DEFAULT_UN,
+      autodescarga: false,
+      metaOverride: {},
+      planOverride: {},
+    };
+  }, [restricciones, calendario, ventana.d, cuboInventarios, stockCuradoPorEspacio, getStockEnCurado]);
+
   // Paso 1 · Necesidad: FERT de la ventana (pendiente + planificado) de los responsables de Formulación
   // y de Venta Externa (038), explotadas a Kg de Bloque Formulado. Necesidad neta = esa necesidad −
   // stock útil (stock SAP menos lo que aún está en curado); el plan de reposición cubre el faltante.
@@ -728,7 +962,13 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     if (allOrders.length === 0) {
       setUnifiedSummaryData([]);
       setConsumoBloqueFormulado([]);
-      return { estado: 'aviso', mensaje: `Sin FERT de Formulación / Venta Externa entre ${pendienteDesde} y ${ventana.d}.` };
+      // La reposición Leader va por cobertura: se calcula aunque no haya FERT en la ventana.
+      const movs = new Map<string, MovimientoConsumo[]>();
+      const rep = await construirReposicion(movs, []);
+      setReposicion(rep);
+      setMovimientosConsumo(Object.fromEntries(movs));
+      actualizarEnCache<SnapshotFormulacion>(CACHE_FORMULACION, { unifiedSummaryData: [], consumoBloqueFormulado: [], reposicion: rep });
+      return { estado: 'aviso', mensaje: `Sin FERT de Formulación / Venta Externa entre ${pendienteDesde} y ${ventana.d}; reposición Leader por cobertura: ${rep.filas.length} bloque(s).` };
     }
     setIsProcessingResumen(true);
     const groupsMap = new Map<string, FormuladoSummaryRow>();
@@ -837,8 +1077,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const summaryOrdenado = Array.from(groupsMap.values()).sort((a, b) =>
       aperturaSortIndex(a.apertura) - aperturaSortIndex(b.apertura) || a.corrida.localeCompare(b.corrida) || a.centro.localeCompare(b.centro)
     );
+    const rep = await construirReposicion(movimientosCache, consumoRows);
     setUnifiedSummaryData(summaryOrdenado);
     setConsumoBloqueFormulado(consumoRows);
+    setReposicion(rep);
     setMovimientosConsumo(Object.fromEntries(movimientosCache));
     // Mantiene el snapshot en sync — si el usuario navega a otro módulo y vuelve, el tab Resumen ya
     // no aparece vacío (ver SnapshotFormulacion). No-op si todavía no se sincronizó ningún dato base
@@ -846,10 +1088,11 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     actualizarEnCache<SnapshotFormulacion>(CACHE_FORMULACION, {
       unifiedSummaryData: summaryOrdenado,
       consumoBloqueFormulado: consumoRows,
+      reposicion: rep,
     });
     setIsProcessingResumen(false);
-    return { estado: 'ok', mensaje: `${allOrders.length} orden(es) → ${summaryOrdenado.length} bloque(s) formulado(s) en el resumen.`, progreso: { actual: allOrders.length, total: allOrders.length } };
-  }, [prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico, tramoFert, pendienteDesde, ventana.d]);
+    return { estado: 'ok', mensaje: `${allOrders.length} orden(es) → ${summaryOrdenado.length} bloque(s) formulado(s) en el resumen; reposición Leader: ${rep.filas.length} bloque(s).`, progreso: { actual: allOrders.length, total: allOrders.length } };
+  }, [prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico, tramoFert, pendienteDesde, ventana.d, construirReposicion]);
 
   // Segunda fase de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar): corre
   // handleProcessResumen automáticamente en cuanto el render con los datos recién sincronizados ya
@@ -937,6 +1180,21 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
 </table>
 <p style="margin:6px 0 0;font-size:11px;font-weight:700;color:#b45309;">Totales — Stock: ${formatNum(tStockKg, 0)} Kg · Cobertura sección: ${tConsumoKg > 0 ? (tStockUtilKg / tConsumoKg).toFixed(1) : '—'} días · Plan Reposición: ${tReposicion} UN</p>`;
     };
+    const seccionLeader = () => {
+      const titulo = `<p style="margin:18px 0 6px;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">Bloque Formulado Leader — Plan de Reposición</p>`;
+      if (!reposicion) return `${titulo}<p style="font-size:11px;color:#9ca3af;">Sin plan de reposición.</p>`;
+      const filas = reposicion.filas.map(b => calcularFilaReposicion(b, reposicion.metaOverride[b.blockCode], reposicion.planOverride[b.blockCode]));
+      const capacidad = reposicion.nichosMax + (reposicion.autodescarga ? reposicion.autodescargaUN : 0);
+      const totalPlan = filas.reduce((s, f) => s + f.planUN, 0);
+      const totalKg = filas.reduce((s, f) => s + f.planKg, 0);
+      const d1 = (v: number | null) => (v === null ? '—' : v.toFixed(1));
+      return `${titulo}
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #e5e7eb;border-collapse:collapse;">
+  <tr>${th('Bloque')}${th('Descripción')}${th('Stock (UN)', true)}${th('Meta (UN/día)', true)}${th('VE (UN)', true)}${th('Plan ant. (UN)', true)}${th('Cobertura (días)', true)}${th('Horizonte (días)', true)}${th('Sugerido (UN)', true)}${th('PLAN (UN)', true)}${th('PLAN (Kg)', true)}</tr>
+  ${filas.map(f => `<tr${f.planUN > 0 ? ' style="background:#fefce8;"' : ''}>${td(esc(f.blockCode))}${td(esc(f.blockDesc))}${td(f.stockUN.toFixed(1), true)}${td(f.metaUNDia.toFixed(2), true)}${td(f.veUN > 0 ? f.veUN.toFixed(1) : '—', true)}${td(f.planAnteriorUN > 0 ? String(f.planAnteriorUN) : '—', true)}${td(d1(f.coberturaActual), true)}${td(f.horizonteDias.toFixed(1), true)}${td(f.sugeridoUN ? String(f.sugeridoUN) : '—', true)}${td(f.planUN ? `<b>${f.planUN}</b>` : '—', true)}${td(f.planKg ? formatNum(f.planKg, 0) : '—', true)}</tr>`).join('')}
+</table>
+<p style="margin:6px 0 0;font-size:11px;font-weight:700;color:${totalPlan > capacidad ? '#dc2626' : '#b45309'};">PLAN: ${totalPlan} bloques / capacidad ${capacidad} (nichos ${reposicion.nichosMax}${reposicion.autodescarga ? ` + autodescarga ${reposicion.autodescargaUN}` : ''}) · ${formatNum(totalKg, 0)} Kg</p>`;
+    };
     const rango = `pendiente ${pendienteDesde} → día de corte ${ventana.d}`;
     return `
 <div style="max-width:960px;margin:0 auto;background:#ffffff;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
@@ -945,7 +1203,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
 <p style="margin:0;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">Formulación · Centro ${centro} (${centro === '1000' ? 'Quito' : 'Guayaquil'}) · Reporte diario</p>
 <h1 style="margin:4px 0 0;font-size:20px;color:#111827;">Bloque Formulado — necesidad, stock y plan de reposición</h1>
 <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">Fecha objetivo: ${fechaObjetivo} · Ventana FERT: ${rango}</p>
-${seccion('Bloque Formulado — Apertura', summarySpaces.apertura.filter(r => r.centro === centro))}
+${centro === '1000' ? seccionLeader() : seccion('Bloque Formulado — Apertura', summarySpaces.apertura.filter(r => r.centro === centro))}
 ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySpaces.combinacion.filter(r => r.centro === centro))}
 <p style="margin:20px 0 0;padding-top:14px;border-top:1px solid #e5e7eb;font-size:11px;color:#9ca3af;">Generado automáticamente por el Optimizador de Producción, favor no responder. Para dudas sobre estos datos, contacta a Planificación Táctica.</p>
 </div>
@@ -963,6 +1221,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     diaCorte: ventana.d,
     unifiedSummaryData,
     consumoBloqueFormulado,
+    reposicion,
   });
   const restaurarEstadoPlan = (crudo: unknown, origen: OrigenEstadoPlan): boolean => {
     const e = crudo as Partial<EstadoPlanFormulacion> | null;
@@ -971,6 +1230,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     setDiaCorte(e.diaCorte ?? '');
     setUnifiedSummaryData(e.unifiedSummaryData);
     setConsumoBloqueFormulado(e.consumoBloqueFormulado ?? []);
+    setReposicion(e.reposicion ?? null);
     setPlanCargadoDe(origen);
     setActiveTab('necesidad');
     return true;
@@ -1046,49 +1306,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     porOrden.forEach(o => { t[o.tramo] += o.un; });
     return t;
   }, [fertConsumoResponsable]);
-
-  // Paso 2 · Stock y Curado (usuario 2026-10-31, Excel de Leader): una fila de getTiemposCuradoBloqueFormulado
-  // = un bloque físico (Idbloque); CantidadStock = Kg que le quedan, peso = peso real al fabricarlo.
-  // Curado = fabricación + CURADO_DIAS_ESPERA. Por Bloque Formulado y por espacio (Leader / Cofama): bloques
-  // y Kg curados y en curado, peso real promedio, y el stock del cubo SAP al lado para comparar.
-  const stockCuradoPorEspacio = useMemo(() => {
-    const todayStr = format(new Date(), 'yyyy-MM-dd');
-    const sapKg = new Map<string, number>();
-    filteredInventario.forEach(inv => {
-      if (String(inv.Centro || '').trim() !== '1000') return;
-      const code = cleanCode(inv.Material);
-      sapKg.set(code, (sapKg.get(code) || 0) + inv.stockKg);
-    });
-    const porEspacio: Record<string, StockCuradoRow[]> = {};
-    CURADO_SPACES.forEach(space => {
-      const m = new Map<string, StockCuradoRow & { pesoSuma: number; pesoN: number }>();
-      curadoData.forEach(row => {
-        if (!matchesCuradoSpace(row, space)) return;
-        const code = cleanCode(getProp(row, ['CodMaterial', 'MATERIAL', 'CODMATERIAL']));
-        if (!code) return;
-        const info = extractMaterialInfo(row);
-        const r = m.get(code) ?? {
-          materialCode: code, descripcion: getProp(row, ['NomMaterial', 'NOMMATERIAL']) || '—', apertura: info.apertura, dens: info.dens,
-          curadosUN: 0, curadosKg: 0, enCuradoUN: 0, enCuradoKg: 0, pesoProm: 0, stockSapKg: sapKg.get(code) || 0, pesoSuma: 0, pesoN: 0,
-        };
-        const peso = safeNum(getProp(row, ['peso', 'PESO']));
-        if (peso > 0) { r.pesoSuma += peso; r.pesoN += 1; }
-        const kg = safeNum(getProp(row, ['CantidadStock', 'CANTIDADSTOCK', 'CANTIDAD_STOCK']));
-        const fab = parseFechaSAP(getProp(row, ['fecha', 'FECHA', 'FECHA_INICIO', 'FECHA_FABRICACION', 'FECHA_OT_PRG_INI']));
-        if (kg > 0 && fab) {
-          const disp = new Date(fab);
-          disp.setDate(disp.getDate() + CURADO_DIAS_ESPERA);
-          if (todayStr >= format(disp, 'yyyy-MM-dd')) { r.curadosUN += 1; r.curadosKg += kg; }
-          else { r.enCuradoUN += 1; r.enCuradoKg += kg; }
-        }
-        m.set(code, r);
-      });
-      porEspacio[space.key] = Array.from(m.values())
-        .map(({ pesoSuma, pesoN, ...r }) => ({ ...r, pesoProm: pesoN > 0 ? pesoSuma / pesoN : 0 }))
-        .sort(compareAperturaDensidad);
-    });
-    return porEspacio;
-  }, [curadoData, filteredInventario]);
 
   // Panel: Rango evaluado → Datos SAP (x/5) → Generando necesidades (fase en el efecto
   // autoGenerarPendiente, que cierra el panel). El rango se elige antes, en handleSincronizarYGenerar.
@@ -1238,9 +1455,33 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       setCuradoData(snap.curadoData);
       setUnifiedSummaryData(snap.unifiedSummaryData || []);
       setConsumoBloqueFormulado(snap.consumoBloqueFormulado || []);
+      setReposicion(snap.reposicion ?? null);
       setDatosCargados(true);
     }
   }, [mounted]);
+
+  // Ajustes manuales del Plan de Reposición (meta, PLAN, autodescarga): se guardan en caché al momento
+  // y viajan en el respaldo la próxima vez que se guarda el reporte.
+  const ajustarReposicion = (cambio: (r: ReposicionLeader) => ReposicionLeader) => {
+    setReposicion(prev => {
+      if (!prev) return prev;
+      const nuevo = cambio(prev);
+      actualizarEnCache<SnapshotFormulacion>(CACHE_FORMULACION, { reposicion: nuevo });
+      return nuevo;
+    });
+  };
+  const ajustarValor = (campo: 'metaOverride' | 'planOverride', code: string, texto: string) => ajustarReposicion(r => {
+    const mapa = { ...r[campo] };
+    const n = numeroRestriccion(texto);
+    if (n === null || n < 0) delete mapa[code]; else mapa[code] = n;
+    return { ...r, [campo]: mapa };
+  });
+  const filasReposicion = useMemo(
+    () => (reposicion ? reposicion.filas.map(b => calcularFilaReposicion(b, reposicion.metaOverride[b.blockCode], reposicion.planOverride[b.blockCode])) : []),
+    [reposicion]
+  );
+  const capacidadReposicion = reposicion ? reposicion.nichosMax + (reposicion.autodescarga ? reposicion.autodescargaUN : 0) : 0;
+  const totalPlanReposicion = filasReposicion.reduce((s, f) => s + f.planUN, 0);
 
 
   // Paso 1 · Necesidad: misma estructura que el Excel "CONSUMOS UIO" — Formulado → Bloque cortado →
@@ -1652,6 +1893,133 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
 
   const fechaCorta = (f: string) => f.split('-').reverse().slice(0, 2).join('/');
 
+  const renderReposicionLeader = () => {
+    if (!reposicion) {
+      return <div className="py-16 text-center text-[10px] font-bold text-gray-500 uppercase tracking-widest">Sin plan de reposición Leader — sincroniza para calcularlo.</div>;
+    }
+    const excedido = totalPlanReposicion > capacidadReposicion;
+    const t = filasReposicion.reduce((s, f) => ({ stockUN: s.stockUN + f.stockUN, sugerido: s.sugerido + f.sugeridoUN, planKg: s.planKg + f.planKg }), { stockUN: 0, sugerido: 0, planKg: 0 });
+    const th = 'px-3 py-3 border-r border-gray-100';
+    const td = 'px-3 py-2 border-r border-gray-100 font-mono text-right';
+    const dias = (v: number | null) => (v === null ? '—' : v.toFixed(1));
+    const input = 'w-16 rounded-md border px-1.5 py-0.5 text-right font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-indigo-400';
+    const hayAjustes = Object.keys(reposicion.metaOverride).length + Object.keys(reposicion.planOverride).length > 0;
+    return (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-gray-100 bg-white px-4 py-3 text-[11px]">
+          <span className="font-black uppercase text-slate-700">Bloque Formulado Leader · producción {fechaCorta(reposicion.diaProduccion)}</span>
+          <span className="font-bold text-slate-500" title="PLAN del último reporte guardado antes del día de producción (columna Plan ant.)">
+            Plan anterior: {reposicion.planAnteriorFecha ? fechaCorta(reposicion.planAnteriorFecha) : 'sin reporte'}
+          </span>
+          <span className={cn('font-black', excedido ? 'text-red-600' : 'text-emerald-700')} title={`Nichos ${reposicion.nichosMax}${reposicion.autodescarga ? ` + autodescarga ${reposicion.autodescargaUN}` : ''} (bloques de ${BLOCK_LENGTH_METERS} m)`}>
+            PLAN {formatNum(totalPlanReposicion, 0)} / {formatNum(capacidadReposicion, 0)} bloques{excedido ? ' · excede capacidad' : ''}
+          </span>
+          <label className="flex items-center gap-1.5 font-bold text-slate-600 cursor-pointer">
+            <input type="checkbox" checked={reposicion.autodescarga} onChange={e => ajustarReposicion(r => ({ ...r, autodescarga: e.target.checked }))} />
+            Autodescarga +{formatNum(reposicion.autodescargaUN, 0)}
+          </label>
+          {hayAjustes && (
+            <Button size="sm" variant="outline" className="h-7 text-[10px] font-black uppercase" onClick={() => ajustarReposicion(r => ({ ...r, metaOverride: {}, planOverride: {} }))}>
+              Restablecer sugerido
+            </Button>
+          )}
+        </div>
+        <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
+          <div className="overflow-x-auto max-h-[600px]">
+            <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
+              <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-20">
+                <tr>
+                  <th className={cn(th, 'text-left')}>Bloque</th>
+                  <th className={cn(th, 'text-left')}>Descripción</th>
+                  <th className={th} title="Peso real promedio de curado Leader; si no hay, Lote Mín. SAP">Peso (Kg)</th>
+                  <th className={cn(th, 'text-emerald-700 bg-emerald-50/50')}>Stock (UN)</th>
+                  <th className={cn(th, 'text-amber-700 bg-amber-50/50')}>En curado (UN)</th>
+                  <th className={cn(th, 'text-cyan-700 bg-cyan-50/50')} title={`Histórico ${SEMANAS_META_CONSUMO} semanas ÷ días hábiles; editable`}>Meta (UN/día)</th>
+                  <th className={cn(th, 'text-purple-700')} title="FERT Venta Externa (038) del paso 1">VE (UN)</th>
+                  <th className={th} title="PLAN del reporte anterior">Plan ant. (UN)</th>
+                  <th className={th} title="Restricción Estrategia_<material>; sin consumo = MTO">Estrat.</th>
+                  <th className={cn(th, 'text-rose-700 bg-rose-50/50')}>Cobertura (días)</th>
+                  <th className={th} title={`Restricción Cobertura_<material> o Formulacion_Cobertura_Dias; por defecto ${HORIZONTE_DEFAULT_DIAS} (1 día de fabricación + ${CURADO_DIAS_ESPERA} de curado)`}>Horizonte (días)</th>
+                  <th className={th}>Acción</th>
+                  <th className={cn(th, 'text-yellow-700 bg-yellow-50/50')}>Sugerido (UN)</th>
+                  <th className={cn(th, 'text-indigo-700 bg-indigo-50/50')}>PLAN (UN)</th>
+                  <th className={th}>PLAN (Kg)</th>
+                  <th className="px-3 py-3" title="Cobertura con el PLAN">Cob. plan (días)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50 font-bold">
+                {filasReposicion.length === 0 ? (
+                  <tr><td colSpan={16} className="py-12 text-center text-slate-300 uppercase font-black">Sin bloques Leader con stock o consumo</td></tr>
+                ) : filasReposicion.map((f, idx) => {
+                  const nuevoGrupo = idx === 0 || f.apertura !== filasReposicion[idx - 1].apertura;
+                  return (
+                    <React.Fragment key={f.blockCode}>
+                      {nuevoGrupo && (
+                        <tr className="bg-indigo-50/60">
+                          <td colSpan={16} className="px-4 py-1.5 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">{aperturaGroupLabel(f.apertura)}</td>
+                        </tr>
+                      )}
+                      <tr className={cn('hover:bg-slate-50 transition-colors', f.reponer && 'bg-yellow-50/30')}>
+                        <td className="px-3 py-2 border-r border-gray-100 text-left font-mono font-black text-indigo-600">{f.blockCode}</td>
+                        <td className="px-3 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[260px]" title={f.corrida}>{f.blockDesc}</td>
+                        <td className={cn(td, f.pesoFuente !== 'real' && 'text-slate-400')} title={f.pesoFuente === 'real' ? 'Peso real (curado)' : f.pesoFuente === 'lote' ? 'Lote Mín. SAP' : 'Sin peso'}>{f.pesoBloque > 0 ? formatNum(f.pesoBloque, 0) : '—'}</td>
+                        <td className={cn(td, 'text-emerald-800 bg-emerald-50/20')}>{f.stockUN.toFixed(1)}</td>
+                        <td className={cn(td, 'text-amber-700 bg-amber-50/20')}>{f.enCuradoUN > 0 ? f.enCuradoUN.toFixed(1) : '—'}</td>
+                        <td className={cn(td, 'bg-cyan-50/20')}>
+                          <input
+                            key={`m-${f.blockCode}-${f.metaEditada}`}
+                            type="number" min={0} step={0.1}
+                            defaultValue={Number(f.metaUNDia.toFixed(2))}
+                            onBlur={e => ajustarValor('metaOverride', f.blockCode, e.target.value === String(Number(f.metaUNDia.toFixed(2))) && !f.metaEditada ? '' : e.target.value)}
+                            className={cn(input, f.metaEditada ? 'border-cyan-500 text-cyan-800' : 'border-gray-200')}
+                            title={`Histórico: ${f.pesoBloque > 0 ? (f.metaKgDia / f.pesoBloque).toFixed(2) : '—'} UN/día (${formatNum(f.metaKgDia, 1)} Kg/día)`}
+                          />
+                        </td>
+                        <td className={cn(td, 'text-purple-700')}>{f.veUN > 0 ? f.veUN.toFixed(1) : '—'}</td>
+                        <td className={td}>{f.planAnteriorUN > 0 ? formatNum(f.planAnteriorUN, 0) : '—'}</td>
+                        <td className="px-3 py-2 border-r border-gray-100 font-black">{f.estrategiaEfectiva}</td>
+                        <td className={cn(td, 'text-rose-700 bg-rose-50/20', f.coberturaActual !== null && f.coberturaActual < f.horizonteDias && 'font-black')}>{dias(f.coberturaActual)}</td>
+                        <td className={cn(td, !f.horizonteRestriccion && 'text-slate-400')}>{f.horizonteDias.toFixed(1)}</td>
+                        <td className="px-3 py-2 border-r border-gray-100 font-black">
+                          {f.reponer ? <span className="text-yellow-700">Reponer</span> : !f.diaProduccion ? <span className="text-slate-400" title="No es día de producción (DiasProduccion_<apertura>)">No prod.</span> : ''}
+                        </td>
+                        <td className={cn(td, 'text-yellow-700 bg-yellow-50/30 font-black')}>{f.sugeridoUN || '—'}</td>
+                        <td className={cn(td, 'bg-indigo-50/30')}>
+                          <input
+                            key={`p-${f.blockCode}-${f.planEditado}-${f.sugeridoUN}`}
+                            type="number" min={0} step={1}
+                            defaultValue={f.planUN}
+                            onBlur={e => ajustarValor('planOverride', f.blockCode, e.target.value === String(f.sugeridoUN) && !f.planEditado ? '' : e.target.value)}
+                            className={cn(input, f.planEditado ? 'border-indigo-500 text-indigo-800 font-black' : 'border-gray-200')}
+                          />
+                        </td>
+                        <td className={td}>{f.planKg > 0 ? formatNum(f.planKg, 0) : '—'}</td>
+                        <td className="px-3 py-2 font-mono text-right">{f.planUN > 0 ? dias(f.coberturaPlan) : ''}</td>
+                      </tr>
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+              {filasReposicion.length > 0 && (
+                <tfoot className="bg-gray-100 text-gray-800 font-black text-[10px] uppercase border-t-2 border-gray-200 sticky bottom-0 z-20">
+                  <tr>
+                    <td colSpan={3} className="px-3 py-3 text-right tracking-widest border-r border-gray-200">Totales</td>
+                    <td className="px-3 py-3 border-r border-gray-200 font-mono text-right text-emerald-700">{t.stockUN.toFixed(1)}</td>
+                    <td colSpan={8} className="border-r border-gray-200" />
+                    <td className="px-3 py-3 border-r border-gray-200 font-mono text-right text-yellow-700">{formatNum(t.sugerido, 0)}</td>
+                    <td className={cn('px-3 py-3 border-r border-gray-200 font-mono text-right', excedido ? 'text-red-600' : 'text-indigo-700')}>{formatNum(totalPlanReposicion, 0)}</td>
+                    <td className="px-3 py-3 border-r border-gray-200 font-mono text-right">{formatNum(t.planKg, 0)}</td>
+                    <td />
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderContent = () => {
     if (isLoading) {
       return (
@@ -1672,7 +2040,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
              </div>
            ) : (
              <>
-               {renderSummaryTable(summarySpaces.apertura, "Bloque Formulado — Apertura (194.5 / 206 / 219 / 228...)", TrendingUp)}
+               {renderReposicionLeader()}
                {renderSummaryTable(summarySpaces.combinacion, "Bloque Formulado — Combinación (sin apertura técnica)", Box)}
              </>
            )}
@@ -1823,7 +2191,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             <PopoverTrigger asChild>
               <Button
                 variant="outline"
-                disabled={isProcessingResumen || unifiedSummaryData.length === 0}
+                disabled={isProcessingResumen || (unifiedSummaryData.length === 0 && !reposicion)}
                 title="Guarda el Resumen (Plan de Reposición) por centro y envíalo por correo desde la vista previa"
                 className="h-10 px-4 rounded-xl gap-2 font-black text-[10px] uppercase border-indigo-200 text-indigo-700 hover:bg-indigo-50"
               >
