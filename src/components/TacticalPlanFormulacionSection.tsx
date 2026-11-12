@@ -10,7 +10,6 @@ import {
   Minus,
   Plus,
   ShoppingCart,
-  Box,
   TrendingUp,
   Table as TableIcon,
   Info,
@@ -20,7 +19,6 @@ import {
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import {
   Popover,
   PopoverContent,
@@ -420,7 +418,113 @@ const calcularFilaReposicion = (b: BaseReposicionRow, metaOverrideUN?: number, p
 // Control del peso estándar: el promedio real de fabricados se aleja más de 3 % del Lote Mín.
 const desfasePeso = (b: BaseReposicionRow): boolean =>
   b.pesoFuente === 'lote' && !!b.pesoRealProm && b.pesoBloque > 0 && Math.abs(b.pesoRealProm / b.pesoBloque - 1) > 0.03;
-const planFinalReposicion =(r: ReposicionLeader | undefined | null): Record<string, number> =>
+// ── Paso 3 · Plan de Reposición Cofama (usuario 2026-11-12, Excel "NN Programación bloque formulados cofama",
+// hoja BASE): una fila por BLOQUE CORTADO (resp 030). Stock = cortado SAP + los formulados Cofama en calle
+// convertidos a cortados por su combinación ("2un - 135X190 / 1un - 105X190"). Misma regla de cobertura que
+// Leader con Interno (necesidad FERT del paso 1) en lugar de VE:
+//   Cobertura = (Stock + Plan ant. − Interno) ÷ Meta · Sugerido = (Horizonte × Meta) − Stock − Plan ant. + Interno
+// El PLAN se arma como en la hoja PLAN: bloque formulado + combinación + cantidad → UN de cada cortado.
+// Peso del cortado = Kg de formulado por UN según su BOM SAP.
+const RESP_COFAMA_CORTADO = '030';
+const TOLERANCIA_MEDIDA_CM = 2;
+interface ComponenteCombinacion { un: number; ancho: number; largo: number }
+const parseCombinacion = (txt: string): ComponenteCombinacion[] =>
+  String(txt || '').split('/').flatMap(p => {
+    const m = p.match(/(\d+)\s*un\s*-?\s*(\d+(?:[.,]\d+)?)\s*[xX*]\s*(\d+(?:[.,]\d+)?)/i);
+    return m ? [{ un: Number(m[1]), ancho: Number(m[2].replace(',', '.')), largo: Number(m[3].replace(',', '.')) }] : [];
+  });
+const medidaDeTexto = (desc: string): { ancho: number; largo: number } | null => {
+  const m = String(desc || '').match(/(\d{2,3})\s*[xX]\s*(\d{2,3})/);
+  return m ? { ancho: Number(m[1]), largo: Number(m[2]) } : null;
+};
+const medidaCoincide = (a: { ancho: number; largo: number }, b: { ancho: number; largo: number }): boolean => {
+  const t = TOLERANCIA_MEDIDA_CM;
+  return (Math.abs(a.ancho - b.ancho) <= t && Math.abs(a.largo - b.largo) <= t) || (Math.abs(a.ancho - b.largo) <= t && Math.abs(a.largo - b.ancho) <= t);
+};
+// Familia del material (VISCO, BIOCRYSTAL, HS, LATEX…): palabras de la descripción sin las genéricas.
+const familiaDe = (desc: string): Set<string> => new Set(
+  String(desc || '').toUpperCase().split(/[^A-Z]+/).filter(w => w.length >= 2 && !['BLOQUE', 'CORTADO', 'FORMULADO', 'UN', 'MOD', 'STD'].includes(w))
+);
+
+interface BaseCofamaRow {
+  cortadoCode: string; cortadoDesc: string; formuladoCode: string; formuladoDesc: string; dens: string;
+  medida: { ancho: number; largo: number } | null;
+  pesoCortado: number;
+  stockCortadoKg: number; stockFormuladoUN: number;
+  metaKgDia: number; internoKg: number; planAnteriorUN: number;
+  horizonteDias: number; horizonteRestriccion: boolean; diaProduccion: boolean;
+}
+interface FormuladoCofama { code: string; desc: string; pesoKg: number; combinaciones: string[] }
+interface LineaPlanCofama { id: string; formuladoCode: string; combinacion: string; cantidad: number }
+interface SinEmparejarCofama { formuladoCode: string; formuladoDesc: string; combinacion: string; bloques: number }
+interface ReposicionCofama {
+  filas: BaseCofamaRow[];
+  formulados: FormuladoCofama[];
+  sinEmparejar: SinEmparejarCofama[];
+  diaProduccion: string;
+  planAnteriorFecha: string | null;
+  lineas: LineaPlanCofama[];
+  metaOverride: Record<string, number>;
+}
+interface FilaCofama extends BaseCofamaRow {
+  stockCortadoUN: number; stockTotalUN: number; metaUNDia: number; internoUN: number;
+  coberturaActual: number | null; reponer: boolean; sugeridoUN: number;
+  planUN: number; coberturaPlan: number | null; metaEditada: boolean;
+}
+
+// Reparte N bloques formulados de una combinación a los bloques cortados: primero los cortados cuya BOM
+// usa ese formulado, si no los de la misma densidad y familia; la medida empareja con ±2 cm.
+const repartirCombinacion = (
+  formuladoCode: string, formuladoDesc: string, combinacion: string, bloques: number, filas: BaseCofamaRow[],
+): { porCortado: Map<string, number>; sinEmparejar: string[] } => {
+  const porCortado = new Map<string, number>();
+  const sinEmparejar: string[] = [];
+  const propios = filas.filter(f => f.formuladoCode === formuladoCode);
+  const dens = extractMaterialInfo({ NOMBRE: formuladoDesc }).dens;
+  const fam = familiaDe(formuladoDesc);
+  // Afines: misma densidad, ordenados por cuántas palabras de familia comparten (D30 VISCO RZ GEL prefiere
+  // un cortado "VISCO RZ GEL" antes que uno solo "VISCO").
+  const afines = filas
+    .map(f => ({ f, comunes: [...familiaDe(f.cortadoDesc)].filter(w => fam.has(w)).length }))
+    .filter(x => x.f.dens === dens && x.comunes > 0)
+    .sort((a, b) => b.comunes - a.comunes)
+    .map(x => x.f);
+  parseCombinacion(combinacion).forEach(c => {
+    const destino = [propios, afines].map(g => g.find(f => f.medida && medidaCoincide(f.medida, c))).find(Boolean);
+    if (destino) porCortado.set(destino.cortadoCode, (porCortado.get(destino.cortadoCode) || 0) + c.un * bloques);
+    else sinEmparejar.push(`${c.un}un - ${c.ancho}X${c.largo}`);
+  });
+  return { porCortado, sinEmparejar };
+};
+const planCofamaPorCortado = (r: ReposicionCofama | undefined | null): Map<string, number> => {
+  const total = new Map<string, number>();
+  if (!r) return total;
+  r.lineas.forEach(l => {
+    if (!(l.cantidad > 0)) return;
+    const f = r.formulados.find(x => x.code === l.formuladoCode);
+    repartirCombinacion(l.formuladoCode, f?.desc ?? '', l.combinacion, l.cantidad, r.filas).porCortado
+      .forEach((un, code) => total.set(code, (total.get(code) || 0) + un));
+  });
+  return total;
+};
+const calcularFilaCofama = (b: BaseCofamaRow, metaOverrideUN: number | undefined, planUN: number): FilaCofama => {
+  const aUN = (kg: number) => (b.pesoCortado > 0 ? kg / b.pesoCortado : 0);
+  const stockCortadoUN = aUN(b.stockCortadoKg);
+  const I = stockCortadoUN + b.stockFormuladoUN;
+  const R = aUN(b.internoKg);
+  const T = b.planAnteriorUN;
+  const O = metaOverrideUN ?? aUN(b.metaKgDia);
+  const cobertura = (extra: number) => (O > 0 ? (I + T - R + extra) / O : null);
+  const coberturaActual = cobertura(0);
+  const reponer = b.diaProduccion && (O > 0 ? (coberturaActual ?? 0) < b.horizonteDias : I + T < R);
+  return {
+    ...b, stockCortadoUN, stockTotalUN: I, metaUNDia: O, internoUN: R, coberturaActual, reponer,
+    sugeridoUN: reponer ? redondeoReposicion(b.horizonteDias * O - I - T + R) : 0,
+    planUN, coberturaPlan: cobertura(planUN), metaEditada: metaOverrideUN !== undefined,
+  };
+};
+
+const planFinalReposicion = (r: ReposicionLeader | undefined | null): Record<string, number> =>
   Object.fromEntries((r?.filas ?? []).map(b => [b.blockCode, calcularFilaReposicion(b, r?.metaOverride?.[b.blockCode], r?.planOverride?.[b.blockCode]).planUN]));
 
 // Materiales de PRUEBA (ej. "BLOQUE FORMULADO PRUEBAS MQ COFAMA") — el usuario confirmó que tanto
@@ -683,6 +787,7 @@ interface SnapshotFormulacion {
   unifiedSummaryData: FormuladoSummaryRow[];
   consumoBloqueFormulado: ConsumoBloqueRow[];
   reposicion?: ReposicionLeader | null;
+  reposicionCofama?: ReposicionCofama | null;
 }
 
 // Respaldo de lo planificado guardado junto al TXT ({fecha}.estado.json), ver capturarEstadoPlan.
@@ -695,6 +800,7 @@ interface EstadoPlanFormulacion {
   unifiedSummaryData: FormuladoSummaryRow[];
   consumoBloqueFormulado: ConsumoBloqueRow[];
   reposicion?: ReposicionLeader | null;
+  reposicionCofama?: ReposicionCofama | null;
 }
 
 export const TacticalPlanFormulacionSection: React.FC = () => {
@@ -749,10 +855,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   const [baseConsumo, setBaseConsumo] = useState<'diario' | 'semanal' | 'mensual'>('diario');
   const [unifiedSummaryData, setUnifiedSummaryData] = useState<FormuladoSummaryRow[]>([]);
   const [reposicion, setReposicion] = useState<ReposicionLeader | null>(null);
+  const [reposicionCofama, setReposicionCofama] = useState<ReposicionCofama | null>(null);
   // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
   const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
   const [consumoBloqueFormulado, setConsumoBloqueFormulado] = useState<ConsumoBloqueRow[]>([]);
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setMounted(true);
@@ -888,11 +994,24 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // Paso 3 · Base del Plan de Reposición Leader (ver BaseReposicionRow): universo = Bloques Formulados de
   // apertura del cubo, centro 1000. Resuelve aquí restricciones, peso, meta de consumo, VE y plan del día
   // anterior para que el respaldo del reporte se recargue igual sin SAP. Completa movimientosCache.
+  // Último reporte guardado antes del día de producción (de ahí sale el "Plan anterior" de Leader y Cofama).
+  const buscarPlanAnterior = useCallback(async (): Promise<{ fecha: string; estado: Partial<EstadoPlanFormulacion> } | null> => {
+    const extra = laborablesHorizonte(calendario.laborablesExtra);
+    const hoyPlan = previousBusinessDay(new Date(`${ventana.d}T12:00:00`), calendario.noLaborables, extra);
+    const fechas: string[] = [];
+    for (const d = new Date(hoyPlan); format(d, 'yyyy-MM-dd') < ventana.d; d.setDate(d.getDate() + 1)) fechas.push(format(d, 'yyyy-MM-dd'));
+    const previo = await buscarUltimoPlanTxt({ modulo: 'formulacion', centro: '1000', fechas }).catch(() => null);
+    return previo?.estado ? { fecha: previo.fechaObjetivo, estado: previo.estado as Partial<EstadoPlanFormulacion> } : null;
+  }, [calendario, ventana.d]);
+  // Valor de una restricción del grupo por nombre (sin distinguir mayúsculas); '' si no existe.
+  const restr = useCallback((nombre: string): string =>
+    restricciones.find(r => String(r.nombre_restriccion || '').trim().toUpperCase() === nombre.toUpperCase())?.valor_restriccion?.trim() || '',
+  [restricciones]);
+
   const construirReposicion = useCallback(async (
     movimientosCache: Map<string, MovimientoConsumo[]>,
+    previo: { fecha: string; estado: Partial<EstadoPlanFormulacion> } | null,
   ): Promise<ReposicionLeader> => {
-    const restr = (nombre: string): string =>
-      restricciones.find(r => String(r.nombre_restriccion || '').trim().toUpperCase() === nombre.toUpperCase())?.valor_restriccion?.trim() || '';
     const extra = laborablesHorizonte(calendario.laborablesExtra);
     const dProd = new Date(`${ventana.d}T12:00:00`);
     const hoyPlan = previousBusinessDay(dProd, calendario.noLaborables, extra);
@@ -971,10 +1090,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       if (o.hist > 0) veHistKg.set(cod, (veHistKg.get(cod) || 0) + kgPorUN * o.hist);
     }));
 
-    const fechasPrevias: string[] = [];
-    for (const d = new Date(hoyPlan); format(d, 'yyyy-MM-dd') < ventana.d; d.setDate(d.getDate() + 1)) fechasPrevias.push(format(d, 'yyyy-MM-dd'));
-    const previo = await buscarUltimoPlanTxt({ modulo: 'formulacion', centro: '1000', fechas: fechasPrevias }).catch(() => null);
-    const repPrevia = (previo?.estado as Partial<EstadoPlanFormulacion> | null)?.reposicion;
+    const repPrevia = previo?.estado?.reposicion;
     const planAnterior = planFinalReposicion(repPrevia);
 
     const curadoLeader = new Map((stockCuradoPorEspacio['leader'] ?? []).filter(r => r.pesoProm > 0).map(r => [r.materialCode, r]));
@@ -1014,14 +1130,143 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     return {
       filas,
       diaProduccion: ventana.d,
-      planAnteriorFecha: repPrevia ? previo?.fechaObjetivo ?? null : null,
+      planAnteriorFecha: repPrevia ? previo?.fecha ?? null : null,
       nichosMax: numeroRestriccion(restr('Formulacion_Nichos_Max')) ?? NICHOS_MAX_DEFAULT,
       autodescargaUN: numeroRestriccion(restr('Formulacion_Autodescarga_UN')) ?? AUTODESCARGA_DEFAULT_UN,
       autodescarga: false,
       metaOverride: {},
       planOverride: {},
     };
-  }, [restricciones, calendario, ventana.d, cuboInventarios, ordenesFert, stockCuradoPorEspacio, getStockEnCurado]);
+  }, [restr, calendario, ventana.d, cuboInventarios, ordenesFert, stockCuradoPorEspacio, getStockEnCurado]);
+
+  // Paso 3 · Base del Plan de Reposición Cofama (ver BaseCofamaRow): universo = BLOQUE CORTADO resp 030 del
+  // cubo, centro 1000. La BOM de cada cortado da su peso (Kg de formulado por UN) y su formulado.
+  const construirReposicionCofama = useCallback(async (
+    movimientosCache: Map<string, MovimientoConsumo[]>,
+    consumoRows: ConsumoBloqueRow[],
+    previo: { fecha: string; estado: Partial<EstadoPlanFormulacion> } | null,
+  ): Promise<ReposicionCofama> => {
+    const extra = laborablesHorizonte(calendario.laborablesExtra);
+    const dProd = new Date(`${ventana.d}T12:00:00`);
+    const hoyPlan = previousBusinessDay(dProd, calendario.noLaborables, extra);
+
+    const cortadosCubo = cuboInventarios.filter(inv => String(inv.Centro || '').trim() === '1000' && /BLOQUE CORTADO/i.test(String(inv.Descripcion || '')) && !esMaterialPrueba(String(inv.Descripcion || '')));
+    const de030 = cortadosCubo.filter(inv => String(inv.RespCtrlProd || '').trim() === RESP_COFAMA_CORTADO);
+    const universo = new Map<string, { desc: string; stockKg: number }>();
+    (de030.length > 0 ? de030 : cortadosCubo).forEach(inv => {
+      const code = cleanCode(inv.Material);
+      const u = universo.get(code) ?? { desc: String(inv.Descripcion || '').toUpperCase(), stockKg: 0 };
+      u.stockKg += safeNum(inv.StockActual);
+      universo.set(code, u);
+    });
+
+    // BOM del cortado: Kg de Bloque Formulado por UN (= peso del cortado) y qué formulado usa.
+    const bom = new Map<string, { formuladoCode: string; formuladoDesc: string; kgPorUN: number }>();
+    const codigos = Array.from(universo.keys());
+    for (let i = 0; i < codigos.length; i += 6) {
+      const lote = codigos.slice(i, i + 6);
+      const res = await Promise.all(lote.map(async code => {
+        try {
+          const r = await serviciosService.getMaestroMaterialesExplosion('1000', code.padStart(18, '0'), 1, 100);
+          const filas: MaterialExplosionRow[] = r?.data?.data || r?.data || [];
+          const f = Array.isArray(filas) ? filas.filter(x => (x.DESCRIPCION_COMPONENTE || '').toUpperCase().includes('BLOQUE FORMULADO')) : [];
+          if (f.length === 0) return null;
+          return {
+            formuladoCode: cleanCode(f[0].COMPONENTE),
+            formuladoDesc: String(f[0].DESCRIPCION_COMPONENTE || '').toUpperCase(),
+            kgPorUN: f.reduce((s, x) => s + safeNum(x.CANTIDAD_ACUMULADA || x.CANTIDAD_UNITARIA || 0), 0),
+          };
+        } catch { return null; }
+      }));
+      lote.forEach((c, k) => { const b = res[k]; if (b) bom.set(c, b); });
+    }
+
+    const faltantes = codigos.filter(c => !movimientosCache.has(c));
+    for (let i = 0; i < faltantes.length; i += 6) {
+      const lote = faltantes.slice(i, i + 6);
+      const res = await Promise.all(lote.map(fetchMovimientosConsumo));
+      lote.forEach((c, k) => movimientosCache.set(c, res[k]));
+    }
+    const diasVentana = SEMANAS_META_CONSUMO * 7;
+    let diasHabiles = 0;
+    for (let i = 0; i < diasVentana; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      if (!esDiaNoLaborable(d, calendario.noLaborables, calendario.laborablesExtra)) diasHabiles++;
+    }
+
+    const internoKg = new Map<string, number>();
+    consumoRows.forEach(r => { if (r.un === 'KG' && universo.has(r.componente)) internoKg.set(r.componente, (internoKg.get(r.componente) || 0) + r.total); });
+
+    const planAnterior = planCofamaPorCortado(previo?.estado?.reposicionCofama);
+    const horizonteGeneral = numeroRestriccion(restr('Formulacion_Cobertura_Cofama_Dias')) ?? numeroRestriccion(restr('Formulacion_Cobertura_Dias')) ?? HORIZONTE_DEFAULT_DIAS;
+    const diasProd = diasProduccionDeRestriccion(restr('DiasProduccion_COFAMA'));
+
+    const filas: BaseCofamaRow[] = [];
+    universo.forEach((u, code) => {
+      const b = bom.get(code);
+      const coberturaRestr = restr(`Cobertura_${code}`);
+      const horizonteMaterial = coberturaRestr ? horizonteDeRestriccion(coberturaRestr, hoyPlan.getDay()) : null;
+      filas.push({
+        cortadoCode: code, cortadoDesc: u.desc,
+        formuladoCode: b?.formuladoCode ?? '', formuladoDesc: b?.formuladoDesc ?? '',
+        dens: extractMaterialInfo({ NOMBRE: u.desc }).dens, medida: medidaDeTexto(u.desc),
+        pesoCortado: b?.kgPorUN ?? 0,
+        stockCortadoKg: u.stockKg, stockFormuladoUN: 0,
+        metaKgDia: diasHabiles > 0 ? consumoUltimosDiasKg(movimientosCache.get(code) ?? [], diasVentana) / diasHabiles : 0,
+        internoKg: internoKg.get(code) || 0, planAnteriorUN: planAnterior.get(code) || 0,
+        horizonteDias: horizonteMaterial ?? horizonteGeneral, horizonteRestriccion: horizonteMaterial !== null,
+        diaProduccion: diasProd ? diasProd.has(dProd.getDay()) : true,
+      });
+    });
+
+    // Formulados Cofama: los de la BOM de los cortados y los que aparecen en curado, con sus combinaciones.
+    const cofamaSpace = CURADO_SPACES.find(s => s.key === 'cofama');
+    const formulados = new Map<string, FormuladoCofama>();
+    filas.forEach(f => { if (f.formuladoCode && !formulados.has(f.formuladoCode)) formulados.set(f.formuladoCode, { code: f.formuladoCode, desc: f.formuladoDesc, pesoKg: 0, combinaciones: [] }); });
+    const sinEmparejar = new Map<string, SinEmparejarCofama>();
+    const stockFormulado = new Map<string, number>();
+    curadoData.forEach(row => {
+      if (!cofamaSpace || !matchesCuradoSpace(row, cofamaSpace)) return;
+      const code = cleanCode(getProp(row, ['CodMaterial', 'MATERIAL', 'CODMATERIAL']));
+      const desc = (getProp(row, ['NomMaterial', 'NOMMATERIAL']) || '').toUpperCase();
+      const comb = getProp(row, ['corridaproceso', 'CORRIDAPROCESO']).trim();
+      if (!code) return;
+      const fm = formulados.get(code) ?? { code, desc, pesoKg: 0, combinaciones: [] };
+      if (comb && parseCombinacion(comb).length > 0 && !fm.combinaciones.includes(comb)) fm.combinaciones.push(comb);
+      formulados.set(code, fm);
+      // Bloque en calle (con Kg disponibles): se cuenta como los cortados que va a dar.
+      if (safeNum(getProp(row, ['CantidadStock', 'CANTIDADSTOCK', 'CANTIDAD_STOCK'])) <= 0 || !comb) return;
+      const { porCortado, sinEmparejar: faltan } = repartirCombinacion(code, desc, comb, 1, filas);
+      porCortado.forEach((un, c) => stockFormulado.set(c, (stockFormulado.get(c) || 0) + un));
+      faltan.forEach(medida => {
+        const k = `${code}|${medida}`;
+        const s = sinEmparejar.get(k) ?? { formuladoCode: code, formuladoDesc: desc, combinacion: medida, bloques: 0 };
+        s.bloques += 1;
+        sinEmparejar.set(k, s);
+      });
+    });
+    filas.forEach(f => { f.stockFormuladoUN = stockFormulado.get(f.cortadoCode) || 0; });
+    // Peso del formulado (Kg del PLAN): Lote Mín. SAP; si no hay, promedio real de los fabricados Cofama.
+    const pesoRealCofama = new Map((stockCuradoPorEspacio['cofama'] ?? []).map(r => [r.materialCode, r.pesoProm]));
+    formulados.forEach(fm => {
+      const lote = cuboInventarios.filter(inv => cleanCode(inv.Material) === fm.code && String(inv.Centro || '').trim() === '1000').reduce((m, inv) => Math.max(m, safeNum(inv.TamLoteMin)), 0);
+      fm.pesoKg = lote > 0 ? lote : pesoRealCofama.get(fm.code) || 0;
+      fm.combinaciones.sort();
+    });
+
+    filas.sort((a, b) => (parseFloat(a.dens) || 0) - (parseFloat(b.dens) || 0) || a.cortadoDesc.localeCompare(b.cortadoDesc));
+    const previa = previo?.estado?.reposicionCofama;
+    return {
+      filas,
+      formulados: Array.from(formulados.values()).sort((a, b) => a.desc.localeCompare(b.desc)),
+      sinEmparejar: Array.from(sinEmparejar.values()),
+      diaProduccion: ventana.d,
+      planAnteriorFecha: previa ? previo?.fecha ?? null : null,
+      lineas: [],
+      metaOverride: {},
+    };
+  }, [restr, calendario, ventana.d, cuboInventarios, curadoData, stockCuradoPorEspacio]);
 
   // Paso 1 · Necesidad: FERT de la ventana (pendiente + planificado) de los responsables de Formulación
   // y de Venta Externa (038), explotadas a Kg de Bloque Formulado. Necesidad neta = esa necesidad −
@@ -1043,11 +1288,14 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       setConsumoBloqueFormulado([]);
       // La reposición Leader va por cobertura: se calcula aunque no haya FERT en la ventana.
       const movs = new Map<string, MovimientoConsumo[]>();
-      const rep = await construirReposicion(movs);
+      const previo = await buscarPlanAnterior();
+      const rep = await construirReposicion(movs, previo);
+      const repCof = await construirReposicionCofama(movs, [], previo);
       setReposicion(rep);
+      setReposicionCofama(repCof);
       setMovimientosConsumo(Object.fromEntries(movs));
-      actualizarEnCache<SnapshotFormulacion>(CACHE_FORMULACION, { unifiedSummaryData: [], consumoBloqueFormulado: [], reposicion: rep });
-      return { estado: 'aviso', mensaje: `Sin FERT de Formulación / Venta Externa entre ${pendienteDesde} y ${ventana.d}; reposición Leader por cobertura: ${rep.filas.length} bloque(s).` };
+      actualizarEnCache<SnapshotFormulacion>(CACHE_FORMULACION, { unifiedSummaryData: [], consumoBloqueFormulado: [], reposicion: rep, reposicionCofama: repCof });
+      return { estado: 'aviso', mensaje: `Sin FERT de Formulación / Venta Externa entre ${pendienteDesde} y ${ventana.d}; reposición por cobertura: ${rep.filas.length} bloque(s) Leader, ${repCof.filas.length} cortado(s) Cofama.` };
     }
     setIsProcessingResumen(true);
     const groupsMap = new Map<string, FormuladoSummaryRow>();
@@ -1156,10 +1404,13 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const summaryOrdenado = Array.from(groupsMap.values()).sort((a, b) =>
       aperturaSortIndex(a.apertura) - aperturaSortIndex(b.apertura) || a.corrida.localeCompare(b.corrida) || a.centro.localeCompare(b.centro)
     );
-    const rep = await construirReposicion(movimientosCache);
+    const previo = await buscarPlanAnterior();
+    const rep = await construirReposicion(movimientosCache, previo);
+    const repCof = await construirReposicionCofama(movimientosCache, consumoRows, previo);
     setUnifiedSummaryData(summaryOrdenado);
     setConsumoBloqueFormulado(consumoRows);
     setReposicion(rep);
+    setReposicionCofama(repCof);
     setMovimientosConsumo(Object.fromEntries(movimientosCache));
     // Mantiene el snapshot en sync — si el usuario navega a otro módulo y vuelve, el tab Resumen ya
     // no aparece vacío (ver SnapshotFormulacion). No-op si todavía no se sincronizó ningún dato base
@@ -1168,10 +1419,11 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       unifiedSummaryData: summaryOrdenado,
       consumoBloqueFormulado: consumoRows,
       reposicion: rep,
+      reposicionCofama: repCof,
     });
     setIsProcessingResumen(false);
-    return { estado: 'ok', mensaje: `${allOrders.length} orden(es) → ${summaryOrdenado.length} bloque(s) formulado(s) en el resumen; reposición Leader: ${rep.filas.length} bloque(s).`, progreso: { actual: allOrders.length, total: allOrders.length } };
-  }, [prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico, tramoFert, pendienteDesde, ventana.d, construirReposicion]);
+    return { estado: 'ok', mensaje: `${allOrders.length} orden(es) → ${summaryOrdenado.length} bloque(s) formulado(s) en el resumen; reposición: ${rep.filas.length} bloque(s) Leader, ${repCof.filas.length} cortado(s) Cofama.`, progreso: { actual: allOrders.length, total: allOrders.length } };
+  }, [prodFiltradas, cuboInventarios, getStockEnCurado, respPorCentroDinamico, tramoFert, pendienteDesde, ventana.d, construirReposicion, construirReposicionCofama, buscarPlanAnterior]);
 
   // Segunda fase de "Sincronizar y Generar Necesidades" (ver handleSincronizarYGenerar): corre
   // handleProcessResumen automáticamente en cuanto el render con los datos recién sincronizados ya
@@ -1274,6 +1526,31 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
 </table>
 <p style="margin:6px 0 0;font-size:11px;font-weight:700;color:${totalPlan > capacidad ? '#dc2626' : '#b45309'};">PLAN: ${totalPlan} bloques / capacidad ${capacidad} (nichos ${reposicion.nichosMax}${reposicion.autodescarga ? ` + autodescarga ${reposicion.autodescargaUN}` : ''}) · ${formatNum(totalKg, 0)} Kg</p>`;
     };
+    const seccionCofama = () => {
+      const titulo = `<p style="margin:18px 0 6px;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">Bloque Formulado Cofama — Plan de Reposición</p>`;
+      const rc = reposicionCofama;
+      if (!rc) return `${titulo}<p style="font-size:11px;color:#9ca3af;">Sin plan de reposición.</p>`;
+      const plan = planCofamaPorCortado(rc);
+      const filas = rc.filas.map(b => calcularFilaCofama(b, rc.metaOverride[b.cortadoCode], plan.get(b.cortadoCode) || 0))
+        .filter(f => f.planUN > 0 || f.sugeridoUN > 0 || f.reponer);
+      const lineas = rc.lineas.filter(l => l.cantidad > 0);
+      const d1 = (v: number | null) => (v === null ? '—' : v.toFixed(1));
+      const totalBloques = lineas.reduce((s, l) => s + l.cantidad, 0);
+      const totalKg = lineas.reduce((s, l) => s + l.cantidad * (rc.formulados.find(f => f.code === l.formuladoCode)?.pesoKg || 0), 0);
+      return `${titulo}
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #e5e7eb;border-collapse:collapse;">
+  <tr>${th('Bloque formulado')}${th('Combinación')}${th('Bloques', true)}${th('Kg', true)}</tr>
+  ${lineas.length === 0 ? `<tr>${td('Sin plan')}${td('')}${td('', true)}${td('', true)}</tr>` : lineas.map(l => {
+    const fm = rc.formulados.find(f => f.code === l.formuladoCode);
+    return `<tr>${td(`${esc(l.formuladoCode)} · ${esc(fm?.desc ?? '')}`)}${td(esc(l.combinacion))}${td(`<b>${l.cantidad}</b>`, true)}${td(fm?.pesoKg ? formatNum(l.cantidad * fm.pesoKg, 0) : '—', true)}</tr>`;
+  }).join('')}
+</table>
+<p style="margin:6px 0 10px;font-size:11px;font-weight:700;color:#b45309;">PLAN: ${totalBloques} bloques formulados · ${formatNum(totalKg, 0)} Kg</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #e5e7eb;border-collapse:collapse;">
+  <tr>${th('Bloque cortado')}${th('Descripción')}${th('Stock (UN)', true)}${th('Meta (UN/día)', true)}${th('Interno (UN)', true)}${th('Plan ant. (UN)', true)}${th('Cobertura (días)', true)}${th('Horizonte (días)', true)}${th('Sugerido (UN)', true)}${th('PLAN (UN)', true)}${th('Cob. plan (días)', true)}</tr>
+  ${filas.map(f => `<tr${f.planUN > 0 ? ' style="background:#fefce8;"' : ''}>${td(esc(f.cortadoCode))}${td(esc(f.cortadoDesc))}${td(f.stockTotalUN.toFixed(1), true)}${td(f.metaUNDia.toFixed(2), true)}${td(f.internoUN > 0 ? f.internoUN.toFixed(1) : '—', true)}${td(f.planAnteriorUN > 0 ? String(f.planAnteriorUN) : '—', true)}${td(d1(f.coberturaActual), true)}${td(f.horizonteDias.toFixed(1), true)}${td(f.sugeridoUN ? String(f.sugeridoUN) : '—', true)}${td(f.planUN ? `<b>${f.planUN}</b>` : '—', true)}${td(f.planUN ? d1(f.coberturaPlan) : '', true)}</tr>`).join('')}
+</table>`;
+    };
     const rango = `pendiente ${pendienteDesde} → día de corte ${ventana.d}`;
     return `
 <div style="max-width:960px;margin:0 auto;background:#ffffff;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
@@ -1283,7 +1560,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
 <h1 style="margin:4px 0 0;font-size:20px;color:#111827;">Bloque Formulado — necesidad, stock y plan de reposición</h1>
 <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">Fecha objetivo: ${fechaObjetivo} · Ventana FERT: ${rango}</p>
 ${centro === '1000' ? seccionLeader() : seccion('Bloque Formulado — Apertura', summarySpaces.apertura.filter(r => r.centro === centro))}
-${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySpaces.combinacion.filter(r => r.centro === centro))}
+${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySpaces.combinacion.filter(r => r.centro === centro))}
 <p style="margin:20px 0 0;padding-top:14px;border-top:1px solid #e5e7eb;font-size:11px;color:#9ca3af;">Generado automáticamente por el Optimizador de Producción, favor no responder. Para dudas sobre estos datos, contacta a Planificación Táctica.</p>
 </div>
 </div>`;
@@ -1301,6 +1578,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     unifiedSummaryData,
     consumoBloqueFormulado,
     reposicion,
+    reposicionCofama,
   });
   const restaurarEstadoPlan = (crudo: unknown, origen: OrigenEstadoPlan): boolean => {
     const e = crudo as Partial<EstadoPlanFormulacion> | null;
@@ -1310,6 +1588,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     setUnifiedSummaryData(e.unifiedSummaryData);
     setConsumoBloqueFormulado(e.consumoBloqueFormulado ?? []);
     setReposicion(e.reposicion ?? null);
+    setReposicionCofama(e.reposicionCofama ?? null);
     setPlanCargadoDe(origen);
     setActiveTab('necesidad');
     return true;
@@ -1535,6 +1814,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
       setUnifiedSummaryData(snap.unifiedSummaryData || []);
       setConsumoBloqueFormulado(snap.consumoBloqueFormulado || []);
       setReposicion(snap.reposicion ?? null);
+      setReposicionCofama(snap.reposicionCofama ?? null);
       setDatosCargados(true);
     }
   }, [mounted]);
@@ -1561,6 +1841,24 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
   );
   const capacidadReposicion = reposicion ? reposicion.nichosMax + (reposicion.autodescarga ? reposicion.autodescargaUN : 0) : 0;
   const totalPlanReposicion = filasReposicion.reduce((s, f) => s + f.planUN, 0);
+
+  const ajustarCofama = (cambio: (r: ReposicionCofama) => ReposicionCofama) => {
+    setReposicionCofama(prev => {
+      if (!prev) return prev;
+      const nuevo = cambio(prev);
+      actualizarEnCache<SnapshotFormulacion>(CACHE_FORMULACION, { reposicionCofama: nuevo });
+      return nuevo;
+    });
+  };
+  const ajustarLineaCofama = (id: string, cambio: Partial<LineaPlanCofama>) =>
+    ajustarCofama(r => ({ ...r, lineas: r.lineas.map(l => (l.id === id ? { ...l, ...cambio } : l)) }));
+  const planCofama = useMemo(() => planCofamaPorCortado(reposicionCofama), [reposicionCofama]);
+  const filasCofama = useMemo(
+    () => (reposicionCofama ? reposicionCofama.filas.map(b => calcularFilaCofama(b, reposicionCofama.metaOverride[b.cortadoCode], planCofama.get(b.cortadoCode) || 0)) : []),
+    [reposicionCofama, planCofama]
+  );
+  // Solo los cortados con algo que mostrar: stock, consumo, necesidad, plan anterior o PLAN de hoy.
+  const filasCofamaVisibles = filasCofama.filter(f => f.stockTotalUN > 0 || f.metaKgDia > 0 || f.internoKg > 0 || f.planAnteriorUN > 0 || f.planUN > 0 || f.horizonteRestriccion);
 
 
   // Paso 1 · Necesidad: misma estructura que el Excel "CONSUMOS UIO" — Formulado → Bloque cortado →
@@ -1643,120 +1941,6 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
               })}
             </tbody>
           </table>
-        </div>
-      </div>
-    );
-  };
-
-  const renderSummaryTable = (data: FormuladoSummaryRow[], title: string, icon: React.ComponentType<{ className?: string }>) => {
-    const tStockKg = data.reduce((s, r) => s + r.stockKg, 0);
-    const tStockUn = data.reduce((s, r) => s + r.stockUN, 0);
-    const tConsumoDiarioKg = data.reduce((s, r) => s + r.consumoDiarioKg, 0);
-    // Cobertura de sección: ratio de totales (Stock Útil total en Kg ÷ Consumo/D total), no
-    // promedio de las coberturas individuales — un promedio simple de días sesgaría hacia los
-    // bloques con menos consumo, aunque representen poco stock real.
-    const tStockUtilKg = data.reduce((s, r) => s + r.stockUtilUN * r.pesoBloque, 0);
-    const tCoberturaActual = tConsumoDiarioKg > 0 ? tStockUtilKg / tConsumoDiarioKg : null;
-
-    return (
-      <div className="space-y-4">
-        <div className="flex items-center justify-between px-2">
-          <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest flex items-center gap-2">
-            {React.createElement(icon, { className: "w-4 h-4 text-indigo-600" })}
-            {title}
-          </h3>
-          <div className="flex gap-4">
-            <Badge variant="outline" className="text-[10px] font-black border-slate-200 bg-slate-50">T. STOCK: {formatNum(tStockKg, 0)} KG</Badge>
-            <Badge variant="outline" className="text-[10px] font-black border-slate-200 bg-slate-50">T. UNIDADES: {Math.round(tStockUn)} UN</Badge>
-          </div>
-        </div>
-        <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
-          <div className="overflow-x-auto max-h-[500px]">
-            <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
-              <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-20">
-                <tr>
-                  <th className="px-6 py-4 text-left border-r border-gray-100 w-32">Bloque Formulado</th>
-                  <th className="px-3 py-4 border-r border-gray-100 text-slate-500">Centro</th>
-                  <th className="px-4 py-4 text-left border-r border-gray-100 text-indigo-700">Corrida</th>
-                  <th className="px-6 py-4 text-left border-r border-gray-100">Descripción Técnica SAP</th>
-                  <th className="px-3 py-4 border-r border-gray-100">Dens.</th>
-                  <th className="px-3 py-4 border-r border-gray-100">Apert.</th>
-                  <th className="px-4 py-4 border-r border-gray-100">Pendiente (Bloq)</th>
-                  <th className="px-4 py-4 border-r border-gray-100">Planificado (Bloq)</th>
-                  <th className="px-6 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50">Stock (Kg)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50 font-black">Stock (UN)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-amber-700 bg-amber-50/50">En Curado (UN)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-emerald-700 bg-emerald-50/50 font-black">Stock Útil (UN)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-cyan-700 bg-cyan-50/50 font-black">Consumo/D (Kg)</th>
-                  <th className="px-4 py-4 border-r border-gray-100 text-rose-700 bg-rose-50/50 font-black">Cobertura Actual (Días)</th>
-                  <th className="px-6 py-4 text-right bg-yellow-50/50 text-yellow-700 font-black">Plan Reposición (UN)</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50 font-bold">
-                {data.map((row, idx) => {
-                  // Clave compuesta con centro: el mismo blockCode puede aparecer dos veces (Quito y
-                  // Guayaquil) desde que la agrupación se partió por centro — usar solo blockCode acá
-                  // expandía/colapsaba ambas filas a la vez.
-                  const groupKey = `${row.blockCode}|${row.centro}`;
-                  const isExp = expandedGroups.has(groupKey);
-                  // Cobertura Actual (días) = Stock Útil (convertido a Kg vía pesoBloque) ÷
-                  // Consumo/D. Sin consumo reciente (0 Kg/día en los últimos 7 días) no hay con qué
-                  // dividir — se muestra "—" en vez de un falso Infinity o un 0 que se leería como
-                  // "sin cobertura" cuando en realidad es "sin dato para calcularla".
-                  const coberturaActualDias = row.consumoDiarioKg > 0 ? (row.stockUtilUN * row.pesoBloque) / row.consumoDiarioKg : null;
-                  return (
-                    <React.Fragment key={idx}>
-                      <tr className="hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => { const n = new Set(expandedGroups); if (isExp) { n.delete(groupKey); } else { n.add(groupKey); } setExpandedGroups(n); }}>
-                        <td className="px-6 py-3 text-left font-mono font-black text-indigo-600 border-r border-gray-100 flex items-center gap-2">
-                           {isExp ? <Minus className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
-                           {row.blockCode}
-                        </td>
-                        <td className="px-3 py-3 border-r border-gray-100 font-black text-slate-500">{row.centro}</td>
-                        <td className="px-4 py-3 text-left font-mono font-black text-indigo-700 bg-indigo-50/10 border-r border-gray-100 whitespace-nowrap">{row.corrida}</td>
-                        <td className="px-6 py-3 text-left uppercase text-slate-900 font-black text-[10px] border-r border-gray-100 truncate max-w-[300px]">{row.blockDesc}</td>
-                        <td className="px-3 py-3 border-r border-gray-100 font-mono text-slate-500">{row.dens}</td>
-                        <td className="px-3 py-3 border-r border-gray-100 font-black text-blue-700 bg-blue-50/10">{row.apertura}</td>
-                        <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-slate-700 bg-slate-50/10">{row.totalBloquesPendiente.toFixed(2)}</td>
-                        <td className="px-4 py-3 border-r border-gray-100 font-mono font-black text-purple-700 bg-purple-50/10">{row.totalBloquesPlanificado.toFixed(2)}</td>
-                        <td className="px-6 py-3 border-r border-gray-100 text-right font-mono font-black text-emerald-600 bg-emerald-50/10">{row.stockKg.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                        <td className="px-4 py-3 border-r border-gray-100 text-right font-mono font-black text-emerald-800 bg-emerald-50/20">{row.stockUN.toFixed(1)}</td>
-                        <td className="px-4 py-3 border-r border-gray-100 text-right font-mono font-black text-amber-700 bg-amber-50/20">{row.stockEnCuradoUN.toFixed(1)}</td>
-                        <td className="px-4 py-3 border-r border-gray-100 text-right font-mono font-black text-emerald-800 bg-emerald-50/30">{row.stockUtilUN.toFixed(1)}</td>
-                        <td className="px-4 py-3 border-r border-gray-100 text-right font-mono font-black text-cyan-700 bg-cyan-50/20">{row.consumoDiarioKg.toFixed(1)}</td>
-                        <td className="px-4 py-3 border-r border-gray-100 text-right font-mono font-black text-rose-700 bg-rose-50/20">{coberturaActualDias === null ? '—' : coberturaActualDias.toFixed(1)}</td>
-                        <td className="px-6 py-3 text-right font-mono font-black text-yellow-700 bg-yellow-50/30">{row.planReposicion}</td>
-                      </tr>
-                      {isExp && row.ferts.map((f, fIdx: number) => (
-                        <tr key={`${idx}-${fIdx}`} className="bg-slate-50/50 text-[10px] text-slate-500 font-medium">
-                          <td className="px-6 py-1.5 text-left pl-10 italic">{f.code}</td>
-                          <td></td>
-                          <td></td>
-                          <td className="px-6 py-1.5 text-left uppercase italic truncate max-w-[300px]">{f.desc}</td>
-                          <td colSpan={2}></td>
-                          <td className="px-4 py-1.5 font-mono">{f.origin === 'prov' ? f.bloques.toFixed(3) : '—'}</td>
-                          <td className="px-4 py-1.5 font-mono">{f.origin === 'fert' ? f.bloques.toFixed(3) : '—'}</td>
-                          <td colSpan={2}></td>
-                          <td className="px-4 py-1.5 font-mono opacity-50">{f.kg.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
-                          <td colSpan={4}></td>
-                        </tr>
-                      ))}
-                    </React.Fragment>
-                  );
-                })}
-              </tbody>
-              <tfoot className="bg-gray-100 text-gray-800 font-black text-[10px] uppercase border-t-2 border-gray-200 sticky bottom-0 z-20">
-                <tr>
-                  <td colSpan={8} className="px-6 py-4 text-right tracking-widest border-r border-gray-200">Totales de Sección</td>
-                  <td className="px-6 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{formatNum(tStockKg, 0)}</td>
-                  <td className="px-4 py-4 border-r border-gray-200 font-mono text-emerald-700 bg-emerald-50">{Math.round(tStockUn)}</td>
-                  <td colSpan={2} className="px-6 py-4"></td>
-                  <td className="px-4 py-4 border-r border-gray-200 font-mono text-cyan-700 bg-cyan-50">{formatNum(tConsumoDiarioKg, 1)}</td>
-                  <td className="px-4 py-4 border-r border-gray-200 font-mono text-rose-700 bg-rose-50">{tCoberturaActual === null ? '—' : tCoberturaActual.toFixed(1)}</td>
-                  <td className="px-6 py-4"></td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
         </div>
       </div>
     );
@@ -2105,6 +2289,176 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
     );
   };
 
+  const renderReposicionCofama = () => {
+    const rc = reposicionCofama;
+    if (!rc) {
+      return <div className="py-16 text-center text-[10px] font-bold text-gray-500 uppercase tracking-widest">Sin plan de reposición Cofama — sincroniza para calcularlo.</div>;
+    }
+    const th = 'px-3 py-3 border-r border-gray-100';
+    const td = 'px-3 py-2 border-r border-gray-100 font-mono text-right';
+    const dias = (v: number | null) => (v === null ? '—' : v.toFixed(1));
+    const input = 'rounded-md border border-gray-200 px-1.5 py-0.5 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-indigo-400';
+    const totalBloques = rc.lineas.reduce((s, l) => s + (l.cantidad > 0 ? l.cantidad : 0), 0);
+    const totalKg = rc.lineas.reduce((s, l) => s + (l.cantidad > 0 ? l.cantidad * (rc.formulados.find(f => f.code === l.formuladoCode)?.pesoKg || 0) : 0), 0);
+    const t = filasCofamaVisibles.reduce((s, f) => ({ stock: s.stock + f.stockTotalUN, sugerido: s.sugerido + f.sugeridoUN, plan: s.plan + f.planUN }), { stock: 0, sugerido: 0, plan: 0 });
+    const agregarLinea = () => ajustarCofama(r => ({
+      ...r,
+      lineas: [...r.lineas, { id: `${Date.now()}-${r.lineas.length}`, formuladoCode: r.formulados[0]?.code ?? '', combinacion: r.formulados[0]?.combinaciones[0] ?? '', cantidad: 1 }],
+    }));
+    return (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-gray-100 bg-white px-4 py-3 text-[11px]">
+          <span className="font-black uppercase text-slate-700">Bloque Formulado Cofama · producción {fechaCorta(rc.diaProduccion)}</span>
+          <span className="font-bold text-slate-500">Plan anterior: {rc.planAnteriorFecha ? fechaCorta(rc.planAnteriorFecha) : 'sin reporte'}</span>
+          <span className="font-black text-indigo-700">PLAN {formatNum(totalBloques, 0)} bloques formulados · {formatNum(totalKg, 0)} Kg</span>
+          {Object.keys(rc.metaOverride).length > 0 && (
+            <Button size="sm" variant="outline" className="h-7 text-[10px] font-black uppercase" onClick={() => ajustarCofama(r => ({ ...r, metaOverride: {} }))}>Restablecer meta</Button>
+          )}
+        </div>
+
+        <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-600">PLAN · formulado + combinación</span>
+            <Button size="sm" variant="outline" className="h-7 gap-1 text-[10px] font-black uppercase" disabled={rc.formulados.length === 0} onClick={agregarLinea}>
+              <Plus className="w-3.5 h-3.5" /> Agregar
+            </Button>
+          </div>
+          <table className="w-full border-collapse text-[10px] text-gray-700">
+            <thead className="bg-gray-50 text-[10px] font-bold uppercase text-gray-500 tracking-widest">
+              <tr>
+                <th className={cn(th, 'text-left')}>Bloque formulado</th>
+                <th className={cn(th, 'text-left')}>Combinación</th>
+                <th className={th}>Bloques</th>
+                <th className={th}>Kg</th>
+                <th className={cn(th, 'text-left')}>Cortados</th>
+                <th className="px-3 py-3" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50 font-bold">
+              {rc.lineas.length === 0 ? (
+                <tr><td colSpan={6} className="py-6 text-center text-slate-300 uppercase font-black">Sin líneas de plan</td></tr>
+              ) : rc.lineas.map(l => {
+                const fm = rc.formulados.find(f => f.code === l.formuladoCode);
+                const rep = repartirCombinacion(l.formuladoCode, fm?.desc ?? '', l.combinacion, l.cantidad > 0 ? l.cantidad : 0, rc.filas);
+                const listaId = `comb-${l.id}`;
+                return (
+                  <tr key={l.id}>
+                    <td className="px-3 py-2 border-r border-gray-100">
+                      <select value={l.formuladoCode} onChange={e => ajustarLineaCofama(l.id, { formuladoCode: e.target.value, combinacion: rc.formulados.find(f => f.code === e.target.value)?.combinaciones[0] ?? l.combinacion })} className={cn(input, 'max-w-[300px]')}>
+                        {rc.formulados.map(f => <option key={f.code} value={f.code}>{f.code} · {f.desc}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-3 py-2 border-r border-gray-100">
+                      <input list={listaId} key={`c-${l.id}-${l.formuladoCode}`} defaultValue={l.combinacion} onBlur={e => ajustarLineaCofama(l.id, { combinacion: e.target.value.trim() })} className={cn(input, 'w-56')} placeholder="2un - 135X190 / 1un - 105X190" />
+                      <datalist id={listaId}>{(fm?.combinaciones ?? []).map(c => <option key={c} value={c} />)}</datalist>
+                    </td>
+                    <td className={td}>
+                      <input type="number" min={0} step={1} key={`n-${l.id}`} defaultValue={l.cantidad} onBlur={e => ajustarLineaCofama(l.id, { cantidad: Math.max(0, Math.round(numeroRestriccion(e.target.value) ?? 0)) })} className={cn(input, 'w-16 text-right')} />
+                    </td>
+                    <td className={td}>{fm?.pesoKg ? formatNum(l.cantidad * fm.pesoKg, 0) : '—'}</td>
+                    <td className="px-3 py-2 border-r border-gray-100 text-left font-mono">
+                      {Array.from(rep.porCortado).map(([c, un]) => <span key={c} className="mr-3 text-emerald-700">{un} → {c}</span>)}
+                      {rep.sinEmparejar.map(s => <span key={s} className="mr-3 text-red-600" title="Sin bloque cortado con esa medida (±2 cm)">{s} ?</span>)}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <button className="text-slate-400 hover:text-red-600" title="Quitar" onClick={() => ajustarCofama(r => ({ ...r, lineas: r.lineas.filter(x => x.id !== l.id) }))}><Minus className="w-3.5 h-3.5" /></button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
+          <div className="overflow-x-auto max-h-[600px]">
+            <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
+              <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-20">
+                <tr>
+                  <th className={cn(th, 'text-left')}>Bloque cortado</th>
+                  <th className={cn(th, 'text-left')}>Descripción</th>
+                  <th className={th} title="Kg de bloque formulado por UN según la BOM SAP">Peso (Kg)</th>
+                  <th className={cn(th, 'text-emerald-700 bg-emerald-50/50')}>Cortado (UN)</th>
+                  <th className={cn(th, 'text-amber-700 bg-amber-50/50')} title="Formulados Cofama en calle convertidos por su combinación">Formulado (UN)</th>
+                  <th className={cn(th, 'text-emerald-700 bg-emerald-50/50')}>Total (UN)</th>
+                  <th className={cn(th, 'text-cyan-700 bg-cyan-50/50')} title={`Histórico ${SEMANAS_META_CONSUMO} semanas ÷ días hábiles; editable`}>Meta (UN/día)</th>
+                  <th className={cn(th, 'text-purple-700')} title="Necesidad FERT del paso 1">Interno (UN)</th>
+                  <th className={th}>Plan ant. (UN)</th>
+                  <th className={cn(th, 'text-rose-700 bg-rose-50/50')}>Cobertura (días)</th>
+                  <th className={th} title={`Cobertura_<material>, Formulacion_Cobertura_Cofama_Dias o Formulacion_Cobertura_Dias; por defecto ${HORIZONTE_DEFAULT_DIAS}`}>Horizonte (días)</th>
+                  <th className={th}>Acción</th>
+                  <th className={cn(th, 'text-yellow-700 bg-yellow-50/50')}>Sugerido (UN)</th>
+                  <th className={cn(th, 'text-indigo-700 bg-indigo-50/50')} title="UN que salen de las líneas de PLAN">PLAN (UN)</th>
+                  <th className="px-3 py-3">Cob. plan (días)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50 font-bold">
+                {filasCofamaVisibles.length === 0 ? (
+                  <tr><td colSpan={15} className="py-12 text-center text-slate-300 uppercase font-black">Sin bloques cortados con stock o consumo</td></tr>
+                ) : filasCofamaVisibles.map(f => (
+                  <tr key={f.cortadoCode} className={cn('hover:bg-slate-50 transition-colors', f.reponer && 'bg-yellow-50/30')}>
+                    <td className="px-3 py-2 border-r border-gray-100 text-left font-mono font-black text-indigo-600">{f.cortadoCode}</td>
+                    <td className="px-3 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[260px]" title={f.formuladoCode ? `${f.formuladoCode} · ${f.formuladoDesc}` : 'Sin formulado en la BOM'}>{f.cortadoDesc}</td>
+                    <td className={cn(td, !f.pesoCortado && 'text-slate-400')}>{f.pesoCortado > 0 ? formatNum(f.pesoCortado, 1) : '—'}</td>
+                    <td className={cn(td, 'text-emerald-800 bg-emerald-50/20')}>{f.stockCortadoUN.toFixed(1)}</td>
+                    <td className={cn(td, 'text-amber-700 bg-amber-50/20')}>{f.stockFormuladoUN > 0 ? formatNum(f.stockFormuladoUN, 0) : '—'}</td>
+                    <td className={cn(td, 'text-emerald-800 bg-emerald-50/30 font-black')}>{f.stockTotalUN.toFixed(1)}</td>
+                    <td className={cn(td, 'bg-cyan-50/20')}>
+                      <input
+                        key={`mc-${f.cortadoCode}-${f.metaEditada}`}
+                        type="number" min={0} step={0.1}
+                        defaultValue={Number(f.metaUNDia.toFixed(2))}
+                        onBlur={e => ajustarCofama(r => {
+                          const mapa = { ...r.metaOverride };
+                          const n = numeroRestriccion(e.target.value);
+                          if (n === null || n < 0 || (!f.metaEditada && e.target.value === String(Number(f.metaUNDia.toFixed(2))))) delete mapa[f.cortadoCode]; else mapa[f.cortadoCode] = n;
+                          return { ...r, metaOverride: mapa };
+                        })}
+                        className={cn(input, 'w-16 text-right', f.metaEditada && 'border-cyan-500 text-cyan-800')}
+                        title={`Histórico: ${f.pesoCortado > 0 ? (f.metaKgDia / f.pesoCortado).toFixed(2) : '—'} UN/día`}
+                      />
+                    </td>
+                    <td className={cn(td, 'text-purple-700')}>{f.internoUN > 0 ? f.internoUN.toFixed(1) : '—'}</td>
+                    <td className={td}>{f.planAnteriorUN > 0 ? formatNum(f.planAnteriorUN, 0) : '—'}</td>
+                    <td className={cn(td, 'text-rose-700 bg-rose-50/20', f.coberturaActual !== null && f.coberturaActual < f.horizonteDias && 'font-black')}>{dias(f.coberturaActual)}</td>
+                    <td className={cn(td, !f.horizonteRestriccion && 'text-slate-400')}>{f.horizonteDias.toFixed(1)}</td>
+                    <td className="px-3 py-2 border-r border-gray-100 font-black">
+                      {f.reponer ? <span className="text-yellow-700">Reponer</span> : !f.diaProduccion ? <span className="text-slate-400" title="No es día de producción (DiasProduccion_COFAMA)">No prod.</span> : ''}
+                    </td>
+                    <td className={cn(td, 'text-yellow-700 bg-yellow-50/30 font-black')}>{f.sugeridoUN || '—'}</td>
+                    <td className={cn(td, 'text-indigo-800 bg-indigo-50/30 font-black', f.planUN > 0 && f.planUN < f.sugeridoUN && 'text-orange-600')}>{f.planUN || '—'}</td>
+                    <td className="px-3 py-2 font-mono text-right">{f.planUN > 0 ? dias(f.coberturaPlan) : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+              {filasCofamaVisibles.length > 0 && (
+                <tfoot className="bg-gray-100 text-gray-800 font-black text-[10px] uppercase border-t-2 border-gray-200 sticky bottom-0 z-20">
+                  <tr>
+                    <td colSpan={5} className="px-3 py-3 text-right tracking-widest border-r border-gray-200">Totales</td>
+                    <td className="px-3 py-3 border-r border-gray-200 font-mono text-right text-emerald-700">{t.stock.toFixed(1)}</td>
+                    <td colSpan={6} className="border-r border-gray-200" />
+                    <td className="px-3 py-3 border-r border-gray-200 font-mono text-right text-yellow-700">{formatNum(t.sugerido, 0)}</td>
+                    <td className="px-3 py-3 border-r border-gray-200 font-mono text-right text-indigo-700">{formatNum(t.plan, 0)}</td>
+                    <td />
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </div>
+
+        {rc.sinEmparejar.length > 0 && (
+          <div className="rounded-2xl border border-red-100 bg-red-50/40 px-4 py-3 text-[10px]">
+            <p className="font-black uppercase text-red-700 mb-1">Combinaciones en calle sin bloque cortado (±{TOLERANCIA_MEDIDA_CM} cm)</p>
+            {rc.sinEmparejar.map(s => (
+              <p key={`${s.formuladoCode}|${s.combinacion}`} className="font-mono text-slate-700">{s.formuladoCode} · {s.formuladoDesc} · {s.combinacion} · {s.bloques} bloque(s)</p>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderContent = () => {
     if (isLoading) {
       return (
@@ -2126,7 +2480,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
            ) : (
              <>
                {renderReposicionLeader()}
-               {renderSummaryTable(summarySpaces.combinacion, "Bloque Formulado — Combinación (sin apertura técnica)", Box)}
+               {renderReposicionCofama()}
              </>
            )}
         </div>
@@ -2276,7 +2630,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
             <PopoverTrigger asChild>
               <Button
                 variant="outline"
-                disabled={isProcessingResumen || (unifiedSummaryData.length === 0 && !reposicion)}
+                disabled={isProcessingResumen || (unifiedSummaryData.length === 0 && !reposicion && !reposicionCofama)}
                 title="Guarda el Resumen (Plan de Reposición) por centro y envíalo por correo desde la vista previa"
                 className="h-10 px-4 rounded-xl gap-2 font-black text-[10px] uppercase border-indigo-200 text-indigo-700 hover:bg-indigo-50"
               >
