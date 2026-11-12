@@ -317,7 +317,11 @@ const resumenConsumoHistorico = (movs: MovimientoConsumo[]) => {
 // "NN Programación bloque formulados 2026.xlsx" (PRG LEADER), por Bloque Formulado de apertura:
 //   I  Stock [UN]        = stock Kg ÷ peso del bloque
 //   O  Meta consumo/día  = histórico (SEMANAS_META_CONSUMO semanas ÷ días hábiles), igual todos los días; editable
-//   V  Venta Externa     = Kg FERT 038 del paso 1 ÷ peso
+//   V  Venta Externa     = solo el EXCESO (usuario 2026-11-12): faltante de las FERT 018 (planchas de venta,
+//                          centro 1000) atrasadas + DIAS_VE_DEFAULT días hábiles desde D, menos lo que VE ya
+//                          consume en la meta (notificado 018 de las mismas semanas del histórico ÷ días
+//                          hábiles × días de la ventana). Las 038 son ya el plan: llegarían tarde.
+//   Peso                 = Lote Mín. SAP como estándar; el promedio real de fabricados queda de control
 //   AL Plan día anterior = PLAN del último reporte guardado antes del día de producción
 //   AC Cobertura actual  = MTS (I + AL) ÷ O · HB (I − V + AL) ÷ O
 //   AD Horizonte         = restricción Cobertura_<material> (un valor o L;M;X;J;V), o
@@ -330,13 +334,16 @@ const HORIZONTE_DEFAULT_DIAS = 1 + CURADO_DIAS_ESPERA;
 const NICHOS_MAX_DEFAULT = 30;
 const AUTODESCARGA_DEFAULT_UN = 6;
 const SEMANAS_META_CONSUMO = 4;
+const RESP_VENTA_EXTERNA_PT = '018';
+const DIAS_VE_DEFAULT = 4;
 
 // Lo que se calcula al generar (SAP + restricciones resueltas) y viaja en el respaldo del reporte.
 interface BaseReposicionRow {
   blockCode: string; blockDesc: string; corrida: string; apertura: string; dens: string;
-  pesoBloque: number; pesoFuente: 'real' | 'lote' | 'sin dato'; pesoDetalle?: string;
+  pesoBloque: number; pesoFuente: 'real' | 'lote' | 'sin dato'; pesoDetalle?: string; pesoRealProm?: number;
   stockKg: number; enCuradoKg: number;
-  metaKgDia: number; veKg: number; planAnteriorUN: number;
+  // veKg = exceso de Venta Externa que entra al cálculo (V); veVentanaKg / veBaseKg lo explican.
+  metaKgDia: number; veKg: number; veVentanaKg?: number; veBaseKg?: number; planAnteriorUN: number;
   horizonteDias: number; horizonteRestriccion: boolean;
   estrategia: EstrategiaReposicion; diaProduccion: boolean;
 }
@@ -410,7 +417,10 @@ const calcularFilaReposicion = (b: BaseReposicionRow, metaOverrideUN?: number, p
     metaEditada: metaOverrideUN !== undefined, planEditado: planOverrideUN !== undefined,
   };
 };
-const planFinalReposicion = (r: ReposicionLeader | undefined | null): Record<string, number> =>
+// Control del peso estándar: el promedio real de fabricados se aleja más de 3 % del Lote Mín.
+const desfasePeso = (b: BaseReposicionRow): boolean =>
+  b.pesoFuente === 'lote' && !!b.pesoRealProm && b.pesoBloque > 0 && Math.abs(b.pesoRealProm / b.pesoBloque - 1) > 0.03;
+const planFinalReposicion =(r: ReposicionLeader | undefined | null): Record<string, number> =>
   Object.fromEntries((r?.filas ?? []).map(b => [b.blockCode, calcularFilaReposicion(b, r?.metaOverride?.[b.blockCode], r?.planOverride?.[b.blockCode]).planUN]));
 
 // Materiales de PRUEBA (ej. "BLOQUE FORMULADO PRUEBAS MQ COFAMA") — el usuario confirmó que tanto
@@ -880,7 +890,6 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // anterior para que el respaldo del reporte se recargue igual sin SAP. Completa movimientosCache.
   const construirReposicion = useCallback(async (
     movimientosCache: Map<string, MovimientoConsumo[]>,
-    consumoRows: ConsumoBloqueRow[],
   ): Promise<ReposicionLeader> => {
     const restr = (nombre: string): string =>
       restricciones.find(r => String(r.nombre_restriccion || '').trim().toUpperCase() === nombre.toUpperCase())?.valor_restriccion?.trim() || '';
@@ -916,8 +925,51 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       if (!esDiaNoLaborable(d, calendario.noLaborables, calendario.laborablesExtra)) diasHabiles++;
     }
 
-    const veKg = new Map<string, number>();
-    consumoRows.forEach(r => { if (r.destino === 'VE' && r.un === 'KG') veKg.set(r.codFormulado, (veKg.get(r.codFormulado) || 0) + r.total); });
+    // Venta Externa (V) = exceso de las FERT 018 sobre lo que VE ya consume dentro de la meta histórica.
+    const diasVE = Math.max(1, Math.round(numeroRestriccion(restr('Formulacion_Dias_VE')) ?? DIAS_VE_DEFAULT));
+    const limiteVE = format(addBusinessDays(dProd, diasVE - 1, calendario.noLaborables, extra), 'yyyy-MM-dd');
+    const hoyStr = format(new Date(), 'yyyy-MM-dd');
+    const inicioHist = new Date();
+    inicioHist.setDate(inicioHist.getDate() - diasVentana + 1);
+    const histDesde = format(inicioHist, 'yyyy-MM-dd');
+    const ordenes018: { material: string; ventana: number; hist: number }[] = [];
+    ordenesFert.forEach(o => {
+      if (getProp(o, ['CENTRO', 'Centro']).trim() !== '1000') return;
+      if (getProp(o, ['RESPCTRLPROD', 'RESPCONTROLPROD', 'RESP_CONTROL_PROD', 'RESPONSABLE']).trim() !== RESP_VENTA_EXTERNA_PT) return;
+      const fechaFin = fechaFinOrden(o);
+      if (!fechaFin) return;
+      const pend = safeNum(getProp(o, ['CANTPENDIENTE', 'CANTPEND']));
+      const notif = safeNum(getProp(o, ['CANTNOTIFICADA', 'CANT_NOTIFICADA']));
+      const ventana = fechaFin <= limiteVE && pend > 0 ? pend : 0;
+      const hist = fechaFin >= histDesde && fechaFin < hoyStr && notif > 0 ? notif : 0;
+      if (ventana > 0 || hist > 0) ordenes018.push({ material: extractMaterialInfo(o).code, ventana, hist });
+    });
+    // Kg de Bloque Formulado por UN de cada plancha 018: una explosión BOM por material, no por orden.
+    const bomPorMaterial = new Map<string, Map<string, number>>();
+    const materiales018 = Array.from(new Set(ordenes018.map(o => o.material)));
+    for (let i = 0; i < materiales018.length; i += 6) {
+      const lote = materiales018.slice(i, i + 6);
+      const res = await Promise.all(lote.map(async mat => {
+        const porBloque = new Map<string, number>();
+        try {
+          const r = await serviciosService.getMaestroMaterialesExplosion('1000', mat.padStart(18, '0'), 1, 100);
+          const bom: MaterialExplosionRow[] = r?.data?.data || r?.data || [];
+          if (Array.isArray(bom)) bom.forEach(row => {
+            if (!(row.DESCRIPCION_COMPONENTE || '').toUpperCase().includes('BLOQUE FORMULADO')) return;
+            const cod = cleanCode(row.COMPONENTE);
+            porBloque.set(cod, (porBloque.get(cod) || 0) + safeNum(row.CANTIDAD_ACUMULADA || row.CANTIDAD_UNITARIA || 0));
+          });
+        } catch { /* sin BOM: la plancha no suma a ningún bloque */ }
+        return porBloque;
+      }));
+      lote.forEach((mat, k) => bomPorMaterial.set(mat, res[k]));
+    }
+    const veVentanaKg = new Map<string, number>();
+    const veHistKg = new Map<string, number>();
+    ordenes018.forEach(o => bomPorMaterial.get(o.material)?.forEach((kgPorUN, cod) => {
+      if (o.ventana > 0) veVentanaKg.set(cod, (veVentanaKg.get(cod) || 0) + kgPorUN * o.ventana);
+      if (o.hist > 0) veHistKg.set(cod, (veHistKg.get(cod) || 0) + kgPorUN * o.hist);
+    }));
 
     const fechasPrevias: string[] = [];
     for (const d = new Date(hoyPlan); format(d, 'yyyy-MM-dd') < ventana.d; d.setDate(d.getDate() + 1)) fechasPrevias.push(format(d, 'yyyy-MM-dd'));
@@ -932,7 +984,9 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const filas: BaseReposicionRow[] = [];
     universo.forEach((u, code) => {
       const real = pesoReal.get(code);
-      const pesoBloque = real ?? u.loteMin;
+      const pesoBloque = u.loteMin > 0 ? u.loteMin : real ?? 0;
+      const veVentana = veVentanaKg.get(code) || 0;
+      const veBase = diasHabiles > 0 ? ((veHistKg.get(code) || 0) / diasHabiles) * diasVE : 0;
       const metaKgDia = diasHabiles > 0 ? consumoUltimosDiasKg(movimientosCache.get(code) ?? [], diasVentana) / diasHabiles : 0;
       const coberturaRestr = restr(`Cobertura_${code}`);
       const horizonteMaterial = coberturaRestr ? horizonteDeRestriccion(coberturaRestr, hoyPlan.getDay()) : null;
@@ -940,18 +994,21 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       const diasProd = diasProduccionDeRestriccion(restr(`DiasProduccion_${u.apertura}`));
       const fila: BaseReposicionRow = {
         blockCode: code, blockDesc: u.desc, corrida: extraerCorridaCategoria(u.categoria), apertura: u.apertura, dens: u.dens,
-        pesoBloque, pesoFuente: real ? 'real' : u.loteMin > 0 ? 'lote' : 'sin dato',
+        pesoBloque, pesoFuente: u.loteMin > 0 ? 'lote' : real ? 'real' : 'sin dato', pesoRealProm: real,
         pesoDetalle: (() => {
           const c = curadoLeader.get(code);
-          return c ? `Promedio de ${c.pesoN} bloque(s) fabricados · ${formatNum(c.pesoMin, 0)}–${formatNum(c.pesoMax, 0)} Kg · CV ${(c.pesoCV * 100).toFixed(1)} %${c.pesoDescartados ? ` · ${c.pesoDescartados} descartado(s)` : ''} · Lote Mín. SAP ${formatNum(u.loteMin, 0)}` : `Sin bloques fabricados en curado: Lote Mín. SAP`;
+          const base = u.loteMin > 0 ? `Estándar Lote Mín. SAP ${formatNum(u.loteMin, 0)} Kg` : 'Sin Lote Mín. SAP: promedio real';
+          if (!c) return `${base} · sin bloques fabricados en curado`;
+          const dif = u.loteMin > 0 ? ` (${c.pesoProm / u.loteMin - 1 >= 0 ? '+' : ''}${((c.pesoProm / u.loteMin - 1) * 100).toFixed(1)} %)` : '';
+          return `${base} · real ${formatNum(c.pesoProm, 0)} Kg${dif}, ${c.pesoN} bloque(s) ${formatNum(c.pesoMin, 0)}–${formatNum(c.pesoMax, 0)}${c.pesoDescartados ? `, ${c.pesoDescartados} parcial(es) fuera` : ''}`;
         })(),
         stockKg: u.stockKg, enCuradoKg: getStockEnCurado(code),
-        metaKgDia, veKg: veKg.get(code) || 0, planAnteriorUN: planAnterior[code] || 0,
+        metaKgDia, veKg: Math.max(0, veVentana - veBase), veVentanaKg: veVentana, veBaseKg: veBase, planAnteriorUN: planAnterior[code] || 0,
         horizonteDias: horizonteMaterial ?? horizonteGeneral, horizonteRestriccion: horizonteMaterial !== null,
         estrategia: estrategiaRestr === 'MTO' || estrategiaRestr === 'HB' ? estrategiaRestr : 'MTS',
         diaProduccion: diasProd ? diasProd.has(dProd.getDay()) : true,
       };
-      if (fila.stockKg > 0 || fila.metaKgDia > 0 || fila.veKg > 0 || fila.planAnteriorUN > 0 || fila.horizonteRestriccion) filas.push(fila);
+      if (fila.stockKg > 0 || fila.metaKgDia > 0 || veVentana > 0 || fila.planAnteriorUN > 0 || fila.horizonteRestriccion) filas.push(fila);
     });
     filas.sort(compareAperturaDensidad);
     return {
@@ -964,7 +1021,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       metaOverride: {},
       planOverride: {},
     };
-  }, [restricciones, calendario, ventana.d, cuboInventarios, stockCuradoPorEspacio, getStockEnCurado]);
+  }, [restricciones, calendario, ventana.d, cuboInventarios, ordenesFert, stockCuradoPorEspacio, getStockEnCurado]);
 
   // Paso 1 · Necesidad: FERT de la ventana (pendiente + planificado) de los responsables de Formulación
   // y de Venta Externa (038), explotadas a Kg de Bloque Formulado. Necesidad neta = esa necesidad −
@@ -986,7 +1043,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       setConsumoBloqueFormulado([]);
       // La reposición Leader va por cobertura: se calcula aunque no haya FERT en la ventana.
       const movs = new Map<string, MovimientoConsumo[]>();
-      const rep = await construirReposicion(movs, []);
+      const rep = await construirReposicion(movs);
       setReposicion(rep);
       setMovimientosConsumo(Object.fromEntries(movs));
       actualizarEnCache<SnapshotFormulacion>(CACHE_FORMULACION, { unifiedSummaryData: [], consumoBloqueFormulado: [], reposicion: rep });
@@ -1099,7 +1156,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const summaryOrdenado = Array.from(groupsMap.values()).sort((a, b) =>
       aperturaSortIndex(a.apertura) - aperturaSortIndex(b.apertura) || a.corrida.localeCompare(b.corrida) || a.centro.localeCompare(b.centro)
     );
-    const rep = await construirReposicion(movimientosCache, consumoRows);
+    const rep = await construirReposicion(movimientosCache);
     setUnifiedSummaryData(summaryOrdenado);
     setConsumoBloqueFormulado(consumoRows);
     setReposicion(rep);
@@ -1956,11 +2013,11 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                 <tr>
                   <th className={cn(th, 'text-left')}>Bloque</th>
                   <th className={cn(th, 'text-left')}>Descripción</th>
-                  <th className={th} title="Peso real promedio de curado Leader; si no hay, Lote Mín. SAP">Peso (Kg)</th>
+                  <th className={th} title="Estándar: Lote Mín. SAP (naranja: el promedio real difiere más de 3 %)">Peso (Kg)</th>
                   <th className={cn(th, 'text-emerald-700 bg-emerald-50/50')}>Stock (UN)</th>
                   <th className={cn(th, 'text-amber-700 bg-amber-50/50')}>En curado (UN)</th>
                   <th className={cn(th, 'text-cyan-700 bg-cyan-50/50')} title={`Histórico ${SEMANAS_META_CONSUMO} semanas ÷ días hábiles; editable`}>Meta (UN/día)</th>
-                  <th className={cn(th, 'text-purple-700')} title="FERT Venta Externa (038) del paso 1">VE (UN)</th>
+                  <th className={cn(th, 'text-purple-700')} title="Exceso FERT 018 (atrasadas + ventana) sobre lo que VE ya consume en la meta">VE (UN)</th>
                   <th className={th} title="PLAN del reporte anterior">Plan ant. (UN)</th>
                   <th className={th} title="Restricción Estrategia_<material>; sin consumo = MTO">Estrat.</th>
                   <th className={cn(th, 'text-rose-700 bg-rose-50/50')}>Cobertura (días)</th>
@@ -1987,7 +2044,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                       <tr className={cn('hover:bg-slate-50 transition-colors', f.reponer && 'bg-yellow-50/30')}>
                         <td className="px-3 py-2 border-r border-gray-100 text-left font-mono font-black text-indigo-600">{f.blockCode}</td>
                         <td className="px-3 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[260px]" title={f.corrida}>{f.blockDesc}</td>
-                        <td className={cn(td, f.pesoFuente !== 'real' && 'text-slate-400')} title={f.pesoFuente === 'sin dato' ? 'Sin peso' : f.pesoDetalle}>{f.pesoBloque > 0 ? formatNum(f.pesoBloque, 0) : '—'}</td>
+                        <td className={cn(td, f.pesoFuente === 'sin dato' ? 'text-slate-400' : desfasePeso(f) ? 'text-orange-600' : '')} title={f.pesoFuente === 'sin dato' ? 'Sin peso' : f.pesoDetalle}>{f.pesoBloque > 0 ? formatNum(f.pesoBloque, 0) : '—'}</td>
                         <td className={cn(td, 'text-emerald-800 bg-emerald-50/20')}>{f.stockUN.toFixed(1)}</td>
                         <td className={cn(td, 'text-amber-700 bg-amber-50/20')}>{f.enCuradoUN > 0 ? f.enCuradoUN.toFixed(1) : '—'}</td>
                         <td className={cn(td, 'bg-cyan-50/20')}>
@@ -2000,7 +2057,10 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                             title={`Histórico: ${f.pesoBloque > 0 ? (f.metaKgDia / f.pesoBloque).toFixed(2) : '—'} UN/día (${formatNum(f.metaKgDia, 1)} Kg/día)`}
                           />
                         </td>
-                        <td className={cn(td, 'text-purple-700')}>{f.veUN > 0 ? f.veUN.toFixed(1) : '—'}</td>
+                        <td
+                          className={cn(td, 'text-purple-700')}
+                          title={f.veVentanaKg !== undefined && f.pesoBloque > 0 ? `FERT 018 ventana ${(f.veVentanaKg / f.pesoBloque).toFixed(1)} UN − ya en la meta ${((f.veBaseKg ?? 0) / f.pesoBloque).toFixed(1)} UN` : undefined}
+                        >{f.veUN > 0 ? f.veUN.toFixed(1) : '—'}</td>
                         <td className={td}>{f.planAnteriorUN > 0 ? formatNum(f.planAnteriorUN, 0) : '—'}</td>
                         <td className="px-3 py-2 border-r border-gray-100 font-black">{f.estrategiaEfectiva}</td>
                         <td className={cn(td, 'text-rose-700 bg-rose-50/20', f.coberturaActual !== null && f.coberturaActual < f.horizonteDias && 'font-black')}>{dias(f.coberturaActual)}</td>
