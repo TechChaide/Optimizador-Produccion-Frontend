@@ -1151,9 +1151,15 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const hoyPlan = previousBusinessDay(dProd, calendario.noLaborables, extra);
 
     const cortadosCubo = cuboInventarios.filter(inv => String(inv.Centro || '').trim() === '1000' && /BLOQUE CORTADO/i.test(String(inv.Descripcion || '')) && !esMaterialPrueba(String(inv.Descripcion || '')));
-    const de030 = cortadosCubo.filter(inv => String(inv.RespCtrlProd || '').trim() === RESP_COFAMA_CORTADO);
+    // Cofama = responsable 030 (puede llegar como "30"). Respaldo si el cubo no lo trae: cortados con medida
+    // en la descripción y sin apertura Leader (2026-11-12 salían TRANSICIÓN, D12 BL 194.5… de Leader).
+    const de030 = cortadosCubo.filter(inv => String(inv.RespCtrlProd ?? '').trim().padStart(3, '0') === RESP_COFAMA_CORTADO);
+    const respaldo = cortadosCubo.filter(inv => {
+      const desc = String(inv.Descripcion || '');
+      return !!medidaDeTexto(desc) && extractMaterialInfo({ NOMBRE: desc }).apertura === '—';
+    });
     const universo = new Map<string, { desc: string; stockKg: number }>();
-    (de030.length > 0 ? de030 : cortadosCubo).forEach(inv => {
+    (de030.length > 0 ? de030 : respaldo).forEach(inv => {
       const code = cleanCode(inv.Material);
       const u = universo.get(code) ?? { desc: String(inv.Descripcion || '').toUpperCase(), stockKg: 0 };
       u.stockKg += safeNum(inv.StockActual);
@@ -1211,7 +1217,8 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         cortadoCode: code, cortadoDesc: u.desc,
         formuladoCode: b?.formuladoCode ?? '', formuladoDesc: b?.formuladoDesc ?? '',
         dens: extractMaterialInfo({ NOMBRE: u.desc }).dens, medida: medidaDeTexto(u.desc),
-        pesoCortado: b?.kgPorUN ?? 0,
+        // El cortado está en KG en SAP (su BOM da 1 Kg/Kg): el peso por UN se resuelve más abajo.
+        pesoCortado: 0,
         stockCortadoKg: u.stockKg, stockFormuladoUN: 0,
         metaKgDia: diasHabiles > 0 ? consumoUltimosDiasKg(movimientosCache.get(code) ?? [], diasVentana) / diasHabiles : 0,
         internoKg: internoKg.get(code) || 0, planAnteriorUN: planAnterior.get(code) || 0,
@@ -1247,6 +1254,28 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       });
     });
     filas.forEach(f => { f.stockFormuladoUN = stockFormulado.get(f.cortadoCode) || 0; });
+
+    // Peso por UN del cortado: restricción Peso_<cortado>; si no, de los bloques Cofama fabricados — el peso de
+    // cada formulado se reparte entre sus piezas por área (3un - 135X190 de 261,7 Kg → ~87 Kg por pieza).
+    const piezas = new Map<string, number[]>();
+    curadoData.forEach(row => {
+      if (!cofamaSpace || !matchesCuradoSpace(row, cofamaSpace)) return;
+      const peso = safeNum(getProp(row, ['peso', 'PESO']));
+      const comb = getProp(row, ['corridaproceso', 'CORRIDAPROCESO']).trim();
+      const partes = parseCombinacion(comb);
+      const areaTotal = partes.reduce((s, p) => s + p.un * p.ancho * p.largo, 0);
+      if (!(peso > 0) || areaTotal <= 0) return;
+      const code = cleanCode(getProp(row, ['CodMaterial', 'MATERIAL', 'CODMATERIAL']));
+      const desc = (getProp(row, ['NomMaterial', 'NOMMATERIAL']) || '').toUpperCase();
+      partes.forEach(p => {
+        const { porCortado } = repartirCombinacion(code, desc, `1un - ${p.ancho}X${p.largo}`, 1, filas);
+        porCortado.forEach((_, c) => piezas.set(c, [...(piezas.get(c) ?? []), (peso * p.ancho * p.largo) / areaTotal]));
+      });
+    });
+    filas.forEach(f => {
+      const fijo = numeroRestriccion(restr(`Peso_${f.cortadoCode}`));
+      f.pesoCortado = fijo && fijo > 0 ? fijo : estadisticaPeso(piezas.get(f.cortadoCode) ?? []).pesoProm;
+    });
     // Peso del formulado (Kg del PLAN): Lote Mín. SAP; si no hay, promedio real de los fabricados Cofama.
     const pesoRealCofama = new Map((stockCuradoPorEspacio['cofama'] ?? []).map(r => [r.materialCode, r.pesoProm]));
     formulados.forEach(fm => {
@@ -1961,6 +1990,8 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
     return {
       combos: Array.from(combos.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8),
       fechas: fechas.length ? `${fechas[0]} → ${fechas[fechas.length - 1]}` : '—',
+      // Registros por fecha de fabricación (últimas 15), para ver qué días trae el servicio.
+      porDia: Object.entries(fechas.reduce<Record<string, number>>((m, f) => { m[f] = (m[f] || 0) + 1; return m; }, {})).slice(-15),
     };
   }, [curadoData]);
 
@@ -2377,7 +2408,7 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
                 <tr>
                   <th className={cn(th, 'text-left')}>Bloque cortado</th>
                   <th className={cn(th, 'text-left')}>Descripción</th>
-                  <th className={th} title="Kg de bloque formulado por UN según la BOM SAP">Peso (Kg)</th>
+                  <th className={th} title="Kg por UN: restricción Peso_<cortado>, o promedio de las piezas de los bloques Cofama fabricados (peso del formulado repartido por área de su combinación)">Peso (Kg)</th>
                   <th className={cn(th, 'text-emerald-700 bg-emerald-50/50')}>Cortado (UN)</th>
                   <th className={cn(th, 'text-amber-700 bg-amber-50/50')} title="Formulados Cofama en calle convertidos por su combinación">Formulado (UN)</th>
                   <th className={cn(th, 'text-emerald-700 bg-emerald-50/50')}>Total (UN)</th>
@@ -2490,6 +2521,11 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
       );
       case 'curado': return (
         <div className="animate-in fade-in duration-300 text-left space-y-4">
+           {curadoData.length > 0 && (
+             <p className="px-2 text-[10px] font-bold text-slate-500" title={diagnosticoCurado.porDia.map(([f, n]) => `${f}: ${n}`).join('\n')}>
+               Servicio de curado: {formatNum(curadoData.length, 0)} registros{curadoTotalServicio > 0 ? ` (informa ${formatNum(curadoTotalServicio, 0)})` : ''} · fabricación {diagnosticoCurado.fechas} · curado = fabricación + {CURADO_DIAS_ESPERA} días
+             </p>
+           )}
            {CURADO_SPACES.map(space => (
              <React.Fragment key={space.key}>{renderStockCurado(space.title, stockCuradoPorEspacio[space.key] ?? [])}</React.Fragment>
            ))}
