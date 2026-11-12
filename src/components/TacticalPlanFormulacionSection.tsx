@@ -859,6 +859,8 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // Reporte guardado del que viene lo que se ve (ver restaurarEstadoPlan); null = datos de la sesión.
   const [planCargadoDe, setPlanCargadoDe] = useState<OrigenEstadoPlan | null>(null);
   const [consumoBloqueFormulado, setConsumoBloqueFormulado] = useState<ConsumoBloqueRow[]>([]);
+  // Grupos abiertos del detalle de Necesidad (ver renderNecesidadTable); vacío = todo contraído.
+  const [expandidoNecesidad, setExpandidoNecesidad] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setMounted(true);
@@ -1906,8 +1908,22 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
     const codes = Array.from(grouped.keys()).sort();
     const columnas = 12;
     const fecha = (f?: string) => f ? f.split('-').reverse().slice(0, 2).join('/') : '—';
+    // Plegable en 3 niveles (usuario 2026-11-12): Formulado → Bloque cortado → órdenes. Claves "F|cod" y "C|cod|cortado".
+    const claveF = (code: string) => `F|${code}`;
+    const claveC = (code: string, componente: string) => `C|${code}|${componente}`;
+    const alternar = (k: string) => setExpandidoNecesidad(prev => { const n = new Set(prev); if (n.has(k)) n.delete(k); else n.add(k); return n; });
+    const todasF = codes.map(claveF);
+    const todasC = codes.flatMap(code => Array.from(grouped.get(code)!.cortados.keys()).map(c => claveC(code, c)));
+    const boton = 'h-7 px-3 text-[10px] font-black uppercase';
+    const Chevron = ({ abierto }: { abierto: boolean }) => (abierto ? <Minus className="w-3 h-3 inline mr-1.5" /> : <Plus className="w-3 h-3 inline mr-1.5" />);
     return (
       <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white text-left">
+        <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-gray-100">
+          <Button size="sm" variant="outline" className={boton} onClick={() => setExpandidoNecesidad(new Set([...todasF, ...todasC]))}>Expandir todo</Button>
+          <Button size="sm" variant="outline" className={boton} onClick={() => setExpandidoNecesidad(new Set(todasF))}>Ver bloques cortados</Button>
+          <Button size="sm" variant="outline" className={boton} onClick={() => setExpandidoNecesidad(new Set())}>Contraer todo</Button>
+          <span className="ml-auto text-[10px] font-bold text-slate-500">{codes.length} formulado(s) · {todasC.length} bloque(s) cortado(s)</span>
+        </div>
         <div className="overflow-x-auto max-h-[600px]">
           <table className="w-full border-collapse text-center font-sans text-[10px] text-gray-700">
             <thead className="bg-gray-50 sticky top-0 text-[10px] font-bold uppercase text-gray-500 tracking-widest z-20">
@@ -1932,20 +1948,31 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
               ) : codes.map(code => {
                 const group = grouped.get(code)!;
                 const items = Array.from(group.cortados.values()).flat();
+                const abiertoF = expandidoNecesidad.has(claveF(code));
                 return (
                   <React.Fragment key={code}>
-                    <tr className="bg-slate-100">
-                      <td className="px-4 py-2 text-left font-mono font-black text-indigo-600 border-r border-gray-100">{code}</td>
-                      <td colSpan={7} className="px-4 py-2 text-left uppercase font-black text-slate-700 border-r border-gray-100">{group.nombreFormulado}</td>
-                      <td colSpan={3} className="px-3 py-2 border-r border-gray-100 text-[9px] text-slate-500 whitespace-nowrap">Pend. {formatNum(kg(items, 'pendiente'), 1)} · Plan. {formatNum(kg(items, 'planificado'), 1)}</td>
+                    <tr className="bg-slate-100 cursor-pointer hover:bg-slate-200/70" onClick={() => alternar(claveF(code))}>
+                      <td className="px-4 py-2 text-left font-mono font-black text-indigo-600 border-r border-gray-100 whitespace-nowrap"><Chevron abierto={abiertoF} />{code}</td>
+                      <td colSpan={7} className="px-4 py-2 text-left uppercase font-black text-slate-700 border-r border-gray-100">{group.nombreFormulado} <span className="ml-2 font-bold normal-case text-slate-400">{group.cortados.size} bloque(s) cortado(s)</span></td>
+                      <td colSpan={3} className="px-3 py-2 border-r border-gray-100 text-[10px] whitespace-nowrap"><span className="text-amber-700">Pend. {formatNum(kg(items, 'pendiente'), 1)}</span> · <span className="text-emerald-700">Plan. {formatNum(kg(items, 'planificado'), 1)}</span></td>
                       <td className="px-4 py-2 bg-indigo-50 text-indigo-800 font-black">{formatNum(kg(items), 3)}</td>
                     </tr>
-                    {Array.from(group.cortados.entries()).map(([componente, rows]) => (
+                    {abiertoF && Array.from(group.cortados.entries()).map(([componente, rows]) => {
+                      const abiertoC = expandidoNecesidad.has(claveC(code, componente));
+                      return (
                       <React.Fragment key={componente}>
-                        {rows.map((row, idx) => (
+                        <tr className="bg-emerald-50/60 cursor-pointer hover:bg-emerald-100/60" onClick={() => alternar(claveC(code, componente))}>
+                          <td />
+                          <td colSpan={2} className="px-4 py-1.5 text-left uppercase font-black text-emerald-800 whitespace-nowrap"><Chevron abierto={abiertoC} />{rows[0].nombreComponente}</td>
+                          <td className="px-4 py-1.5 text-left font-mono text-indigo-600">{componente}</td>
+                          <td colSpan={4} className="px-3 py-1.5 text-left text-[10px] text-slate-500">{rows.length} orden(es)</td>
+                          <td colSpan={3} className="px-3 py-1.5 text-[10px] whitespace-nowrap"><span className="text-amber-700">Pend. {formatNum(kg(rows, 'pendiente'), 1)}</span> · <span className="text-emerald-700">Plan. {formatNum(kg(rows, 'planificado'), 1)}</span></td>
+                          <td className="px-4 py-1.5 font-black text-emerald-900">{formatNum(kg(rows), 3)}</td>
+                        </tr>
+                        {abiertoC && rows.map((row, idx) => (
                           <tr key={idx} className="hover:bg-slate-50 transition-colors font-mono text-[10px]">
                             <td className="px-4 py-1.5 border-r border-gray-100 text-slate-400 text-left">{row.codFormulado}</td>
-                            <td className="px-4 py-1.5 border-r border-gray-100 text-left uppercase truncate max-w-[220px]">{idx === 0 ? row.nombreComponente : ''}</td>
+                            <td className="px-4 py-1.5 border-r border-gray-100 text-left uppercase truncate max-w-[220px] text-slate-400">{idx === 0 ? row.nombreComponente : ''}</td>
                             <td className="px-3 py-1.5 border-r border-gray-100 text-indigo-600 font-black">{row.componente}</td>
                             <td className="px-4 py-1.5 border-r border-gray-100 text-left uppercase truncate max-w-[240px]">{row.nombre}</td>
                             <td className="px-3 py-1.5 border-r border-gray-100 text-slate-500">{row.material}</td>
@@ -1958,13 +1985,9 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
                             <td className="px-4 py-1.5 font-black text-slate-900">{formatNum(row.total, 3)}</td>
                           </tr>
                         ))}
-                        <tr className="bg-emerald-50/60">
-                          <td />
-                          <td colSpan={columnas - 2} className="px-4 py-1.5 text-left uppercase font-black text-emerald-800">Total {rows[0].nombreComponente}</td>
-                          <td className="px-4 py-1.5 font-black text-emerald-900">{formatNum(kg(rows), 3)}</td>
-                        </tr>
                       </React.Fragment>
-                    ))}
+                      );
+                    })}
                   </React.Fragment>
                 );
               })}
@@ -2544,41 +2567,57 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
             <span className="font-bold text-amber-700">Pendiente {fechaCorta(pendienteDesde)} → {fechaCorta(ventana.d)}</span>
             <span className="font-bold text-emerald-700">Planificado {fechaCorta(ventana.d)}</span>
           </div>
-          <div className="overflow-x-auto rounded-2xl border border-gray-100 bg-white">
-            <table className="w-full border-collapse text-[11px] text-center">
-              <thead className="bg-gray-50 text-[10px] font-bold uppercase text-gray-500 tracking-widest">
-                <tr>
-                  <th className="px-4 py-2 text-left">Kg Bloque Formulado</th>
-                  {(['1000', '2000', 'VE'] as const).map(dst => <th key={dst} className="px-4 py-2">{ETIQUETA_DESTINO[dst]}</th>)}
-                  <th className="px-4 py-2 text-indigo-700">Total</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50 font-mono font-bold">
-                {(['pendiente', 'planificado'] as const).map(tramo => (
-                  <tr key={tramo}>
-                    <td className={cn("px-4 py-2 text-left font-sans font-black uppercase", tramo === 'pendiente' ? 'text-amber-700' : 'text-emerald-700')}>{tramo}</td>
-                    {(['1000', '2000', 'VE'] as const).map(dst => (
-                      <td key={dst} className="px-4 py-2">
-                        {formatNum(necesidadKg[dst][tramo], 1)}
-                        {dst === '2000' && <span className="ml-1 font-sans text-[10px] text-amber-700">· {formatNum(subBloquesGye[tramo], 0)} sub-bloq.</span>}
-                      </td>
+          {(() => {
+            // Resumen por destino (usuario 2026-11-12: la matriz tramo × destino no se entendía): una fila por
+            // destino con Pendiente / Planificado / Total en Kg de Bloque Formulado, % del total y, solo para
+            // GYE, los sub-bloques (UN) en su propia columna.
+            const destinos = [
+              { dst: '1000' as const, nombre: 'Quito (UIO)', tip: 'FERT de los responsables de Formulación, centro 1000' },
+              { dst: '2000' as const, nombre: 'Guayaquil (GYE)', tip: 'Sub-bloques cortados en UIO para GYE (FERT 041)' },
+              { dst: 'VE' as const, nombre: 'Venta Externa', tip: 'FERT 038' },
+            ];
+            const totalDe = (dst: DestinoConsumo) => necesidadKg[dst].pendiente + necesidadKg[dst].planificado;
+            const t = { pendiente: 0, planificado: 0 };
+            destinos.forEach(({ dst }) => { t.pendiente += necesidadKg[dst].pendiente; t.planificado += necesidadKg[dst].planificado; });
+            const total = t.pendiente + t.planificado;
+            const th = 'px-4 py-2 text-right';
+            return (
+              <div className="overflow-x-auto rounded-2xl border border-gray-100 bg-white">
+                <table className="w-full border-collapse text-[11px]">
+                  <thead className="bg-gray-50 text-[10px] font-bold uppercase text-gray-500 tracking-widest">
+                    <tr>
+                      <th className="px-4 py-2 text-left">Necesidad de Bloque Formulado</th>
+                      <th className={cn(th, 'text-amber-700')} title={`FECHAFIN ${fechaCorta(pendienteDesde)} → ${fechaCorta(ventana.d)} con saldo`}>Pendiente (Kg)</th>
+                      <th className={cn(th, 'text-emerald-700')} title={`FECHAFIN ${fechaCorta(ventana.d)}`}>Planificado (Kg)</th>
+                      <th className={cn(th, 'text-indigo-700')}>Total (Kg)</th>
+                      <th className={th}>% del total</th>
+                      <th className={cn(th, 'text-amber-700')} title="Unidades de sub-bloque de las FERT 041 (pendiente + planificado)">Sub-bloques GYE (UN)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50 font-mono font-bold">
+                    {destinos.map(({ dst, nombre, tip }) => (
+                      <tr key={dst}>
+                        <td className="px-4 py-2 text-left font-sans font-black uppercase text-slate-700" title={tip}>{nombre}</td>
+                        <td className="px-4 py-2 text-right text-amber-800">{formatNum(necesidadKg[dst].pendiente, 1)}</td>
+                        <td className="px-4 py-2 text-right text-emerald-800">{formatNum(necesidadKg[dst].planificado, 1)}</td>
+                        <td className="px-4 py-2 text-right text-indigo-800 font-black">{formatNum(totalDe(dst), 1)}</td>
+                        <td className="px-4 py-2 text-right text-slate-500">{total > 0 ? `${((totalDe(dst) / total) * 100).toFixed(0)} %` : '—'}</td>
+                        <td className="px-4 py-2 text-right text-amber-700">{dst === '2000' ? formatNum(subBloquesGye.pendiente + subBloquesGye.planificado, 0) : ''}</td>
+                      </tr>
                     ))}
-                    <td className="px-4 py-2 text-indigo-800">{formatNum(necesidadKg['1000'][tramo] + necesidadKg['2000'][tramo] + necesidadKg.VE[tramo], 1)}</td>
-                  </tr>
-                ))}
-                <tr className="bg-indigo-50/50 font-black">
-                  <td className="px-4 py-2 text-left font-sans uppercase text-indigo-800">Total</td>
-                  {(['1000', '2000', 'VE'] as const).map(dst => (
-                    <td key={dst} className="px-4 py-2">
-                      {formatNum(necesidadKg[dst].pendiente + necesidadKg[dst].planificado, 1)}
-                      {dst === '2000' && <span className="ml-1 font-sans text-[10px] text-amber-700">· {formatNum(subBloquesGye.pendiente + subBloquesGye.planificado, 0)} sub-bloq.</span>}
-                    </td>
-                  ))}
-                  <td className="px-4 py-2 text-indigo-900">{formatNum((['1000', '2000', 'VE'] as const).reduce((s, dst) => s + necesidadKg[dst].pendiente + necesidadKg[dst].planificado, 0), 1)}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+                    <tr className="bg-indigo-50/50 font-black">
+                      <td className="px-4 py-2 text-left font-sans uppercase text-indigo-800">Total</td>
+                      <td className="px-4 py-2 text-right text-amber-800">{formatNum(t.pendiente, 1)}</td>
+                      <td className="px-4 py-2 text-right text-emerald-800">{formatNum(t.planificado, 1)}</td>
+                      <td className="px-4 py-2 text-right text-indigo-900">{formatNum(total, 1)}</td>
+                      <td className="px-4 py-2 text-right text-slate-500">{total > 0 ? '100 %' : '—'}</td>
+                      <td />
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
           {renderNecesidadTable(fertConsumoResponsable)}
         </div>
       );
