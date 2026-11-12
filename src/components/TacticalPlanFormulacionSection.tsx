@@ -339,7 +339,8 @@ const DIAS_VE_DEFAULT = 4;
 interface BaseReposicionRow {
   blockCode: string; blockDesc: string; corrida: string; apertura: string; dens: string;
   pesoBloque: number; pesoFuente: 'real' | 'lote' | 'sin dato'; pesoDetalle?: string; pesoRealProm?: number;
-  stockKg: number; enCuradoKg: number;
+  // Curado / en curado = mismos Kg (CantidadStock) que la pestaña 2 · Stock y Curado, espacio Leader.
+  stockKg: number; enCuradoKg: number; curadoKg?: number;
   // veKg = exceso de Venta Externa que entra al cálculo (V); veVentanaKg / veBaseKg lo explican.
   metaKgDia: number; veKg: number; veVentanaKg?: number; veBaseKg?: number; planAnteriorUN: number;
   horizonteDias: number; horizonteRestriccion: boolean;
@@ -357,7 +358,7 @@ interface ReposicionLeader {
   planOverride: Record<string, number>;
 }
 interface FilaReposicion extends BaseReposicionRow {
-  stockUN: number; enCuradoUN: number; metaUNDia: number; veUN: number;
+  stockUN: number; enCuradoUN: number; curadoUN: number; metaUNDia: number; veUN: number;
   estrategiaEfectiva: EstrategiaReposicion;
   coberturaActual: number | null; reponer: boolean; sugeridoUN: number;
   planUN: number; planKg: number; coberturaPlan: number | null;
@@ -410,7 +411,7 @@ const calcularFilaReposicion = (b: BaseReposicionRow, metaOverrideUN?: number, p
   const sugeridoUN = reponer ? redondeoReposicion(bruto) : 0;
   const planUN = planOverrideUN ?? sugeridoUN;
   return {
-    ...b, stockUN: I, enCuradoUN: aUN(b.enCuradoKg), metaUNDia: O, veUN: V, estrategiaEfectiva,
+    ...b, stockUN: I, enCuradoUN: aUN(b.enCuradoKg), curadoUN: aUN(b.curadoKg ?? 0), metaUNDia: O, veUN: V, estrategiaEfectiva,
     coberturaActual, reponer, sugeridoUN, planUN, planKg: Math.ceil(planUN * peso), coberturaPlan: cobertura(planUN),
     metaEditada: metaOverrideUN !== undefined, planEditado: planOverrideUN !== undefined,
   };
@@ -994,6 +995,20 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         }
         m.set(code, r);
       });
+      // Leader: también los Bloques Formulados de apertura con stock SAP sin registros de curado, para que
+      // esta pestaña liste lo mismo que el Plan de Reposición (usuario 2026-11-12: "no cuadra siendo la misma data").
+      if (space.key === 'leader') {
+        filteredInventario.forEach(inv => {
+          const code = cleanCode(inv.Material);
+          if (String(inv.Centro || '').trim() !== '1000' || m.has(code) || !(inv.stockKg > 0)) return;
+          const info = extractMaterialInfo(inv as unknown as RawApiRow);
+          if (info.apertura === '—') return;
+          m.set(code, {
+            materialCode: code, descripcion: String(inv.Descripcion || '—').toUpperCase(), apertura: info.apertura, dens: info.dens,
+            curadosUN: 0, curadosKg: 0, enCuradoUN: 0, enCuradoKg: 0, stockSapKg: sapKg.get(code) || 0, pesos: [],
+          });
+        });
+      }
       porEspacio[space.key] = Array.from(m.values())
         .map(({ pesos, ...r }) => ({ ...r, ...estadisticaPeso(pesos) }))
         .sort(compareAperturaDensidad);
@@ -1103,8 +1118,8 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const repPrevia = previo?.estado?.reposicion;
     const planAnterior = planFinalReposicion(repPrevia);
 
-    const curadoLeader = new Map((stockCuradoPorEspacio['leader'] ?? []).filter(r => r.pesoProm > 0).map(r => [r.materialCode, r]));
-    const pesoReal = new Map(Array.from(curadoLeader, ([c, r]) => [c, r.pesoProm]));
+    const curadoLeader = new Map((stockCuradoPorEspacio['leader'] ?? []).map(r => [r.materialCode, r]));
+    const pesoReal = new Map(Array.from(curadoLeader).filter(([, r]) => r.pesoProm > 0).map(([c, r]) => [c, r.pesoProm]));
     const horizonteGeneral = numeroRestriccion(restr('Formulacion_Cobertura_Dias')) ?? HORIZONTE_DEFAULT_DIAS;
 
     const filas: BaseReposicionRow[] = [];
@@ -1124,11 +1139,11 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         pesoDetalle: (() => {
           const c = curadoLeader.get(code);
           const base = u.loteMin > 0 ? `Estándar Lote Mín. SAP ${formatNum(u.loteMin, 0)} Kg` : 'Sin Lote Mín. SAP: promedio real';
-          if (!c) return `${base} · sin bloques fabricados en curado`;
+          if (!c || c.pesoN === 0) return `${base} · sin bloques fabricados en curado`;
           const dif = u.loteMin > 0 ? ` (${c.pesoProm / u.loteMin - 1 >= 0 ? '+' : ''}${((c.pesoProm / u.loteMin - 1) * 100).toFixed(1)} %)` : '';
           return `${base} · real ${formatNum(c.pesoProm, 0)} Kg${dif}, ${c.pesoN} bloque(s) ${formatNum(c.pesoMin, 0)}–${formatNum(c.pesoMax, 0)}${c.pesoDescartados ? `, ${c.pesoDescartados} parcial(es) fuera` : ''}`;
         })(),
-        stockKg: u.stockKg, enCuradoKg: getStockEnCurado(code),
+        stockKg: u.stockKg, enCuradoKg: curadoLeader.get(code)?.enCuradoKg ?? 0, curadoKg: curadoLeader.get(code)?.curadosKg ?? 0,
         metaKgDia, veKg: Math.max(0, veVentana - veBase), veVentanaKg: veVentana, veBaseKg: veBase, planAnteriorUN: planAnterior[code] || 0,
         horizonteDias: horizonteMaterial ?? horizonteGeneral, horizonteRestriccion: horizonteMaterial !== null,
         estrategia: estrategiaRestr === 'MTO' || estrategiaRestr === 'HB' ? estrategiaRestr : 'MTS',
@@ -1147,7 +1162,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       metaOverride: {},
       planOverride: {},
     };
-  }, [restr, calendario, ventana.d, cuboInventarios, ordenesFert, stockCuradoPorEspacio, getStockEnCurado]);
+  }, [restr, calendario, ventana.d, cuboInventarios, ordenesFert, stockCuradoPorEspacio]);
 
   // Paso 3 · Base del Plan de Reposición Cofama (ver BaseCofamaRow): universo = BLOQUE CORTADO resp 030 del
   // cubo, centro 1000. La BOM de cada cortado da su peso (Kg de formulado por UN) y su formulado.
@@ -2051,12 +2066,13 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
                   <th className={cn(th, "text-amber-700 bg-amber-50/50")} title="Σ CantidadStock">En curado (Kg)</th>
                   <th className={th} title="Promedio de peso de los bloques fabricados">Peso real (Kg/bloq.)</th>
                   <th className={cn(th, "text-teal-700")} title="Promedio de CuradoAltura">Altura (cm)</th>
-                  <th className="px-4 py-3 text-slate-500" title="StockActual del cubo de inventarios, centro 1000">Stock SAP (Kg)</th>
+                  <th className="px-4 py-3 border-r border-gray-100 text-slate-500" title="StockActual del cubo de inventarios, centro 1000">Stock SAP (Kg)</th>
+                  <th className="px-4 py-3 text-rose-700" title="Stock SAP − curados − en curado: Kg en SAP sin registro en el servicio de curado (negativo: el curado registra más que SAP)">Sin registro curado (Kg)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50 font-bold">
                 {data.length === 0 ? (
-                  <tr><td colSpan={9} className="py-6 px-4 text-left text-[10px] text-slate-500">
+                  <tr><td colSpan={10} className="py-6 px-4 text-left text-[10px] text-slate-500">
                     <p className="font-black uppercase text-slate-400 mb-1">Sin bloques · {formatNum(curadoData.length, 0)} registros de curado{curadoTotalServicio > 0 ? ` (servicio informa ${formatNum(curadoTotalServicio, 0)})` : ''} · fechas {diagnosticoCurado.fechas}</p>
                     {diagnosticoCurado.combos.map(([k, n]) => <p key={k} className="font-mono">{n}× {k}</p>)}
                   </td></tr>
@@ -2067,7 +2083,7 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
                     <React.Fragment key={row.materialCode}>
                       {nuevoGrupo && (
                         <tr className="bg-indigo-50/60">
-                          <td colSpan={9} className="px-4 py-1.5 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">{aperturaGroupLabel(row.apertura)}</td>
+                          <td colSpan={10} className="px-4 py-1.5 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">{aperturaGroupLabel(row.apertura)}</td>
                         </tr>
                       )}
                       <tr className="hover:bg-slate-50 transition-colors">
@@ -2082,7 +2098,8 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
                           title={row.pesoN > 0 ? `${row.pesoN} bloque(s) · ${formatNum(row.pesoMin, 0)}–${formatNum(row.pesoMax, 0)} Kg · CV ${(row.pesoCV * 100).toFixed(1)} %${row.pesoDescartados ? ` · ${row.pesoDescartados} descartado(s) por ±${TOLERANCIA_PESO_MEDIANA * 100} % de la mediana` : ''}` : undefined}
                         >{row.pesoProm > 0 ? formatNum(row.pesoProm, 1) : '—'}</td>
                         <td className={cn(td, "text-teal-800")} title={altura ? `${altura.min.toFixed(1)}–${altura.max.toFixed(1)} cm · ${altura.n} bloque(s)` : undefined}>{altura ? (altura.suma / altura.n).toFixed(1) : '—'}</td>
-                        <td className="px-4 py-2 font-mono text-slate-500">{formatNum(row.stockSapKg, 1)}</td>
+                        <td className="px-4 py-2 border-r border-gray-100 font-mono text-slate-500">{formatNum(row.stockSapKg, 1)}</td>
+                        <td className={cn("px-4 py-2 font-mono", Math.abs(row.stockSapKg - row.curadosKg - row.enCuradoKg) > 1 ? "text-rose-700 font-black" : "text-slate-400")}>{formatNum(row.stockSapKg - row.curadosKg - row.enCuradoKg, 1)}</td>
                       </tr>
                     </React.Fragment>
                   );
@@ -2097,7 +2114,8 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
                     <td className="px-4 py-3 border-r border-gray-200 font-mono text-amber-800">{formatNum(t.enCuradoUN, 0)}</td>
                     <td className="px-4 py-3 border-r border-gray-200 font-mono text-amber-700">{formatNum(t.enCuradoKg, 1)}</td>
                     <td colSpan={2} className="border-r border-gray-200" />
-                    <td className="px-4 py-3 font-mono text-slate-600">{formatNum(t.stockSapKg, 1)}</td>
+                    <td className="px-4 py-3 border-r border-gray-200 font-mono text-slate-600">{formatNum(t.stockSapKg, 1)}</td>
+                    <td className="px-4 py-3 font-mono text-rose-700">{formatNum(t.stockSapKg - t.curadosKg - t.enCuradoKg, 1)}</td>
                   </tr>
                 </tfoot>
               )}
@@ -2262,8 +2280,9 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
                   <th className={cn(th, 'text-left')}>Bloque</th>
                   <th className={cn(th, 'text-left')}>Descripción</th>
                   <th className={th} title="Estándar: Lote Mín. SAP (naranja: el promedio real difiere más de 3 %)">Peso (Kg)</th>
-                  <th className={cn(th, 'text-emerald-700 bg-emerald-50/50')}>Stock (UN)</th>
-                  <th className={cn(th, 'text-amber-700 bg-amber-50/50')}>En curado (UN)</th>
+                  <th className={cn(th, 'text-emerald-700 bg-emerald-50/50')} title="Stock SAP (cubo) ÷ peso">Stock SAP (UN)</th>
+                  <th className={cn(th, 'text-emerald-700 bg-emerald-50/50')} title="Igual que 2 · Stock y Curado (Leader): Kg curados ÷ peso">Curado (UN)</th>
+                  <th className={cn(th, 'text-amber-700 bg-amber-50/50')} title="Igual que 2 · Stock y Curado (Leader): Kg en curado ÷ peso">En curado (UN)</th>
                   <th className={cn(th, 'text-cyan-700 bg-cyan-50/50')} title={`Histórico ${SEMANAS_META_CONSUMO} semanas ÷ días hábiles; editable`}>Meta (UN/día)</th>
                   <th className={cn(th, 'text-purple-700')} title="Exceso FERT 018 (atrasadas + ventana) sobre lo que VE ya consume en la meta">VE (UN)</th>
                   <th className={th} title="PLAN del reporte anterior">Plan ant. (UN)</th>
@@ -2279,21 +2298,25 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
               </thead>
               <tbody className="divide-y divide-gray-50 font-bold">
                 {filasReposicion.length === 0 ? (
-                  <tr><td colSpan={16} className="py-12 text-center text-slate-300 uppercase font-black">Sin bloques Leader con stock o consumo</td></tr>
+                  <tr><td colSpan={17} className="py-12 text-center text-slate-300 uppercase font-black">Sin bloques Leader con stock o consumo</td></tr>
                 ) : filasReposicion.map((f, idx) => {
                   const nuevoGrupo = idx === 0 || f.apertura !== filasReposicion[idx - 1].apertura;
                   return (
                     <React.Fragment key={f.blockCode}>
                       {nuevoGrupo && (
                         <tr className="bg-indigo-50/60">
-                          <td colSpan={16} className="px-4 py-1.5 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">{aperturaGroupLabel(f.apertura)}</td>
+                          <td colSpan={17} className="px-4 py-1.5 text-left text-[10px] font-black uppercase tracking-widest text-indigo-700">{aperturaGroupLabel(f.apertura)}</td>
                         </tr>
                       )}
                       <tr className={cn('hover:bg-slate-50 transition-colors', f.reponer && 'bg-yellow-50/30')}>
                         <td className="px-3 py-2 border-r border-gray-100 text-left font-mono font-black text-indigo-600">{f.blockCode}</td>
                         <td className="px-3 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[260px]" title={f.corrida}>{f.blockDesc}</td>
                         <td className={cn(td, f.pesoFuente === 'sin dato' ? 'text-slate-400' : desfasePeso(f) ? 'text-orange-600' : '')} title={f.pesoFuente === 'sin dato' ? 'Sin peso' : f.pesoDetalle}>{f.pesoBloque > 0 ? formatNum(f.pesoBloque, 0) : '—'}</td>
-                        <td className={cn(td, 'text-emerald-800 bg-emerald-50/20')}>{f.stockUN.toFixed(1)}</td>
+                        <td
+                          className={cn(td, 'text-emerald-800 bg-emerald-50/20')}
+                          title={`SAP ${formatNum(f.stockKg, 0)} Kg · curado ${formatNum(f.curadoKg ?? 0, 0)} Kg · en curado ${formatNum(f.enCuradoKg, 0)} Kg · sin registro curado ${formatNum(f.stockKg - (f.curadoKg ?? 0) - f.enCuradoKg, 0)} Kg`}
+                        >{f.stockUN.toFixed(1)}</td>
+                        <td className={cn(td, 'text-emerald-700 bg-emerald-50/20')}>{f.curadoUN > 0 ? f.curadoUN.toFixed(1) : '—'}</td>
                         <td className={cn(td, 'text-amber-700 bg-amber-50/20')}>{f.enCuradoUN > 0 ? f.enCuradoUN.toFixed(1) : '—'}</td>
                         <td className={cn(td, 'bg-cyan-50/20')}>
                           <input
@@ -2338,7 +2361,7 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
                   <tr>
                     <td colSpan={3} className="px-3 py-3 text-right tracking-widest border-r border-gray-200">Totales</td>
                     <td className="px-3 py-3 border-r border-gray-200 font-mono text-right text-emerald-700">{t.stockUN.toFixed(1)}</td>
-                    <td colSpan={8} className="border-r border-gray-200" />
+                    <td colSpan={9} className="border-r border-gray-200" />
                     <td className="px-3 py-3 border-r border-gray-200 font-mono text-right text-yellow-700">{formatNum(t.sugerido, 0)}</td>
                     <td className={cn('px-3 py-3 border-r border-gray-200 font-mono text-right', excedido ? 'text-red-600' : 'text-indigo-700')}>{formatNum(totalPlanReposicion, 0)}</td>
                     <td className="px-3 py-3 border-r border-gray-200 font-mono text-right">{formatNum(t.planKg, 0)}</td>
