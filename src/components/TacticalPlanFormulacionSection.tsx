@@ -56,7 +56,24 @@ interface StockCuradoRow {
   materialCode: string; descripcion: string; apertura: string; dens: string;
   curadosUN: number; curadosKg: number; enCuradoUN: number; enCuradoKg: number;
   pesoProm: number; stockSapKg: number;
+  // Variación del peso de los bloques fabricados (ver estadisticaPeso).
+  pesoN: number; pesoMin: number; pesoMax: number; pesoCV: number; pesoDescartados: number;
 }
+
+// Peso real del bloque = promedio de los bloques fabricados (usuario 2026-11-12). Excel Bloq.For del
+// 12/11: variación por material ≤ 1,5 % salvo bloques parciales (30004624: uno de 653 Kg entre otros de
+// ~1140), por eso se descartan los que se alejan más de ±20 % de la mediana antes de promediar.
+const TOLERANCIA_PESO_MEDIANA = 0.2;
+const estadisticaPeso = (pesos: number[]) => {
+  if (pesos.length === 0) return { pesoProm: 0, pesoN: 0, pesoMin: 0, pesoMax: 0, pesoCV: 0, pesoDescartados: 0 };
+  const orden = [...pesos].sort((a, b) => a - b);
+  const mitad = Math.floor(orden.length / 2);
+  const mediana = orden.length % 2 ? orden[mitad] : (orden[mitad - 1] + orden[mitad]) / 2;
+  const validos = orden.filter(p => Math.abs(p / mediana - 1) <= TOLERANCIA_PESO_MEDIANA);
+  const prom = validos.reduce((s, p) => s + p, 0) / validos.length;
+  const desv = Math.sqrt(validos.reduce((s, p) => s + (p - prom) ** 2, 0) / validos.length);
+  return { pesoProm: prom, pesoN: validos.length, pesoMin: validos[0], pesoMax: validos[validos.length - 1], pesoCV: prom > 0 ? desv / prom : 0, pesoDescartados: orden.length - validos.length };
+};
 
 // Paso 1 · Necesidad (usuario 2026-10-31): solo FERT (las provisionales varían, no es información real),
 // por FECHAFIN, misma regla para todos (UIO, GYE 041 y Venta Externa 038). Planificado = FERT del día de corte D;
@@ -317,7 +334,7 @@ const SEMANAS_META_CONSUMO = 4;
 // Lo que se calcula al generar (SAP + restricciones resueltas) y viaja en el respaldo del reporte.
 interface BaseReposicionRow {
   blockCode: string; blockDesc: string; corrida: string; apertura: string; dens: string;
-  pesoBloque: number; pesoFuente: 'real' | 'lote' | 'sin dato';
+  pesoBloque: number; pesoFuente: 'real' | 'lote' | 'sin dato'; pesoDetalle?: string;
   stockKg: number; enCuradoKg: number;
   metaKgDia: number; veKg: number; planAnteriorUN: number;
   horizonteDias: number; horizonteRestriccion: boolean;
@@ -829,7 +846,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     });
     const porEspacio: Record<string, StockCuradoRow[]> = {};
     CURADO_SPACES.forEach(space => {
-      const m = new Map<string, StockCuradoRow & { pesoSuma: number; pesoN: number }>();
+      const m = new Map<string, Omit<StockCuradoRow, 'pesoProm' | 'pesoN' | 'pesoMin' | 'pesoMax' | 'pesoCV' | 'pesoDescartados'> & { pesos: number[] }>();
       curadoData.forEach(row => {
         if (!matchesCuradoSpace(row, space)) return;
         const code = cleanCode(getProp(row, ['CodMaterial', 'MATERIAL', 'CODMATERIAL']));
@@ -837,10 +854,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         const info = extractMaterialInfo(row);
         const r = m.get(code) ?? {
           materialCode: code, descripcion: getProp(row, ['NomMaterial', 'NOMMATERIAL']) || '—', apertura: info.apertura, dens: info.dens,
-          curadosUN: 0, curadosKg: 0, enCuradoUN: 0, enCuradoKg: 0, pesoProm: 0, stockSapKg: sapKg.get(code) || 0, pesoSuma: 0, pesoN: 0,
+          curadosUN: 0, curadosKg: 0, enCuradoUN: 0, enCuradoKg: 0, stockSapKg: sapKg.get(code) || 0, pesos: [],
         };
         const peso = safeNum(getProp(row, ['peso', 'PESO']));
-        if (peso > 0) { r.pesoSuma += peso; r.pesoN += 1; }
+        if (peso > 0) r.pesos.push(peso);
         const kg = safeNum(getProp(row, ['CantidadStock', 'CANTIDADSTOCK', 'CANTIDAD_STOCK']));
         const fab = parseFechaSAP(getProp(row, ['fecha', 'FECHA', 'FECHA_INICIO', 'FECHA_FABRICACION', 'FECHA_OT_PRG_INI']));
         if (kg > 0 && fab) {
@@ -852,7 +869,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         m.set(code, r);
       });
       porEspacio[space.key] = Array.from(m.values())
-        .map(({ pesoSuma, pesoN, ...r }) => ({ ...r, pesoProm: pesoN > 0 ? pesoSuma / pesoN : 0 }))
+        .map(({ pesos, ...r }) => ({ ...r, ...estadisticaPeso(pesos) }))
         .sort(compareAperturaDensidad);
     });
     return porEspacio;
@@ -908,7 +925,8 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const repPrevia = (previo?.estado as Partial<EstadoPlanFormulacion> | null)?.reposicion;
     const planAnterior = planFinalReposicion(repPrevia);
 
-    const pesoReal = new Map((stockCuradoPorEspacio['leader'] ?? []).filter(r => r.pesoProm > 0).map(r => [r.materialCode, r.pesoProm]));
+    const curadoLeader = new Map((stockCuradoPorEspacio['leader'] ?? []).filter(r => r.pesoProm > 0).map(r => [r.materialCode, r]));
+    const pesoReal = new Map(Array.from(curadoLeader, ([c, r]) => [c, r.pesoProm]));
     const horizonteGeneral = numeroRestriccion(restr('Formulacion_Cobertura_Dias')) ?? HORIZONTE_DEFAULT_DIAS;
 
     const filas: BaseReposicionRow[] = [];
@@ -923,6 +941,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       const fila: BaseReposicionRow = {
         blockCode: code, blockDesc: u.desc, corrida: extraerCorridaCategoria(u.categoria), apertura: u.apertura, dens: u.dens,
         pesoBloque, pesoFuente: real ? 'real' : u.loteMin > 0 ? 'lote' : 'sin dato',
+        pesoDetalle: (() => {
+          const c = curadoLeader.get(code);
+          return c ? `Promedio de ${c.pesoN} bloque(s) fabricados · ${formatNum(c.pesoMin, 0)}–${formatNum(c.pesoMax, 0)} Kg · CV ${(c.pesoCV * 100).toFixed(1)} %${c.pesoDescartados ? ` · ${c.pesoDescartados} descartado(s)` : ''} · Lote Mín. SAP ${formatNum(u.loteMin, 0)}` : `Sin bloques fabricados en curado: Lote Mín. SAP`;
+        })(),
         stockKg: u.stockKg, enCuradoKg: getStockEnCurado(code),
         metaKgDia, veKg: veKg.get(code) || 0, planAnteriorUN: planAnterior[code] || 0,
         horizonteDias: horizonteMaterial ?? horizonteGeneral, horizonteRestriccion: horizonteMaterial !== null,
@@ -1750,7 +1772,10 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                         <td className={cn(td, "text-emerald-700 bg-emerald-50/20")}>{formatNum(row.curadosKg, 1)}</td>
                         <td className={cn(td, "font-black text-amber-800 bg-amber-50/20")}>{formatNum(row.enCuradoUN, 0)}</td>
                         <td className={cn(td, "text-amber-700 bg-amber-50/20")}>{formatNum(row.enCuradoKg, 1)}</td>
-                        <td className={cn(td, "text-slate-700")}>{row.pesoProm > 0 ? formatNum(row.pesoProm, 1) : '—'}</td>
+                        <td
+                          className={cn(td, row.pesoCV > 0.02 ? "text-orange-600" : "text-slate-700")}
+                          title={row.pesoN > 0 ? `${row.pesoN} bloque(s) · ${formatNum(row.pesoMin, 0)}–${formatNum(row.pesoMax, 0)} Kg · CV ${(row.pesoCV * 100).toFixed(1)} %${row.pesoDescartados ? ` · ${row.pesoDescartados} descartado(s) por ±${TOLERANCIA_PESO_MEDIANA * 100} % de la mediana` : ''}` : undefined}
+                        >{row.pesoProm > 0 ? formatNum(row.pesoProm, 1) : '—'}</td>
                         <td className={cn(td, "text-teal-800")} title={altura ? `${altura.min.toFixed(1)}–${altura.max.toFixed(1)} cm · ${altura.n} bloque(s)` : undefined}>{altura ? (altura.suma / altura.n).toFixed(1) : '—'}</td>
                         <td className="px-4 py-2 font-mono text-slate-500">{formatNum(row.stockSapKg, 1)}</td>
                       </tr>
@@ -1962,7 +1987,7 @@ ${seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySp
                       <tr className={cn('hover:bg-slate-50 transition-colors', f.reponer && 'bg-yellow-50/30')}>
                         <td className="px-3 py-2 border-r border-gray-100 text-left font-mono font-black text-indigo-600">{f.blockCode}</td>
                         <td className="px-3 py-2 border-r border-gray-100 text-left uppercase truncate max-w-[260px]" title={f.corrida}>{f.blockDesc}</td>
-                        <td className={cn(td, f.pesoFuente !== 'real' && 'text-slate-400')} title={f.pesoFuente === 'real' ? 'Peso real (curado)' : f.pesoFuente === 'lote' ? 'Lote Mín. SAP' : 'Sin peso'}>{f.pesoBloque > 0 ? formatNum(f.pesoBloque, 0) : '—'}</td>
+                        <td className={cn(td, f.pesoFuente !== 'real' && 'text-slate-400')} title={f.pesoFuente === 'sin dato' ? 'Sin peso' : f.pesoDetalle}>{f.pesoBloque > 0 ? formatNum(f.pesoBloque, 0) : '—'}</td>
                         <td className={cn(td, 'text-emerald-800 bg-emerald-50/20')}>{f.stockUN.toFixed(1)}</td>
                         <td className={cn(td, 'text-amber-700 bg-amber-50/20')}>{f.enCuradoUN > 0 ? f.enCuradoUN.toFixed(1) : '—'}</td>
                         <td className={cn(td, 'bg-cyan-50/20')}>
