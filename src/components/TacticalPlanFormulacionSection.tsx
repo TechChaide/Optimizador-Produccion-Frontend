@@ -455,6 +455,14 @@ interface BaseCofamaRow {
   horizonteDias: number; horizonteRestriccion: boolean; diaProduccion: boolean;
 }
 interface FormuladoCofama { code: string; desc: string; pesoKg: number; combinaciones: string[] }
+// ¿El cortado es de Cofama? (usuario 2026-11-12: "no debes colocar los materiales de Leader en Cofama").
+// Nunca si él o su formulado tienen apertura Leader; además debe tener medida en la descripción o un formulado
+// fabricado en F_BLOQ_M (formuladosCofama). Fuera: TRANSICIÓN, PARA ESQUINAS, D12 BL 194.5, TAPICERIA … 194.5.
+const esCortadoCofama = (cortadoDesc: string, formuladoCode: string, formuladoDesc: string, formuladosCofama: Set<string>): boolean => {
+  const conApertura = (d: string) => extractMaterialInfo({ NOMBRE: d }).apertura !== '—';
+  if (conApertura(cortadoDesc) || (formuladoDesc && conApertura(formuladoDesc))) return false;
+  return !!medidaDeTexto(cortadoDesc) || (!!formuladoCode && formuladosCofama.has(formuladoCode));
+};
 interface LineaPlanCofama { id: string; formuladoCode: string; combinacion: string; cantidad: number }
 interface SinEmparejarCofama { formuladoCode: string; formuladoDesc: string; combinacion: string; bloques: number }
 interface ReposicionCofama {
@@ -1153,15 +1161,14 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const hoyPlan = previousBusinessDay(dProd, calendario.noLaborables, extra);
 
     const cortadosCubo = cuboInventarios.filter(inv => String(inv.Centro || '').trim() === '1000' && /BLOQUE CORTADO/i.test(String(inv.Descripcion || '')) && !esMaterialPrueba(String(inv.Descripcion || '')));
-    // Cofama = responsable 030 (puede llegar como "30"). Respaldo si el cubo no lo trae: cortados con medida
-    // en la descripción y sin apertura Leader (2026-11-12 salían TRANSICIÓN, D12 BL 194.5… de Leader).
+    // Cofama = responsable 030 (puede llegar como "30"); si el cubo no lo trae, todos los cortados. En ambos
+    // casos se descartan los de apertura Leader aquí y, con la BOM, los que no pasan esCortadoCofama.
     const de030 = cortadosCubo.filter(inv => String(inv.RespCtrlProd ?? '').trim().padStart(3, '0') === RESP_COFAMA_CORTADO);
-    const respaldo = cortadosCubo.filter(inv => {
-      const desc = String(inv.Descripcion || '');
-      return !!medidaDeTexto(desc) && extractMaterialInfo({ NOMBRE: desc }).apertura === '—';
-    });
+    const sinApertura = (de030.length > 0 ? de030 : cortadosCubo).filter(inv => extractMaterialInfo({ NOMBRE: String(inv.Descripcion || '') }).apertura === '—');
+    const cofamaSpace = CURADO_SPACES.find(s => s.key === 'cofama');
+    const formuladosCofama = new Set(curadoData.filter(row => cofamaSpace && matchesCuradoSpace(row, cofamaSpace)).map(row => cleanCode(getProp(row, ['CodMaterial', 'MATERIAL', 'CODMATERIAL']))).filter(Boolean));
     const universo = new Map<string, { desc: string; stockKg: number }>();
-    (de030.length > 0 ? de030 : respaldo).forEach(inv => {
+    sinApertura.forEach(inv => {
       const code = cleanCode(inv.Material);
       const u = universo.get(code) ?? { desc: String(inv.Descripcion || '').toUpperCase(), stockKg: 0 };
       u.stockKg += safeNum(inv.StockActual);
@@ -1213,6 +1220,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const filas: BaseCofamaRow[] = [];
     universo.forEach((u, code) => {
       const b = bom.get(code);
+      if (!esCortadoCofama(u.desc, b?.formuladoCode ?? '', b?.formuladoDesc ?? '', formuladosCofama)) return;
       const coberturaRestr = restr(`Cobertura_${code}`);
       const horizonteMaterial = coberturaRestr ? horizonteDeRestriccion(coberturaRestr, hoyPlan.getDay()) : null;
       filas.push({
@@ -1230,7 +1238,6 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     });
 
     // Formulados Cofama: los de la BOM de los cortados y los que aparecen en curado, con sus combinaciones.
-    const cofamaSpace = CURADO_SPACES.find(s => s.key === 'cofama');
     const formulados = new Map<string, FormuladoCofama>();
     filas.forEach(f => { if (f.formuladoCode && !formulados.has(f.formuladoCode)) formulados.set(f.formuladoCode, { code: f.formuladoCode, desc: f.formuladoDesc, pesoKg: 0, combinaciones: [] }); });
     const sinEmparejar = new Map<string, SinEmparejarCofama>();
@@ -1563,6 +1570,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       if (!rc) return `${titulo}<p style="font-size:11px;color:#9ca3af;">Sin plan de reposición.</p>`;
       const plan = planCofamaPorCortado(rc);
       const filas = rc.filas.map(b => calcularFilaCofama(b, rc.metaOverride[b.cortadoCode], plan.get(b.cortadoCode) || 0))
+        .filter(f => esCortadoCofama(f.cortadoDesc, f.formuladoCode, f.formuladoDesc, new Set(rc.formulados.filter(x => x.combinaciones.length > 0).map(x => x.code))))
         .filter(f => f.planUN > 0 || f.sugeridoUN > 0 || f.reponer);
       const lineas = rc.lineas.filter(l => l.cantidad > 0);
       const d1 = (v: number | null) => (v === null ? '—' : v.toFixed(1));
@@ -1889,7 +1897,9 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
     [reposicionCofama, planCofama]
   );
   // Solo los cortados con algo que mostrar: stock, consumo, necesidad, plan anterior o PLAN de hoy.
-  const filasCofamaVisibles = filasCofama.filter(f => f.stockTotalUN > 0 || f.metaKgDia > 0 || f.internoKg > 0 || f.planAnteriorUN > 0 || f.planUN > 0 || f.horizonteRestriccion);
+  // esCortadoCofama también al mostrar: un reporte guardado antes del filtro (12/11) traía cortados de Leader.
+  const formuladosConCombinacion = new Set((reposicionCofama?.formulados ?? []).filter(f => f.combinaciones.length > 0).map(f => f.code));
+  const filasCofamaVisibles = filasCofama.filter(f => esCortadoCofama(f.cortadoDesc, f.formuladoCode, f.formuladoDesc, formuladosConCombinacion)).filter(f => f.stockTotalUN > 0 || f.metaKgDia > 0 || f.internoKg > 0 || f.planAnteriorUN > 0 || f.planUN > 0 || f.horizonteRestriccion);
 
 
   // Paso 1 · Necesidad: misma estructura que el Excel "CONSUMOS UIO" — Formulado → Bloque cortado →
