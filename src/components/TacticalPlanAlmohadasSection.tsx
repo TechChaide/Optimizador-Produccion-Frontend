@@ -1077,7 +1077,8 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                       <TableCell className="text-xs">
                         {f.maestro.descripcion}
                         {!f.maestro.talleres && <Badge variant="outline" className="ml-2 text-[10px] text-amber-700 border-amber-300" title="Sin matriz de talleres: todos habilitados">sin matriz</Badge>}
-                        {f.maestro.tela && <div className="text-[10px] text-gray-400">{normalizarTela(f.maestro.tela)}</div>}
+                        {f.maestro.talleres?.length === 0 && <Badge variant="outline" className="ml-2 text-[10px] text-red-700 border-red-300" title="Ningún taller marcado en Matriz_cod_tela: no entra al objetivo ni a Distribuir">sin taller</Badge>}
+                        {f.maestro.tela &&<div className="text-[10px] text-gray-400">{normalizarTela(f.maestro.tela)}</div>}
                       </TableCell>
                       <TableCell className="text-right tabular-nums font-semibold">{fmt(f.pedidoFinal)}</TableCell>
                       <TableCell className="text-right tabular-nums text-gray-500" title={f.tapa ? `${f.tapa.descripcion}${f.tapaPorBom ? ' (BOM)' : ` · ${f.tapa.tela} ${f.tapa.color}`}` : undefined}>
