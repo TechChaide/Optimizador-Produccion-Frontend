@@ -42,6 +42,9 @@ export interface TallerAlmohada {
   codProveedor: string;
   diaEntrega: string;
   horaEntrega: string;
+  // PLAN SUBCONTRATACIÓN fila 7 (PERSONAS) y fila 6 (PESO): reparto del costo semanal = personas × peso ÷ Σ.
+  personas: number;
+  peso: number;
 }
 
 export const FORROS_ALMOHADA_EXCEL: ForroAlmohadaMaestro[] = [
@@ -326,14 +329,14 @@ export const FERT_FORRO_ALMOHADA_EXCEL: [string, string, string][] = [
 ];
 
 export const TALLERES_ALMOHADA_EXCEL: TallerAlmohada[] = [
-  {"nombre": "ALBA TREVOLES", "codProveedor": "100287", "diaEntrega": "MIERCOLES", "horaEntrega": "10:00"},
-  {"nombre": "MARTHA VARGAS", "codProveedor": "105311", "diaEntrega": "MIERCOLES", "horaEntrega": "10:30"},
-  {"nombre": "PAMELA CAIZA", "codProveedor": "5106243", "diaEntrega": "MIERCOLES", "horaEntrega": "11:00"},
-  {"nombre": "NORMA ALOMOTO", "codProveedor": "105641", "diaEntrega": "MIERCOLES", "horaEntrega": "11:30"},
-  {"nombre": "PIEDAD SUNTAXI", "codProveedor": "5043062", "diaEntrega": "JUEVES", "horaEntrega": "10:00"},
-  {"nombre": "MIRTA HIDALGO", "codProveedor": "104537", "diaEntrega": "JUEVES", "horaEntrega": "10:30"},
-  {"nombre": "MARIA MAZA", "codProveedor": "104778", "diaEntrega": "JUEVES", "horaEntrega": "11:00"},
-  {"nombre": "AMPARO LOACHAMIN", "codProveedor": "5023693", "diaEntrega": "VIERNES", "horaEntrega": "10:00"},
-  {"nombre": "YOLANDA BALLADARES", "codProveedor": "105241", "diaEntrega": "VIERNES", "horaEntrega": "10:30"},
-  {"nombre": "JUAN PONCE", "codProveedor": "5009127", "diaEntrega": "VIERNES", "horaEntrega": "11:00"},
+  {"nombre": "ALBA TREVOLES", "codProveedor": "100287", "diaEntrega": "MIERCOLES", "horaEntrega": "10:00", "personas": 0, "peso": 0},
+  {"nombre": "MARTHA VARGAS", "codProveedor": "105311", "diaEntrega": "MIERCOLES", "horaEntrega": "10:30", "personas": 3, "peso": 1},
+  {"nombre": "PAMELA CAIZA", "codProveedor": "5106243", "diaEntrega": "MIERCOLES", "horaEntrega": "11:00", "personas": 3, "peso": 1},
+  {"nombre": "NORMA ALOMOTO", "codProveedor": "105641", "diaEntrega": "MIERCOLES", "horaEntrega": "11:30", "personas": 3, "peso": 1},
+  {"nombre": "PIEDAD SUNTAXI", "codProveedor": "5043062", "diaEntrega": "JUEVES", "horaEntrega": "10:00", "personas": 2, "peso": 1},
+  {"nombre": "MIRTA HIDALGO", "codProveedor": "104537", "diaEntrega": "JUEVES", "horaEntrega": "10:30", "personas": 4, "peso": 1},
+  {"nombre": "MARIA MAZA", "codProveedor": "104778", "diaEntrega": "JUEVES", "horaEntrega": "11:00", "personas": 3, "peso": 1},
+  {"nombre": "AMPARO LOACHAMIN", "codProveedor": "5023693", "diaEntrega": "VIERNES", "horaEntrega": "10:00", "personas": 4, "peso": 1},
+  {"nombre": "YOLANDA BALLADARES", "codProveedor": "105241", "diaEntrega": "VIERNES", "horaEntrega": "10:30", "personas": 3, "peso": 1},
+  {"nombre": "JUAN PONCE", "codProveedor": "5009127", "diaEntrega": "VIERNES", "horaEntrega": "11:00", "personas": 3, "peso": 1},
 ];

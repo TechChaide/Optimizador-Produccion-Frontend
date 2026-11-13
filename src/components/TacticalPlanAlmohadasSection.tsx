@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { BedDouble, ChevronDown, ChevronRight, Download, FileSpreadsheet, Loader2, RefreshCw, TriangleAlert, Upload } from 'lucide-react';
+import { BedDouble, ChevronDown, ChevronRight, Download, Eraser, FileSpreadsheet, Loader2, RefreshCw, TriangleAlert, Upload, Wand2 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
@@ -22,6 +22,7 @@ import {
   type ForroAlmohadaMaestro,
   type TapaAlmohada,
 } from '@/data/almohadasForrosExcel';
+import { distribuirPedido, resumenPorTaller, PARAMETROS_DISTRIBUCION_DEFECTO, type Asignacion, type ForroDistribucion } from '@/lib/almohadas-distribucion';
 import { leerExcelValidacion, type ExcelValidacion, type ValoresExcelForro } from '@/lib/almohadas-validacion-excel';
 import {
   ALMACEN_FORROS_ALMOHADA,
@@ -116,7 +117,6 @@ interface ForroCalculado {
   ssManual: boolean;
 }
 
-type Asignacion = Record<string, Record<string, number>>;
 type ComponenteForro = { forro: string; factor: number };
 
 // FERT → forros del Excel (1 forro por almohada).
@@ -158,6 +158,25 @@ const leerAsignacion = (fechaCorte: string): Asignacion => {
     return raw ? (JSON.parse(raw) as Asignacion) : {};
   } catch {
     return {};
+  }
+};
+// Personas y peso por taller (filas 7 y 6 del PLAN SUBCONTRATACIÓN); editables, se recuerdan en el navegador.
+type CapacidadTalleres = Record<string, { personas: number; peso: number }>;
+const CLAVE_CAPACIDAD = 'almohadas-subcontratacion-capacidad';
+const CAPACIDAD_EXCEL: CapacidadTalleres = Object.fromEntries(TALLERES_ALMOHADA_EXCEL.map(t => [t.nombre, { personas: t.personas, peso: t.peso }]));
+const leerCapacidad = (): CapacidadTalleres => {
+  try {
+    const raw = localStorage.getItem(CLAVE_CAPACIDAD);
+    return raw ? { ...CAPACIDAD_EXCEL, ...(JSON.parse(raw) as CapacidadTalleres) } : CAPACIDAD_EXCEL;
+  } catch {
+    return CAPACIDAD_EXCEL;
+  }
+};
+const guardarCapacidad = (c: CapacidadTalleres) => {
+  try {
+    localStorage.setItem(CLAVE_CAPACIDAD, JSON.stringify(c));
+  } catch {
+    /* sin almacenamiento local */
   }
 };
 const guardarAsignacion = (fechaCorte: string, a: Asignacion) => {
@@ -260,6 +279,8 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   const [soloConPedido, setSoloConPedido] = useState(true);
   const [pedidoManual, setPedidoManual] = useState<Record<string, number>>({});
   const [asignacion, setAsignacion] = useState<Asignacion>({});
+  const [capacidad, setCapacidad] = useState<CapacidadTalleres>(CAPACIDAD_EXCEL);
+  const [paramDist, setParamDist] = useState(PARAMETROS_DISTRIBUCION_DEFECTO);
   const inputMe2nRef = useRef<HTMLInputElement>(null);
 
   // Huecos del Excel completados por BOM: FERT de almohadas sin forro, forros nuevos y tapas.
@@ -279,6 +300,9 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   useEffect(() => {
     setAsignacion(leerAsignacion(fechaCorte));
   }, [fechaCorte]);
+  useEffect(() => {
+    setCapacidad(leerCapacidad());
+  }, []);
 
   const sincronizar = useCallback(async () => {
     setCargando(true);
@@ -513,16 +537,29 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
     });
   };
   const asignadoDe = (forro: string): number => Object.values(asignacion[forro] ?? {}).reduce((s, v) => s + v, 0);
-  const porTaller = useMemo(() => TALLERES_ALMOHADA_EXCEL.map(t => {
-    let un = 0;
-    let usd = 0;
-    conPedido.forEach(f => {
-      const q = asignacion[f.maestro.codigo]?.[t.nombre] ?? 0;
-      un += q;
-      usd += q * (f.maestro.precio ?? 0);
-    });
-    return { taller: t, un, usd };
-  }), [conPedido, asignacion]);
+  const forrosDist = useMemo<ForroDistribucion[]>(() => conPedido.map(f => ({
+    codigo: f.maestro.codigo,
+    cantidad: f.pedidoFinal,
+    precio: f.maestro.precio ?? 0,
+    prioridad: f.maestro.prioridad ?? null,
+    talleres: f.maestro.talleres,
+  })), [conPedido]);
+  const talleresDist = useMemo(() => TALLERES_ALMOHADA_EXCEL.map(t => ({
+    nombre: t.nombre,
+    ponderado: (capacidad[t.nombre]?.personas ?? 0) * (capacidad[t.nombre]?.peso ?? 0),
+  })), [capacidad]);
+  const porTaller = useMemo(() => resumenPorTaller(forrosDist, talleresDist, asignacion), [forrosDist, talleresDist, asignacion]);
+  const cambiarCapacidad = (taller: string, campo: 'personas' | 'peso', valor: number) => setCapacidad(prev => {
+    const sig = { ...prev, [taller]: { ...(prev[taller] ?? { personas: 0, peso: 1 }), [campo]: Math.max(0, valor) } };
+    guardarCapacidad(sig);
+    return sig;
+  });
+  const fijarAsignacion = (a: Asignacion) => {
+    setAsignacion(a);
+    guardarAsignacion(fechaCorte, a);
+  };
+  // Conserva lo escrito a mano y reparte solo lo que falta de cada forro.
+  const distribuir = () => fijarAsignacion(distribuirPedido(forrosDist, talleresDist, asignacion, paramDist));
 
   const toggle = (codigo: string) => setExpandidos(prev => {
     const s = new Set(prev);
@@ -570,6 +607,22 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       fila.Diferencia = asignadoDe(f.maestro.codigo) - f.pedidoFinal;
       return fila;
     }),
+    Talleres: porTaller.map(p => {
+      const t = TALLERES_ALMOHADA_EXCEL.find(x => x.nombre === p.nombre)!;
+      return {
+        Taller: p.nombre,
+        'Cod. proveedor': t.codProveedor,
+        'Dia entrega': t.diaEntrega,
+        Hora: t.horaEntrega,
+        Personas: capacidad[p.nombre]?.personas ?? 0,
+        Peso: capacidad[p.nombre]?.peso ?? 0,
+        '%': Math.round(p.porcentaje * 1000) / 10,
+        'Objetivo USD': Math.round(p.objetivoUsd * 100) / 100,
+        'Asignado USD': Math.round(p.asignadoUsd * 100) / 100,
+        'Desviacion USD': Math.round(p.desviacionUsd * 100) / 100,
+        UN: p.unidades,
+      };
+    }),
     Tapas: conPedido.flatMap(f => (f.tapa ? [{
       Forro: f.maestro.codigo,
       'Desc. forro': f.maestro.descripcion,
@@ -580,14 +633,6 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       Tapas: f.pedidoFinal * f.tapa.tapasPorForro,
       Origen: f.tapaPorBom ? 'BOM' : 'Excel',
     }] : [])),
-    Talleres: porTaller.map(p => ({
-      Taller: p.taller.nombre,
-      Proveedor: p.taller.codProveedor,
-      'Dia entrega': p.taller.diaEntrega,
-      Hora: p.taller.horaEntrega,
-      Unidades: p.un,
-      USD: Math.round(p.usd * 100) / 100,
-    })),
   });
 
   // ---------------- Validar contra Excel ----------------
@@ -972,7 +1017,24 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
 
         {/* ---------------- 4 Plan Subcontratación ---------------- */}
         <TabsContent value="subcontratacion" className="mt-4 space-y-4">
-          <div className="flex justify-end">
+          <div className="flex flex-wrap items-end justify-end gap-3">
+            <div className="flex flex-col gap-1">
+              <Label className="text-xs text-gray-500" title="Las partes de un forro dividido se redondean a este múltiplo">Paquete (UN)</Label>
+              <Input type="number" min={1} value={paramDist.paquete} className="h-8 w-20 text-right"
+                onChange={e => setParamDist(v => ({ ...v, paquete: Math.max(1, Number(e.target.value) || 1) }))} />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label className="text-xs text-gray-500" title="Parte mínima por taller al dividir un forro">Mín. por taller (UN)</Label>
+              <Input type="number" min={1} value={paramDist.minimoPorTaller} className="h-8 w-20 text-right"
+                onChange={e => setParamDist(v => ({ ...v, minimoPorTaller: Math.max(1, Number(e.target.value) || 1) }))} />
+            </div>
+            <Button size="sm" onClick={distribuir} disabled={conPedido.length === 0}
+              title="Reparte lo pendiente de cada forro según personas × peso, respetando la matriz y lo ya escrito">
+              <Wand2 className="w-4 h-4 mr-2" />Distribuir
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => fijarAsignacion({})} disabled={Object.keys(asignacion).length === 0}>
+              <Eraser className="w-4 h-4 mr-2" />Limpiar
+            </Button>
             <Button variant="outline" size="sm" onClick={exportarSubcontratacion} disabled={conPedido.length === 0}>
               <Download className="w-4 h-4 mr-2" />Excel
             </Button>
@@ -1045,17 +1107,55 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                     <TableCell colSpan={3} className="font-semibold">Total UN</TableCell>
                     <TableCell className="text-right tabular-nums font-semibold">{fmt(totales.pedido)}</TableCell>
                     <TableCell colSpan={2} />
-                    {porTaller.map(p => <TableCell key={p.taller.nombre} className="text-center tabular-nums">{p.un ? fmt(p.un) : '—'}</TableCell>)}
-                    <TableCell className="text-right tabular-nums">{fmt(porTaller.reduce((s, p) => s + p.un, 0))}</TableCell>
+                    {porTaller.map(p => <TableCell key={p.nombre} className="text-center tabular-nums">{p.unidades ? fmt(p.unidades) : '—'}</TableCell>)}
+                    <TableCell className="text-right tabular-nums">{fmt(porTaller.reduce((s, p) => s + p.unidades, 0))}</TableCell>
                     <TableCell />
                   </TableRow>
                   <TableRow>
                     <TableCell colSpan={3} className="font-semibold">Total USD</TableCell>
                     <TableCell className="text-right tabular-nums">${fmt(totales.pedidoUsd, 2)}</TableCell>
                     <TableCell colSpan={2} />
-                    {porTaller.map(p => <TableCell key={p.taller.nombre} className="text-center tabular-nums text-xs">{p.usd ? `$${fmt(p.usd, 2)}` : '—'}</TableCell>)}
-                    <TableCell className="text-right tabular-nums">${fmt(porTaller.reduce((s, p) => s + p.usd, 0), 2)}</TableCell>
+                    {porTaller.map(p => <TableCell key={p.nombre} className="text-center tabular-nums text-xs">{p.asignadoUsd ? `$${fmt(p.asignadoUsd, 2)}` : '—'}</TableCell>)}
+                    <TableCell className="text-right tabular-nums">${fmt(porTaller.reduce((s, p) => s + p.asignadoUsd, 0), 2)}</TableCell>
                     <TableCell />
+                  </TableRow>
+                  <TableRow>
+                    <TableCell colSpan={3} className="font-semibold" title="Costo total × (personas × peso) ÷ Σ">Objetivo USD</TableCell>
+                    <TableCell colSpan={3} />
+                    {porTaller.map(p => (
+                      <TableCell key={p.nombre} className="text-center tabular-nums text-xs text-gray-500" title={`${fmt(p.porcentaje * 100, 1)} %`}>
+                        {p.objetivoUsd ? `$${fmt(p.objetivoUsd, 2)}` : '—'}
+                      </TableCell>
+                    ))}
+                    <TableCell colSpan={2} />
+                  </TableRow>
+                  <TableRow>
+                    <TableCell colSpan={3} className="font-semibold">Desviación USD</TableCell>
+                    <TableCell colSpan={3} />
+                    {porTaller.map(p => (
+                      <TableCell key={p.nombre} className={cn('text-center tabular-nums text-xs font-semibold',
+                        Math.abs(p.desviacionUsd) <= Math.max(1, p.objetivoUsd * 0.05) ? 'text-emerald-600' : p.desviacionUsd > 0 ? 'text-amber-600' : 'text-red-600')}>
+                        {fmt(p.desviacionUsd, 2)}
+                      </TableCell>
+                    ))}
+                    <TableCell colSpan={2} />
+                  </TableRow>
+                  <TableRow>
+                    <TableCell colSpan={3} className="font-semibold">Personas × peso</TableCell>
+                    <TableCell colSpan={3} />
+                    {TALLERES_ALMOHADA_EXCEL.map(t => (
+                      <TableCell key={t.nombre} className="text-center p-1">
+                        <div className="flex items-center justify-center gap-1">
+                          <Input type="number" min={0} value={capacidad[t.nombre]?.personas ?? 0} title="Personas"
+                            onChange={e => cambiarCapacidad(t.nombre, 'personas', Number(e.target.value) || 0)}
+                            className="h-7 w-12 text-right tabular-nums px-1" />
+                          <Input type="number" min={0} step={0.1} value={capacidad[t.nombre]?.peso ?? 0} title="Peso"
+                            onChange={e => cambiarCapacidad(t.nombre, 'peso', Number(e.target.value) || 0)}
+                            className="h-7 w-12 text-right tabular-nums px-1" />
+                        </div>
+                      </TableCell>
+                    ))}
+                    <TableCell colSpan={2} />
                   </TableRow>
                 </TableFooter>
               )}
