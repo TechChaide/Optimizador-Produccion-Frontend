@@ -54,6 +54,7 @@ export * from './TacticalPlanTallerCorteSection';
 export * from './TiemposTallerCorteTab';
 export * from './ProvisionalOrdersTallerCorteTab';
 export * from './PlanTallerCorteTab';
+export * from './TacticalPlanAlmohadasSection';
 export * from './PlanPlanchasMixtasTab';
 export * from './PlanMueblesTabSection';
 export * from './ProvisionalOrdersSummaryTab';

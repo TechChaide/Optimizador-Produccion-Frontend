@@ -28,7 +28,7 @@ import { serviciosService } from '@/services/seguridades/servicios.service';
 import { useToast } from '@/hooks/use-toast';
 import { environment } from '@/environments/environments.prod';
 import { User } from '@/types/interfaces';
-import { TacticalPlanMueblesSection, TacticalPlanTallerCorteSection, TacticalPlanPlanchasMixtasSection } from '@/components';
+import { TacticalPlanMueblesSection, TacticalPlanTallerCorteSection, TacticalPlanPlanchasMixtasSection, TacticalPlanAlmohadasSection } from '@/components';
 // (LogoutButton preserved in repo but not used here; we implement custom panel UI)
 
 
@@ -542,10 +542,12 @@ export default function DashboardLayout({
     const MUEBLES_PATH = '/dashboard/opciones/programacion-tactica-muebles';
     const TALLER_CORTE_PATH = '/dashboard/opciones/programacion-tactica-taller-corte';
     const PLANCHAS_MIXTAS_PATH = '/dashboard/opciones/programacion-tactica-planchas-mixtas';
+    const ALMOHADAS_PATH = '/dashboard/opciones/programacion-tactica-subcontratacion';
 
     const isMueblesActive = pathname === MUEBLES_PATH;
     const isTallerCorteActive = pathname === TALLER_CORTE_PATH;
     const isPlanchasMixtasActive = pathname === PLANCHAS_MIXTAS_PATH;
+    const isAlmohadasActive = pathname === ALMOHADAS_PATH;
 
     // Una vez que el usuario visita cada Proyecto, se marca como "visitado" y a partir de ahí se
     // mantiene montado (oculto con CSS si no es el activo) para toda la sesión. Antes de la primera
@@ -553,14 +555,16 @@ export default function DashboardLayout({
     const [visitedMuebles, setVisitedMuebles] = useState(isMueblesActive);
     const [visitedTallerCorte, setVisitedTallerCorte] = useState(isTallerCorteActive);
     const [visitedPlanchasMixtas, setVisitedPlanchasMixtas] = useState(isPlanchasMixtasActive);
+    const [visitedAlmohadas, setVisitedAlmohadas] = useState(isAlmohadasActive);
 
     useEffect(() => {
         if (isMueblesActive) setVisitedMuebles(true);
         if (isTallerCorteActive) setVisitedTallerCorte(true);
         if (isPlanchasMixtasActive) setVisitedPlanchasMixtas(true);
-    }, [isMueblesActive, isTallerCorteActive, isPlanchasMixtasActive]);
+        if (isAlmohadasActive) setVisitedAlmohadas(true);
+    }, [isMueblesActive, isTallerCorteActive, isPlanchasMixtasActive, isAlmohadasActive]);
 
-    const isPersistedProjectRoute = isMueblesActive || isTallerCorteActive || isPlanchasMixtasActive;
+    const isPersistedProjectRoute = isMueblesActive || isTallerCorteActive || isPlanchasMixtasActive || isAlmohadasActive;
 
     useEffect(() => {
         const loadMenus = async () => {
@@ -725,6 +729,11 @@ export default function DashboardLayout({
                         {visitedPlanchasMixtas && (
                             <div className={isPlanchasMixtasActive ? '' : 'hidden'}>
                                 <TacticalPlanPlanchasMixtasSection />
+                            </div>
+                        )}
+                        {visitedAlmohadas && (
+                            <div className={isAlmohadasActive ? '' : 'hidden'}>
+                                <TacticalPlanAlmohadasSection />
                             </div>
                         )}
                         {!isPersistedProjectRoute && children}

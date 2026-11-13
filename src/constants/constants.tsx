@@ -23,6 +23,7 @@ import {
     Scissors,
     FlaskConical,
     Layers,
+    BedDouble,
 } from 'lucide-react';
 import { ProcessType, Holiday, HolidayScope } from '@/types/types'; 
 
@@ -55,6 +56,7 @@ export enum ActiveView {
   TACTICAL_SCHEDULING_FORROS = 'TACTICAL_SCHEDULING_FORROS',
   TACTICAL_SCHEDULING_TALLER_CORTE = 'TACTICAL_SCHEDULING_TALLER_CORTE',
   TACTICAL_SCHEDULING_PLANCHAS_MIXTAS = 'TACTICAL_SCHEDULING_PLANCHAS_MIXTAS',
+  TACTICAL_SCHEDULING_ALMOHADAS = 'TACTICAL_SCHEDULING_ALMOHADAS',
   WORK_SHIFT_PLANNING = 'WORK_SHIFT_PLANNING',
   DICTIONARY = 'DICTIONARY',
   CUT_LAMINATION_PLAN = 'CUT_LAMINATION_PLAN',
@@ -146,6 +148,7 @@ const NAVIGATION_ITEMS = [
   { id: ActiveView.TACTICAL_SCHEDULING_FORROS, label: 'Programación Táctica Forros', icon: <TacticalSchedulingIcon />, href: '/dashboard/opciones/programacion-tactica-forros' },
   { id: ActiveView.TACTICAL_SCHEDULING_TALLER_CORTE, label: 'Programación Táctica Taller de Corte', icon: <Scissors className="w-5 h-5" />, href: '/dashboard/opciones/programacion-tactica-taller-corte' },
   { id: ActiveView.TACTICAL_SCHEDULING_PLANCHAS_MIXTAS, label: 'Programación Táctica Planchas Mixtas', icon: <Layers className="w-5 h-5" />, href: '/dashboard/opciones/programacion-tactica-planchas-mixtas' },
+  { id: ActiveView.TACTICAL_SCHEDULING_ALMOHADAS, label: 'Programación Táctica Subcontratación', icon: <BedDouble className="w-5 h-5" />, href: '/dashboard/opciones/programacion-tactica-subcontratacion' },
   { id: ActiveView.WORK_SHIFT_PLANNING, label: 'Planificación de Turnos', icon: <WorkShiftIcon />, href: '/dashboard/opciones/planificacion-turnos' },
   { id: ActiveView.GESTION_TURNO_OPERADORES, label: 'Gestión Turno - Operadores', icon: <PersonnelIcon />, href: '/dashboard/opciones/gestion-turno-operadores' },
   { id: ActiveView.DICTIONARY, label: 'Diccionario de Datos', icon: <RealDataIcon />, href: '/dashboard/opciones/diccionario-datos' },
@@ -188,6 +191,7 @@ export const OPCIONES_ITEMS: ActiveView[] = [
   ActiveView.TACTICAL_SCHEDULING_FORROS,
   ActiveView.TACTICAL_SCHEDULING_TALLER_CORTE,
   ActiveView.TACTICAL_SCHEDULING_PLANCHAS_MIXTAS,
+  ActiveView.TACTICAL_SCHEDULING_ALMOHADAS,
   ActiveView.WORK_SHIFT_PLANNING,
   ActiveView.GESTION_TURNO_OPERADORES,
   ActiveView.DICTIONARY,
@@ -202,6 +206,7 @@ export const PROYECTOS_ITEMS: ActiveView[] = [
   ActiveView.TACTICAL_SCHEDULING_MUEBLES,
   ActiveView.TACTICAL_SCHEDULING_TALLER_CORTE,
   ActiveView.TACTICAL_SCHEDULING_PLANCHAS_MIXTAS,
+  ActiveView.TACTICAL_SCHEDULING_ALMOHADAS,
 ];
 
 // Items que van dentro de la sección "Parámetros" (contraíble)
