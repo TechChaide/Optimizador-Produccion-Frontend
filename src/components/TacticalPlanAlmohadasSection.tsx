@@ -22,7 +22,7 @@ import {
   type ForroAlmohadaMaestro,
   type TapaAlmohada,
 } from '@/data/almohadasForrosExcel';
-import { distribuirPedido, resumenPorTaller, PARAMETROS_DISTRIBUCION_DEFECTO, type Asignacion, type ForroDistribucion } from '@/lib/almohadas-distribucion';
+import { distribuirPedido, normalizarTela, resumenPorTaller, PARAMETROS_DISTRIBUCION_DEFECTO, type Asignacion, type ForroDistribucion } from '@/lib/almohadas-distribucion';
 import { leerExcelValidacion, type ExcelValidacion, type ValoresExcelForro } from '@/lib/almohadas-validacion-excel';
 import {
   ALMACEN_FORROS_ALMOHADA,
@@ -543,6 +543,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
     precio: f.maestro.precio ?? 0,
     prioridad: f.maestro.prioridad ?? null,
     talleres: f.maestro.talleres,
+    tela: f.maestro.tela,
   })), [conPedido]);
   const talleresDist = useMemo(() => TALLERES_ALMOHADA_EXCEL.map(t => ({
     nombre: t.nombre,
@@ -598,6 +599,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
         Prioridad: f.maestro.prioridad ?? '',
         Codigo: f.maestro.codigo,
         Descripcion: f.maestro.descripcion,
+        Tela: f.maestro.tela,
         Cantidad: f.pedidoFinal,
         Precio: f.maestro.precio ?? 0,
         'Costo total': Math.round(f.pedidoFinal * (f.maestro.precio ?? 0) * 100) / 100,
@@ -1028,6 +1030,11 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
               <Input type="number" min={1} value={paramDist.minimoPorTaller} className="h-8 w-20 text-right"
                 onChange={e => setParamDist(v => ({ ...v, minimoPorTaller: Math.max(1, Number(e.target.value) || 1) }))} />
             </div>
+            <div className="flex items-center gap-2 h-8" title="Los forros de la misma tela van al mismo taller mientras le quede hueco (aprovecha el corte)">
+              <Switch id="agrupar-tela" checked={paramDist.agruparPorTela}
+                onCheckedChange={v => setParamDist(x => ({ ...x, agruparPorTela: v }))} />
+              <Label htmlFor="agrupar-tela" className="text-xs text-gray-600">Agrupar por tela</Label>
+            </div>
             <Button size="sm" onClick={distribuir} disabled={conPedido.length === 0}
               title="Reparte lo pendiente de cada forro según personas × peso, respetando la matriz y lo ya escrito">
               <Wand2 className="w-4 h-4 mr-2" />Distribuir
@@ -1070,6 +1077,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                       <TableCell className="text-xs">
                         {f.maestro.descripcion}
                         {!f.maestro.talleres && <Badge variant="outline" className="ml-2 text-[10px] text-amber-700 border-amber-300" title="Sin matriz de talleres: todos habilitados">sin matriz</Badge>}
+                        {f.maestro.tela && <div className="text-[10px] text-gray-400">{normalizarTela(f.maestro.tela)}</div>}
                       </TableCell>
                       <TableCell className="text-right tabular-nums font-semibold">{fmt(f.pedidoFinal)}</TableCell>
                       <TableCell className="text-right tabular-nums text-gray-500" title={f.tapa ? `${f.tapa.descripcion}${f.tapaPorBom ? ' (BOM)' : ` · ${f.tapa.tela} ${f.tapa.color}`}` : undefined}>
