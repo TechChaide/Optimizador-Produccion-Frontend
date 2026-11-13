@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { BedDouble, ChevronDown, ChevronRight, Download, Loader2, RefreshCw, TriangleAlert, Upload } from 'lucide-react';
+import { BedDouble, ChevronDown, ChevronRight, Download, FileSpreadsheet, Loader2, RefreshCw, TriangleAlert, Upload } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
@@ -20,7 +20,9 @@ import {
   FORROS_ALMOHADA_EXCEL,
   TALLERES_ALMOHADA_EXCEL,
   type ForroAlmohadaMaestro,
+  type TapaAlmohada,
 } from '@/data/almohadasForrosExcel';
+import { leerExcelValidacion, type ExcelValidacion, type ValoresExcelForro } from '@/lib/almohadas-validacion-excel';
 import {
   ALMACEN_FORROS_ALMOHADA,
   CENTRO_ALMOHADAS,
@@ -89,6 +91,7 @@ interface OrdenForro {
   descripcionFert: string;
   fecha: string;
   cantidad: number;
+  porBom: boolean;
 }
 
 interface ForroCalculado {
@@ -100,19 +103,47 @@ interface ForroCalculado {
   ssPp: ResultadoSsPp | null;
   rep: ResultadoReposicion;
   pedidoFinal: number;
+  loteMin: number;
+  loteMax: number;
+  loteCalculado: boolean;
+  tapa: TapaAlmohada | undefined;
+  tapaPorBom: boolean;
 }
 
 type Asignacion = Record<string, Record<string, number>>;
+type ComponenteForro = { forro: string; factor: number };
 
+// FERT → forros del Excel (1 forro por almohada).
 const FORROS_POR_FERT = (() => {
-  const m = new Map<string, string[]>();
+  const m = new Map<string, ComponenteForro[]>();
   FERT_FORRO_ALMOHADA_EXCEL.forEach(([fert, forro]) => {
     const lista = m.get(fert) ?? [];
-    if (!lista.includes(forro)) lista.push(forro);
+    if (!lista.some(c => c.forro === forro)) lista.push({ forro, factor: 1 });
     m.set(fert, lista);
   });
   return m;
 })();
+
+// Lote cuando el Excel no lo trae: misma fórmula del Excel (CALCULO SS-PP, BJ y BP):
+// mínimo = EVEN(consumo semanal ÷ 2.5 × 5), máximo = mínimo × 1.5.
+const loteDe = (m: ForroAlmohadaMaestro, ssPp: ResultadoSsPp | null) => {
+  if ((m.loteMin ?? 0) > 0) return { loteMin: m.loteMin!, loteMax: m.loteMax || m.loteMin! * 1.5, loteCalculado: false };
+  const semanal = ssPp?.consumoSemanal ?? 0;
+  if (semanal <= 0) return { loteMin: 0, loteMax: 0, loteCalculado: false };
+  const min = Math.ceil((semanal / 2.5) * 5 / 2) * 2;
+  return { loteMin: min, loteMax: min * 1.5, loteCalculado: true };
+};
+
+// Explosión BOM (centro 1000) e hijos directos de un material.
+const hijosBom = async (material: string): Promise<Fila[]> => {
+  const r = await serviciosService.getMaestroMaterialesExplosion(CENTRO_ALMOHADAS, material.padStart(18, '0'), 1, 500);
+  const filas = filasDe(r);
+  const directos = filas.filter(f => limpiarCodigo(getProp(f, ['MATERIAL_PADRE'])) === material);
+  return directos.length ? directos : filas.filter(f => getProp(f, ['NIVEL']) === '1');
+};
+const descComponente = (f: Fila) => getProp(f, ['DESCRIPCION_COMPONENTE', 'DESCRIPCION']).toUpperCase();
+
+const iguales = (app: number, excel: number) => Math.abs(app - excel) <= Math.max(1, Math.abs(excel) * 0.01);
 
 const CLAVE_ASIGNACION = 'almohadas-subcontratacion:';
 const leerAsignacion = (fechaCorte: string): Asignacion => {
@@ -184,6 +215,20 @@ const exportarExcel = (nombre: string, hojas: Record<string, Fila[]>) => {
   XLSX.writeFile(wb, nombre);
 };
 
+const METRICAS_VALIDACION: { clave: string; etiqueta: string; app: (f: ForroCalculado) => number; excel: (x: ValoresExcelForro) => number }[] = [
+  { clave: 'nec', etiqueta: 'Necesidad', app: f => f.necesidad, excel: x => x.necesidad },
+  { clave: 'stock', etiqueta: 'Stock 1014', app: f => f.stock, excel: x => x.stock },
+  { clave: 'tr', etiqueta: 'Tránsito', app: f => f.transito, excel: x => x.transito },
+  { clave: 'sem', etiqueta: 'Cons. semanal', app: f => f.ssPp?.consumoSemanal ?? 0, excel: x => x.consumoSemanal },
+  { clave: 'diario', etiqueta: 'Cons. diario', app: f => f.ssPp?.consumoDiario ?? 0, excel: x => x.consumoDiario },
+  { clave: 'ss', etiqueta: 'SS', app: f => f.ssPp?.ss ?? 0, excel: x => x.ss },
+  { clave: 'pp', etiqueta: 'PP', app: f => f.ssPp?.pp ?? 0, excel: x => x.pp },
+  { clave: 'ppss', etiqueta: 'PP/SS', app: f => f.rep.ppss, excel: x => x.ppss },
+  { clave: 'sf', etiqueta: 'Stock final', app: f => f.rep.stockFinal, excel: x => x.stockFinal },
+  { clave: 'lote', etiqueta: 'Lote mín', app: f => f.loteMin, excel: x => x.loteMin },
+  { clave: 'ped', etiqueta: 'Pedido', app: f => f.rep.pedido, excel: x => x.pedido },
+];
+
 const fechaCorteDefecto = (): string => fechaISO(addBusinessDays(new Date(), PARAMETROS_SS_PP_DEFECTO.leadTimeDias));
 
 export const TacticalPlanAlmohadasSection: React.FC = () => {
@@ -209,6 +254,20 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   const [asignacion, setAsignacion] = useState<Asignacion>({});
   const inputMe2nRef = useRef<HTMLInputElement>(null);
 
+  // Huecos del Excel completados por BOM: FERT de almohadas sin forro, forros nuevos y tapas.
+  const [forrosPorFertBom, setForrosPorFertBom] = useState<Map<string, ComponenteForro[]>>(new Map());
+  const [forrosExtra, setForrosExtra] = useState<ForroAlmohadaMaestro[]>([]);
+  const [tapasBom, setTapasBom] = useState<Map<string, TapaAlmohada>>(new Map());
+
+  // Validación contra el Excel.
+  const [baseCantidad, setBaseCantidad] = useState<'pendiente' | 'programada'>('pendiente');
+  const [excelVal, setExcelVal] = useState<ExcelValidacion | null>(null);
+  const [soloDiferencias, setSoloDiferencias] = useState(false);
+  const [transitoOrigen, setTransitoOrigen] = useState<'me2n' | 'excel' | null>(null);
+  const inputValRef = useRef<HTMLInputElement>(null);
+
+  const maestros = useMemo(() => [...FORROS_ALMOHADA_EXCEL, ...forrosExtra], [forrosExtra]);
+
   useEffect(() => {
     setAsignacion(leerAsignacion(fechaCorte));
   }, [fechaCorte]);
@@ -218,10 +277,64 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
     try {
       setAvance({ etapa: 'Órdenes FERT e inventario', n: 0, total: 2 });
       const [fert, inv] = await Promise.all([sapCompartido.ordenesFert(), sapCompartido.inventarioAnioActual()]);
-      setFertRows(filasDe(fert));
+      const filasFert = filasDe(fert);
+      setFertRows(filasFert);
       setInvRows(filasDe(inv));
 
-      const codigos = FORROS_ALMOHADA_EXCEL.map(f => f.codigo);
+      // FERT de almohadas que el Excel no relaciona con un forro → forros hijos en la BOM.
+      const fertsSinForro = Array.from(new Set(filasFert.flatMap(o => {
+        const centro = getProp(o, ['CENTRO']);
+        if (centro && centro !== CENTRO_ALMOHADAS) return [];
+        if (!getProp(o, ['SECTORDESC', 'SECTOR']).toUpperCase().includes('ALMOHADA')) return [];
+        const fert = limpiarCodigo(getProp(o, ['MATERIAL', 'CODIGOMATERIAL']));
+        return fert && !FORROS_POR_FERT.has(fert) ? [fert] : [];
+      })));
+      const mapaBom = new Map<string, ComponenteForro[]>();
+      const nuevos = new Map<string, ForroAlmohadaMaestro>();
+      const codigosSeed = new Set(FORROS_ALMOHADA_EXCEL.map(f => f.codigo));
+      if (fertsSinForro.length) {
+        setAvance({ etapa: 'BOM FERT sin forro', n: 0, total: fertsSinForro.length });
+        await enParalelo(fertsSinForro, 6, async fert => {
+          try {
+            const comps = (await hijosBom(fert)).filter(f => descComponente(f).startsWith('FORRO'));
+            const lista = comps.map(f => ({ forro: limpiarCodigo(getProp(f, ['COMPONENTE'])), factor: num(getProp(f, ['CANTIDAD_UNITARIA'])) || 1 }))
+              .filter(c => c.forro);
+            if (lista.length) mapaBom.set(fert, lista);
+            comps.forEach(f => {
+              const c = limpiarCodigo(getProp(f, ['COMPONENTE']));
+              if (c && !codigosSeed.has(c) && !nuevos.has(c)) {
+                nuevos.set(c, { codigo: c, descripcion: getProp(f, ['DESCRIPCION_COMPONENTE', 'DESCRIPCION']), prioridad: null, tela: '' });
+              }
+            });
+          } catch { /* sin BOM: queda en "sin forro" */ }
+        }, n => setAvance({ etapa: 'BOM FERT sin forro', n, total: fertsSinForro.length }));
+      }
+      setForrosPorFertBom(mapaBom);
+      setForrosExtra(Array.from(nuevos.values()));
+
+      // Tapas que el Excel no trae → hijos "TAPA..." del forro en la BOM.
+      const todos = [...FORROS_ALMOHADA_EXCEL, ...nuevos.values()];
+      const sinTapa = todos.filter(f => !f.tapa).map(f => f.codigo);
+      const tapas = new Map<string, TapaAlmohada>();
+      if (sinTapa.length) {
+        setAvance({ etapa: 'BOM tapas', n: 0, total: sinTapa.length });
+        await enParalelo(sinTapa, 6, async forro => {
+          try {
+            const t = (await hijosBom(forro)).find(f => descComponente(f).startsWith('TAPA'));
+            if (t) {
+              tapas.set(forro, {
+                codigo: limpiarCodigo(getProp(t, ['COMPONENTE'])),
+                descripcion: getProp(t, ['DESCRIPCION_COMPONENTE', 'DESCRIPCION']),
+                tapasPorForro: num(getProp(t, ['CANTIDAD_UNITARIA'])) || 1,
+                tela: '', color: '', capas: 0, undPorCapa: 0,
+              });
+            }
+          } catch { /* sin BOM */ }
+        }, n => setAvance({ etapa: 'BOM tapas', n, total: sinTapa.length }));
+      }
+      setTapasBom(tapas);
+
+      const codigos = todos.map(f => f.codigo);
       const fallidos: string[] = [];
       setAvance({ etapa: 'Consumos MB51', n: 0, total: codigos.length });
       const resultados = await enParalelo(
@@ -258,6 +371,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
     try {
       const { porMaterial, filas } = await leerMe2n(archivo);
       setTransito(porMaterial);
+      setTransitoOrigen('me2n');
       setArchivoMe2n({ nombre: archivo.name, filas });
       addNotification('success', `ME2N cargado: ${filas} posiciones abiertas, ${porMaterial.size} materiales.`);
     } catch (e) {
@@ -276,12 +390,15 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       if (centro && centro !== CENTRO_ALMOHADAS) return;
       const fecha = fechaISO(getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']));
       if (!fecha || fecha > fechaCorte) return;
+      // El Excel suma CANTPROGRAMADA; "pendiente" descuenta lo ya entregado.
       const pendienteTxt = getProp(o, ['CANTPENDIENTE', 'CANT_PEND']);
-      const cantidad = pendienteTxt !== '' ? num(pendienteTxt) : num(getProp(o, ['CANTPROGRAMADA', 'CANTIDAD']));
+      const programada = num(getProp(o, ['CANTPROGRAMADA', 'CANTIDAD']));
+      const cantidad = baseCantidad === 'programada' || pendienteTxt === '' ? programada : num(pendienteTxt);
       if (cantidad <= 0) return;
       const fert = limpiarCodigo(getProp(o, ['MATERIAL', 'CODIGOMATERIAL']));
       const descripcionFert = getProp(o, ['NOMBRE', 'DESCRIPCION', 'TEXTO']);
-      const forros = FORROS_POR_FERT.get(fert);
+      const porBom = !FORROS_POR_FERT.has(fert);
+      const forros = FORROS_POR_FERT.get(fert) ?? forrosPorFertBom.get(fert);
       if (!forros) {
         const sector = getProp(o, ['SECTORDESC', 'SECTOR']).toUpperCase();
         if (sector.includes('ALMOHADA')) {
@@ -293,9 +410,9 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
         return;
       }
       const orden = limpiarCodigo(getProp(o, ['ORDEN', 'NUMEROORDEN']));
-      forros.forEach(forro => {
+      forros.forEach(({ forro, factor }) => {
         const lista = porForro.get(forro) ?? [];
-        lista.push({ orden, fert, descripcionFert, fecha, cantidad });
+        lista.push({ orden, fert, descripcionFert, fecha, cantidad: cantidad * factor, porBom });
         porForro.set(forro, lista);
       });
     });
@@ -304,7 +421,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       ordenesPorForro: porForro,
       sinMapear: Array.from(sinMapearMap.values()).sort((a, b) => b.cantidad - a.cantidad),
     };
-  }, [fertRows, fechaCorte]);
+  }, [fertRows, fechaCorte, baseCantidad, forrosPorFertBom]);
 
   // ---------------- Paso 2: stock 1014 ----------------
   const stockPorMaterial = useMemo(() => {
@@ -326,12 +443,13 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   }, [consumos, params]);
 
   // ---------------- Paso 3: reposición ----------------
-  const forros: ForroCalculado[] = useMemo(() => FORROS_ALMOHADA_EXCEL.map(maestro => {
+  const forros: ForroCalculado[] = useMemo(() => maestros.map(maestro => {
     const ordenes = ordenesPorForro.get(maestro.codigo) ?? [];
     const necesidad = ordenes.reduce((s, o) => s + o.cantidad, 0);
     const stock = stockPorMaterial.get(maestro.codigo) ?? 0;
     const tr = transito.get(maestro.codigo) ?? 0;
     const ssPp = ssPpPorForro.get(maestro.codigo) ?? null;
+    const lote = loteDe(maestro, ssPp);
     const rep = calcularReposicion({
       necesidad,
       stock,
@@ -339,14 +457,18 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       ss: ssPp?.ss ?? 0,
       pp: ssPp?.pp ?? 0,
       consumoDiario: ssPp?.consumoDiario ?? 0,
-      loteMin: maestro.loteMin ?? 0,
+      loteMin: lote.loteMin,
     });
     const manual = pedidoManual[maestro.codigo];
-    return { maestro, ordenes, necesidad, stock, transito: tr, ssPp, rep, pedidoFinal: manual ?? rep.pedido };
+    const tapaBom = maestro.tapa ? undefined : tapasBom.get(maestro.codigo);
+    return {
+      maestro, ordenes, necesidad, stock, transito: tr, ssPp, rep, pedidoFinal: manual ?? rep.pedido,
+      ...lote, tapa: maestro.tapa ?? tapaBom, tapaPorBom: !!tapaBom,
+    };
   }).sort((a, b) =>
     (PRIORIDAD_ORDEN[a.maestro.prioridad ?? ''] ?? 9) - (PRIORIDAD_ORDEN[b.maestro.prioridad ?? ''] ?? 9)
     || a.rep.stockFinal - b.rep.stockFinal
-  ), [ordenesPorForro, stockPorMaterial, transito, ssPpPorForro, pedidoManual]);
+  ), [maestros, ordenesPorForro, stockPorMaterial, transito, ssPpPorForro, pedidoManual, tapasBom]);
 
   const conNecesidad = useMemo(() => forros.filter(f => f.necesidad > 0).sort((a, b) => b.necesidad - a.necesidad), [forros]);
   const filasReposicion = useMemo(() => (soloConPedido ? forros.filter(f => f.pedidoFinal > 0) : forros), [forros, soloConPedido]);
@@ -401,8 +523,9 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       SS: Math.round(f.ssPp?.ss ?? 0),
       PP: Math.round(f.ssPp?.pp ?? 0),
       'PP/SS': Math.round(f.rep.ppss),
-      'Lote min': f.maestro.loteMin ?? 0,
-      'Lote max': f.maestro.loteMax ?? 0,
+      'Lote min': f.loteMin,
+      'Lote max': f.loteMax,
+      'Lote calculado': f.loteCalculado ? 'SI' : '',
       'Pedido sugerido': f.rep.pedido,
       'Pedido final': f.pedidoFinal,
       'Cobertura (dias)': f.rep.coberturaDias ?? '',
@@ -425,15 +548,16 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       fila.Diferencia = asignadoDe(f.maestro.codigo) - f.pedidoFinal;
       return fila;
     }),
-    Tapas: conPedido.filter(f => f.maestro.tapa).map(f => ({
+    Tapas: conPedido.flatMap(f => (f.tapa ? [{
       Forro: f.maestro.codigo,
       'Desc. forro': f.maestro.descripcion,
-      Tapa: f.maestro.tapa!.codigo,
-      'Desc. tapa': f.maestro.tapa!.descripcion,
-      Tela: f.maestro.tapa!.tela,
-      Color: f.maestro.tapa!.color,
-      Tapas: f.pedidoFinal * f.maestro.tapa!.tapasPorForro,
-    })),
+      Tapa: f.tapa.codigo,
+      'Desc. tapa': f.tapa.descripcion,
+      Tela: f.tapa.tela,
+      Color: f.tapa.color,
+      Tapas: f.pedidoFinal * f.tapa.tapasPorForro,
+      Origen: f.tapaPorBom ? 'BOM' : 'Excel',
+    }] : [])),
     Talleres: porTaller.map(p => ({
       Taller: p.taller.nombre,
       Proveedor: p.taller.codProveedor,
@@ -442,6 +566,70 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       Unidades: p.un,
       USD: Math.round(p.usd * 100) / 100,
     })),
+  });
+
+  // ---------------- Validar contra Excel ----------------
+  const cargarExcelValidacion = async (archivo: File | undefined) => {
+    if (!archivo) return;
+    try {
+      const v = await leerExcelValidacion(archivo);
+      setExcelVal(v);
+      addNotification('success', `Excel leído: ${v.forros.size} forros${v.fechaCorte ? `, corte ${v.fechaCorte}` : ''}.`);
+    } catch (e) {
+      addNotification('error', `No se pudo leer el Excel: ${(e as Error).message}`);
+    } finally {
+      if (inputValRef.current) inputValRef.current.value = '';
+    }
+  };
+  const igualarAlExcel = () => {
+    if (!excelVal) return;
+    if (excelVal.fechaCorte) setFechaCorte(excelVal.fechaCorte);
+    setBaseCantidad('programada');
+    if (excelVal.transito.size) {
+      setTransito(excelVal.transito);
+      setTransitoOrigen('excel');
+    }
+    setPedidoManual({});
+  };
+
+  const comparacion = useMemo(() => {
+    if (!excelVal) return [];
+    const porCodigo = new Map(forros.map(f => [f.maestro.codigo, f]));
+    const codigos = Array.from(new Set([...excelVal.forros.keys(), ...forros.filter(f => f.necesidad > 0 || f.stock > 0).map(f => f.maestro.codigo)]));
+    return codigos.map(codigo => {
+      const f = porCodigo.get(codigo);
+      const x: ValoresExcelForro | undefined = excelVal.forros.get(codigo);
+      const metricas = METRICAS_VALIDACION.map(m => {
+        const app = f ? m.app(f) : 0;
+        const excel = x ? m.excel(x) : 0;
+        return { clave: m.clave, app, excel, ok: iguales(app, excel) };
+      });
+      return {
+        codigo,
+        descripcion: f?.maestro.descripcion ?? '',
+        enExcel: !!x,
+        metricas,
+        difs: metricas.filter(m => !m.ok).length,
+      };
+    }).sort((a, b) => b.difs - a.difs || a.codigo.localeCompare(b.codigo));
+  }, [excelVal, forros]);
+  const resumenValidacion = useMemo(() => METRICAS_VALIDACION.map((m, i) => ({
+    etiqueta: m.etiqueta,
+    ok: comparacion.filter(c => c.metricas[i].ok).length,
+  })), [comparacion]);
+  const filasComparacion = soloDiferencias ? comparacion.filter(c => c.difs > 0) : comparacion;
+
+  const exportarComparacion = () => exportarExcel(`Validacion_ALM_${fechaCorte}.xlsx`, {
+    Validacion: comparacion.map(c => {
+      const fila: Fila = { Codigo: c.codigo, Descripcion: c.descripcion, 'En Excel': c.enExcel ? 'SI' : 'NO' };
+      c.metricas.forEach((m, i) => {
+        const e = METRICAS_VALIDACION[i].etiqueta;
+        fila[`${e} Excel`] = Math.round(m.excel * 100) / 100;
+        fila[`${e} App`] = Math.round(m.app * 100) / 100;
+        fila[`${e} Dif`] = Math.round((m.app - m.excel) * 100) / 100;
+      });
+      return fila;
+    }),
   });
 
   const sinDatos = !cargando && fertRows.length === 0 && invRows.length === 0;
@@ -504,11 +692,12 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       )}
 
       <Tabs value={tab} onValueChange={setTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-4 gap-1 h-auto p-1 bg-muted border border-dashed border-gray-300 rounded-lg">
+        <TabsList className="grid w-full grid-cols-5 gap-1 h-auto p-1 bg-muted border border-dashed border-gray-300 rounded-lg">
           <TabsTrigger value="necesidad" className="font-bold text-blue-700 data-[state=active]:text-blue-700">1 Necesidad</TabsTrigger>
           <TabsTrigger value="stock" className="font-bold text-blue-700 data-[state=active]:text-blue-700">2 Stock y SS/PP</TabsTrigger>
           <TabsTrigger value="reposicion" className="font-bold text-blue-700 data-[state=active]:text-blue-700">3 Reposición</TabsTrigger>
           <TabsTrigger value="subcontratacion" className="font-bold text-blue-700 data-[state=active]:text-blue-700">4 Plan Subcontratación</TabsTrigger>
+          <TabsTrigger value="validar" className="font-bold text-blue-700 data-[state=active]:text-blue-700">Validar Excel</TabsTrigger>
         </TabsList>
 
         {/* ---------------- 1 Necesidad ---------------- */}
@@ -574,7 +763,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                         <TableCell />
                         <TableCell className="text-gray-500">{o.fecha}</TableCell>
                         <TableCell className="font-mono text-gray-500">{o.orden}</TableCell>
-                        <TableCell className="text-gray-600"><span className="font-mono">{o.fert}</span> · {o.descripcionFert}</TableCell>
+                        <TableCell className="text-gray-600"><span className="font-mono">{o.fert}</span> · {o.descripcionFert}{o.porBom && <Badge variant="outline" className="ml-2 text-[10px]">BOM</Badge>}</TableCell>
                         <TableCell />
                         <TableCell className="text-right tabular-nums text-gray-600">{fmt(o.cantidad)}</TableCell>
                       </TableRow>
@@ -658,8 +847,8 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                     <TableCell className="text-right tabular-nums">{f.ssPp ? fmt(f.ssPp.desvSemanal) : '—'}</TableCell>
                     <TableCell className="text-right tabular-nums">{f.ssPp ? fmt(f.ssPp.ss) : '—'}</TableCell>
                     <TableCell className="text-right tabular-nums font-semibold">{f.ssPp ? fmt(f.ssPp.pp) : '—'}</TableCell>
-                    <TableCell className="text-right tabular-nums">{f.maestro.loteMin ? fmt(f.maestro.loteMin) : '—'}</TableCell>
-                    <TableCell className="text-right tabular-nums">{f.maestro.loteMax ? fmt(f.maestro.loteMax) : '—'}</TableCell>
+                    <TableCell className={cn('text-right tabular-nums', f.loteCalculado && 'italic text-blue-700')} title={f.loteCalculado ? 'Calculado: EVEN(semanal ÷ 2.5 × 5)' : undefined}>{f.loteMin ? fmt(f.loteMin) : '—'}</TableCell>
+                    <TableCell className={cn('text-right tabular-nums', f.loteCalculado && 'italic text-blue-700')}>{f.loteMax ? fmt(f.loteMax) : '—'}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -673,7 +862,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
             <div className="flex items-center gap-2">
               <Switch id="alm-solo-pedido" checked={soloConPedido} onCheckedChange={setSoloConPedido} />
               <Label htmlFor="alm-solo-pedido" className="text-sm">Solo forros a pedir</Label>
-              {!archivoMe2n && <span className="text-xs text-amber-700 ml-3">Tránsito = 0 (sin ME2N)</span>}
+              {!transitoOrigen && <span className="text-xs text-amber-700 ml-3">Tránsito = 0 (sin ME2N)</span>}
             </div>
             <div className="flex gap-2">
               {Object.keys(pedidoManual).length > 0 && (
@@ -693,7 +882,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                   <TableHead className="text-right">Stock 1014</TableHead>
                   <TableHead className="text-right">Tránsito</TableHead>
                   <TableHead className="text-right">Stock final</TableHead>
-                  <TableHead className="text-right" title="PP + SS/2">PP/SS</TableHead>
+                  <TableHead className="text-right" title="SS + PP/2">PP/SS</TableHead>
                   <TableHead className="text-right">Lote mín</TableHead>
                   <TableHead className="text-right">Sugerido</TableHead>
                   <TableHead className="text-right">Pedido</TableHead>
@@ -712,7 +901,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                     <TableCell className="text-right tabular-nums">{f.transito ? fmt(f.transito) : '—'}</TableCell>
                     <TableCell className={cn('text-right tabular-nums font-semibold', f.rep.stockFinal < 0 && 'text-red-600')}>{fmt(f.rep.stockFinal)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmt(f.rep.ppss)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{f.maestro.loteMin ? fmt(f.maestro.loteMin) : '—'}</TableCell>
+                    <TableCell className={cn('text-right tabular-nums', f.loteCalculado && 'italic text-blue-700')} title={f.loteCalculado ? 'Calculado: EVEN(semanal ÷ 2.5 × 5)' : undefined}>{f.loteMin ? fmt(f.loteMin) : '—'}</TableCell>
                     <TableCell className={cn('text-right tabular-nums', f.rep.excedeLote && 'text-amber-700 font-semibold')} title={f.rep.excedeLote ? `Faltante ${fmt(f.rep.faltante)} > lote mínimo` : undefined}>
                       {f.rep.pedido ? fmt(f.rep.pedido) : '—'}{f.rep.excedeLote ? ' ⚠' : ''}
                     </TableCell>
@@ -794,10 +983,13 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                     <TableRow key={f.maestro.codigo}>
                       <TableCell><Badge variant="outline" className={claseprioridad(f.maestro.prioridad)}>{f.maestro.prioridad ?? '—'}</Badge></TableCell>
                       <TableCell className="font-mono text-xs">{f.maestro.codigo}</TableCell>
-                      <TableCell className="text-xs">{f.maestro.descripcion}</TableCell>
+                      <TableCell className="text-xs">
+                        {f.maestro.descripcion}
+                        {!f.maestro.talleres && <Badge variant="outline" className="ml-2 text-[10px] text-amber-700 border-amber-300" title="Sin matriz de talleres: todos habilitados">sin matriz</Badge>}
+                      </TableCell>
                       <TableCell className="text-right tabular-nums font-semibold">{fmt(f.pedidoFinal)}</TableCell>
-                      <TableCell className="text-right tabular-nums text-gray-500" title={f.maestro.tapa ? `${f.maestro.tapa.descripcion} · ${f.maestro.tapa.tela} ${f.maestro.tapa.color}` : undefined}>
-                        {f.maestro.tapa ? fmt(f.pedidoFinal * f.maestro.tapa.tapasPorForro) : '—'}
+                      <TableCell className="text-right tabular-nums text-gray-500" title={f.tapa ? `${f.tapa.descripcion}${f.tapaPorBom ? ' (BOM)' : ` · ${f.tapa.tela} ${f.tapa.color}`}` : undefined}>
+                        {f.tapa ? fmt(f.pedidoFinal * f.tapa.tapasPorForro) : '—'}
                       </TableCell>
                       <TableCell className="text-right tabular-nums text-gray-500">{f.maestro.precio ? fmt(f.maestro.precio, 2) : '—'}</TableCell>
                       {TALLERES_ALMOHADA_EXCEL.map(t => {
@@ -848,12 +1040,90 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
             </Table>
           </div>
         </TabsContent>
+        {/* ---------------- Validar contra Excel ---------------- */}
+        <TabsContent value="validar" className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-white px-4 py-3">
+            <input ref={inputValRef} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={e => void cargarExcelValidacion(e.target.files?.[0])} />
+            <Button variant="outline" size="sm" onClick={() => inputValRef.current?.click()}>
+              <FileSpreadsheet className="w-4 h-4 mr-2" />{excelVal ? excelVal.nombre : 'Cargar Excel ALM'}
+            </Button>
+            {excelVal && (
+              <>
+                <Button size="sm" onClick={igualarAlExcel} title="Fecha de corte del Excel, cantidad programada y tránsito de la hoja PED COMPRAS">
+                  Igualar condiciones al Excel
+                </Button>
+                <span className="text-xs text-gray-500">Corte Excel: {excelVal.fechaCorte || '—'} · App: {fechaCorte}</span>
+              </>
+            )}
+            <div className="flex items-center gap-2 ml-auto">
+              <Label className="text-xs text-gray-500">Cantidad</Label>
+              <Button variant={baseCantidad === 'pendiente' ? 'default' : 'outline'} size="sm" className="h-7" onClick={() => setBaseCantidad('pendiente')}>Pendiente</Button>
+              <Button variant={baseCantidad === 'programada' ? 'default' : 'outline'} size="sm" className="h-7" onClick={() => setBaseCantidad('programada')}>Programada (Excel)</Button>
+            </div>
+          </div>
+
+          {excelVal && (
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                {resumenValidacion.map(r => (
+                  <Badge key={r.etiqueta} variant="outline" className={cn('text-xs', r.ok === comparacion.length ? 'border-emerald-300 text-emerald-700' : 'border-amber-300 text-amber-700')}>
+                    {r.etiqueta}: {r.ok}/{comparacion.length}
+                  </Badge>
+                ))}
+                <div className="flex items-center gap-2 ml-auto">
+                  <Switch id="alm-solo-dif" checked={soloDiferencias} onCheckedChange={setSoloDiferencias} />
+                  <Label htmlFor="alm-solo-dif" className="text-sm">Solo diferencias</Label>
+                  <Button variant="outline" size="sm" onClick={exportarComparacion}><Download className="w-4 h-4 mr-2" />Excel</Button>
+                </div>
+              </div>
+              <div className="border rounded-lg overflow-auto max-h-[65vh] bg-white">
+                <Table>
+                  <TableHeader className="sticky top-0 bg-white z-10">
+                    <TableRow>
+                      <TableHead rowSpan={2}>Forro</TableHead>
+                      <TableHead rowSpan={2} className="min-w-[200px]">Descripción</TableHead>
+                      {METRICAS_VALIDACION.map(m => <TableHead key={m.clave} colSpan={2} className="text-center border-l">{m.etiqueta}</TableHead>)}
+                    </TableRow>
+                    <TableRow>
+                      {METRICAS_VALIDACION.map(m => (
+                        <React.Fragment key={m.clave}>
+                          <TableHead className="text-right text-[10px] border-l">Excel</TableHead>
+                          <TableHead className="text-right text-[10px]">App</TableHead>
+                        </React.Fragment>
+                      ))}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filasComparacion.map(c => (
+                      <TableRow key={c.codigo}>
+                        <TableCell className="font-mono text-xs">
+                          {c.codigo}
+                          {!c.enExcel && <Badge variant="outline" className="ml-1 text-[10px]">no Excel</Badge>}
+                        </TableCell>
+                        <TableCell className="text-xs">{c.descripcion}</TableCell>
+                        {c.metricas.map(m => (
+                          <React.Fragment key={m.clave}>
+                            <TableCell className="text-right tabular-nums text-xs text-gray-500 border-l">{fmt(m.excel, m.clave === 'diario' ? 1 : 0)}</TableCell>
+                            <TableCell className={cn('text-right tabular-nums text-xs', m.ok ? 'text-emerald-700' : 'bg-red-50 text-red-700 font-semibold')} title={m.ok ? undefined : `Dif: ${fmt(m.app - m.excel, 1)}`}>
+                              {fmt(m.app, m.clave === 'diario' ? 1 : 0)}
+                            </TableCell>
+                          </React.Fragment>
+                        ))}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          )}
+        </TabsContent>
       </Tabs>
 
       {sincronizadoEn && (
         <div className="text-[11px] text-gray-400 text-right">
           SAP {sincronizadoEn.toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' })}
-          {archivoMe2n ? ` · ME2N ${archivoMe2n.nombre}` : ''}
+          {transitoOrigen === 'excel' ? ' · tránsito: hoja PED COMPRAS' : archivoMe2n ? ` · ME2N ${archivoMe2n.nombre}` : ''}
+          {baseCantidad === 'programada' ? ' · cantidad programada' : ''}
         </div>
       )}
     </div>

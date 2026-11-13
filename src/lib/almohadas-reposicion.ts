@@ -12,7 +12,7 @@
  *  REV PED COMPRAS:
  *    necesidad semana = Σ pendiente de las órdenes FERT del forro con fecha ≤ fecha de corte
  *    stock final      = stock 1014 (libre utilización) + pedidos en tránsito − necesidad
- *    PP/SS            = PP + SS ÷ 2
+ *    PP/SS            = SS + PP ÷ 2   (así está en el Excel: VLOOKUP col 4 + col 3 ÷ 2)
  *    pedido           = PP/SS < stock final ? 0 : lote mínimo
  *    cobertura (días) = stock final ÷ consumo diario
  *
@@ -116,7 +116,8 @@ export interface ResultadoReposicion {
 
 export const calcularReposicion = (e: EntradaReposicion): ResultadoReposicion => {
   const stockFinal = e.stock + e.transito - e.necesidad;
-  const ppss = e.pp + e.ss / 2;
+  // Excel K = VLOOKUP(col 4 = SS) + VLOOKUP(col 3 = PP)/2 (verificado: 30003379 → 262 + 652/2 = 588).
+  const ppss = e.ss + e.pp / 2;
   const faltante = Math.max(0, ppss - stockFinal);
   // Sin consumo histórico (PP/SS = 0) solo se pide si la necesidad deja el stock en negativo.
   const pide = ppss >= stockFinal && (ppss > 0 || stockFinal < 0);
