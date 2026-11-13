@@ -21,6 +21,15 @@
  */
 
 export const ALMACEN_FORROS_ALMOHADA = '1014';
+// Almacenes que se leen de MB52 y ME2N. Los forros antifaz se reciben en 1015 (13-11: no tienen fila en
+// 1014); el resto solo cuenta 1014 — en 1015 tienen residuos de otras áreas que el Excel no suma.
+export const ALMACENES_LEIDOS = ['1014', '1015'];
+export const almacenesDeForro = (descripcion: string): string[] =>
+  /^FORRO ANTIFAZ/i.test(descripcion.trim()) ? ['1014', '1015'] : [ALMACEN_FORROS_ALMOHADA];
+// Stock y tránsito se guardan por material + almacén y se suman según almacenesDeForro.
+export const claveAlmacen = (material: string, almacen: string): string => `${material}|${almacen}`;
+export const sumarAlmacenes = (m: Map<string, number>, material: string, almacenes: string[]): number =>
+  almacenes.reduce((s, a) => s + (m.get(claveAlmacen(material, a)) ?? 0), 0);
 export const CENTRO_ALMOHADAS = '1000';
 
 export interface ParametrosSsPp {

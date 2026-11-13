@@ -25,6 +25,10 @@ import {
 import { leerExcelValidacion, type ExcelValidacion, type ValoresExcelForro } from '@/lib/almohadas-validacion-excel';
 import {
   ALMACEN_FORROS_ALMOHADA,
+  ALMACENES_LEIDOS,
+  almacenesDeForro,
+  claveAlmacen,
+  sumarAlmacenes,
   CENTRO_ALMOHADAS,
   PARAMETROS_SS_PP_DEFECTO,
   calcularReposicion,
@@ -165,7 +169,8 @@ const guardarAsignacion = (fechaCorte: string, a: Asignacion) => {
 };
 
 // Pedidos de compra abiertos (export ME2N, mismas columnas que la hoja "PED COMPRAS"): Material,
-// Almacén, Por entregar (cantidad). Se suman por material, solo almacén 1014 si la columna existe.
+// Almacén, Por entregar (cantidad). Se guardan por material + almacén (1014 y 1015; sin columna de
+// almacén = 1014); cada forro suma los suyos (almacenesDeForro).
 const leerMe2n = async (archivo: File): Promise<{ porMaterial: Map<string, number>; filas: number }> => {
   const wb = XLSX.read(await archivo.arrayBuffer(), { type: 'array', cellDates: true });
   const porMaterial = new Map<string, number>();
@@ -176,9 +181,10 @@ const leerMe2n = async (archivo: File): Promise<{ porMaterial: Map<string, numbe
       const material = limpiarCodigo(getProp(r, ['Material', 'MATERIAL']));
       const pendiente = num(getProp(r, ['Por entregar (cantidad)', 'Por entregar', 'CANT PENDIENTE', 'Cantidad pendiente']));
       if (!material || pendiente <= 0) return;
-      const almacen = limpiarCodigo(getProp(r, ['Almacén', 'Almacen', 'ALMACEN']));
-      if (almacen && almacen !== ALMACEN_FORROS_ALMOHADA) return;
-      porMaterial.set(material, (porMaterial.get(material) ?? 0) + pendiente);
+      const almacen = limpiarCodigo(getProp(r, ['Almacén', 'Almacen', 'ALMACEN'])) || ALMACEN_FORROS_ALMOHADA;
+      if (!ALMACENES_LEIDOS.includes(almacen)) return;
+      const clave = claveAlmacen(material, almacen);
+      porMaterial.set(clave, (porMaterial.get(clave) ?? 0) + pendiente);
       filas++;
     });
   });
@@ -375,7 +381,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       setTransito(porMaterial);
       setTransitoOrigen('me2n');
       setArchivoMe2n({ nombre: archivo.name, filas });
-      addNotification('success', `ME2N cargado: ${filas} posiciones abiertas, ${porMaterial.size} materiales.`);
+      addNotification('success', `ME2N cargado: ${filas} posiciones abiertas (1014/1015).`);
     } catch (e) {
       addNotification('error', `No se pudo leer el archivo ME2N: ${(e as Error).message}`);
     } finally {
@@ -429,11 +435,13 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   const stockPorMaterial = useMemo(() => {
     const m = new Map<string, number>();
     invRows.forEach(r => {
-      if (limpiarCodigo(getProp(r, ['ALMACEN'])) !== ALMACEN_FORROS_ALMOHADA) return;
+      const almacen = limpiarCodigo(getProp(r, ['ALMACEN']));
+      if (!ALMACENES_LEIDOS.includes(almacen)) return;
       const centro = getProp(r, ['CENTRO']);
       if (centro && centro !== CENTRO_ALMOHADAS) return;
       const material = limpiarCodigo(getProp(r, ['MATERIAL']));
-      m.set(material, (m.get(material) ?? 0) + num(getProp(r, ['LIBREUTILIZACION'])));
+      const clave = claveAlmacen(material, almacen);
+      m.set(clave, (m.get(clave) ?? 0) + num(getProp(r, ['LIBREUTILIZACION'])));
     });
     return m;
   }, [invRows]);
@@ -448,8 +456,9 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   const forros: ForroCalculado[] = useMemo(() => maestros.map(maestro => {
     const ordenes = ordenesPorForro.get(maestro.codigo) ?? [];
     const necesidad = ordenes.reduce((s, o) => s + o.cantidad, 0);
-    const stock = stockPorMaterial.get(maestro.codigo) ?? 0;
-    const tr = transito.get(maestro.codigo) ?? 0;
+    const almacenes = almacenesDeForro(maestro.descripcion);
+    const stock = sumarAlmacenes(stockPorMaterial, maestro.codigo, almacenes);
+    const tr = sumarAlmacenes(transito, maestro.codigo, almacenes);
     // PP / SS escritos a mano por el planificador en el Excel reemplazan al cálculo (igual que el Excel).
     const calculado = ssPpPorForro.get(maestro.codigo) ?? null;
     const ppManual = maestro.ppManual !== undefined;

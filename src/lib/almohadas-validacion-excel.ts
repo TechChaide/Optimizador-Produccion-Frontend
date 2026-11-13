@@ -8,6 +8,7 @@
  *  - PED COMPRAS: pedidos abiertos (mismas columnas que ME2N) → tránsito.
  */
 import * as XLSX from 'xlsx';
+import { ALMACEN_FORROS_ALMOHADA, ALMACENES_LEIDOS, claveAlmacen } from '@/lib/almohadas-reposicion';
 
 export interface ValoresExcelForro {
   codigo: string;
@@ -30,7 +31,7 @@ export interface ExcelValidacion {
   nombre: string;
   fechaCorte: string;
   forros: Map<string, ValoresExcelForro>;
-  // Pedidos abiertos de la hoja PED COMPRAS (Por entregar), por material.
+  // Pedidos abiertos de la hoja PED COMPRAS (Por entregar), por material + almacén (claveAlmacen).
   transito: Map<string, number>;
 }
 
@@ -133,10 +134,11 @@ export const leerExcelValidacion = async (archivo: File): Promise<ExcelValidacio
         const m = codigo(r?.[iMat]);
         const q = n(r?.[iPend]);
         if (!m || q <= 0) return;
-        // Mismo criterio que la carga ME2N del módulo: solo almacén 1014 (el Excel suma también 1015).
-        const almacen = String(r?.[iAlm] ?? '').trim();
-        if (iAlm >= 0 && almacen && almacen !== '1014') return;
-        transito.set(m, (transito.get(m) ?? 0) + q);
+        // Mismo criterio que la carga ME2N del módulo: 1014 y 1015 por separado; cada forro suma los suyos.
+        const almacen = (iAlm >= 0 ? String(r?.[iAlm] ?? '').trim() : '') || ALMACEN_FORROS_ALMOHADA;
+        if (!ALMACENES_LEIDOS.includes(almacen)) return;
+        const clave = claveAlmacen(m, almacen);
+        transito.set(clave, (transito.get(clave) ?? 0) + q);
       });
     }
   }
