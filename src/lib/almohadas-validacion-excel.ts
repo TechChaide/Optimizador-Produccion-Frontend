@@ -95,11 +95,18 @@ export const leerExcelValidacion = async (archivo: File): Promise<ExcelValidacio
   const calc = hoja(wb, 'CALCULO SS-PP');
   const vistosB = new Set<string>();
   const vistosI = new Set<string>();
+  // Solo la primera tabla (fila 13 en adelante, hasta el primer hueco de 3 filas): más abajo hay otra
+  // tabla dinámica con los mismos códigos y valores semanales en las columnas de cálculo (ej. 30005383).
+  let finTablaB = false;
+  let vacias = 0;
   for (let i = 12; i < calc.length; i++) {
     const r = calc[i] || [];
     const cB = codigo(r[col('B')]);
-    // Primera aparición: el mismo código vuelve a salir más abajo en otra tabla dinámica.
-    const fB = cB ? forros.get(cB) : undefined;
+    if (!finTablaB) {
+      vacias = cB ? 0 : vacias + 1;
+      if (vacias >= 3) finTablaB = true;
+    }
+    const fB = cB && !finTablaB ? forros.get(cB) : undefined;
     if (fB && !vistosB.has(cB)) {
       vistosB.add(cB);
       fB.consumoSemanal = n(r[col('BA')]);

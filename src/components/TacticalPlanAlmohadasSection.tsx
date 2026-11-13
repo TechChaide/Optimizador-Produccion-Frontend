@@ -108,6 +108,8 @@ interface ForroCalculado {
   loteCalculado: boolean;
   tapa: TapaAlmohada | undefined;
   tapaPorBom: boolean;
+  ppManual: boolean;
+  ssManual: boolean;
 }
 
 type Asignacion = Record<string, Record<string, number>>;
@@ -448,7 +450,17 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
     const necesidad = ordenes.reduce((s, o) => s + o.cantidad, 0);
     const stock = stockPorMaterial.get(maestro.codigo) ?? 0;
     const tr = transito.get(maestro.codigo) ?? 0;
-    const ssPp = ssPpPorForro.get(maestro.codigo) ?? null;
+    // PP / SS escritos a mano por el planificador en el Excel reemplazan al cálculo (igual que el Excel).
+    const calculado = ssPpPorForro.get(maestro.codigo) ?? null;
+    const ppManual = maestro.ppManual !== undefined;
+    const ssManual = maestro.ssManual !== undefined;
+    const ssPp: ResultadoSsPp | null = calculado || ppManual || ssManual
+      ? {
+        ...(calculado ?? { semanal: [], semanasConConsumo: 0, consumoSemanal: 0, consumoDiario: 0, desvSemanal: 0, ss: 0, pp: 0 }),
+        ...(ppManual ? { pp: maestro.ppManual! } : {}),
+        ...(ssManual ? { ss: maestro.ssManual! } : {}),
+      }
+      : null;
     const lote = loteDe(maestro, ssPp);
     const rep = calcularReposicion({
       necesidad,
@@ -463,7 +475,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
     const tapaBom = maestro.tapa ? undefined : tapasBom.get(maestro.codigo);
     return {
       maestro, ordenes, necesidad, stock, transito: tr, ssPp, rep, pedidoFinal: manual ?? rep.pedido,
-      ...lote, tapa: maestro.tapa ?? tapaBom, tapaPorBom: !!tapaBom,
+      ...lote, tapa: maestro.tapa ?? tapaBom, tapaPorBom: !!tapaBom, ppManual, ssManual,
     };
   }).sort((a, b) =>
     (PRIORIDAD_ORDEN[a.maestro.prioridad ?? ''] ?? 9) - (PRIORIDAD_ORDEN[b.maestro.prioridad ?? ''] ?? 9)
@@ -526,6 +538,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       'Lote min': f.loteMin,
       'Lote max': f.loteMax,
       'Lote calculado': f.loteCalculado ? 'SI' : '',
+      'PP/SS manual': [f.ppManual && 'PP', f.ssManual && 'SS'].filter(Boolean).join('+'),
       'Pedido sugerido': f.rep.pedido,
       'Pedido final': f.pedidoFinal,
       'Cobertura (dias)': f.rep.coberturaDias ?? '',
@@ -845,8 +858,8 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                     <TableCell className="text-right tabular-nums">{f.ssPp ? fmt(f.ssPp.consumoSemanal) : '—'}</TableCell>
                     <TableCell className="text-right tabular-nums">{f.ssPp ? fmt(f.ssPp.consumoDiario, 1) : '—'}</TableCell>
                     <TableCell className="text-right tabular-nums">{f.ssPp ? fmt(f.ssPp.desvSemanal) : '—'}</TableCell>
-                    <TableCell className="text-right tabular-nums">{f.ssPp ? fmt(f.ssPp.ss) : '—'}</TableCell>
-                    <TableCell className="text-right tabular-nums font-semibold">{f.ssPp ? fmt(f.ssPp.pp) : '—'}</TableCell>
+                    <TableCell className={cn('text-right tabular-nums', f.ssManual && 'italic text-violet-700')} title={f.ssManual ? 'SS manual (Excel)' : undefined}>{f.ssPp ? fmt(f.ssPp.ss) : '—'}</TableCell>
+                    <TableCell className={cn('text-right tabular-nums font-semibold', f.ppManual && 'italic text-violet-700')} title={f.ppManual ? 'PP manual (Excel)' : undefined}>{f.ssPp ? fmt(f.ssPp.pp) : '—'}</TableCell>
                     <TableCell className={cn('text-right tabular-nums', f.loteCalculado && 'italic text-blue-700')} title={f.loteCalculado ? 'Calculado: EVEN(semanal ÷ 2.5 × 5)' : undefined}>{f.loteMin ? fmt(f.loteMin) : '—'}</TableCell>
                     <TableCell className={cn('text-right tabular-nums', f.loteCalculado && 'italic text-blue-700')}>{f.loteMax ? fmt(f.loteMax) : '—'}</TableCell>
                   </TableRow>
