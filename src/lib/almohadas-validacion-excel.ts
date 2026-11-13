@@ -133,7 +133,9 @@ export const leerExcelValidacion = async (archivo: File): Promise<ExcelValidacio
         const m = codigo(r?.[iMat]);
         const q = n(r?.[iPend]);
         if (!m || q <= 0) return;
-        if (iAlm >= 0 && codigo(r?.[iAlm]) && String(r?.[iAlm]).trim() !== '1014') return;
+        // Mismo criterio que la carga ME2N del módulo: solo almacén 1014 (el Excel suma también 1015).
+        const almacen = String(r?.[iAlm] ?? '').trim();
+        if (iAlm >= 0 && almacen && almacen !== '1014') return;
         transito.set(m, (transito.get(m) ?? 0) + q);
       });
     }
