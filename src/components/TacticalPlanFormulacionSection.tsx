@@ -34,7 +34,7 @@ import { useAppContext } from '@/context/AppProvider';
 import type { Restriccion } from '@/types/interfaces';
 import type { CuboInventariosItem } from '@/types/types';
 import { cn } from '@/lib/utils';
-import { useReportePlanTxt, useAutoCargaPlanVigente, useReportePlanTxtGrupo, ReportePlanTxtAccionesGrupo, ReportePlanTxtVistaPreviaGrupo, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
+import { useReportePlanTxt, useAutoCargaPlanVigente, ReportePlanTxtAcciones, ReportePlanTxtVistaPrevia, type OrigenEstadoPlan } from '@/components/ReportePlanTxtFlujo';
 import { PanelProgreso, usePanelProgreso } from '@/components/PanelProgreso';
 import { guardarEnCache, leerDeCache, actualizarEnCache } from '@/lib/cache-modulos';
 import { CUPULA_MAX_CM } from '@/lib/bloques-espuma';
@@ -760,7 +760,7 @@ const extractMaterialInfo = (item: RawApiRow) => {
 
 // Orden fijo de aperturas técnicas (pedido por el usuario para los 3 espacios de Control
 // Curado: evaluación general + detalle Leader + detalle Cofama). "—" (sin apertura técnica,
-// materiales de combinación — ver summarySpaces más abajo) siempre al final.
+// materiales de combinación) siempre al final.
 const APERTURA_ORDEN = ['194.5', '206', '219', '228'];
 const aperturaSortIndex = (apertura: string): number => {
   const i = APERTURA_ORDEN.indexOf(apertura);
@@ -1518,15 +1518,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
   // a) Apertura: bloques con apertura técnica (194.5/206/219/228...) — línea continua LEADER.
   // b) Combinación: bloques sin apertura (ej. "BLOQUE FORMULADO D48 VISCO GEL CL 3un-135X190") —
   //    línea de combinación COFAMA.
-  const summarySpaces = useMemo(() => {
-    const apertura = unifiedSummaryData.filter(row => row.apertura !== '—');
-    const combinacion = unifiedSummaryData.filter(row => row.apertura === '—');
-    return { apertura, combinacion };
-  }, [unifiedSummaryData]);
-
   // "Reporte de producción" (EN DESARROLLO) — este módulo no tenía correo: el reporte se arma acá
-  // con el mismo esquema HTML de los correos de los otros módulos y el contenido de la tabla Resumen
-  // por centro (mismas columnas y misma Cobertura Actual que renderSummaryTable). Mismo flujo de 3
+  // con el mismo esquema HTML de los correos de los otros módulos. SOLO CENTRO 1000 (13-11, usuario):
+  // la espuma se fabrica únicamente en Quito; lo que consume GYE ya va dentro del plan de reposición
+  // Leader/Cofama del Centro 1000, así que el reporte del Centro 2000 se quitó. Mismo flujo de 3
   // pasos que Laminado/Corte Espuma/Venta Externa (Guardar -> Recuperar/vista previa -> Enviar, ver
   // ReportePlanTxtFlujo.tsx). Fecha objetivo = inicio del rango seleccionado (por defecto hoy), o hoy
   // en Plan Maestro.
@@ -1543,27 +1538,10 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     if (correos.length > 0) setDestinatariosReporte(prev => prev.trim() ? prev : correos.join(', '));
   }, [restricciones]);
 
-  const construirReporteHtmlFormulacion = (centro: '1000' | '2000', fechaObjetivo: string) => {
+  const construirReporteHtmlFormulacion = (fechaObjetivo: string) => {
     const esc = (v: unknown) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const th = (t: string, right = false) => `<td${right ? ' align="right"' : ''} style="padding:6px 8px;font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;background:#f9fafb;border-bottom:1px solid #e5e7eb;">${t}</td>`;
     const td = (t: string, right = false) => `<td${right ? ' align="right"' : ''} style="padding:5px 8px;font-size:11px;color:#374151;border-bottom:1px solid #f3f4f6;">${t}</td>`;
-    const seccion = (titulo: string, filas: FormuladoSummaryRow[]) => {
-      if (filas.length === 0) return `<p style="margin:18px 0 6px;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">${titulo}</p><p style="font-size:11px;color:#9ca3af;">Sin bloques para este centro.</p>`;
-      const tStockKg = filas.reduce((s, r) => s + r.stockKg, 0);
-      const tStockUtilKg = filas.reduce((s, r) => s + r.stockUtilUN * r.pesoBloque, 0);
-      const tConsumoKg = filas.reduce((s, r) => s + r.consumoDiarioKg, 0);
-      const tReposicion = filas.reduce((s, r) => s + r.planReposicion, 0);
-      return `
-<p style="margin:18px 0 6px;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">${titulo}</p>
-<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #e5e7eb;border-collapse:collapse;">
-  <tr>${th('Bloque')}${th('Corrida')}${th('Descripción')}${th('Dens.')}${th('Apert.')}${th('Pendiente (Bloq)', true)}${th('Planificado (Bloq)', true)}${th('Stock (Kg)', true)}${th('Stock (UN)', true)}${th('En Curado (UN)', true)}${th('Stock Útil (UN)', true)}${th('Consumo/D (Kg)', true)}${th('Cobertura (Días)', true)}${th('Plan Reposición (UN)', true)}</tr>
-  ${filas.map(r => {
-    const cobertura = r.consumoDiarioKg > 0 ? (r.stockUtilUN * r.pesoBloque) / r.consumoDiarioKg : null;
-    return `<tr>${td(esc(r.blockCode))}${td(esc(r.corrida))}${td(esc(r.blockDesc))}${td(esc(r.dens))}${td(esc(r.apertura))}${td(r.totalBloquesPendiente.toFixed(2), true)}${td(r.totalBloquesPlanificado.toFixed(2), true)}${td(formatNum(r.stockKg, 0), true)}${td(r.stockUN.toFixed(1), true)}${td(r.stockEnCuradoUN.toFixed(1), true)}${td(r.stockUtilUN.toFixed(1), true)}${td(r.consumoDiarioKg.toFixed(1), true)}${td(cobertura === null ? '—' : cobertura.toFixed(1), true)}${td(String(r.planReposicion), true)}</tr>`;
-  }).join('')}
-</table>
-<p style="margin:6px 0 0;font-size:11px;font-weight:700;color:#b45309;">Totales — Stock: ${formatNum(tStockKg, 0)} Kg · Cobertura sección: ${tConsumoKg > 0 ? (tStockUtilKg / tConsumoKg).toFixed(1) : '—'} días · Plan Reposición: ${tReposicion} UN</p>`;
-    };
     const seccionLeader = () => {
       const titulo = `<p style="margin:18px 0 6px;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">Bloque Formulado Leader — Plan de Reposición</p>`;
       if (!reposicion) return `${titulo}<p style="font-size:11px;color:#9ca3af;">Sin plan de reposición.</p>`;
@@ -1610,21 +1588,20 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
 <div style="max-width:960px;margin:0 auto;background:#ffffff;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#4f46e5;"><tr><td style="padding:18px 24px;font-size:15px;font-weight:700;color:#ffffff;">CHAIDE Y CHAIDE</td><td align="right" style="padding:18px 24px;font-size:11px;font-weight:600;text-transform:uppercase;color:#c7d2fe;">Planificación de Producción</td></tr></table>
 <div style="padding:20px 24px 24px;">
-<p style="margin:0;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">Formulación · Centro ${centro} (${centro === '1000' ? 'Quito' : 'Guayaquil'}) · Reporte diario</p>
+<p style="margin:0;font-size:10px;font-weight:700;text-transform:uppercase;color:#6b7280;">Formulación · Centro 1000 (Quito) · Reporte diario</p>
 <h1 style="margin:4px 0 0;font-size:20px;color:#111827;">Bloque Formulado — necesidad, stock y plan de reposición</h1>
 <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">Fecha objetivo: ${fechaObjetivo} · Ventana FERT: ${rango}</p>
-${centro === '1000' ? seccionLeader() : seccion('Bloque Formulado — Apertura', summarySpaces.apertura.filter(r => r.centro === centro))}
-${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinación (sin apertura técnica)', summarySpaces.combinacion.filter(r => r.centro === centro))}
+${seccionLeader()}
+${seccionCofama()}
 <p style="margin:20px 0 0;padding-top:14px;border-top:1px solid #e5e7eb;font-size:11px;color:#9ca3af;">Generado automáticamente por el Optimizador de Producción, favor no responder. Para dudas sobre estos datos, contacta a Planificación Táctica.</p>
 </div>
 </div>`;
   };
 
   const fechaObjetivoReporte = ventana.d;
-  const asuntoReporteFormulacion = (centro: '1000' | '2000') => `Reporte de producción — Formulación [Bloque Formulado]-[Centro ${centro}]`;
+  const asuntoReporteFormulacion = 'Reporte de producción — Formulación [Bloque Formulado]-[Centro 1000]';
   // Respaldo de "Salida de Datos" que viaja junto al TXT ({fecha}.estado.json) para volver a cargar
-  // lo planificado desde "Recuperar y revisar" (mismo flujo que Corte Laminado). Cubre ambos centros:
-  // se guarda una sola vez, en el reporte del Centro 1000.
+  // lo planificado desde "Recuperar y revisar" (mismo flujo que Corte Laminado).
   const capturarEstadoPlan = (): EstadoPlanFormulacion => ({
     tipo: 'formulacion-salida',
     version: 2,
@@ -1648,27 +1625,16 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
     return true;
   };
 
-  const reporteFlujo1000 = useReportePlanTxt({
+  const reporteFlujo = useReportePlanTxt({
     modulo: 'formulacion',
     centro: '1000',
     fechaObjetivo: fechaObjetivoReporte,
-    asunto: asuntoReporteFormulacion('1000'),
-    construirHtml: () => construirReporteHtmlFormulacion('1000', fechaObjetivoReporte),
+    asunto: asuntoReporteFormulacion,
+    construirHtml: () => construirReporteHtmlFormulacion(fechaObjetivoReporte),
     etiqueta: 'Centro 1000',
     capturarEstado: capturarEstadoPlan,
     restaurarEstado: restaurarEstadoPlan,
   });
-  const reporteFlujo2000 = useReportePlanTxt({
-    modulo: 'formulacion',
-    centro: '2000',
-    fechaObjetivo: fechaObjetivoReporte,
-    asunto: asuntoReporteFormulacion('2000'),
-    construirHtml: () => construirReporteHtmlFormulacion('2000', fechaObjetivoReporte),
-    etiqueta: 'Centro 2000',
-  });
-  // Los dos centros son el mismo reporte: un solo Guardar / Revisar / Enviar para ambos.
-  const reporteGrupo = useReportePlanTxtGrupo([reporteFlujo1000, reporteFlujo2000]);
-  // Solo el reporte del Centro 1000 lleva el respaldo del módulo (ver reporteFlujo1000).
   useAutoCargaPlanVigente({
     modulo: 'formulacion',
     centros: ['1000'],
@@ -1677,22 +1643,20 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
     restaurar: restaurarEstadoPlan,
   });
 
-  // Fase 2 del panel (igual que los otros 3 módulos): tras generar necesidades, guarda el reporte de
-  // ambos centros (reemplaza el existente) y cierra con "Ver reporte y enviar". El envío sigue manual.
+  // Fase 2 del panel (igual que los otros 3 módulos): tras generar necesidades, guarda el reporte del
+  // Centro 1000 (reemplaza el existente) y cierra con "Ver reporte y enviar". El envío sigue manual.
   useEffect(() => {
     if (!reportePorGuardar) return;
     setReportePorGuardar(false);
     void (async () => {
       panelProgreso.actualizar('rep', { estado: 'en_curso' });
-      const oks: boolean[] = [];
-      for (const f of reporteGrupo.flujos) oks.push(await f.guardar({ sinConfirmar: true, silencioso: true }));
-      const ok = oks.some(Boolean);
+      const ok = await reporteFlujo.guardar({ sinConfirmar: true, silencioso: true });
       panelProgreso.actualizar('rep', ok
-        ? { estado: oks.every(Boolean) ? 'ok' : 'aviso', detalle: `Reporte del ${fechaObjetivoReporte} guardado en la carpeta compartida${oks.every(Boolean) ? '' : ' (un centro falló, reintenta desde "Enviar Reporte")'} — todavía no se envió.` }
+        ? { estado: 'ok', detalle: `Reporte del ${fechaObjetivoReporte} guardado en la carpeta compartida — todavía no se envió.` }
         : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
       panelProgreso.concluir(
         ok ? 'Necesidades y reporte guardados. Revisa y envía el reporte.' : undefined,
-        ok ? [{ etiqueta: 'Ver reporte y enviar', onClick: () => { void reporteGrupo.recuperarTodos(fechaObjetivoReporte); } }] : [],
+        ok ? [{ etiqueta: 'Ver reporte y enviar', onClick: () => { void reporteFlujo.recuperar(); } }] : [],
       );
     })();
   }, [reportePorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -2739,7 +2703,7 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
               <Button
                 variant="outline"
                 disabled={isProcessingResumen || (unifiedSummaryData.length === 0 && !reposicion && !reposicionCofama)}
-                title="Guarda el Resumen (Plan de Reposición) por centro y envíalo por correo desde la vista previa"
+                title="Guarda el Plan de Reposición del Centro 1000 y envíalo por correo desde la vista previa"
                 className="h-10 px-4 rounded-xl gap-2 font-black text-[10px] uppercase border-indigo-200 text-indigo-700 hover:bg-indigo-50"
               >
                 <Mail className="w-4 h-4" /> Reporte
@@ -2749,12 +2713,12 @@ ${centro === '1000' ? seccionCofama() : seccion('Bloque Formulado — Combinaci�
               <div>
                 <p className="text-xs font-black uppercase tracking-widest text-slate-700">Reporte de producción <span className="text-amber-600">(en desarrollo)</span></p>
               </div>
-              <ReportePlanTxtAccionesGrupo grupo={reporteGrupo} />
+              <ReportePlanTxtAcciones flujo={reporteFlujo} compacto />
             </PopoverContent>
           </Popover>
-          <ReportePlanTxtVistaPreviaGrupo
-            grupo={reporteGrupo}
-            titulo="Formulación [Bloque Formulado]"
+          <ReportePlanTxtVistaPrevia
+            flujo={reporteFlujo}
+            titulo="Formulación [Bloque Formulado] — Centro 1000"
             destinatarios={destinatariosReporte}
             onDestinatariosChange={setDestinatariosReporte}
           />
