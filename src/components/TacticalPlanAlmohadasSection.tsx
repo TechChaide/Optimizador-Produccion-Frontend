@@ -132,6 +132,10 @@ const FORROS_POR_FERT = (() => {
 
 // Lote cuando el Excel no lo trae: misma fórmula del Excel (CALCULO SS-PP, BJ y BP):
 // mínimo = EVEN(consumo semanal ÷ 2.5 × 5), máximo = mínimo × 1.5.
+// Forros 40002xxx sin taller en Matriz_cod_tela: proceso interno con consumo de tela automatizado, no se subcontratan.
+const esForroInterno = (m: ForroAlmohadaMaestro) => m.talleres?.length === 0;
+const FORROS_INTERNOS = new Set(FORROS_ALMOHADA_EXCEL.filter(esForroInterno).map(f => f.codigo));
+
 const loteDe = (m: ForroAlmohadaMaestro, ssPp: ResultadoSsPp | null) => {
   if ((m.loteMin ?? 0) > 0) return { loteMin: m.loteMin!, loteMax: m.loteMax || m.loteMin! * 1.5, loteCalculado: false };
   const semanal = ssPp?.consumoSemanal ?? 0;
@@ -287,6 +291,9 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   const [forrosPorFertBom, setForrosPorFertBom] = useState<Map<string, ComponenteForro[]>>(new Map());
   const [forrosExtra, setForrosExtra] = useState<ForroAlmohadaMaestro[]>([]);
   const [tapasBom, setTapasBom] = useState<Map<string, TapaAlmohada>>(new Map());
+  // FERT con TELA directa en la LM (sin forro): proceso interno, fuera del plan.
+  const [telaPorFertBom, setTelaPorFertBom] = useState<Map<string, string>>(new Map());
+  const [verInternos, setVerInternos] = useState(false);
 
   // Validación contra el Excel.
   const [baseCantidad, setBaseCantidad] = useState<'pendiente' | 'programada'>('pendiente');
@@ -295,7 +302,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   const [transitoOrigen, setTransitoOrigen] = useState<'me2n' | 'excel' | null>(null);
   const inputValRef = useRef<HTMLInputElement>(null);
 
-  const maestros = useMemo(() => [...FORROS_ALMOHADA_EXCEL, ...forrosExtra], [forrosExtra]);
+  const maestros = useMemo(() => [...FORROS_ALMOHADA_EXCEL, ...forrosExtra].filter(m => !esForroInterno(m)), [forrosExtra]);
 
   useEffect(() => {
     setAsignacion(leerAsignacion(fechaCorte));
@@ -322,13 +329,17 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
         return fert && !FORROS_POR_FERT.has(fert) ? [fert] : [];
       })));
       const mapaBom = new Map<string, ComponenteForro[]>();
+      const telas = new Map<string, string>();
       const nuevos = new Map<string, ForroAlmohadaMaestro>();
       const codigosSeed = new Set(FORROS_ALMOHADA_EXCEL.map(f => f.codigo));
       if (fertsSinForro.length) {
         setAvance({ etapa: 'BOM FERT sin forro', n: 0, total: fertsSinForro.length });
         await enParalelo(fertsSinForro, 6, async fert => {
           try {
-            const comps = (await hijosBom(fert)).filter(f => descComponente(f).startsWith('FORRO'));
+            const hijos = await hijosBom(fert);
+            const comps = hijos.filter(f => descComponente(f).startsWith('FORRO'));
+            const tela = comps.length ? undefined : hijos.find(f => descComponente(f).startsWith('TELA'));
+            if (tela) telas.set(fert, `${limpiarCodigo(getProp(tela, ['COMPONENTE']))} ${descComponente(tela)}`.trim());
             const lista = comps.map(f => ({ forro: limpiarCodigo(getProp(f, ['COMPONENTE'])), factor: num(getProp(f, ['CANTIDAD_UNITARIA'])) || 1 }))
               .filter(c => c.forro);
             if (lista.length) mapaBom.set(fert, lista);
@@ -342,10 +353,11 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
         }, n => setAvance({ etapa: 'BOM FERT sin forro', n, total: fertsSinForro.length }));
       }
       setForrosPorFertBom(mapaBom);
+      setTelaPorFertBom(telas);
       setForrosExtra(Array.from(nuevos.values()));
 
       // Tapas que el Excel no trae → hijos "TAPA..." del forro en la BOM.
-      const todos = [...FORROS_ALMOHADA_EXCEL, ...nuevos.values()];
+      const todos = [...FORROS_ALMOHADA_EXCEL, ...nuevos.values()].filter(f => !esForroInterno(f));
       const sinTapa = todos.filter(f => !f.tapa).map(f => f.codigo);
       const tapas = new Map<string, TapaAlmohada>();
       if (sinTapa.length) {
@@ -414,9 +426,10 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   };
 
   // ---------------- Paso 1: necesidad por forro ----------------
-  const { ordenesPorForro, sinMapear } = useMemo(() => {
+  const { ordenesPorForro, sinMapear, internos } = useMemo(() => {
     const porForro = new Map<string, OrdenForro[]>();
     const sinMapearMap = new Map<string, { fert: string; descripcion: string; cantidad: number; ordenes: number }>();
+    const internosMap = new Map<string, { fert: string; descripcion: string; componente: string; cantidad: number; ordenes: number }>();
     fertRows.forEach(o => {
       const centro = getProp(o, ['CENTRO']);
       if (centro && centro !== CENTRO_ALMOHADAS) return;
@@ -431,6 +444,15 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       const descripcionFert = getProp(o, ['NOMBRE', 'DESCRIPCION', 'TEXTO']);
       const porBom = !FORROS_POR_FERT.has(fert);
       const forros = FORROS_POR_FERT.get(fert) ?? forrosPorFertBom.get(fert);
+      const tela = telaPorFertBom.get(fert);
+      const forroInterno = forros?.find(c => FORROS_INTERNOS.has(c.forro));
+      if (tela || forroInterno) {
+        const previo = internosMap.get(fert) ?? { fert, descripcion: descripcionFert, componente: tela ?? forroInterno!.forro, cantidad: 0, ordenes: 0 };
+        previo.cantidad += cantidad;
+        previo.ordenes += 1;
+        internosMap.set(fert, previo);
+        return;
+      }
       if (!forros) {
         const sector = getProp(o, ['SECTORDESC', 'SECTOR']).toUpperCase();
         if (sector.includes('ALMOHADA')) {
@@ -452,8 +474,9 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
     return {
       ordenesPorForro: porForro,
       sinMapear: Array.from(sinMapearMap.values()).sort((a, b) => b.cantidad - a.cantidad),
+      internos: Array.from(internosMap.values()).sort((a, b) => b.cantidad - a.cantidad),
     };
-  }, [fertRows, fechaCorte, baseCantidad, forrosPorFertBom]);
+  }, [fertRows, fechaCorte, baseCantidad, forrosPorFertBom, telaPorFertBom]);
 
   // ---------------- Paso 2: stock 1014 ----------------
   const stockPorMaterial = useMemo(() => {
@@ -804,6 +827,41 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
               )}
             </div>
           )}
+          {internos.length > 0 && (
+            <div className="rounded-md border border-gray-200 bg-gray-50 text-sm text-gray-700">
+              <button type="button" className="flex w-full items-center gap-2 px-4 py-2 text-left" onClick={() => setVerInternos(v => !v)}
+                title="Tela directa en la LM o forro sin taller en Matriz_cod_tela: consumo de tela interno, no se subcontrata">
+                {verInternos ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                {internos.length} FERT fuera del plan · proceso interno ({fmt(internos.reduce((s, x) => s + x.cantidad, 0))} UN)
+              </button>
+              {verInternos && (
+                <div className="px-4 pb-3">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>FERT</TableHead>
+                        <TableHead>Descripción</TableHead>
+                        <TableHead>Forro / Tela (LM)</TableHead>
+                        <TableHead className="text-right">Órdenes</TableHead>
+                        <TableHead className="text-right">Cantidad</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {internos.map(x => (
+                        <TableRow key={x.fert}>
+                          <TableCell className="font-mono text-xs">{x.fert}</TableCell>
+                          <TableCell className="text-xs">{x.descripcion}</TableCell>
+                          <TableCell className="text-xs">{x.componente}</TableCell>
+                          <TableCell className="text-right tabular-nums">{x.ordenes}</TableCell>
+                          <TableCell className="text-right tabular-nums">{fmt(x.cantidad)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </div>
+          )}
           <div className="border rounded-lg overflow-auto max-h-[65vh] bg-white">
             <Table>
               <TableHeader className="sticky top-0 bg-white z-10">
@@ -1077,7 +1135,6 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                       <TableCell className="text-xs">
                         {f.maestro.descripcion}
                         {!f.maestro.talleres && <Badge variant="outline" className="ml-2 text-[10px] text-amber-700 border-amber-300" title="Sin matriz de talleres: todos habilitados">sin matriz</Badge>}
-                        {f.maestro.talleres?.length === 0 && <Badge variant="outline" className="ml-2 text-[10px] text-red-700 border-red-300" title="Ningún taller marcado en Matriz_cod_tela: no entra al objetivo ni a Distribuir">sin taller</Badge>}
                         {f.maestro.tela &&<div className="text-[10px] text-gray-400">{normalizarTela(f.maestro.tela)}</div>}
                       </TableCell>
                       <TableCell className="text-right tabular-nums font-semibold">{fmt(f.pedidoFinal)}</TableCell>
