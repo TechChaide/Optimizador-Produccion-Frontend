@@ -39,6 +39,17 @@ import {
   type ResultadoReposicion,
   type ResultadoSsPp,
 } from '@/lib/almohadas-reposicion';
+import { PROTECTORES_EXCEL, TALLERES_PROTECTOR_EXCEL, type ProtectorMaestro } from '@/data/protectoresExcel';
+import {
+  ALMACENES_PROTECTOR,
+  PARAMETROS_PROTECTOR_DEFECTO,
+  calcularReposicionProtector,
+  calcularSsPpProtector,
+  type MovimientoProtector,
+  type ParametrosProtector,
+  type ResultadoReposicionProtector,
+  type ResultadoSsPpProtector,
+} from '@/lib/protectores-reposicion';
 
 type Fila = Record<string, unknown>;
 
@@ -193,10 +204,13 @@ const guardarAsignacion = (fechaCorte: string, a: Asignacion) => {
 
 // Pedidos de compra abiertos (export ME2N, mismas columnas que la hoja "PED COMPRAS"): Material,
 // Almacén, Por entregar (cantidad). Se guardan por material + almacén (1014 y 1015; sin columna de
-// almacén = 1014); cada forro suma los suyos (almacenesDeForro).
-const leerMe2n = async (archivo: File): Promise<{ porMaterial: Map<string, number>; filas: number }> => {
+// almacén = 1014); cada forro suma los suyos (almacenesDeForro). Los protectores FERT suman su pedido
+// en cualquier almacén (porFert).
+const leerMe2n = async (archivo: File): Promise<{ porMaterial: Map<string, number>; porFert: Map<string, number>; filas: number }> => {
   const wb = XLSX.read(await archivo.arrayBuffer(), { type: 'array', cellDates: true });
   const porMaterial = new Map<string, number>();
+  const porFert = new Map<string, number>();
+  const fertsProtector = new Set(PROTECTORES_EXCEL.map(p => p.fert));
   let filas = 0;
   wb.SheetNames.forEach(nombre => {
     const rows = XLSX.utils.sheet_to_json<Fila>(wb.Sheets[nombre], { defval: '' });
@@ -204,6 +218,11 @@ const leerMe2n = async (archivo: File): Promise<{ porMaterial: Map<string, numbe
       const material = limpiarCodigo(getProp(r, ['Material', 'MATERIAL']));
       const pendiente = num(getProp(r, ['Por entregar (cantidad)', 'Por entregar', 'CANT PENDIENTE', 'Cantidad pendiente']));
       if (!material || pendiente <= 0) return;
+      if (fertsProtector.has(material)) {
+        porFert.set(material, (porFert.get(material) ?? 0) + pendiente);
+        filas++;
+        return;
+      }
       const almacen = limpiarCodigo(getProp(r, ['Almacén', 'Almacen', 'ALMACEN'])) || ALMACEN_FORROS_ALMOHADA;
       if (!ALMACENES_LEIDOS.includes(almacen)) return;
       const clave = claveAlmacen(material, almacen);
@@ -211,8 +230,62 @@ const leerMe2n = async (archivo: File): Promise<{ porMaterial: Map<string, numbe
       filas++;
     });
   });
-  return { porMaterial, filas };
+  return { porMaterial, porFert, filas };
 };
+
+// Salidas 601 (entrega, cantidad negativa en SAP) y 602 (reversa) de un protector FERT.
+const descargarSalidasProtector = async (fert: string): Promise<MovimientoProtector[]> => {
+  const r = await serviciosService.getConsumosFormulado(fert);
+  return filasDe(r).flatMap(f => {
+    const mov = getProp(f, ['Movimiento', 'MOVIMIENTO']);
+    if (mov !== '601' && mov !== '602') return [];
+    const fecha = aFecha(fechaISO(getProp(f, ['Fecha', 'FECHA'])));
+    return fecha ? [{ fecha, cantidad: -num(getProp(f, ['Cantidad', 'CANTIDAD'])) }] : [];
+  });
+};
+
+interface ProtectorCalculado {
+  maestro: ProtectorMaestro;
+  stockPorAlmacen: number[]; // mismo orden que ALMACENES_PROTECTOR
+  stock: number;
+  transito: number;
+  ssPp: ResultadoSsPpProtector;
+  rep: ResultadoReposicionProtector;
+  pedidoFinal: number;
+}
+
+// Capacidad semanal (UN) por taller de protectores: punto medio del rango del Excel; editable.
+type CapacidadProtector = Record<string, number>;
+const CLAVE_CAPACIDAD_PROT = 'protectores-subcontratacion-capacidad';
+const CAPACIDAD_PROT_EXCEL: CapacidadProtector = Object.fromEntries(
+  TALLERES_PROTECTOR_EXCEL.map(t => [t.nombre, (t.capacidadMin + t.capacidadMax) / 2]),
+);
+const leerCapacidadProt = (): CapacidadProtector => {
+  try {
+    const raw = localStorage.getItem(CLAVE_CAPACIDAD_PROT);
+    return raw ? { ...CAPACIDAD_PROT_EXCEL, ...(JSON.parse(raw) as CapacidadProtector) } : CAPACIDAD_PROT_EXCEL;
+  } catch {
+    return CAPACIDAD_PROT_EXCEL;
+  }
+};
+const CLAVE_ASIGNACION_PROT = 'protectores-subcontratacion:';
+const leerAsignacionProt = (fechaCorte: string): Asignacion => {
+  try {
+    const raw = localStorage.getItem(CLAVE_ASIGNACION_PROT + fechaCorte);
+    return raw ? (JSON.parse(raw) as Asignacion) : {};
+  } catch {
+    return {};
+  }
+};
+const guardarLocal = (clave: string, valor: unknown) => {
+  try {
+    localStorage.setItem(clave, JSON.stringify(valor));
+  } catch {
+    /* sin almacenamiento local */
+  }
+};
+// Lotes del Excel de protectores ("LOTES 30" en dISTRIBUCIÓN).
+const PARAMETROS_DIST_PROT = { paquete: 30, minimoPorTaller: 30, agruparPorTela: false };
 
 // Movimientos 261 (consumo, cantidad negativa en SAP) y 262 (reversa) de un forro.
 const descargarConsumos = async (codigo: string): Promise<MovimientoForro[]> => {
@@ -302,13 +375,26 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   const [transitoOrigen, setTransitoOrigen] = useState<'me2n' | 'excel' | null>(null);
   const inputValRef = useRef<HTMLInputElement>(null);
 
-  const maestros = useMemo(() => [...FORROS_ALMOHADA_EXCEL, ...forrosExtra].filter(m => !esForroInterno(m)), [forrosExtra]);
+  // Protectores: solo reposición de stock hasta SS/PP.
+  const [salidasProt, setSalidasProt] = useState<Map<string, MovimientoProtector[]>>(new Map());
+  const [salidasProtFallidas, setSalidasProtFallidas] = useState<string[]>([]);
+  const [paramsProt, setParamsProt] = useState<ParametrosProtector>(PARAMETROS_PROTECTOR_DEFECTO);
+  const [transitoProt, setTransitoProt] = useState<Map<string, number>>(new Map());
+  const [pedidoManualProt, setPedidoManualProt] = useState<Record<string, number>>({});
+  const [soloConPedidoProt, setSoloConPedidoProt] = useState(true);
+  const [expandidosProt, setExpandidosProt] = useState<Set<string>>(new Set());
+  const [asignacionProt, setAsignacionProt] = useState<Asignacion>({});
+  const [capacidadProt, setCapacidadProt] = useState<CapacidadProtector>(CAPACIDAD_PROT_EXCEL);
+
+  const maestros =useMemo(() => [...FORROS_ALMOHADA_EXCEL, ...forrosExtra].filter(m => !esForroInterno(m)), [forrosExtra]);
 
   useEffect(() => {
     setAsignacion(leerAsignacion(fechaCorte));
+    setAsignacionProt(leerAsignacionProt(fechaCorte));
   }, [fechaCorte]);
   useEffect(() => {
     setCapacidad(leerCapacidad());
+    setCapacidadProt(leerCapacidadProt());
   }, []);
 
   const sincronizar = useCallback(async () => {
@@ -396,8 +482,28 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       );
       setConsumos(new Map(resultados));
       setConsumosFallidos(fallidos);
+
+      const ferts = PROTECTORES_EXCEL.map(p => p.fert);
+      const fallidosProt: string[] = [];
+      setAvance({ etapa: 'Salidas MB51 protectores', n: 0, total: ferts.length });
+      const salidas = await enParalelo(
+        ferts,
+        6,
+        async c => {
+          try {
+            return [c, await descargarSalidasProtector(c)] as const;
+          } catch {
+            fallidosProt.push(c);
+            return [c, [] as MovimientoProtector[]] as const;
+          }
+        },
+        n => setAvance({ etapa: 'Salidas MB51 protectores', n, total: ferts.length }),
+      );
+      setSalidasProt(new Map(salidas));
+      setSalidasProtFallidas(fallidosProt);
       setSincronizadoEn(new Date());
       if (fallidos.length) addNotification('warning', `Sin consumos MB51 para ${fallidos.length} forros.`);
+      if (fallidosProt.length) addNotification('warning', `Sin salidas MB51 para ${fallidosProt.length} protectores.`);
     } catch (e) {
       addNotification('error', `Error al sincronizar Almohadas: ${(e as Error).message}`);
     } finally {
@@ -413,11 +519,12 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   const cargarMe2n = async (archivo: File | undefined) => {
     if (!archivo) return;
     try {
-      const { porMaterial, filas } = await leerMe2n(archivo);
+      const { porMaterial, porFert, filas } = await leerMe2n(archivo);
       setTransito(porMaterial);
+      setTransitoProt(porFert);
       setTransitoOrigen('me2n');
       setArchivoMe2n({ nombre: archivo.name, filas });
-      addNotification('success', `ME2N cargado: ${filas} posiciones abiertas (1014/1015).`);
+      addNotification('success', `ME2N cargado: ${filas} posiciones abiertas (forros 1014/1015 · ${porFert.size} protectores).`);
     } catch (e) {
       addNotification('error', `No se pudo leer el archivo ME2N: ${(e as Error).message}`);
     } finally {
@@ -585,6 +692,93 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
   // Conserva lo escrito a mano y reparte solo lo que falta de cada forro.
   const distribuir = () => fijarAsignacion(distribuirPedido(forrosDist, talleresDist, asignacion, paramDist));
 
+  // ---------------- Protectores: necesidad (SS/PP) y reposición ----------------
+  const stockProtector = useMemo(() => {
+    const m = new Map<string, number>();
+    invRows.forEach(r => {
+      const centro = getProp(r, ['CENTRO']);
+      const almacen = limpiarCodigo(getProp(r, ['ALMACEN']));
+      if (!ALMACENES_PROTECTOR.some(a => a.almacen === almacen && (!centro || a.centro === centro))) return;
+      const clave = claveAlmacen(limpiarCodigo(getProp(r, ['MATERIAL'])), almacen);
+      m.set(clave, (m.get(clave) ?? 0) + num(getProp(r, ['LIBREUTILIZACION'])));
+    });
+    return m;
+  }, [invRows]);
+
+  const protectores: ProtectorCalculado[] = useMemo(() => PROTECTORES_EXCEL.map(maestro => {
+    const stockPorAlmacen = ALMACENES_PROTECTOR.map(a => stockProtector.get(claveAlmacen(maestro.fert, a.almacen)) ?? 0);
+    const stock = stockPorAlmacen.reduce((s, v) => s + v, 0);
+    const transitoFert = transitoProt.get(maestro.fert) ?? 0;
+    const ssPp = calcularSsPpProtector(salidasProt.get(maestro.fert) ?? [], maestro.paquete, paramsProt);
+    const rep = calcularReposicionProtector({ stock, transito: transitoFert, ppss: ssPp.ppss, diario: ssPp.diario, paquete: maestro.paquete });
+    return { maestro, stockPorAlmacen, stock, transito: transitoFert, ssPp, rep, pedidoFinal: pedidoManualProt[maestro.fert] ?? rep.pedido };
+  }).sort((a, b) => b.rep.faltante - a.rep.faltante || b.ssPp.demandaSemanal - a.ssPp.demandaSemanal),
+  [stockProtector, transitoProt, salidasProt, paramsProt, pedidoManualProt]);
+
+  const protConPedido = useMemo(() => protectores.filter(p => p.pedidoFinal > 0), [protectores]);
+  const filasReposicionProt = soloConPedidoProt ? protConPedido : protectores;
+  const totalesProt = useMemo(() => ({
+    pedido: protConPedido.reduce((s, p) => s + p.pedidoFinal, 0),
+    pedidoUsd: protConPedido.reduce((s, p) => s + p.pedidoFinal * (p.maestro.precio ?? 0), 0),
+  }), [protConPedido]);
+
+  // Reparto en unidades (precio 1) según la capacidad semanal de cada taller.
+  const protDist = useMemo<ForroDistribucion[]>(() => protConPedido.map(p => ({
+    codigo: p.maestro.fert, cantidad: p.pedidoFinal, precio: 1, prioridad: null,
+  })), [protConPedido]);
+  const talleresProtDist = useMemo(() => TALLERES_PROTECTOR_EXCEL.map(t => ({ nombre: t.nombre, ponderado: capacidadProt[t.nombre] ?? 0 })), [capacidadProt]);
+  const porTallerProt = useMemo(() => resumenPorTaller(protDist, talleresProtDist, asignacionProt), [protDist, talleresProtDist, asignacionProt]);
+  const usdTallerProt = useMemo(() => {
+    const precio = new Map(protConPedido.map(p => [p.maestro.fert, p.maestro.precio ?? 0]));
+    const m = new Map<string, number>();
+    Object.entries(asignacionProt).forEach(([fert, porT]) => Object.entries(porT).forEach(([t, v]) => m.set(t, (m.get(t) ?? 0) + v * (precio.get(fert) ?? 0))));
+    return m;
+  }, [asignacionProt, protConPedido]);
+  const fijarAsignacionProt = (a: Asignacion) => {
+    setAsignacionProt(a);
+    guardarLocal(CLAVE_ASIGNACION_PROT + fechaCorte, a);
+  };
+  const asignarProt = (fert: string, taller: string, valor: number) => {
+    const sig: Asignacion = { ...asignacionProt, [fert]: { ...(asignacionProt[fert] ?? {}), [taller]: valor } };
+    if (!(valor > 0)) delete sig[fert][taller];
+    fijarAsignacionProt(sig);
+  };
+  const asignadoProtDe = (fert: string): number => Object.values(asignacionProt[fert] ?? {}).reduce((s, v) => s + v, 0);
+  const distribuirProt = () => fijarAsignacionProt(distribuirPedido(protDist, talleresProtDist, asignacionProt, PARAMETROS_DIST_PROT));
+  const cambiarCapacidadProt = (taller: string, valor: number) => setCapacidadProt(prev => {
+    const sig = { ...prev, [taller]: Math.max(0, valor) };
+    guardarLocal(CLAVE_CAPACIDAD_PROT, sig);
+    return sig;
+  });
+  const toggleProt = (fert: string) => setExpandidosProt(prev => {
+    const s = new Set(prev);
+    if (s.has(fert)) s.delete(fert); else s.add(fert);
+    return s;
+  });
+
+  const exportarReposicionProt = () => exportarExcel(`Reposicion_Protectores_${fechaCorte}.xlsx`, {
+    Reposicion: protectores.map(p => {
+      const fila: Fila = { FERT: p.maestro.fert, Descripcion: p.maestro.descripcion, Forro: p.maestro.forro, 'Desc. forro': p.maestro.descripcionForro };
+      ALMACENES_PROTECTOR.forEach((a, i) => { fila[`Stock ${a.almacen}`] = p.stockPorAlmacen[i]; });
+      Object.assign(fila, {
+        'Stock total': p.stock,
+        Transito: p.transito,
+        'Stock final': p.rep.stockFinal,
+        'Salidas ventana': p.ssPp.totalVentana,
+        'Demanda semanal': p.ssPp.demandaSemanal,
+        SS: p.ssPp.ss,
+        PP: Math.round(p.ssPp.pp * 100) / 100,
+        'PP/SS': Math.round(p.ssPp.ppss * 100) / 100,
+        Faltante: Math.round(p.rep.faltante * 100) / 100,
+        Paquete: p.maestro.paquete,
+        'Pedido sugerido': p.rep.pedido,
+        'Pedido final': p.pedidoFinal,
+        'Cobertura (dias)': p.rep.coberturaDias ?? '',
+      });
+      return fila;
+    }),
+  });
+
   const toggle = (codigo: string) => setExpandidos(prev => {
     const s = new Set(prev);
     if (s.has(codigo)) s.delete(codigo); else s.add(codigo);
@@ -616,7 +810,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
     })),
   });
 
-  const exportarSubcontratacion = () => exportarExcel(`Plan_Subcontratacion_ALM_${fechaCorte}.xlsx`, {
+  const exportarSubcontratacion = () => exportarExcel(`Plan_Subcontratacion_ALM_PROT_${fechaCorte}.xlsx`, {
     'Plan Subcontratacion': conPedido.map(f => {
       const fila: Fila = {
         Prioridad: f.maestro.prioridad ?? '',
@@ -658,6 +852,32 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       Tapas: f.pedidoFinal * f.tapa.tapasPorForro,
       Origen: f.tapaPorBom ? 'BOM' : 'Excel',
     }] : [])),
+    Protectores: protConPedido.map(p => {
+      const fila: Fila = {
+        FERT: p.maestro.fert,
+        Descripcion: p.maestro.descripcion,
+        Forro: p.maestro.forro,
+        Cantidad: p.pedidoFinal,
+        Precio: p.maestro.precio ?? '',
+        'Costo total': Math.round(p.pedidoFinal * (p.maestro.precio ?? 0) * 100) / 100,
+      };
+      TALLERES_PROTECTOR_EXCEL.forEach(t => { fila[t.nombre] = asignacionProt[p.maestro.fert]?.[t.nombre] ?? 0; });
+      fila.Asignado = asignadoProtDe(p.maestro.fert);
+      fila.Diferencia = asignadoProtDe(p.maestro.fert) - p.pedidoFinal;
+      return fila;
+    }),
+    'Talleres protectores': porTallerProt.map(p => {
+      const t = TALLERES_PROTECTOR_EXCEL.find(x => x.nombre === p.nombre)!;
+      return {
+        Taller: p.nombre,
+        'Cod. proveedor': t.codProveedor,
+        Ruta: t.ruta,
+        'Capacidad (UN)': capacidadProt[p.nombre] ?? 0,
+        'Objetivo UN': Math.round(p.objetivoUsd),
+        'Asignado UN': p.unidades,
+        'Asignado USD': Math.round((usdTallerProt.get(p.nombre) ?? 0) * 100) / 100,
+      };
+    }),
   });
 
   // ---------------- Validar contra Excel ----------------
@@ -762,13 +982,14 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         {[
           { t: 'Órdenes ≤ corte', v: fmt(totales.ordenes) },
           { t: 'Necesidad (UN)', v: fmt(totales.necesidad) },
           { t: 'Forros a pedir', v: fmt(conPedido.length) },
           { t: 'Pedido (UN / USD)', v: `${fmt(totales.pedido)} / $${fmt(totales.pedidoUsd, 2)}` },
           { t: 'Inventario 1014 USD', v: `$${fmt(totales.invUsd, 2)}` },
+          { t: 'Protectores (ref. / UN)', v: `${fmt(protConPedido.length)} / ${fmt(totalesProt.pedido)}` },
         ].map(k => (
           <div key={k.t} className="rounded-lg border border-gray-200 bg-white px-4 py-3 shadow-sm">
             <div className="text-[11px] uppercase tracking-wide text-gray-500">{k.t}</div>
@@ -784,11 +1005,13 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       )}
 
       <Tabs value={tab} onValueChange={setTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-5 gap-1 h-auto p-1 bg-muted border border-dashed border-gray-300 rounded-lg">
+        <TabsList className="grid w-full grid-cols-2 md:grid-cols-7 gap-1 h-auto p-1 bg-muted border border-dashed border-gray-300 rounded-lg">
           <TabsTrigger value="necesidad" className="font-bold text-blue-700 data-[state=active]:text-blue-700">1 Necesidad</TabsTrigger>
           <TabsTrigger value="stock" className="font-bold text-blue-700 data-[state=active]:text-blue-700">2 Stock y SS/PP</TabsTrigger>
           <TabsTrigger value="reposicion" className="font-bold text-blue-700 data-[state=active]:text-blue-700">3 Reposición</TabsTrigger>
-          <TabsTrigger value="subcontratacion" className="font-bold text-blue-700 data-[state=active]:text-blue-700">4 Plan Subcontratación</TabsTrigger>
+          <TabsTrigger value="necesidad-prot" className="font-bold text-teal-700 data-[state=active]:text-teal-700">4 Necesidad Protectores</TabsTrigger>
+          <TabsTrigger value="reposicion-prot" className="font-bold text-teal-700 data-[state=active]:text-teal-700">5 Reposición Protectores</TabsTrigger>
+          <TabsTrigger value="subcontratacion" className="font-bold text-blue-700 data-[state=active]:text-blue-700 whitespace-normal leading-tight">6 Plan Subcontratación Almohadas y Protectores</TabsTrigger>
           <TabsTrigger value="validar" className="font-bold text-blue-700 data-[state=active]:text-blue-700">Validar Excel</TabsTrigger>
         </TabsList>
 
@@ -1075,9 +1298,196 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
           </div>
         </TabsContent>
 
-        {/* ---------------- 4 Plan Subcontratación ---------------- */}
+        {/* ---------------- 4 Necesidad Protectores (SS / PP) ---------------- */}
+        <TabsContent value="necesidad-prot" className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-end gap-4 rounded-lg border bg-white px-4 py-3">
+            {([
+              ['semanas', 'Semanas', 1, 'Ventana de salidas 601 (la demanda semanal divide el total para estas semanas)'],
+              ['leadTimeDias', 'Lead time (días)', 1, undefined],
+              ['z', 'Z', 0.01, undefined],
+              ['semanasSs', 'Semanas SS', 1, 'SS = CEILING(demanda semanal × semanas SS, paquete)'],
+            ] as const).map(([clave, etiqueta, paso, ayuda]) => (
+              <div key={clave} className="space-y-1" title={ayuda}>
+                <Label className="text-xs text-gray-500">{etiqueta}</Label>
+                <Input
+                  type="number"
+                  step={paso}
+                  min={0}
+                  value={paramsProt[clave]}
+                  onChange={e => {
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v) && v > 0) setParamsProt(p => ({ ...p, [clave]: clave === 'z' ? v : Math.round(v) }));
+                  }}
+                  className="h-8 w-28"
+                />
+              </div>
+            ))}
+            <Button variant="ghost" size="sm" onClick={() => setParamsProt(PARAMETROS_PROTECTOR_DEFECTO)}>Restablecer</Button>
+            {salidasProtFallidas.length > 0 && (
+              <span className="text-xs text-amber-700" title={salidasProtFallidas.join(', ')}>Sin MB51: {salidasProtFallidas.length} protectores</span>
+            )}
+          </div>
+          <div className="border rounded-lg overflow-auto max-h-[65vh] bg-white">
+            <Table>
+              <TableHeader className="sticky top-0 bg-white z-10">
+                <TableRow>
+                  <TableHead className="w-8" />
+                  <TableHead>FERT</TableHead>
+                  <TableHead className="min-w-[220px]">Descripción</TableHead>
+                  <TableHead>Forro</TableHead>
+                  <TableHead className="text-right" title="Semanas con salida / semanas evaluadas">Sem.</TableHead>
+                  <TableHead className="text-right" title="Salidas 601 − 602 en la ventana">Salidas</TableHead>
+                  <TableHead className="text-right" title="CEILING(salidas ÷ semanas, 5)">Dem. semanal</TableHead>
+                  <TableHead className="text-right">Diario</TableHead>
+                  <TableHead className="text-right">Paquete</TableHead>
+                  <TableHead className="text-right">SS</TableHead>
+                  <TableHead className="text-right" title="Reposición ÷ 2 + SS">PP</TableHead>
+                  <TableHead className="text-right" title="SS + PP ÷ 2">PP/SS</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {protectores.map(p => (
+                  <React.Fragment key={p.maestro.fert}>
+                    <TableRow className="cursor-pointer hover:bg-gray-50" onClick={() => toggleProt(p.maestro.fert)}>
+                      <TableCell>{expandidosProt.has(p.maestro.fert) ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</TableCell>
+                      <TableCell className="font-mono text-xs">{p.maestro.fert}</TableCell>
+                      <TableCell className="text-xs">{p.maestro.descripcion}</TableCell>
+                      <TableCell className="font-mono text-xs text-gray-500" title={p.maestro.descripcionForro}>{p.maestro.forro || '—'}</TableCell>
+                      <TableCell className="text-right tabular-nums text-gray-500">{p.ssPp.semanasConSalida}/{paramsProt.semanas}</TableCell>
+                      <TableCell className="text-right tabular-nums">{fmt(p.ssPp.totalVentana)}</TableCell>
+                      <TableCell className="text-right tabular-nums">{fmt(p.ssPp.demandaSemanal)}</TableCell>
+                      <TableCell className="text-right tabular-nums">{fmt(p.ssPp.diario, 1)}</TableCell>
+                      <TableCell className={cn('text-right tabular-nums', !p.maestro.paquete && 'text-amber-700')} title={p.maestro.paquete ? undefined : 'Sin paquete en Tabla2: SS 0 y sin pedido sugerido'}>
+                        {p.maestro.paquete ? fmt(p.maestro.paquete) : '—'}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{fmt(p.ssPp.ss)}</TableCell>
+                      <TableCell className="text-right tabular-nums">{fmt(p.ssPp.pp, 1)}</TableCell>
+                      <TableCell className="text-right tabular-nums font-semibold">{fmt(p.ssPp.ppss, 1)}</TableCell>
+                    </TableRow>
+                    {expandidosProt.has(p.maestro.fert) && (
+                      <TableRow className="bg-slate-50/70">
+                        <TableCell />
+                        <TableCell colSpan={11}>
+                          <div className="flex flex-wrap gap-1 text-[11px] tabular-nums">
+                            {p.ssPp.semanal.map((v, i) => (
+                              <span key={i} className={cn('rounded border px-1.5 py-0.5', v > 0 ? 'border-teal-200 bg-teal-50 text-teal-800' : 'border-gray-200 text-gray-400')}
+                                title={`Semana −${paramsProt.semanas - i}`}>
+                                {fmt(v)}
+                              </span>
+                            ))}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </React.Fragment>
+                ))}
+              </TableBody>
+              <TableFooter>
+                <TableRow>
+                  <TableCell colSpan={5} className="font-semibold">Total</TableCell>
+                  <TableCell className="text-right tabular-nums">{fmt(protectores.reduce((s, p) => s + p.ssPp.totalVentana, 0))}</TableCell>
+                  <TableCell className="text-right tabular-nums">{fmt(protectores.reduce((s, p) => s + p.ssPp.demandaSemanal, 0))}</TableCell>
+                  <TableCell colSpan={2} />
+                  <TableCell className="text-right tabular-nums">{fmt(protectores.reduce((s, p) => s + p.ssPp.ss, 0))}</TableCell>
+                  <TableCell className="text-right tabular-nums">{fmt(protectores.reduce((s, p) => s + p.ssPp.pp, 0))}</TableCell>
+                  <TableCell className="text-right tabular-nums font-semibold">{fmt(protectores.reduce((s, p) => s + p.ssPp.ppss, 0))}</TableCell>
+                </TableRow>
+              </TableFooter>
+            </Table>
+          </div>
+        </TabsContent>
+
+        {/* ---------------- 5 Reposición Protectores ---------------- */}
+        <TabsContent value="reposicion-prot" className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Switch id="prot-solo-pedido" checked={soloConPedidoProt} onCheckedChange={setSoloConPedidoProt} />
+              <Label htmlFor="prot-solo-pedido" className="text-sm">Solo protectores a pedir</Label>
+              {transitoProt.size === 0 && <span className="text-xs text-amber-700 ml-3">Tránsito = 0 (sin ME2N)</span>}
+            </div>
+            <div className="flex gap-2">
+              {Object.keys(pedidoManualProt).length > 0 && (
+                <Button variant="ghost" size="sm" onClick={() => setPedidoManualProt({})}>Quitar ajustes ({Object.keys(pedidoManualProt).length})</Button>
+              )}
+              <Button variant="outline" size="sm" onClick={exportarReposicionProt}><Download className="w-4 h-4 mr-2" />Excel</Button>
+            </div>
+          </div>
+          <div className="border rounded-lg overflow-auto max-h-[65vh] bg-white">
+            <Table>
+              <TableHeader className="sticky top-0 bg-white z-10">
+                <TableRow>
+                  <TableHead>FERT</TableHead>
+                  <TableHead className="min-w-[220px]">Descripción</TableHead>
+                  {ALMACENES_PROTECTOR.map(a => <TableHead key={a.almacen} className="text-right">Stock {a.almacen}</TableHead>)}
+                  <TableHead className="text-right">Tránsito</TableHead>
+                  <TableHead className="text-right" title="Stock + tránsito">Stock final</TableHead>
+                  <TableHead className="text-right" title="SS + PP ÷ 2">PP/SS</TableHead>
+                  <TableHead className="text-right">Faltante</TableHead>
+                  <TableHead className="text-right">Paquete</TableHead>
+                  <TableHead className="text-right" title="CEILING(faltante, paquete)">Sugerido</TableHead>
+                  <TableHead className="text-right">Pedido</TableHead>
+                  <TableHead className="text-right">Cobertura (d)</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filasReposicionProt.map(p => (
+                  <TableRow key={p.maestro.fert} className={cn(p.rep.faltante > 0 && p.rep.stockFinal <= 0 && 'bg-red-50/60')}>
+                    <TableCell className="font-mono text-xs">{p.maestro.fert}</TableCell>
+                    <TableCell className="text-xs">{p.maestro.descripcion}</TableCell>
+                    {p.stockPorAlmacen.map((v, i) => <TableCell key={i} className="text-right tabular-nums">{v ? fmt(v) : '—'}</TableCell>)}
+                    <TableCell className="text-right tabular-nums">{p.transito ? fmt(p.transito) : '—'}</TableCell>
+                    <TableCell className="text-right tabular-nums font-semibold">{fmt(p.rep.stockFinal)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmt(p.ssPp.ppss, 1)}</TableCell>
+                    <TableCell className={cn('text-right tabular-nums', p.rep.faltante > 0 && 'text-red-600 font-semibold')}>{p.rep.faltante > 0 ? fmt(p.rep.faltante, 1) : '—'}</TableCell>
+                    <TableCell className="text-right tabular-nums text-gray-500">{p.maestro.paquete ? fmt(p.maestro.paquete) : '—'}</TableCell>
+                    <TableCell className="text-right tabular-nums">{p.rep.pedido ? fmt(p.rep.pedido) : '—'}</TableCell>
+                    <TableCell className="text-right">
+                      <Input
+                        type="number"
+                        min={0}
+                        value={p.pedidoFinal}
+                        onChange={e => {
+                          const v = Math.max(0, Math.round(Number(e.target.value) || 0));
+                          setPedidoManualProt(prev => {
+                            const sig = { ...prev };
+                            if (v === p.rep.pedido) delete sig[p.maestro.fert]; else sig[p.maestro.fert] = v;
+                            return sig;
+                          });
+                        }}
+                        className={cn('h-7 w-24 ml-auto text-right tabular-nums', pedidoManualProt[p.maestro.fert] !== undefined && 'border-blue-400 bg-blue-50')}
+                      />
+                    </TableCell>
+                    <TableCell className={cn('text-right tabular-nums', (p.rep.coberturaDias ?? 99) < paramsProt.leadTimeDias && 'text-red-600 font-semibold')}>
+                      {p.rep.coberturaDias ?? '—'}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {filasReposicionProt.length === 0 && (
+                  <TableRow><TableCell colSpan={10 + ALMACENES_PROTECTOR.length} className="text-center py-6 text-gray-400 text-xs">{cargando ? 'Cargando…' : 'Sin protectores a pedir.'}</TableCell></TableRow>
+                )}
+              </TableBody>
+              {filasReposicionProt.length > 0 && (
+                <TableFooter>
+                  <TableRow>
+                    <TableCell colSpan={2} className="font-semibold">Total</TableCell>
+                    {ALMACENES_PROTECTOR.map((a, i) => (
+                      <TableCell key={a.almacen} className="text-right tabular-nums">{fmt(filasReposicionProt.reduce((s, p) => s + p.stockPorAlmacen[i], 0))}</TableCell>
+                    ))}
+                    <TableCell className="text-right tabular-nums">{fmt(filasReposicionProt.reduce((s, p) => s + p.transito, 0))}</TableCell>
+                    <TableCell colSpan={5} />
+                    <TableCell className="text-right tabular-nums font-semibold">{fmt(filasReposicionProt.reduce((s, p) => s + p.pedidoFinal, 0))}</TableCell>
+                    <TableCell />
+                  </TableRow>
+                </TableFooter>
+              )}
+            </Table>
+          </div>
+        </TabsContent>
+
+        {/* ---------------- 6 Plan Subcontratación Almohadas y Protectores ---------------- */}
         <TabsContent value="subcontratacion" className="mt-4 space-y-4">
           <div className="flex flex-wrap items-end justify-end gap-3">
+            <h3 className="mr-auto self-center text-base font-semibold text-blue-800">Almohadas</h3>
             <div className="flex flex-col gap-1">
               <Label className="text-xs text-gray-500" title="Las partes de un forro dividido se redondean a este múltiplo">Paquete (UN)</Label>
               <Input type="number" min={1} value={paramDist.paquete} className="h-8 w-20 text-right"
@@ -1100,7 +1510,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
             <Button variant="outline" size="sm" onClick={() => fijarAsignacion({})} disabled={Object.keys(asignacion).length === 0}>
               <Eraser className="w-4 h-4 mr-2" />Limpiar
             </Button>
-            <Button variant="outline" size="sm" onClick={exportarSubcontratacion} disabled={conPedido.length === 0}>
+            <Button variant="outline" size="sm" onClick={exportarSubcontratacion} disabled={conPedido.length === 0 && protConPedido.length === 0}>
               <Download className="w-4 h-4 mr-2" />Excel
             </Button>
           </div>
@@ -1221,6 +1631,122 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
                         </div>
                       </TableCell>
                     ))}
+                    <TableCell colSpan={2} />
+                  </TableRow>
+                </TableFooter>
+              )}
+            </Table>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+            <h3 className="text-base font-semibold text-teal-800">Protectores</h3>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={distribuirProt} disabled={protConPedido.length === 0}
+                title="Reparte en lotes de 30 según la capacidad semanal (UN) de cada taller, respetando lo ya escrito">
+                <Wand2 className="w-4 h-4 mr-2" />Distribuir
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => fijarAsignacionProt({})} disabled={Object.keys(asignacionProt).length === 0}>
+                <Eraser className="w-4 h-4 mr-2" />Limpiar
+              </Button>
+            </div>
+          </div>
+          <div className="border rounded-lg overflow-auto max-h-[65vh] bg-white">
+            <Table>
+              <TableHeader className="sticky top-0 bg-white z-10">
+                <TableRow>
+                  <TableHead>FERT</TableHead>
+                  <TableHead className="min-w-[220px]">Descripción</TableHead>
+                  <TableHead className="text-right">Pedido</TableHead>
+                  <TableHead className="text-right">Precio</TableHead>
+                  {TALLERES_PROTECTOR_EXCEL.map(t => (
+                    <TableHead key={t.nombre} className="text-center min-w-[110px] leading-tight py-1">
+                      <div className="text-[11px] font-semibold">{t.nombre}</div>
+                      <div className="text-[10px] font-normal text-gray-400">{t.ruta} · {t.capacidadMin}-{t.capacidadMax} UN</div>
+                    </TableHead>
+                  ))}
+                  <TableHead className="text-right">Asignado</TableHead>
+                  <TableHead className="text-right">Dif.</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {protConPedido.map(p => {
+                  const asignado = asignadoProtDe(p.maestro.fert);
+                  const dif = asignado - p.pedidoFinal;
+                  return (
+                    <TableRow key={p.maestro.fert}>
+                      <TableCell className="font-mono text-xs">{p.maestro.fert}</TableCell>
+                      <TableCell className="text-xs">
+                        {p.maestro.descripcion}
+                        {p.maestro.forro && <div className="text-[10px] text-gray-400">{p.maestro.forro} · {p.maestro.descripcionForro}</div>}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums font-semibold">{fmt(p.pedidoFinal)}</TableCell>
+                      <TableCell className="text-right tabular-nums text-gray-500">{p.maestro.precio ? fmt(p.maestro.precio, 2) : '—'}</TableCell>
+                      {TALLERES_PROTECTOR_EXCEL.map(t => (
+                        <TableCell key={t.nombre} className="text-center p-1">
+                          <Input
+                            type="number"
+                            min={0}
+                            value={asignacionProt[p.maestro.fert]?.[t.nombre] ?? ''}
+                            onChange={e => asignarProt(p.maestro.fert, t.nombre, Math.max(0, Math.round(Number(e.target.value) || 0)))}
+                            className="h-7 w-20 mx-auto text-right tabular-nums"
+                          />
+                        </TableCell>
+                      ))}
+                      <TableCell className="text-right tabular-nums">{fmt(asignado)}</TableCell>
+                      <TableCell className={cn('text-right tabular-nums font-semibold', dif === 0 ? 'text-emerald-600' : 'text-red-600')}>{dif === 0 ? '✓' : fmt(dif)}</TableCell>
+                    </TableRow>
+                  );
+                })}
+                {protConPedido.length === 0 && (
+                  <TableRow><TableCell colSpan={6 + TALLERES_PROTECTOR_EXCEL.length} className="text-center py-6 text-gray-400 text-xs">Sin pedidos en el paso 5.</TableCell></TableRow>
+                )}
+              </TableBody>
+              {protConPedido.length > 0 && (
+                <TableFooter>
+                  <TableRow>
+                    <TableCell colSpan={2} className="font-semibold">Total UN</TableCell>
+                    <TableCell className="text-right tabular-nums font-semibold">{fmt(totalesProt.pedido)}</TableCell>
+                    <TableCell />
+                    {porTallerProt.map(p => <TableCell key={p.nombre} className="text-center tabular-nums">{p.unidades ? fmt(p.unidades) : '—'}</TableCell>)}
+                    <TableCell className="text-right tabular-nums">{fmt(porTallerProt.reduce((s, p) => s + p.unidades, 0))}</TableCell>
+                    <TableCell />
+                  </TableRow>
+                  <TableRow>
+                    <TableCell colSpan={2} className="font-semibold">Total USD</TableCell>
+                    <TableCell className="text-right tabular-nums">${fmt(totalesProt.pedidoUsd, 2)}</TableCell>
+                    <TableCell />
+                    {TALLERES_PROTECTOR_EXCEL.map(t => {
+                      const usd = usdTallerProt.get(t.nombre) ?? 0;
+                      return <TableCell key={t.nombre} className="text-center tabular-nums text-xs">{usd ? `$${fmt(usd, 2)}` : '—'}</TableCell>;
+                    })}
+                    <TableCell className="text-right tabular-nums">${fmt(Array.from(usdTallerProt.values()).reduce((s, v) => s + v, 0), 2)}</TableCell>
+                    <TableCell />
+                  </TableRow>
+                  <TableRow>
+                    <TableCell colSpan={2} className="font-semibold" title="Pedido total × capacidad ÷ Σ capacidad">Objetivo UN</TableCell>
+                    <TableCell colSpan={2} />
+                    {porTallerProt.map(p => (
+                      <TableCell key={p.nombre} className="text-center tabular-nums text-xs text-gray-500" title={`${fmt(p.porcentaje * 100, 1)} %`}>
+                        {p.objetivoUsd ? fmt(p.objetivoUsd) : '—'}
+                      </TableCell>
+                    ))}
+                    <TableCell colSpan={2} />
+                  </TableRow>
+                  <TableRow>
+                    <TableCell colSpan={2} className="font-semibold">Capacidad (UN/sem)</TableCell>
+                    <TableCell colSpan={2} />
+                    {TALLERES_PROTECTOR_EXCEL.map(t => {
+                      const cap = capacidadProt[t.nombre] ?? 0;
+                      const unidades = porTallerProt.find(p => p.nombre === t.nombre)?.unidades ?? 0;
+                      return (
+                        <TableCell key={t.nombre} className="text-center p-1">
+                          <Input type="number" min={0} value={cap}
+                            onChange={e => cambiarCapacidadProt(t.nombre, Number(e.target.value) || 0)}
+                            className={cn('h-7 w-16 mx-auto text-right tabular-nums px-1', unidades > t.capacidadMax && 'border-red-400 text-red-600')}
+                            title={unidades > t.capacidadMax ? `Asignado ${fmt(unidades)} > máximo ${t.capacidadMax}` : undefined} />
+                        </TableCell>
+                      );
+                    })}
                     <TableCell colSpan={2} />
                   </TableRow>
                 </TableFooter>
