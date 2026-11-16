@@ -810,7 +810,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
     })),
   });
 
-  const exportarSubcontratacion = () => exportarExcel(`Plan_Subcontratacion_ALM_PROT_${fechaCorte}.xlsx`, {
+  const exportarSubcontratacion = () => exportarExcel(`Plan_Subcontratacion_ALM_${fechaCorte}.xlsx`, {
     'Plan Subcontratacion': conPedido.map(f => {
       const fila: Fila = {
         Prioridad: f.maestro.prioridad ?? '',
@@ -852,6 +852,9 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       Tapas: f.pedidoFinal * f.tapa.tapasPorForro,
       Origen: f.tapaPorBom ? 'BOM' : 'Excel',
     }] : [])),
+  });
+
+  const exportarSubcontratacionProt = () => exportarExcel(`Plan_Subcontratacion_PROT_${fechaCorte}.xlsx`, {
     Protectores: protConPedido.map(p => {
       const fila: Fila = {
         FERT: p.maestro.fert,
@@ -1005,13 +1008,14 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
       )}
 
       <Tabs value={tab} onValueChange={setTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-2 md:grid-cols-7 gap-1 h-auto p-1 bg-muted border border-dashed border-gray-300 rounded-lg">
+        <TabsList className="grid w-full grid-cols-2 md:grid-cols-8 gap-1 h-auto p-1 bg-muted border border-dashed border-gray-300 rounded-lg">
           <TabsTrigger value="necesidad" className="font-bold text-blue-700 data-[state=active]:text-blue-700">1 Necesidad</TabsTrigger>
           <TabsTrigger value="stock" className="font-bold text-blue-700 data-[state=active]:text-blue-700">2 Stock y SS/PP</TabsTrigger>
           <TabsTrigger value="reposicion" className="font-bold text-blue-700 data-[state=active]:text-blue-700">3 Reposición</TabsTrigger>
           <TabsTrigger value="necesidad-prot" className="font-bold text-teal-700 data-[state=active]:text-teal-700">4 Necesidad Protectores</TabsTrigger>
           <TabsTrigger value="reposicion-prot" className="font-bold text-teal-700 data-[state=active]:text-teal-700">5 Reposición Protectores</TabsTrigger>
-          <TabsTrigger value="subcontratacion" className="font-bold text-blue-700 data-[state=active]:text-blue-700 whitespace-normal leading-tight">6 Plan Subcontratación Almohadas y Protectores</TabsTrigger>
+          <TabsTrigger value="subcontratacion" className="font-bold text-blue-700 data-[state=active]:text-blue-700 whitespace-normal leading-tight">6 Plan Subcontratación Almohadas</TabsTrigger>
+          <TabsTrigger value="subcontratacion-prot" className="font-bold text-teal-700 data-[state=active]:text-teal-700 whitespace-normal leading-tight">7 Plan Subcontratación Protectores</TabsTrigger>
           <TabsTrigger value="validar" className="font-bold text-blue-700 data-[state=active]:text-blue-700">Validar Excel</TabsTrigger>
         </TabsList>
 
@@ -1484,10 +1488,9 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
           </div>
         </TabsContent>
 
-        {/* ---------------- 6 Plan Subcontratación Almohadas y Protectores ---------------- */}
+        {/* ---------------- 6 Plan Subcontratación Almohadas ---------------- */}
         <TabsContent value="subcontratacion" className="mt-4 space-y-4">
           <div className="flex flex-wrap items-end justify-end gap-3">
-            <h3 className="mr-auto self-center text-base font-semibold text-blue-800">Almohadas</h3>
             <div className="flex flex-col gap-1">
               <Label className="text-xs text-gray-500" title="Las partes de un forro dividido se redondean a este múltiplo">Paquete (UN)</Label>
               <Input type="number" min={1} value={paramDist.paquete} className="h-8 w-20 text-right"
@@ -1510,7 +1513,7 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
             <Button variant="outline" size="sm" onClick={() => fijarAsignacion({})} disabled={Object.keys(asignacion).length === 0}>
               <Eraser className="w-4 h-4 mr-2" />Limpiar
             </Button>
-            <Button variant="outline" size="sm" onClick={exportarSubcontratacion} disabled={conPedido.length === 0 && protConPedido.length === 0}>
+            <Button variant="outline" size="sm" onClick={exportarSubcontratacion} disabled={conPedido.length === 0}>
               <Download className="w-4 h-4 mr-2" />Excel
             </Button>
           </div>
@@ -1637,10 +1640,15 @@ export const TacticalPlanAlmohadasSection: React.FC = () => {
               )}
             </Table>
           </div>
+        </TabsContent>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-            <h3 className="text-base font-semibold text-teal-800">Protectores</h3>
+        {/* ---------------- 7 Plan Subcontratación Protectores ---------------- */}
+        <TabsContent value="subcontratacion-prot" className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={exportarSubcontratacionProt} disabled={protConPedido.length === 0}>
+                <Download className="w-4 h-4 mr-2" />Excel
+              </Button>
               <Button size="sm" onClick={distribuirProt} disabled={protConPedido.length === 0}
                 title="Reparte en lotes de 30 según la capacidad semanal (UN) de cada taller, respetando lo ya escrito">
                 <Wand2 className="w-4 h-4 mr-2" />Distribuir
