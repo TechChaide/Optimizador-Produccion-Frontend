@@ -76,8 +76,8 @@ export interface FlujoReportePlanTxt {
   /** true si quedó guardado (false si se canceló o falló). sinConfirmar: el grupo ya preguntó una sola vez.
    *  silencioso: sin aviso de éxito (lo muestra el panel de progreso del módulo). */
   guardar: (opts?: { sinConfirmar?: boolean; silencioso?: boolean }) => Promise<boolean>;
-  /** true si se recuperó. abrir=false: no abre el diálogo individual (lo usa el diálogo de grupo). */
-  recuperar: (opts?: { abrir?: boolean; fecha?: string }) => Promise<boolean>;
+  /** Lo recuperado (null si falló). abrir=false: no abre el diálogo individual (lo usa el diálogo de grupo). */
+  recuperar: (opts?: { abrir?: boolean; fecha?: string }) => Promise<PlanTxtRecuperado | null>;
   /** Fecha objetivo del reporte abierto en la vista previa. */
   fechaVista: string | null;
   /** true si se envió. */
@@ -202,12 +202,12 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
     }
   }, [addNotification, estado, guardadoEn, prefijo]);
 
-  const recuperar = useCallback(async (opts?: { abrir?: boolean; fecha?: string }): Promise<boolean> => {
+  const recuperar = useCallback(async (opts?: { abrir?: boolean; fecha?: string }): Promise<PlanTxtRecuperado | null> => {
     const cfg = configRef.current;
     // fecha: abrir el plan de OTRA fecha objetivo (ej. el lunes, revisar lo que se guardó el viernes
     // para el lunes, cuando el módulo ya apunta al martes).
     const fecha = opts?.fecha || cfg.fechaObjetivo;
-    if (!fecha) return false;
+    if (!fecha) return null;
     setRecuperando(true);
     try {
       let plan = await obtenerPlanTxt({ modulo: cfg.modulo, centro: cfg.centro, fechaObjetivo: fecha });
@@ -229,10 +229,10 @@ export function useReportePlanTxt(config: ConfigReportePlanTxt): FlujoReportePla
         setRuta(plan.ruta);
       }
       if (opts?.abrir !== false) setVistaAbierta(true);
-      return true;
+      return plan;
     } catch (error) {
       addNotification('error', `${prefijo}error al recuperar el reporte: ${(error as Error).message}`);
-      return false;
+      return null;
     } finally {
       setRecuperando(false);
     }

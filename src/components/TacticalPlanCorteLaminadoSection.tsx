@@ -3376,21 +3376,22 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     }
   }, [getOrigenesProrrateo, flushFaltanteInternoNotification, desactivarPlanesLaminadoSuperados, puestoTrabajoLineaPorMaterial]);
 
-  // Fase 2 del panel (igual que Corte Espuma): al confirmar, el diálogo se cierra y el panel muestra
-  // Guardando P3 → Actualizando necesidades → Guardando reporte (sin toasts); el reporte lo guarda un
-  // efecto junto a reporteFlujo (reportePorGuardar) y el panel cierra con "Ver reporte y enviar". El
-  // envío sigue manual desde la vista previa.
+  // Ciclo del día (usuario 2026-11-17): 1 · P3 → 2 · Enviar a SAP → 3 · Actualizar órdenes SAP → correo.
+  // El P3 ya no guarda el reporte: la foto se congela al enviar a SAP (reportePorGuardar, efecto junto a
+  // reporteFlujo) y el paso 3 completa en ella las órdenes que SAP crea (~10 min después, a pedido).
   const [reportePorGuardar, setReportePorGuardar] = useState(false);
+  const [enviadoSapEn, setEnviadoSapEn] = useState<string | null>(null);
+  const [ordenesReporte, setOrdenesReporte] = useState<{ encontradas: number; total: number } | null>(null);
+  const [actualizandoOrdenes, setActualizandoOrdenes] = useState(false);
   const handleConfirmarRespuestaP3PFD = useCallback(async () => {
     if (!planPreviewP3PFD) return;
     const { p3 } = planPreviewP3PFD;
     setIsSavingPlanP3PFD(true);
     setPlanPreviewP3PFD(null);
-    panelProgreso.iniciar('Corte y Laminado — Respuesta P3 y reporte', [
+    panelProgreso.iniciar('Corte y Laminado — Respuesta P3', [
       { id: 'p3', etiqueta: 'Guardando P3 · Rollos' },
       { id: 'aviso', etiqueta: 'Correo de respuesta automática' },
       { id: 'nec', etiqueta: 'Actualizando necesidades' },
-      { id: 'rep', etiqueta: 'Guardando reporte' },
     ]);
     try {
       const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
@@ -3409,11 +3410,9 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       panelProgreso.actualizar('nec', { estado: 'en_curso' });
       await fetchNecesidadesPlanta();
       panelProgreso.actualizar('nec', { estado: 'ok' });
-      // El reporte no depende de que el P3 haya salido bien: se guarda igual.
-      setReportePorGuardar(true);
+      panelProgreso.concluir(resP3.huboError ? undefined : 'P3 guardado. Siguiente: 2 · Enviar a SAP.');
     } catch (e) {
       panelProgreso.actualizar('nec', { estado: 'error', detalle: (e as Error).message });
-      panelProgreso.actualizar('rep', { estado: 'omitido' });
       panelProgreso.concluir(`Error al guardar la Respuesta P3: ${(e as Error).message}`);
     } finally {
       setIsSavingPlanP3PFD(false);
@@ -4048,6 +4047,11 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
   // responsables 014/031) con la fecha del plan y llena cada marca por material. Si un material tiene
   // varias líneas (corrida 1/2 y 2/2), se empareja por la cantidad más cercana (KG o UN según la
   // unidad de la orden) y cada orden se usa una sola vez. Lo no encontrado sigue "pendiente SAP".
+  // Órdenes del reporte guardado: total de líneas con marca y cuántas ya tienen número de SAP.
+  const contarOrdenesReporte = (html: string) => {
+    const celdas = Array.from(html.matchAll(/<!--OF:[^>]*-->([\s\S]*?)<!--\/OF-->/g), m => m[1].trim());
+    return { total: celdas.length, encontradas: celdas.filter(c => c && c !== 'pendiente SAP').length };
+  };
   const completarOrdenesSap = async (html: string, fechaPlan: string): Promise<string> => {
     if (!html.includes('<!--OF:')) return html;
     const res = await serviciosService.getOrdenesFert(1, 20000);
@@ -4864,6 +4868,13 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
       const fallidos = resultados.filter(r => !r.ok);
       // SAP ya tiene órdenes nuevas: la próxima lectura de FERT/provisionales va a SAP (ver datos-sap-compartidos).
       if (ok.length > 0) refrescarDatosSap(['fert', 'provisionales']);
+      // Foto del plan enviado (paso 2 del ciclo): el reporte se congela acá, con "pendiente SAP" en cada
+      // orden; el paso 3 · Actualizar órdenes SAP las completa cuando SAP las crea.
+      if (ok.length > 0) {
+        setEnviadoSapEn(new Date().toISOString());
+        setOrdenesReporte(null);
+        setReportePorGuardar(true);
+      }
       if (fallidos.length === 0) {
         addNotification('success', `${ok.length} orden(es) de producción enviada(s) a SAP correctamente.`);
       } else {
@@ -5350,23 +5361,34 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- una sola vez al montar, tras rehidratar
   }, [rehidratado]);
 
-  // Fase 2 del panel: guarda el reporte tras confirmar el P3 (sin preguntar si ya había uno: el P3
-  // recién confirmado lo reemplaza) y deja "Ver reporte y enviar" como siguiente paso.
+  // Paso 2 del ciclo: tras enviar a SAP se congela el reporte del plan enviado (sin preguntar si ya
+  // había uno: el envío recién hecho lo reemplaza). Las órdenes quedan "pendiente SAP" hasta el paso 3.
   useEffect(() => {
     if (!reportePorGuardar) return;
     setReportePorGuardar(false);
     void (async () => {
-      panelProgreso.actualizar('rep', { estado: 'en_curso' });
       const ok = await reporteFlujo.guardar({ sinConfirmar: true, silencioso: true });
-      panelProgreso.actualizar('rep', ok
-        ? { estado: 'ok', detalle: `Plan del ${reporteFlujo.config.fechaObjetivo} guardado en la carpeta compartida (todavía no se envió).` }
-        : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
-      panelProgreso.concluir(
-        ok ? 'P3 y reporte guardados. Exporta a SAP si corresponde y luego revisa y envía el reporte.' : undefined,
-        ok ? [{ etiqueta: 'Ver reporte y enviar', onClick: () => { setActiveTab('resumen'); void reporteFlujo.recuperar(); } }] : [],
-      );
+      if (ok) addNotification('success', `Reporte del ${reporteFlujo.config.fechaObjetivo} guardado con el plan enviado a SAP. Cuando SAP cree las órdenes, usa "3 · Actualizar órdenes SAP".`);
     })();
   }, [reportePorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Paso 3 del ciclo (a pedido, SAP crea las órdenes cada ~10 min): completa las órdenes en el reporte
+  // guardado SIN volver a sincronizar (las FERT nuevas cambiarían el plan) y, si ya están todas, abre la
+  // vista previa para enviar el correo.
+  const handleActualizarOrdenesSap = async () => {
+    setActualizandoOrdenes(true);
+    try {
+      const plan = await reporteFlujo.recuperar({ abrir: false });
+      if (!plan) return;
+      const conteo = contarOrdenesReporte(plan.html ?? '');
+      setOrdenesReporte(conteo);
+      // La vista previa vive en la pestaña Resumen (junto a "Enviar Reporte").
+      if (conteo.encontradas >= conteo.total) { setActiveTab('resumen'); reporteFlujo.setVistaAbierta(true); }
+      else addNotification('warning', `${conteo.encontradas}/${conteo.total} órdenes creadas en SAP. Vuelve a actualizar en unos minutos.`);
+    } finally {
+      setActualizandoOrdenes(false);
+    }
+  };
 
   if (!mounted) return <div className="p-4 md:p-6 min-h-screen bg-white" />;
 
@@ -6175,13 +6197,31 @@ export const TacticalPlanCorteLaminadoSection: React.FC = () => {
                 onClick={handleAbrirRespuestaP3PFD}
                 disabled={isSavingPlanP3PFD || respuestaSalidaRows.every(r => r.cantidadKg <= 0)}
                 className="rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white shadow-lg"
-                title="Genera y previsualiza la Respuesta P3 (stock + corridas). Al confirmar, el panel guarda el P3 y el reporte."
+                title="Genera y previsualiza la Respuesta P3 (stock + corridas). Al confirmar, el panel guarda el P3."
               >
                 {isSavingPlanP3PFD ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardList className="w-4 h-4" />}
                 {isSavingPlanP3PFD ? 'Guardando...' : '1 · Generar Respuesta · P3 - Rollos'}
               </Button>
               <Button onClick={handleExportTxt} disabled={isValidandoExportTxt} className="bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest shadow-lg flex items-center gap-2">
                 {isValidandoExportTxt ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} {isValidandoExportTxt ? 'Validando…' : '2 · Enviar a SAP'}
+              </Button>
+              <Button
+                onClick={() => { void handleActualizarOrdenesSap(); }}
+                disabled={actualizandoOrdenes || isEnviandoSap || reporteFlujo.estado !== 'guardado'}
+                variant="outline"
+                title={[
+                  enviadoSapEn ? `Enviado a SAP ${format(new Date(enviadoSapEn), 'HH:mm')}` : null,
+                  ordenesReporte ? `${ordenesReporte.encontradas}/${ordenesReporte.total} órdenes en el reporte` : null,
+                  'Trae las órdenes que SAP creó (sin volver a sincronizar), guarda el reporte y abre el correo',
+                ].filter(Boolean).join(' · ')}
+                className="rounded-xl h-10 px-6 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+              >
+                {actualizandoOrdenes ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} 3 · Actualizar órdenes SAP
+                {ordenesReporte && (
+                  <span className={cn('rounded px-1.5 py-0.5 text-[9px]', ordenesReporte.encontradas >= ordenesReporte.total ? 'bg-emerald-100' : 'bg-amber-100 text-amber-700')}>
+                    {ordenesReporte.encontradas}/{ordenesReporte.total}
+                  </span>
+                )}
               </Button>
             </div>
           </div>
