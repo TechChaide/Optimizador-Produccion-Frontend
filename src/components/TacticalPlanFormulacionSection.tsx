@@ -15,6 +15,7 @@ import {
   Info,
   Mail,
   FileText,
+  Save,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -1515,13 +1516,11 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
         // Conteo final en r.progreso: el avance solo se publica cada 10 órdenes y el efecto no alcanza el último.
         r => {
           panelProgreso.actualizar('resumen', { estado: r.estado, detalle: r.mensaje, ...(r.progreso ? { progreso: r.progreso } : {}) });
-          // Fase 2 del panel: con necesidades generadas se guarda el reporte (efecto reportePorGuardar).
-          if (r.estado === 'error') { panelProgreso.actualizar('rep', { estado: 'omitido' }); panelProgreso.concluir(); }
-          else setReportePorGuardar(true);
+          // Ciclo del día (2026-11-17): sincronizar ya no guarda el reporte; se guarda al confirmar el plan.
+          panelProgreso.concluir(r.estado === 'error' ? undefined : 'Necesidades generadas. Ajusta el Plan de Reposición y confírmalo para guardar el reporte.');
         },
         e => {
           panelProgreso.actualizar('resumen', { estado: 'error', detalle: (e as Error).message });
-          panelProgreso.actualizar('rep', { estado: 'omitido' });
           panelProgreso.concluir();
         }
       )
@@ -1665,21 +1664,15 @@ ${seccionCofama()}
     restaurar: restaurarEstadoPlan,
   });
 
-  // Fase 2 del panel (igual que los otros 3 módulos): tras generar necesidades, guarda el reporte del
-  // Centro 1000 (reemplaza el existente) y cierra con "Ver reporte y enviar". El envío sigue manual.
+  // Ciclo del día (usuario 2026-11-17): Formulación no envía a SAP; el cierre es "Confirmar plan" del
+  // paso 3 · Reposición. Guarda el reporte con el plan ajustado (reemplaza el existente; será el "Plan
+  // ant." del día siguiente) y abre la vista previa para enviarlo.
   useEffect(() => {
     if (!reportePorGuardar) return;
     setReportePorGuardar(false);
     void (async () => {
-      panelProgreso.actualizar('rep', { estado: 'en_curso' });
       const ok = await reporteFlujo.guardar({ sinConfirmar: true, silencioso: true });
-      panelProgreso.actualizar('rep', ok
-        ? { estado: 'ok', detalle: `Reporte del ${fechaObjetivoReporte} guardado en la carpeta compartida — todavía no se envió.` }
-        : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
-      panelProgreso.concluir(
-        ok ? 'Necesidades y reporte guardados. Revisa y envía el reporte.' : undefined,
-        ok ? [{ etiqueta: 'Ver reporte y enviar', onClick: () => { void reporteFlujo.recuperar(); } }] : [],
-      );
+      if (ok) await reporteFlujo.recuperar();
     })();
   }, [reportePorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1718,7 +1711,6 @@ ${seccionCofama()}
       { id: 'fecha', etiqueta: `Día de corte: ${corta(d)}` },
       { id: 'sap', etiqueta: 'Sincronizando datos SAP' },
       { id: 'resumen', etiqueta: 'Generando necesidades' },
-      { id: 'rep', etiqueta: 'Guardando reporte (1000 y 2000)' },
     ]);
     panelProgreso.actualizar('fecha', { estado: 'ok' });
     const TOTAL_CONSULTAS_SAP = 4;
@@ -2257,6 +2249,15 @@ ${seccionCofama()}
               Restablecer sugerido
             </Button>
           )}
+          <Button
+            size="sm"
+            className="ml-auto h-7 gap-1.5 text-[10px] font-black uppercase bg-indigo-600 hover:bg-indigo-700 text-white"
+            disabled={reporteFlujo.guardando || !!planCargadoDe}
+            title={planCargadoDe ? 'Plan cargado de un reporte guardado: sincroniza para confirmar uno nuevo' : 'Guarda el reporte con este plan y abre el correo'}
+            onClick={() => setReportePorGuardar(true)}
+          >
+            {reporteFlujo.guardando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />} Confirmar plan
+          </Button>
         </div>
         <div className="rounded-2xl border border-gray-100 shadow-sm overflow-hidden bg-white">
           <div className="overflow-x-auto max-h-[600px]">
