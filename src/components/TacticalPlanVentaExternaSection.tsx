@@ -3111,7 +3111,9 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
   // Fase 2 del panel (igual que Corte Espuma / Laminado): cada centro es un paso del panel (sin
   // toasts) y al final se guarda el reporte de Empaque (efecto reportePorGuardar, junto a
   // reporteFlujoEmpaque, uno por centro) para cerrar con "Ver reporte Centro …". El envío sigue manual.
-  const [reportePorGuardar, setReportePorGuardar] = useState(false);
+  // Ciclo del día (usuario 2026-11-17): en VE el cierre es el PFD-VENTA (plan final, PT; no crea órdenes
+  // SAP). El reporte de Empaque de un centro se guarda SOLO si su PFD-VENTA quedó guardado.
+  const [reportePorGuardar, setReportePorGuardar] = useState<('1000' | '2000')[] | null>(null);
   const handleGenerarYGuardarPfdVenta = async () => {
     setIsRunningPfdVentaSecuencia(true);
     panelProgreso.iniciar('Venta Externa — PFD-VENTA y reporte', [
@@ -3120,6 +3122,7 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
       { id: 'rep-1000', etiqueta: 'Guardando reporte de Empaque · Centro 1000' },
       { id: 'rep-2000', etiqueta: 'Guardando reporte de Empaque · Centro 2000' },
     ]);
+    const cerrados: ('1000' | '2000')[] = [];
     try {
       for (const centro of ['1000', '2000'] as const) {
         const id = `pfd-${centro}`;
@@ -3140,9 +3143,12 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
         }
         const resultado = await guardarPfdVentaCore(centro, preview.lineas);
         panelProgreso.actualizar(id, { estado: resultado.status === 'ok' ? 'ok' : resultado.status === 'sin-datos' ? 'aviso' : 'error', detalle: resultado.mensaje });
+        if (resultado.status === 'ok') cerrados.push(centro);
       }
-      // El reporte de Empaque no depende de que el PFD-VENTA haya salido: se guarda igual.
-      setReportePorGuardar(true);
+      (['1000', '2000'] as const).filter(c => !cerrados.includes(c)).forEach(c =>
+        panelProgreso.actualizar(`rep-${c}`, { estado: 'omitido', detalle: 'Sin PFD-VENTA guardado: el ciclo del centro no está cerrado.' }));
+      if (cerrados.length > 0) setReportePorGuardar(cerrados);
+      else panelProgreso.concluir('Ningún centro cerró su PFD-VENTA: no se guardó reporte.');
     } catch (e) {
       panelProgreso.actualizar('rep-1000', { estado: 'omitido' });
       panelProgreso.actualizar('rep-2000', { estado: 'omitido' });
@@ -3154,12 +3160,13 @@ export const TacticalPlanVentaExternaSection: React.FC = () => {
 
   useEffect(() => {
     if (!reportePorGuardar) return;
-    setReportePorGuardar(false);
+    const centros = reportePorGuardar;
+    setReportePorGuardar(null);
     void (async () => {
-      // Un reporte por centro (ver reporteFlujoEmpaque). Secuencial: construirHtml refresca el preview
-      // FERT/PT de cada centro.
+      // Un reporte por centro con PFD-VENTA guardado (ver reporteFlujoEmpaque). Secuencial: construirHtml
+      // refresca el preview FERT/PT de cada centro.
       const guardados: ('1000' | '2000')[] = [];
-      for (const centro of ['1000', '2000'] as const) {
+      for (const centro of centros) {
         panelProgreso.actualizar(`rep-${centro}`, { estado: 'en_curso' });
         const ok = await reporteFlujoEmpaque[centro].guardar({ sinConfirmar: true, silencioso: true });
         if (ok) guardados.push(centro);
