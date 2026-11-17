@@ -36,6 +36,7 @@ import {
   ChevronUp,
   ChevronDown,
   CheckCircle2,
+  XCircle,
   AlertTriangle,
   Lock,
   Unlock,
@@ -14208,6 +14209,30 @@ useEffect(() => {
   const [isCargandoPlanTxt, setIsCargandoPlanTxt] = useState(false);
   const [confirmRestaurarPlanTxt, setConfirmRestaurarPlanTxt] = useState(false);
 
+  // Respaldo del plan EN VIVO (lo que había en pantalla antes de "Restaurar en pantalla"), para
+  // poder "Cerrar" la vista de un plan guardado y volver exactamente a lo que se tenía — sin esto,
+  // restaurar un plan viejo para solo mirarlo pisaba el trabajo en curso sin forma de regresar
+  // (reportado por el usuario: "considera la información de las tarjetas de ajuste que están y no
+  // debe ser así"). Vive en un ref (no state) porque es un dato de respaldo puntual, no algo que
+  // deba disparar un re-render por sí mismo. `null` = no se está viendo un plan restaurado.
+  const estadoVivoBackupRef = useRef<{
+    acolchadoAceptadoPuestos: Set<string>; tapaAceptadoPuestos: Set<string>; forrosAceptadoPuestos: Set<string>;
+    otrosInterioresAceptadoPuestos: Set<string>; bordBandAcceptedMachines: Set<string>; corteAcceptedMachines: Set<string>;
+    bscAcceptedMachines: Set<string>; intpfAcceptedMachines: Set<string>; ttchnAcceptedMachines: Set<string>;
+    ajusteBandasAceptado: boolean; ajusteRmtbAceptado: boolean;
+    recuperacionPasoFecha: string; techStartDate: string; techEndDate: string;
+    rangoFbaseForroPorPuesto: Map<string, { desde: string; hasta: string }>;
+    jornadaDiurnaSel: string; jornadaNocturnaSel: string; jornadaFinSemanaSel: string;
+    esDiaFeriado: boolean; jornadaFeriadoSel: string; feriadoFechasManuales: string[];
+    citasMedicasPorPersona: Record<string, number>; workstationConfigs: Record<string, WorkstationConfig>;
+    trasladoGyePorForro: Map<string, number>; trasladoGyeBloqueado: Set<string>;
+    reparacionTrasladoPorForro: Map<string, number>; stockConfirmadoPorClave: Map<string, { confirmado: boolean; bloqueado: boolean }>;
+    trasladoGyeChn: number; trasladoGyeBase: number;
+    planFinalOrders: any[]; planFinalGuardado: boolean; sapEnviado: boolean;
+  } | null>(null);
+  // Qué plan restaurado se está viendo (para el banner "Estás viendo..."); `null` = vista normal.
+  const [planRestauradoActivo, setPlanRestauradoActivo] = useState<{ fechaObjetivo: string } | null>(null);
+
   // Función inversa del respaldo .txt: vuelve a cargar en pantalla fechas, jornada, Personal &
   // Turnos y las órdenes de Plan Final tal como se guardaron (con eso el Resumen se recalcula solo,
   // porque `ocupacionPorHR.yaAceptado` sale de planFinalOrders).
@@ -14264,6 +14289,82 @@ useEffect(() => {
     try { localStorage.removeItem(ACEPTAR_PLAN_DRAFT_STORAGE_KEY); } catch { /* localStorage no disponible */ }
     addNotification('success', `Plan del ${formatFechaLarga(s.fechaObjetivo)} restaurado: ${(s.planFinalOrders || []).length} orden(es) en Plan Final, jornada y Personal & Turnos cargados.`);
   }, [addNotification, formatFechaLarga]);
+
+  // Envoltura de `restaurarPlanDesdeSnapshot` que primero guarda el estado EN VIVO actual (solo la
+  // primera vez: si ya se está viendo un plan restaurado y se cambia a OTRA fecha guardada, debe
+  // seguir pudiéndose volver al estado original de antes de abrir "Planes guardados", no al plan
+  // restaurado anterior) para que `cerrarVistaPlanRestaurado` pueda devolverlo tal cual.
+  const handleRestaurarPlanTxt = useCallback((s: PlanTxtSnapshot) => {
+    if (!estadoVivoBackupRef.current) {
+      estadoVivoBackupRef.current = {
+        acolchadoAceptadoPuestos, tapaAceptadoPuestos, forrosAceptadoPuestos, otrosInterioresAceptadoPuestos,
+        bordBandAcceptedMachines, corteAcceptedMachines, bscAcceptedMachines, intpfAcceptedMachines, ttchnAcceptedMachines,
+        ajusteBandasAceptado, ajusteRmtbAceptado,
+        recuperacionPasoFecha, techStartDate, techEndDate, rangoFbaseForroPorPuesto,
+        jornadaDiurnaSel, jornadaNocturnaSel, jornadaFinSemanaSel, esDiaFeriado, jornadaFeriadoSel, feriadoFechasManuales,
+        citasMedicasPorPersona, workstationConfigs,
+        trasladoGyePorForro, trasladoGyeBloqueado, reparacionTrasladoPorForro, stockConfirmadoPorClave, trasladoGyeChn, trasladoGyeBase,
+        planFinalOrders, planFinalGuardado, sapEnviado,
+      };
+    }
+    restaurarPlanDesdeSnapshot(s);
+    setPlanRestauradoActivo({ fechaObjetivo: s.fechaObjetivo });
+  }, [
+    restaurarPlanDesdeSnapshot,
+    acolchadoAceptadoPuestos, tapaAceptadoPuestos, forrosAceptadoPuestos, otrosInterioresAceptadoPuestos,
+    bordBandAcceptedMachines, corteAcceptedMachines, bscAcceptedMachines, intpfAcceptedMachines, ttchnAcceptedMachines,
+    ajusteBandasAceptado, ajusteRmtbAceptado,
+    recuperacionPasoFecha, techStartDate, techEndDate, rangoFbaseForroPorPuesto,
+    jornadaDiurnaSel, jornadaNocturnaSel, jornadaFinSemanaSel, esDiaFeriado, jornadaFeriadoSel, feriadoFechasManuales,
+    citasMedicasPorPersona, workstationConfigs,
+    trasladoGyePorForro, trasladoGyeBloqueado, reparacionTrasladoPorForro, stockConfirmadoPorClave, trasladoGyeChn, trasladoGyeBase,
+    planFinalOrders, planFinalGuardado, sapEnviado,
+  ]);
+
+  // Vuelve exactamente a lo que había en pantalla antes de "Restaurar en pantalla" — simétrico a
+  // `restaurarPlanDesdeSnapshot`, campo por campo, para que ver un plan guardado sea 100% reversible
+  // y nunca termine mezclado con el trabajo en curso (Resumen, Ajuste de Producción, etc.).
+  const cerrarVistaPlanRestaurado = useCallback(() => {
+    const b = estadoVivoBackupRef.current;
+    if (!b) { setPlanRestauradoActivo(null); return; }
+    setAcolchadoAceptadoPuestos(b.acolchadoAceptadoPuestos);
+    setTapaAceptadoPuestos(b.tapaAceptadoPuestos);
+    setForrosAceptadoPuestos(b.forrosAceptadoPuestos);
+    setOtrosInterioresAceptadoPuestos(b.otrosInterioresAceptadoPuestos);
+    setBordBandAcceptedMachines(b.bordBandAcceptedMachines);
+    setCorteAcceptedMachines(b.corteAcceptedMachines);
+    setBscAcceptedMachines(b.bscAcceptedMachines);
+    setIntpfAcceptedMachines(b.intpfAcceptedMachines);
+    setTtchnAcceptedMachines(b.ttchnAcceptedMachines);
+    setAjusteBandasAceptado(b.ajusteBandasAceptado);
+    setAjusteRmtbAceptado(b.ajusteRmtbAceptado);
+    setRecuperacionPasoFecha(b.recuperacionPasoFecha);
+    setTechStartDate(b.techStartDate);
+    setTechEndDate(b.techEndDate);
+    setRangoFbaseForroPorPuesto(b.rangoFbaseForroPorPuesto);
+    setJornadaDiurnaSel(b.jornadaDiurnaSel);
+    setJornadaNocturnaSel(b.jornadaNocturnaSel);
+    setJornadaFinSemanaSel(b.jornadaFinSemanaSel);
+    setEsDiaFeriado(b.esDiaFeriado);
+    setJornadaFeriadoSel(b.jornadaFeriadoSel);
+    setFeriadoFechasManuales(b.feriadoFechasManuales);
+    setCitasMedicasPorPersona(b.citasMedicasPorPersona);
+    setWorkstationConfigs(b.workstationConfigs);
+    setTrasladoGyePorForro(b.trasladoGyePorForro);
+    setTrasladoGyeBloqueado(b.trasladoGyeBloqueado);
+    setReparacionTrasladoPorForro(b.reparacionTrasladoPorForro);
+    setStockConfirmadoPorClave(b.stockConfirmadoPorClave);
+    setTrasladoGyeChn(b.trasladoGyeChn);
+    setTrasladoGyeBase(b.trasladoGyeBase);
+    // Mismo criterio que al restaurar: evita el aviso "Plan Final se actualizó solo" al volver.
+    planFinalPrimeraCargaRef.current = true;
+    setPlanFinalOrders(b.planFinalOrders);
+    setPlanFinalGuardado(b.planFinalGuardado);
+    setSapEnviado(b.sapEnviado);
+    estadoVivoBackupRef.current = null;
+    setPlanRestauradoActivo(null);
+    addNotification('success', 'Volviste a tu plan en vivo — lo que tenías antes de ver el plan guardado.');
+  }, [addNotification]);
 
   const consultarPlanTxt = useCallback(async (fecha: string) => {
     setPlanTxtFecha(fecha);
@@ -14346,6 +14447,23 @@ useEffect(() => {
         </div>
       </div>
 
+      {/* Visible en CUALQUIER pestaña (Resumen, Ajuste de Producción, Personal y Turnos, el correo)
+          mientras se esté viendo un plan restaurado desde "Planes guardados" — para que sea obvio
+          que lo que se ve no es el trabajo en vivo, y para poder volver a él en cualquier momento. */}
+      {planRestauradoActivo && (
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 bg-amber-50 border-2 border-amber-300 rounded-2xl px-5 py-3 shadow-sm">
+          <div className="flex items-center gap-2 text-amber-800">
+            <History className="w-4 h-4 shrink-0" />
+            <span className="text-xs font-black uppercase tracking-tight">
+              Viendo el plan guardado del {formatFechaLarga(planRestauradoActivo.fechaObjetivo)} — esto no es tu trabajo en vivo.
+            </span>
+          </div>
+          <Button size="sm" onClick={cerrarVistaPlanRestaurado} className="h-8 rounded-xl text-[9px] font-black uppercase tracking-widest bg-amber-600 hover:bg-amber-700 text-white shrink-0">
+            <XCircle className="w-3.5 h-3.5 mr-1.5" /> Cerrar y volver a mi plan en vivo
+          </Button>
+        </div>
+      )}
+
       <Dialog open={planTxtDialogOpen} onOpenChange={setPlanTxtDialogOpen}>
         <DialogContent className="max-w-6xl w-[95vw] max-h-[90vh] flex flex-col">
           <DialogHeader>
@@ -14393,9 +14511,9 @@ useEffect(() => {
                 {planTxtResultado.snapshot ? (
                   confirmRestaurarPlanTxt ? (
                     <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-bold text-amber-700">Reemplaza el Plan Final, jornada y Personal & Turnos actuales.</span>
+                      <span className="text-[10px] font-bold text-amber-700">Reemplaza el Plan Final, jornada y Personal & Turnos actuales (podrás volver con "Cerrar y volver a mi plan en vivo").</span>
                       <Button size="sm" variant="outline" onClick={() => setConfirmRestaurarPlanTxt(false)} className="h-8 rounded-xl text-[9px] font-black uppercase">Cancelar</Button>
-                      <Button size="sm" onClick={() => restaurarPlanDesdeSnapshot(planTxtResultado.snapshot!)} className="h-8 rounded-xl text-[9px] font-black uppercase bg-amber-600 hover:bg-amber-700 text-white">Confirmar</Button>
+                      <Button size="sm" onClick={() => handleRestaurarPlanTxt(planTxtResultado.snapshot!)} className="h-8 rounded-xl text-[9px] font-black uppercase bg-amber-600 hover:bg-amber-700 text-white">Confirmar</Button>
                     </div>
                   ) : (
                     <Button size="sm" onClick={() => setConfirmRestaurarPlanTxt(true)} className="h-8 rounded-xl text-[9px] font-black uppercase tracking-widest bg-indigo-600 hover:bg-indigo-700 text-white">
