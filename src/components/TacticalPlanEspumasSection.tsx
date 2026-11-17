@@ -1136,10 +1136,13 @@ export const TacticalPlanEspumasSection: React.FC = () => {
   const [autoGenerarPendiente, setAutoGenerarPendiente] = useState(false);
   const [syncStep, setSyncStep] = useState<'idle' | 'sincronizando' | 'generando'>('idle');
   const panelProgreso = usePanelProgreso();
-  // Fase 2 del panel (2026-10-03): tras confirmar P3/PFD, el reporte de cada centro se guarda solo.
-  // Lo corre un efecto (ver más abajo, junto a reporteFlujo) para que construirHtml lea el render
-  // posterior a guardar el P3/PFD y refrescar necesidades, no un cierre viejo.
+  // Ciclo del día (2026-11-17): al exportar a SAP, el reporte del centro se guarda solo. Lo corre un
+  // efecto (ver más abajo, junto a reporteFlujo) para que construirHtml lea el render vigente.
   const [reportesPorGuardar, setReportesPorGuardar] = useState<('1000' | '2000')[] | null>(null);
+  // Órdenes enviadas a SAP por centro (material + fecha de inicio) para el paso 3 · Actualizar órdenes SAP.
+  type EnvioSapEspuma = { en: string; ordenes: { material: string; fecha: string }[]; conteo?: { encontradas: number; total: number } };
+  const [enviosSapEspuma, setEnviosSapEspuma] = useState<Partial<Record<'1000' | '2000', EnvioSapEspuma>>>({});
+  const [actualizandoOrdenesCentro, setActualizandoOrdenesCentro] = useState<'1000' | '2000' | null>(null);
   const [ordenesProvisionales, setOrdenesProvisionales] = useState<RawApiRow[]>([]);
   const [ordenesFert, setOrdenesFert] = useState<RawApiRow[]>([]);
   // "Pendientes Totales" (pedidos de venta pendientes de entrega, sector "09 ESPUMAS" — mismo dato
@@ -3546,48 +3549,54 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     restaurar: restaurarEstadoPlan,
   });
 
-  // Fase 2 del panel: guarda el reporte de cada centro confirmado en P3/PFD (sin preguntar si ya
-  // había uno: el P3 recién confirmado lo reemplaza) y deja "Ver reporte y enviar" como siguiente
-  // paso. El envío sigue siendo manual, desde la vista previa.
+  // Ciclo del día (usuario 2026-11-17, igual que Laminado): 1 · P3 → 2 · Exportar a SAP → 3 · Actualizar
+  // órdenes SAP → correo. El reporte del centro se congela al exportar a SAP (no al P3 ni al sincronizar).
   useEffect(() => {
     if (!reportesPorGuardar) return;
     const centros = reportesPorGuardar;
     setReportesPorGuardar(null);
     void (async () => {
-      const guardados: ('UIO' | 'GYE')[] = [];
       for (const centro of centros) {
-        const planta = centro === '1000' ? 'UIO' : 'GYE';
-        const flujo = reporteFlujo[planta];
+        const flujo = reporteFlujo[centro === '1000' ? 'UIO' : 'GYE'];
         if (!flujo.config.fechaObjetivo) {
-          panelProgreso.actualizar(`rep-${centro}`, { estado: 'aviso', detalle: 'Sin fecha en "Evaluar Capacidad": elige la fecha y guárdalo desde "Enviar Reporte".' });
+          addNotification('warning', `Centro ${centro}: sin fecha en "Evaluar Capacidad"; elige la fecha y guarda el reporte desde "Enviar Reporte".`);
           continue;
         }
-        panelProgreso.actualizar(`rep-${centro}`, { estado: 'en_curso' });
         const ok = await flujo.guardar({ sinConfirmar: true, silencioso: true });
-        panelProgreso.actualizar(`rep-${centro}`, ok
-          ? { estado: 'ok', detalle: `Plan del ${flujo.config.fechaObjetivo} guardado en la carpeta compartida (todavía no se envió).` }
-          : { estado: 'error', detalle: 'No se pudo guardar; reintenta desde "Enviar Reporte".' });
-        if (ok) guardados.push(planta);
+        if (ok) addNotification('success', `Centro ${centro}: reporte del ${flujo.config.fechaObjetivo} guardado con el PFD enviado a SAP. Cuando SAP cree las órdenes, usa "3 · Actualizar órdenes SAP".`);
       }
-      // Orden SAP → reporte (usuario 2026-10-12): primero exportar el PFD a SAP y después revisar y
-      // enviar el correo. El reporte ya quedó guardado como foto del P3 (no se recalcula con las FERT
-      // nuevas); el correo de Espuma no lleva orden SAP por material, así que solo cambia el orden.
-      const nombre = (planta: 'UIO' | 'GYE') => guardados.length > 1 ? (planta === 'UIO' ? ' Quito' : ' Guayaquil') : '';
-      panelProgreso.concluir(
-        guardados.length > 0 ? 'P3 y reporte guardados. 1) Exporta el PFD a SAP; 2) luego revisa y envía el reporte.' : undefined,
-        [
-          ...guardados.map(planta => ({
-            etiqueta: `1 · Exportar a SAP${nombre(planta)}`,
-            onClick: () => { setActiveTab('respuestaP3'); void handleExportSap(planta === 'UIO' ? '1000' : '2000'); },
-          })),
-          ...guardados.map(planta => ({
-            etiqueta: `2 · Ver reporte y enviar${nombre(planta)}`,
-            onClick: () => { setActiveTab('resumen'); void reporteFlujo[planta].recuperar(); },
-          })),
-        ],
-      );
     })();
   }, [reportesPorGuardar]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Paso 3 (a pedido, SAP crea las órdenes cada ~10 min): busca en las FERT las órdenes enviadas (centro +
+  // material + fecha de inicio) SIN volver a sincronizar; si están todas, abre el correo del centro.
+  const handleActualizarOrdenesSapEspuma = async (centro: '1000' | '2000') => {
+    const envio = enviosSapEspuma[centro];
+    const flujo = reporteFlujo[centro === '1000' ? 'UIO' : 'GYE'];
+    setActualizandoOrdenesCentro(centro);
+    try {
+      let conteo: { encontradas: number; total: number } | null = null;
+      if (envio && envio.ordenes.length > 0) {
+        const res = await serviciosService.getOrdenesFert(1, 20000);
+        const enSap = new Set(((res.data || []) as RawApiRow[]).map(o => {
+          const fecha = getProp(o, ['FECHA', 'FECHAINICIO', 'FECHA_INICIO']).trim().split('T')[0];
+          return `${getProp(o, ['CENTRO', 'Centro']).trim()}|${String(Number(getProp(o, ['MATERIAL', 'CodMaterial'])))}|${fecha}`;
+        }));
+        const encontradas = envio.ordenes.filter(x => enSap.has(`${centro}|${x.material}|${x.fecha}`)).length;
+        conteo = { encontradas, total: envio.ordenes.length };
+        setEnviosSapEspuma(prev => ({ ...prev, [centro]: { ...envio, conteo } }));
+      }
+      if (conteo && conteo.encontradas < conteo.total) {
+        addNotification('warning', `Centro ${centro}: ${conteo.encontradas}/${conteo.total} órdenes creadas en SAP. Vuelve a actualizar en unos minutos.`);
+        return;
+      }
+      if (await flujo.recuperar({ abrir: false })) { setActiveTab('resumen'); flujo.setVistaAbierta(true); }
+    } catch (e) {
+      addNotification('error', `Centro ${centro}: no se pudieron consultar las órdenes de SAP — ${(e as Error).message}`);
+    } finally {
+      setActualizandoOrdenesCentro(null);
+    }
+  };
 
   // Materiales de "Laminado Cilíndrico" (descripción "LAMINA CILINDRICA...") — verificado con datos
   // reales: son 6 materiales, todos de Muebles, y ya reciben su respuesta P3 desde el módulo de
@@ -4962,13 +4971,12 @@ export const TacticalPlanEspumasSection: React.FC = () => {
     const nombrePlanta = (c: '1000' | '2000') => (c === '1000' ? 'Quito' : 'Guayaquil');
     setIsSavingPlanP3PFD(true);
     setPlanPreviewP3PFD(null);
-    panelProgreso.iniciar('Corte Espuma — Respuesta P3 y reporte', [
+    panelProgreso.iniciar('Corte Espuma — Respuesta P3', [
       ...previews.flatMap(({ centro }) => [
         { id: `p3-${centro}`, etiqueta: `Guardando P3 · ${nombrePlanta(centro)}` },
         { id: `aviso-${centro}`, etiqueta: `Correo de respuesta automática · ${nombrePlanta(centro)}` },
       ]),
       { id: 'nec', etiqueta: 'Actualizando necesidades' },
-      ...previews.map(({ centro }) => ({ id: `rep-${centro}`, etiqueta: `Guardando reporte · ${nombrePlanta(centro)}` })),
     ]);
     try {
       const user = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
@@ -4990,8 +4998,8 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       await fetchNecesidadesPlanta();
       panelProgreso.actualizar('nec', { estado: 'ok' });
       // Sin fecha en "Evaluar Capacidad", el reporte se arma con la fecha del P3 (día de recuperación)
-      // en vez de quedar en aviso (pedido del usuario 2026-10-03); una fecha ya elegida se respeta. Va
-      // en el mismo render que setReportesPorGuardar, así el efecto ya ve el resumen con esa fecha.
+      // en vez de quedar en aviso (pedido del usuario 2026-10-03); una fecha ya elegida se respeta. El
+      // reporte ya no se guarda acá: se congela al exportar a SAP (paso 2).
       setSelectedDatesCapacidad(prev => {
         const next = { ...prev };
         previews.forEach(({ centro, p3 }) => {
@@ -5000,11 +5008,9 @@ export const TacticalPlanEspumasSection: React.FC = () => {
         });
         return next;
       });
-      // El reporte (capacidad + correo) no depende de que el P3 haya salido bien: se guarda igual.
-      setReportesPorGuardar(previews.map(x => x.centro));
+      panelProgreso.concluir('P3 guardado. Siguiente: 2 · Exportar a SAP.');
     } catch (e) {
       panelProgreso.actualizar('nec', { estado: 'error', detalle: (e as Error).message });
-      previews.forEach(({ centro }) => panelProgreso.actualizar(`rep-${centro}`, { estado: 'omitido' }));
       panelProgreso.concluir(`Error al guardar la Respuesta P3: ${(e as Error).message}`);
     } finally {
       setIsSavingPlanP3PFD(false);
@@ -5295,6 +5301,22 @@ export const TacticalPlanEspumasSection: React.FC = () => {
       const fallidos = resultados.filter(r => !r.ok);
       // SAP ya tiene órdenes nuevas: la próxima lectura de FERT/provisionales va a SAP (ver datos-sap-compartidos).
       if (ok.length > 0) refrescarDatosSap(['fert', 'provisionales']);
+      // Paso 2 del ciclo: se congela el reporte del centro y se recuerdan las órdenes enviadas para el paso 3.
+      const centroEnvio = payloads[0].Centro === '2000' ? '2000' : '1000';
+      const enviadas = payloads.filter((p, i) => resultados[i]?.ok);
+      if (enviadas.length > 0) {
+        setEnviosSapEspuma(prev => ({
+          ...prev,
+          [centroEnvio]: {
+            en: new Date().toISOString(),
+            ordenes: enviadas.map(p => {
+              const f = String(p.FechaInicioProgramada || '');
+              return { material: String(Number(p.CodigoMaterial)), fecha: `${f.slice(0, 4)}-${f.slice(4, 6)}-${f.slice(6, 8)}` };
+            }),
+          },
+        }));
+        setReportesPorGuardar([centroEnvio]);
+      }
       if (fallidos.length === 0) {
         addNotification('success', `${ok.length} orden(es) de producción enviada(s) a SAP correctamente.`);
       } else {
@@ -7328,6 +7350,31 @@ Incluye el pendiente FERT hasta el ${format(parseFechaLocal(ocupacion.pendienteA
                       >
                         {isValidandoExportSap ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} 2 · Exportar a SAP · PFD {nombrePlanta}
                       </Button>
+                      {(() => {
+                        const envio = enviosSapEspuma[centro];
+                        const flujo = reporteFlujo[centro === '1000' ? 'UIO' : 'GYE'];
+                        const completo = envio?.conteo && envio.conteo.encontradas >= envio.conteo.total;
+                        return (
+                          <Button
+                            onClick={() => { void handleActualizarOrdenesSapEspuma(centro); }}
+                            disabled={actualizandoOrdenesCentro !== null || isEnviandoSap || flujo.estado !== 'guardado'}
+                            variant="outline"
+                            title={[
+                              envio ? `Enviado a SAP ${format(new Date(envio.en), 'HH:mm')}` : null,
+                              envio?.conteo ? `${envio.conteo.encontradas}/${envio.conteo.total} órdenes creadas` : null,
+                              'Busca las órdenes que SAP creó (sin volver a sincronizar) y abre el correo del centro',
+                            ].filter(Boolean).join(' · ')}
+                            className="rounded-xl h-9 px-5 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                          >
+                            {actualizandoOrdenesCentro === centro ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} 3 · Actualizar órdenes SAP
+                            {envio?.conteo && (
+                              <span className={cn('rounded px-1.5 py-0.5 text-[9px]', completo ? 'bg-emerald-100' : 'bg-amber-100 text-amber-700')}>
+                                {envio.conteo.encontradas}/{envio.conteo.total}
+                              </span>
+                            )}
+                          </Button>
+                        );
+                      })()}
                     </div>
                   </div>
                   <div className="overflow-x-auto max-h-[500px]">
