@@ -314,11 +314,12 @@ const resumenConsumoHistorico = (movs: MovimientoConsumo[]) => {
 // Paso 3 · Plan de Reposición Leader (usuario 2026-11-12): misma regla que la hoja BASE del Excel
 // "NN Programación bloque formulados 2026.xlsx" (PRG LEADER), por Bloque Formulado de apertura:
 //   I  Stock [UN]        = stock Kg ÷ peso del bloque
-//   O  Meta consumo/día  = histórico (SEMANAS_META_CONSUMO semanas ÷ días hábiles), igual todos los días; editable
-//   V  Venta Externa     = solo el EXCESO (usuario 2026-11-12): faltante de las FERT 018 (planchas de venta,
-//                          centro 1000) atrasadas + DIAS_VE_DEFAULT días hábiles desde D, menos lo que VE ya
-//                          consume en la meta (notificado 018 de las mismas semanas del histórico ÷ días
-//                          hábiles × días de la ventana). Las 038 son ya el plan: llegarían tarde.
+//   O  Meta consumo/día  = consumo INTERNO (usuario 2026-11-17): histórico de SEMANAS_META_CONSUMO semanas menos
+//                          lo notificado por las FERT 018 de esas semanas (BOM), ÷ días hábiles; editable
+//   V  Venta Externa     = pedido completo de las FERT 018 (planchas de venta, centro 1000) atrasadas + DIAS_VE_DEFAULT
+//                          días hábiles desde D, por fecha fin. Las 038 son ya el plan: llegarían tarde.
+//   Estrategia           = Estrategia_<material> si existe; si no, por datos: interno y VE → HB, solo interno →
+//                          MTS, solo VE → MTO (fabrica contra pedido), ninguno → SIN (no se repone)
 //   Peso                 = Lote Mín. SAP como estándar; el promedio real de fabricados queda de control
 //   AL Plan día anterior = PLAN del último reporte guardado antes del día de producción
 //   AC Cobertura actual  = MTS (I + AL) ÷ O · HB (I − V + AL) ÷ O
@@ -327,13 +328,13 @@ const resumenConsumoHistorico = (movs: MovimientoConsumo[]) => {
 //   Reponer              = día de producción (DiasProduccion_<apertura>) y AC < AD (MTO: stock Kg < VE Kg)
 //   AI Sugerido          = (AD × O) − I + V − AL, a 1 decimal; fracción ≥ 0,3 sube, si no baja
 //   AJ PLAN              = sugerido, editable; tope = nichos (30) + autodescarga (6) opcional
-type EstrategiaReposicion = 'MTS' | 'MTO' | 'HB';
+type EstrategiaReposicion = 'MTS' | 'MTO' | 'HB' | 'SIN';
 const HORIZONTE_DEFAULT_DIAS = 1 + CURADO_DIAS_ESPERA;
 const NICHOS_MAX_DEFAULT = 30;
 const AUTODESCARGA_DEFAULT_UN = 6;
 const SEMANAS_META_CONSUMO = 4;
 const RESP_VENTA_EXTERNA_PT = '018';
-const DIAS_VE_DEFAULT = 4;
+const DIAS_VE_DEFAULT = 3;
 
 // Lo que se calcula al generar (SAP + restricciones resueltas) y viaja en el respaldo del reporte.
 interface BaseReposicionRow {
@@ -341,10 +342,13 @@ interface BaseReposicionRow {
   pesoBloque: number; pesoFuente: 'real' | 'lote' | 'sin dato'; pesoDetalle?: string; pesoRealProm?: number;
   // Curado / en curado = mismos Kg (CantidadStock) que la pestaña 2 · Stock y Curado, espacio Leader.
   stockKg: number; enCuradoKg: number; curadoKg?: number;
-  // veKg = exceso de Venta Externa que entra al cálculo (V); veVentanaKg / veBaseKg lo explican.
-  metaKgDia: number; veKg: number; veVentanaKg?: number; veBaseKg?: number; planAnteriorUN: number;
+  // metaKgDia = consumo interno/día; metaTotalKgDia / veHistKg (Kg 018 del histórico) lo explican.
+  // veKg = pedido FERT 018 de la ventana (V); veFechas = ese pedido por fecha fin.
+  metaKgDia: number; metaTotalKgDia?: number; veHistKg?: number;
+  veKg: number; veVentanaKg?: number; veBaseKg?: number; veFechas?: { fecha: string; kg: number }[]; planAnteriorUN: number;
   horizonteDias: number; horizonteRestriccion: boolean;
-  estrategia: EstrategiaReposicion; diaProduccion: boolean;
+  // estrategia = la que quedó al generar; estrategiaRestriccion = Estrategia_<material>, manda sobre los datos.
+  estrategia: EstrategiaReposicion; estrategiaRestriccion?: EstrategiaReposicion; diaProduccion: boolean;
 }
 interface ReposicionLeader {
   filas: BaseReposicionRow[];
@@ -399,14 +403,17 @@ const calcularFilaReposicion = (b: BaseReposicionRow, metaOverrideUN?: number, p
   const AL = b.planAnteriorUN;
   const O = metaOverrideUN ?? aUN(b.metaKgDia);
   const AD = b.horizonteDias;
-  // Sin consumo no hay cobertura que medir: se repone solo contra Venta Externa (como MTO).
-  const estrategiaEfectiva: EstrategiaReposicion = O > 0 ? b.estrategia : 'MTO';
+  // Restricción manda; si no, por datos: consumo interno (O) y/o pedido 018 (V). Sin consumo no hay cobertura:
+  // solo VE → MTO (contra pedido), nada → SIN.
+  const estrategiaEfectiva: EstrategiaReposicion = b.estrategiaRestriccion
+    ? (b.estrategiaRestriccion !== 'MTO' && !(O > 0) ? (V > 0 ? 'MTO' : 'SIN') : b.estrategiaRestriccion)
+    : O > 0 ? (V > 0 ? 'HB' : 'MTS') : V > 0 || (b.veHistKg ?? 0) > 0 ? 'MTO' : 'SIN';
   const cobertura = (extra: number): number | null => {
-    if (estrategiaEfectiva === 'MTO') return null;
+    if (estrategiaEfectiva === 'MTO' || estrategiaEfectiva === 'SIN') return null;
     return (estrategiaEfectiva === 'HB' ? I - V + AL + extra : I + AL + extra) / O;
   };
   const coberturaActual = cobertura(0);
-  const reponer = b.diaProduccion && (estrategiaEfectiva === 'MTO' ? b.stockKg < b.veKg : (coberturaActual ?? 0) < AD);
+  const reponer = b.diaProduccion && estrategiaEfectiva !== 'SIN' && (estrategiaEfectiva === 'MTO' ? b.stockKg < b.veKg : (coberturaActual ?? 0) < AD);
   const bruto = (estrategiaEfectiva === 'MTO' ? 0 : AD * O) - I + V - AL;
   const sugeridoUN = reponer ? redondeoReposicion(bruto) : 0;
   const planUN = planOverrideUN ?? sugeridoUN;
@@ -1076,7 +1083,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     const inicioHist = new Date();
     inicioHist.setDate(inicioHist.getDate() - diasVentana + 1);
     const histDesde = format(inicioHist, 'yyyy-MM-dd');
-    const ordenes018: { material: string; ventana: number; hist: number }[] = [];
+    const ordenes018: { material: string; fechaFin: string; ventana: number; hist: number }[] = [];
     ordenesFert.forEach(o => {
       if (getProp(o, ['CENTRO', 'Centro']).trim() !== '1000') return;
       if (getProp(o, ['RESPCTRLPROD', 'RESPCONTROLPROD', 'RESP_CONTROL_PROD', 'RESPONSABLE']).trim() !== RESP_VENTA_EXTERNA_PT) return;
@@ -1086,7 +1093,7 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       const notif = safeNum(getProp(o, ['CANTNOTIFICADA', 'CANT_NOTIFICADA']));
       const ventana = fechaFin <= limiteVE && pend > 0 ? pend : 0;
       const hist = fechaFin >= histDesde && fechaFin < hoyStr && notif > 0 ? notif : 0;
-      if (ventana > 0 || hist > 0) ordenes018.push({ material: extractMaterialInfo(o).code, ventana, hist });
+      if (ventana > 0 || hist > 0) ordenes018.push({ material: extractMaterialInfo(o).code, fechaFin, ventana, hist });
     });
     // Kg de Bloque Formulado por UN de cada plancha 018: una explosión BOM por material, no por orden.
     const bomPorMaterial = new Map<string, Map<string, number>>();
@@ -1110,8 +1117,15 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
     }
     const veVentanaKg = new Map<string, number>();
     const veHistKg = new Map<string, number>();
+    // Pedido 018 por bloque y fecha fin (las atrasadas quedan con su fecha, antes de D).
+    const veFechasKg = new Map<string, Map<string, number>>();
     ordenes018.forEach(o => bomPorMaterial.get(o.material)?.forEach((kgPorUN, cod) => {
-      if (o.ventana > 0) veVentanaKg.set(cod, (veVentanaKg.get(cod) || 0) + kgPorUN * o.ventana);
+      if (o.ventana > 0) {
+        veVentanaKg.set(cod, (veVentanaKg.get(cod) || 0) + kgPorUN * o.ventana);
+        const porFecha = veFechasKg.get(cod) ?? new Map<string, number>();
+        porFecha.set(o.fechaFin, (porFecha.get(o.fechaFin) || 0) + kgPorUN * o.ventana);
+        veFechasKg.set(cod, porFecha);
+      }
       if (o.hist > 0) veHistKg.set(cod, (veHistKg.get(cod) || 0) + kgPorUN * o.hist);
     }));
 
@@ -1127,11 +1141,16 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
       const real = pesoReal.get(code);
       const pesoBloque = u.loteMin > 0 ? u.loteMin : real ?? 0;
       const veVentana = veVentanaKg.get(code) || 0;
-      const veBase = diasHabiles > 0 ? ((veHistKg.get(code) || 0) / diasHabiles) * diasVE : 0;
-      const metaKgDia = diasHabiles > 0 ? consumoUltimosDiasKg(movimientosCache.get(code) ?? [], diasVentana) / diasHabiles : 0;
+      // Meta = consumo interno: el histórico total menos lo que se llevaron las FERT 018 en esas semanas.
+      const consumoTotalKg = consumoUltimosDiasKg(movimientosCache.get(code) ?? [], diasVentana);
+      const veHist = veHistKg.get(code) || 0;
+      const metaKgDia = diasHabiles > 0 ? Math.max(0, consumoTotalKg - veHist) / diasHabiles : 0;
       const coberturaRestr = restr(`Cobertura_${code}`);
       const horizonteMaterial = coberturaRestr ? horizonteDeRestriccion(coberturaRestr, hoyPlan.getDay()) : null;
-      const estrategiaRestr = restr(`Estrategia_${code}`).toUpperCase();
+      const estrategiaTxt = restr(`Estrategia_${code}`).toUpperCase().trim();
+      const estrategiaRestriccion: EstrategiaReposicion | undefined =
+        estrategiaTxt === 'MTO' || estrategiaTxt === 'HB' || estrategiaTxt === 'MTS' ? estrategiaTxt : undefined;
+      const estrategiaDatos: EstrategiaReposicion = metaKgDia > 0 ? (veVentana > 0 ? 'HB' : 'MTS') : veVentana > 0 || veHist > 0 ? 'MTO' : 'SIN';
       const diasProd = diasProduccionDeRestriccion(restr(`DiasProduccion_${u.apertura}`));
       const fila: BaseReposicionRow = {
         blockCode: code, blockDesc: u.desc, corrida: extraerCorridaCategoria(u.categoria), apertura: u.apertura, dens: u.dens,
@@ -1144,9 +1163,12 @@ export const TacticalPlanFormulacionSection: React.FC = () => {
           return `${base} · real ${formatNum(c.pesoProm, 0)} Kg${dif}, ${c.pesoN} bloque(s) ${formatNum(c.pesoMin, 0)}–${formatNum(c.pesoMax, 0)}${c.pesoDescartados ? `, ${c.pesoDescartados} parcial(es) fuera` : ''}`;
         })(),
         stockKg: u.stockKg, enCuradoKg: curadoLeader.get(code)?.enCuradoKg ?? 0, curadoKg: curadoLeader.get(code)?.curadosKg ?? 0,
-        metaKgDia, veKg: Math.max(0, veVentana - veBase), veVentanaKg: veVentana, veBaseKg: veBase, planAnteriorUN: planAnterior[code] || 0,
+        metaKgDia, metaTotalKgDia: diasHabiles > 0 ? consumoTotalKg / diasHabiles : 0, veHistKg: veHist,
+        veKg: veVentana, veVentanaKg: veVentana,
+        veFechas: Array.from(veFechasKg.get(code) ?? []).sort(([a], [b]) => a.localeCompare(b)).map(([fecha, kg]) => ({ fecha, kg })),
+        planAnteriorUN: planAnterior[code] || 0,
         horizonteDias: horizonteMaterial ?? horizonteGeneral, horizonteRestriccion: horizonteMaterial !== null,
-        estrategia: estrategiaRestr === 'MTO' || estrategiaRestr === 'HB' ? estrategiaRestr : 'MTS',
+        estrategia: estrategiaRestriccion ?? estrategiaDatos, estrategiaRestriccion,
         diaProduccion: diasProd ? diasProd.has(dProd.getDay()) : true,
       };
       if (fila.stockKg > 0 || fila.metaKgDia > 0 || veVentana > 0 || fila.planAnteriorUN > 0 || fila.horizonteRestriccion) filas.push(fila);
@@ -2250,7 +2272,7 @@ ${seccionCofama()}
                   <th className={cn(th, 'text-cyan-700 bg-cyan-50/50')} title={`Histórico ${SEMANAS_META_CONSUMO} semanas ÷ días hábiles; editable`}>Meta (UN/día)</th>
                   <th className={cn(th, 'text-purple-700')} title="Exceso FERT 018 (atrasadas + ventana) sobre lo que VE ya consume en la meta">VE (UN)</th>
                   <th className={th} title="PLAN del reporte anterior">Plan ant. (UN)</th>
-                  <th className={th} title="Restricción Estrategia_<material>; sin consumo = MTO">Estrat.</th>
+                  <th className={th} title="Restricción Estrategia_<material> o por datos (consumo interno / FERT 018)">Estrat.</th>
                   <th className={cn(th, 'text-rose-700 bg-rose-50/50')}>Cobertura (días)</th>
                   <th className={th} title={`Restricción Cobertura_<material> o Formulacion_Cobertura_Dias; por defecto ${HORIZONTE_DEFAULT_DIAS} (1 día de fabricación + ${CURADO_DIAS_ESPERA} de curado)`}>Horizonte (días)</th>
                   <th className={th}>Acción</th>
@@ -2289,15 +2311,18 @@ ${seccionCofama()}
                             defaultValue={Number(f.metaUNDia.toFixed(2))}
                             onBlur={e => ajustarValor('metaOverride', f.blockCode, e.target.value === String(Number(f.metaUNDia.toFixed(2))) && !f.metaEditada ? '' : e.target.value)}
                             className={cn(input, f.metaEditada ? 'border-cyan-500 text-cyan-800' : 'border-gray-200')}
-                            title={`Histórico: ${f.pesoBloque > 0 ? (f.metaKgDia / f.pesoBloque).toFixed(2) : '—'} UN/día (${formatNum(f.metaKgDia, 1)} Kg/día)`}
+                            title={`Interno: ${f.pesoBloque > 0 ? (f.metaKgDia / f.pesoBloque).toFixed(2) : '—'} UN/día (${formatNum(f.metaKgDia, 1)} Kg/día)${f.metaTotalKgDia !== undefined ? ` · total ${formatNum(f.metaTotalKgDia, 1)} Kg/día − VE 018 ${formatNum(f.metaTotalKgDia - f.metaKgDia, 1)} Kg/día` : ''}`}
                           />
                         </td>
                         <td
                           className={cn(td, 'text-purple-700')}
-                          title={f.veVentanaKg !== undefined && f.pesoBloque > 0 ? `FERT 018 ventana ${(f.veVentanaKg / f.pesoBloque).toFixed(1)} UN − ya en la meta ${((f.veBaseKg ?? 0) / f.pesoBloque).toFixed(1)} UN` : undefined}
+                          title={f.veFechas?.length && f.pesoBloque > 0 ? `FERT 018: ${f.veFechas.map(v => `${v.fecha.slice(8, 10)}/${v.fecha.slice(5, 7)} ${(v.kg / f.pesoBloque).toFixed(1)} UN`).join(' · ')}` : undefined}
                         >{f.veUN > 0 ? f.veUN.toFixed(1) : '—'}</td>
                         <td className={td}>{f.planAnteriorUN > 0 ? formatNum(f.planAnteriorUN, 0) : '—'}</td>
-                        <td className="px-3 py-2 border-r border-gray-100 font-black">{f.estrategiaEfectiva}</td>
+                        <td
+                          className={cn('px-3 py-2 border-r border-gray-100 font-black', f.estrategiaEfectiva === 'SIN' && 'text-gray-400 font-medium', f.estrategiaRestriccion && 'underline decoration-dotted')}
+                          title={f.estrategiaRestriccion ? `Restricción Estrategia_${f.blockCode}` : 'MTS interno · HB interno + VE · MTO solo VE (contra pedido) · SIN sin movimiento'}
+                        >{f.estrategiaEfectiva === 'SIN' ? 'SIN MOV' : f.estrategiaEfectiva}</td>
                         <td className={cn(td, 'text-rose-700 bg-rose-50/20', f.coberturaActual !== null && f.coberturaActual < f.horizonteDias && 'font-black')}>{dias(f.coberturaActual)}</td>
                         <td className={cn(td, !f.horizonteRestriccion && 'text-slate-400')}>{f.horizonteDias.toFixed(1)}</td>
                         <td className="px-3 py-2 border-r border-gray-100 font-black">
