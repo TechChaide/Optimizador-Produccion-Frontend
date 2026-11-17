@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx';
 import { serviciosService } from '@/services/servicios.service';
 import { formatMaterialSap, SAP_ESTATUS_REG_ORD_CARGADO, usuarioProcesoSap } from '@/lib/sap-material';
 import { ecuadorHolidaysService } from '@/services/ecuador-holidays.service';
-import { cargarDiasNoLaborables, feriadosNacionales } from '@/lib/dias-laborables';
+import { cargarDiasNoLaborables, feriadosNacionales, listarDiasNoLaborablesCalendario, marcarDiaComoFeriado, quitarDiaNoLaborable, type DiaNoLaborableCalendario } from '@/lib/dias-laborables';
 import { planGrupoService } from '@/services/plangrupo.service';
 import { detalleTacticoService } from '@/services/detalletactico.service';
 import { restriccionService } from '@/services/restriccion.service';
@@ -848,6 +848,14 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
     // Estado para la Ventana de Fabricación (días laborables hacia adelante)
     const [holidaysMap, setHolidaysMap] = useState<Map<string, string>>(new Map());
     const [activatedSpecialDays, setActivatedSpecialDays] = useState<Set<string>>(new Set());
+    // "Feriados imprevistos" (pedido del usuario 2026-11-17): días que el Gobierno decreta como feriado a
+    // última hora. Se registran en el calendario de la app (Calendario Área) para que los salten TODOS los
+    // módulos; `recargaFeriados` vuelve a correr la carga de feriados tras registrar/quitar uno.
+    const [recargaFeriados, setRecargaFeriados] = useState(0);
+    const [feriadosRegistrados, setFeriadosRegistrados] = useState<DiaNoLaborableCalendario[]>([]);
+    const [nuevoFeriadoFecha, setNuevoFeriadoFecha] = useState('');
+    const [nuevoFeriadoNombre, setNuevoFeriadoNombre] = useState('');
+    const [isGuardandoFeriado, setIsGuardandoFeriado] = useState(false);
 
     // Estado para Mesas de Trabajo Habilitadas
     const [activeTables, setActiveTables] = useState<Set<number>>(new Set(WORK_TABLES.map(t => t.id)));
@@ -1619,13 +1627,58 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                     if (nombreLegal && nacionales.has(fecha)) map.set(fecha, nombreLegal);
                 });
                 calendario?.laborablesExtra.forEach(fecha => map.delete(fecha));
+                // Los registrados en el calendario con su propio nombre (p. ej. un feriado decretado) se
+                // muestran con ese nombre en la Ventana de Fabricación.
+                const registrados = await listarDiasNoLaborablesCalendario(toDateKey(new Date())).catch(() => [] as DiaNoLaborableCalendario[]);
+                registrados.forEach(r => {
+                    if (r.fecha === r.fechaFin && r.fecha >= startKey && r.fecha <= endKey && !calendario?.laborablesExtra.has(r.fecha)) {
+                        map.set(r.fecha, r.nombre.replace(/^Feriado:\s*/i, ''));
+                    }
+                });
+                setFeriadosRegistrados(registrados);
                 setHolidaysMap(map);
             } catch (error) {
                 console.error('Error al cargar feriados para la ventana de fabricación:', error);
             }
         };
         fetchHolidays();
-    }, []);
+    }, [recargaFeriados]);
+
+    const handleRegistrarFeriado = async () => {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(nuevoFeriadoFecha)) {
+            addNotification('warning', 'Seleccione la fecha del feriado.');
+            return;
+        }
+        if (nuevoFeriadoFecha < toDateKey(new Date())) {
+            addNotification('warning', 'La fecha del feriado no puede ser anterior a hoy.');
+            return;
+        }
+        setIsGuardandoFeriado(true);
+        try {
+            await marcarDiaComoFeriado(nuevoFeriadoFecha, nuevoFeriadoNombre || 'Feriado decretado por el Gobierno');
+            addNotification('success', `Feriado del ${nuevoFeriadoFecha} registrado en el calendario. La Ventana de Fabricación se recalculó.`);
+            setNuevoFeriadoFecha('');
+            setNuevoFeriadoNombre('');
+            setRecargaFeriados(n => n + 1);
+        } catch (error) {
+            addNotification('error', `No se pudo registrar el feriado: ${(error as Error).message}`);
+        } finally {
+            setIsGuardandoFeriado(false);
+        }
+    };
+
+    const handleQuitarFeriado = async (registro: DiaNoLaborableCalendario) => {
+        setIsGuardandoFeriado(true);
+        try {
+            await quitarDiaNoLaborable(registro.codigoDetalle);
+            addNotification('success', `Se quitó "${registro.nombre}" (${registro.fecha}) del calendario.`);
+            setRecargaFeriados(n => n + 1);
+        } catch (error) {
+            addNotification('error', `No se pudo quitar el feriado: ${(error as Error).message}`);
+        } finally {
+            setIsGuardandoFeriado(false);
+        }
+    };
 
     const planningDays = useMemo<PlanningDay[]>(() => {
         const days: PlanningDay[] = [];
@@ -4600,6 +4653,49 @@ export const ProvisionalOrdersAlphaTab = React.forwardRef<ProvisionalOrdersAlpha
                             {workingWindow.map((d, idx) => (
                                 <span key={d.key} className="font-mono font-semibold text-indigo-700">
                                     {d.date.toLocaleDateString('es-EC', { day: '2-digit', month: '2-digit', year: 'numeric' })}{idx < workingWindow.length - 1 ? ' •' : ''}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                {/* FERIADOS IMPREVISTOS: se registran en el calendario de la app (Calendario Área) */}
+                <div className="bg-white border border-amber-200 rounded-xl p-4 shadow-sm">
+                    <div className="flex items-center gap-2 mb-2">
+                        <CalendarClock className="w-4 h-4 text-amber-600" />
+                        <h3 className="text-xs font-bold text-gray-800 uppercase tracking-tight">Feriados imprevistos / días no laborables decretados</h3>
+                    </div>
+                    <p className="text-[11px] text-gray-500 mb-3">
+                        Registre aquí un feriado que decrete el Gobierno (o un día que la planta no trabajará). Se guarda en el calendario de la
+                        aplicación, así que lo respetan la Ventana de Fabricación y los demás módulos de planificación.
+                    </p>
+                    <div className="flex flex-wrap items-end gap-2">
+                        <div>
+                            <Label htmlFor="feriado-fecha" className="text-[11px] font-semibold text-gray-600">Fecha</Label>
+                            <Input id="feriado-fecha" type="date" value={nuevoFeriadoFecha} min={toDateKey(new Date())}
+                                onChange={(e) => setNuevoFeriadoFecha(e.target.value)} className="h-8 text-xs w-40" />
+                        </div>
+                        <div className="flex-1 min-w-[220px]">
+                            <Label htmlFor="feriado-nombre" className="text-[11px] font-semibold text-gray-600">Motivo</Label>
+                            <Input id="feriado-nombre" value={nuevoFeriadoNombre} placeholder="Ej. Feriado decretado por el Gobierno"
+                                onChange={(e) => setNuevoFeriadoNombre(e.target.value)} className="h-8 text-xs" />
+                        </div>
+                        <Button onClick={handleRegistrarFeriado} disabled={isGuardandoFeriado || !nuevoFeriadoFecha} size="sm"
+                            className="h-8 bg-amber-600 hover:bg-amber-700 text-white gap-1.5 text-xs">
+                            {isGuardandoFeriado ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                            Registrar feriado
+                        </Button>
+                    </div>
+                    {feriadosRegistrados.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                            {feriadosRegistrados.map(r => (
+                                <span key={r.codigoDetalle} className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] text-amber-800">
+                                    <span className="font-mono font-semibold">{r.fecha === r.fechaFin ? r.fecha : `${r.fecha} → ${r.fechaFin}`}</span>
+                                    <span>{r.nombre.replace(/^Feriado:\s*/i, '')}</span>
+                                    <button type="button" onClick={() => handleQuitarFeriado(r)} disabled={isGuardandoFeriado}
+                                        title="Quitar del calendario" className="ml-0.5 rounded-full p-0.5 hover:bg-amber-200 disabled:opacity-50">
+                                        <X className="w-3 h-3" />
+                                    </button>
                                 </span>
                             ))}
                         </div>
