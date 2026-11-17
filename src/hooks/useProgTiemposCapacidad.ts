@@ -138,7 +138,26 @@ export interface ResumenCapacidadRow {
   puestosT1: number;
   puestosT2: number;
   ocupacion: number;
+  // Horas por turno del Centro (filtros "Horas T1"/"Horas T2" de Rev Capacidad).
+  horasT1: number;
+  horasT2: number;
+  // Rendimiento (filtro "Rend L1"/"Rend L2"/etc. de Rev Capacidad) aplicado a la Línea de esta fila —
+  // necesario para poder guardar/restaurar la parametrización completa de "Rev Capacidad" por fecha
+  // objetivo (ver "Guardar Plan" en Resumen Plan Final).
+  rendimiento: number;
 }
+
+// Convierte el nombre normalizado de una Línea (ej. "LINEA 1") a su clave de Rendimiento ("L1"), con
+// el mismo criterio de coincidencia por dígito que usa Rev Capacidad (getRendFactor). Devuelve null si
+// no matchea ninguna de las líneas conocidas.
+export const lineaKeyFromNombre = (lineaNormalizada: string): 'L1' | 'L2' | 'L3' | 'L5' | null => {
+  const linea = String(lineaNormalizada || '');
+  if (linea.includes('1')) return 'L1';
+  if (linea.includes('2')) return 'L2';
+  if (linea.includes('3')) return 'L3';
+  if (linea.includes('5')) return 'L5';
+  return null;
+};
 
 let resumenCapacidadStore: ResumenCapacidadRow[] = [];
 const resumenCapacidadListeners = new Set<() => void>();

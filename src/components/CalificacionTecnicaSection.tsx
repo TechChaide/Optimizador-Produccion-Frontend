@@ -60,15 +60,50 @@ export const CalificacionTecnicaSection: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // `getHabilidadesOperadorPorEstacion` (GET sin page/rowsPerPage) quedó reemplazado por
+  // `getMaestroCuboHabilidadesCrudos`, que sí pagina de verdad — el endpoint viejo devolvía solo
+  // una porción fija del total (confirmado: 241 filas / 4 puestos de una base con muchas más) sin
+  // ninguna forma de pedir el resto. Centro fijo '1000' (mismo criterio que el resto de la app) y
+  // año en curso — esto es personal vigente, no un histórico por año pasado.
   const fetchHabilidades = async () => {
     setIsLoading(true);
     try {
-      const response = await serviciosService.getHabilidadesOperadorPorEstacion();
-      if (response && response.data) {
-        const dataArray = Array.isArray(response.data) ? response.data : [response.data];
+      const anio = String(new Date().getFullYear());
+      const centro = '1000';
+      const rowsPerPage = 2000;
+      const firstResponse = await serviciosService.getMaestroCuboHabilidadesCrudos(anio, centro, 1, rowsPerPage);
+      let dataArray = Array.isArray(firstResponse?.data) ? firstResponse.data : [];
+      // Mismo criterio que TacticalPlanForrosSection: no adivinar un solo nombre de campo para el
+      // total — si el backend lo manda con otro nombre, `total` quedaba en 0 en silencio y se
+      // perdían las páginas 2+ sin aviso (bug ya confirmado una vez con el endpoint viejo).
+      const detectarTotal = (res: any): number => {
+        if (!res || typeof res !== 'object') return 0;
+        const directos = [res.totalRegistros, res.totalRecords, res.totalRows, res.total, res.Total, res.totalCount, res.count];
+        for (const v of directos) { const n = Number(v); if (!Number.isNaN(n) && n > 0) return n; }
+        const key = Object.keys(res).find(k => {
+          const norm = k.toUpperCase().replace(/[^A-Z]/g, '');
+          const n = Number((res as any)[k]);
+          return norm.includes('TOTAL') && !norm.includes('PAGINA') && !norm.includes('PAGE') && !Number.isNaN(n) && n > 0;
+        });
+        return key ? Number((res as any)[key]) || 0 : 0;
+      };
+      const total = detectarTotal(firstResponse);
+      const totalPages = total > 0 ? Math.ceil(total / rowsPerPage) : 1;
+      // Resto de páginas EN PARALELO (no una por una) — con miles de registros, esperar cada
+      // página en secuencia sumaba varios segundos al cargar esta pantalla.
+      if (totalPages > 1) {
+        const paginasRestantes = await Promise.all(
+          Array.from({ length: totalPages - 1 }, (_, i) => i + 2).map(p =>
+            serviciosService.getMaestroCuboHabilidadesCrudos(anio, centro, p, rowsPerPage)
+          )
+        );
+        paginasRestantes.forEach(res => { if (Array.isArray(res?.data)) dataArray = [...dataArray, ...res.data]; });
+      }
+      if (dataArray.length > 0) {
         setHabilidades(dataArray);
-        if (dataArray.length > 0) {
-          setColumns(Object.keys(dataArray[0]));
+        setColumns(Object.keys(dataArray[0]));
+        if (total > 0 && dataArray.length !== total) {
+          addNotification('warning', `El backend reportó ${total.toLocaleString()} registros pero se acumularon ${dataArray.length.toLocaleString()} — revisa si el tamaño real de página coincide con el pedido.`);
         }
       } else {
         setHabilidades([]);

@@ -318,16 +318,20 @@ export const serviciosService = {
     return response.json();
   },
 
-  async getHabilidadesOperadorPorEstacion(): Promise<BodyResponse<any>> {
-    const response = await fetchWithAuth(API_URL + "/HabilidadesOperadorPorEstacion", {
-      method: "GET",
+  // Reemplaza a getHabilidadesOperadorPorEstacion: ese GET no tenía forma de pedir más de una
+  // página y el backend devolvía solo una porción (confirmado: 241 filas / 4 puestos de una base
+  // con muchas más) — este endpoint nuevo sí pagina de verdad con page/rowsPerPage.
+  async getMaestroCuboHabilidadesCrudos(anio: string, centro: string, page: number, rowsPerPage: number): Promise<BodyResponse<any>> {
+    const response = await fetchWithAuth(API_URL + "/MaestroCuboHabilidadesCrudos", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ anio, centro, page, rowsPerPage }),
     });
     if (!response.ok) {
       const errorBody = await response
         .json()
         .catch(() => ({ message: "Error desconocido" }));
-      throw new Error(errorBody.message || "Failed to fetch Habilidades");
+      throw new Error(errorBody.message || "Failed to fetch Maestro Cubo Habilidades Crudos");
     }
     return response.json();
   },

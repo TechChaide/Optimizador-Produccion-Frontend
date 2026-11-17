@@ -452,3 +452,96 @@ export const marcarDiaComoJornada = async (fecha: string, nombreDetalle: string)
 
   await detalleCalendarioService.save(payload);
 };
+
+/** Día no laborable registrado en el calendario de la app (ver `listarDiasNoLaborablesCalendario`). */
+export interface DiaNoLaborableCalendario {
+  codigoDetalle: number;
+  fecha: string; // 'yyyy-MM-dd' (primer día si el detalle cubre un rango)
+  fechaFin: string;
+  nombre: string;
+}
+
+/**
+ * Días no laborables del calendario de la app (feriados decretados, paros, etc.) desde `desde` en
+ * adelante, de más próximo a más lejano. Usado por la casilla "Feriados imprevistos" de Planificación
+ * Táctica Muebles para mostrar y quitar lo registrado.
+ */
+export const listarDiasNoLaborablesCalendario = async (desde: string): Promise<DiaNoLaborableCalendario[]> => {
+  const res = await detalleCalendarioService.getAll();
+  const out: DiaNoLaborableCalendario[] = [];
+  (res.data || []).forEach(det => {
+    if (det.estado !== 'A') return;
+    const nombreTipo = det.tipo_detalle?.nombre_tipo_detalle || '';
+    if (!TIPO_NO_LABORABLE.test(nombreTipo) && !TIPO_NO_LABORABLE.test(det.nombre_detalle || '')) return;
+    const inicio = det.fecha_inicio || det.fecha_real;
+    const fin = det.fecha_fin || det.fecha_real || inicio;
+    if (!inicio) return;
+    const fecha = format(new Date(inicio), 'yyyy-MM-dd');
+    const fechaFin = format(new Date(fin), 'yyyy-MM-dd');
+    if (fechaFin < desde) return;
+    out.push({ codigoDetalle: det.codigo_detalle, fecha, fechaFin, nombre: det.nombre_detalle || nombreTipo });
+  });
+  return out.sort((a, b) => a.fecha.localeCompare(b.fecha));
+};
+
+/**
+ * Registra una fecha como NO laborable (feriado decretado por el Gobierno, paro, etc.) en el calendario
+ * de la app, para que `cargarDiasNoLaborables` la salte en todos los módulos (pedido del usuario
+ * 2026-11-17: el viernes 20-nov-2026 se decretó feriado y la fecha objetivo de Muebles debía pasar al
+ * lunes 23-nov). Simétrico a `marcarDiaComoJornada`.
+ *
+ * Tipo de Detalle: el activo cuyo nombre contenga "Feriado" (o "No laborable"); si no existe, el primer
+ * tipo activo que no sea "Jornada", y el nombre del detalle se prefija con "Feriado: " para que igual se
+ * reconozca como no laborable. Requiere un Calendario Área activo. Si ya hay un detalle activo de UN solo
+ * día en esa fecha, lo reutiliza en vez de duplicarlo.
+ */
+export const marcarDiaComoFeriado = async (fecha: string, nombre: string): Promise<void> => {
+  const [tiposRes, calendariosRes, detallesRes] = await Promise.all([
+    tipoDetalleService.getAll(),
+    calendarioService.getAll(),
+    detalleCalendarioService.getAll(),
+  ]);
+
+  const tiposActivos = (tiposRes.data || []).filter(t => t.estado === 'A');
+  const tipoFeriado = tiposActivos.find(t => TIPO_NO_LABORABLE.test(t.nombre_tipo_detalle || ''));
+  const tipo = tipoFeriado ?? tiposActivos.find(t => !TIPO_LABORABLE.test(t.nombre_tipo_detalle || ''));
+  if (!tipo) {
+    throw new Error('No existe ningún Tipo de Detalle activo. Cree uno llamado "Feriado" en Parámetros → Tipo de Detalle.');
+  }
+  const calendario = (calendariosRes.data || []).find(c => c.estado === 'A');
+  if (!calendario) {
+    throw new Error('No existe un Calendario Área activo. Créelo en Configuraciones → Calendario Área.');
+  }
+
+  const nombreLimpio = nombre.trim() || 'Feriado decretado';
+  const nombreDetalle = tipoFeriado || TIPO_NO_LABORABLE.test(nombreLimpio) ? nombreLimpio : `Feriado: ${nombreLimpio}`;
+
+  const existente = (detallesRes.data || []).find(d => {
+    if (d.estado !== 'A') return false;
+    const inicio = d.fecha_inicio || d.fecha_real;
+    const fin = d.fecha_fin || d.fecha_real || inicio;
+    if (!inicio) return false;
+    return format(new Date(inicio), 'yyyy-MM-dd') === fecha && format(new Date(fin), 'yyyy-MM-dd') === fecha;
+  });
+
+  const fechaDate = new Date(`${fecha}T00:00:00`);
+  await detalleCalendarioService.save({
+    codigo_detalle: existente?.codigo_detalle,
+    codigo_calendario: existente?.codigo_calendario ?? calendario.codigo_calendario,
+    codigo_tipo_detalle: tipo.codigo_tipo_detalle,
+    nombre_detalle: nombreDetalle,
+    fecha_real: fechaDate,
+    fecha_inicio: fechaDate,
+    fecha_fin: fechaDate,
+    estado: 'A',
+    fecha_modificacion: new Date(),
+    usuario_modificacion: 'modulo-tactico',
+  } as DetalleCalendario);
+};
+
+/** Quita un día no laborable del calendario (pasa el detalle a estado 'I', no lo borra). */
+export const quitarDiaNoLaborable = async (codigoDetalle: number): Promise<void> => {
+  const res = await detalleCalendarioService.getById(codigoDetalle);
+  if (!res?.data) throw new Error('No se encontró el registro en el calendario.');
+  await detalleCalendarioService.save({ ...res.data, estado: 'I', fecha_modificacion: new Date(), usuario_modificacion: 'modulo-tactico' });
+};
