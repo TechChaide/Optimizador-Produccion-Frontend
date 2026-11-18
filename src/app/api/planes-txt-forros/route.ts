@@ -17,12 +17,29 @@ import { toFechaEcuador } from '@/lib/fecha-ecuador';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const BASE = process.env.RUTA_PLANES || environment.ruta_planes;
+const BASE = process.env.RUTA_PLANES?.trim() || environment.ruta_planes;
 const FECHA_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 // {MES} va por nombre (no número), con el mismo formato que ya usan las carpetas de Muebles en la
 // carpeta compartida: 2026\Octubre\FORROS\1000.
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 const MESES_MAYUS = MESES.map(m => m.toUpperCase());
+
+// La raíz NUNCA se crea, solo se verifica (mismo criterio de /api/planes-txt). Sin esto, si la carpeta
+// compartida no es accesible desde el servidor (ej. contenedor Linux sin el recurso SMB montado o sin
+// RUTA_PLANES), el listado devolvía "sin planes" sin error y el guardado hacía mkdir recursive de la
+// ruta UNC como carpeta LOCAL del contenedor (parecía guardar y los archivos se perdían).
+const verificarRaiz = async (): Promise<string | null> => {
+  if (process.platform !== 'win32' && BASE.startsWith('\\\\')) {
+    return `el servidor corre en ${process.platform} y no puede abrir la ruta de red ${BASE}. Hay que montar la carpeta compartida en el servidor y definir la variable RUTA_PLANES con la ruta montada.`;
+  }
+  try {
+    const st = await fs.stat(BASE);
+    if (!st.isDirectory()) return `la ruta raíz ${BASE} no es una carpeta`;
+  } catch {
+    return `la carpeta raíz ${BASE} no existe o no es accesible desde el servidor (¿recurso compartido sin montar o sin permisos?)`;
+  }
+  return null;
+};
 
 // Solo caracteres seguros para nombre de carpeta — evita path traversal ("..", "\", "/").
 const limpiarSegmento = (v: unknown): string =>
@@ -85,6 +102,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ message: 'Parámetros inválidos: fechaObjetivo (YYYY-MM-DD), grupo, centro y contenido son obligatorios.' }, { status: 400 });
     }
 
+    const errorRaiz = await verificarRaiz();
+    if (errorRaiz) return NextResponse.json({ message: `No se pudo guardar el plan: ${errorRaiz}` }, { status: 500 });
+
     const ahora = new Date();
     const [anio, mesNum] = toFechaEcuador(ahora).split('-');
     const mes = MESES[Number(mesNum) - 1];
@@ -121,6 +141,8 @@ export async function GET(req: NextRequest) {
     if (!grupo || !centro) {
       return NextResponse.json({ message: 'Parámetros grupo y centro son obligatorios.' }, { status: 400 });
     }
+    const errorRaiz = await verificarRaiz();
+    if (errorRaiz) return NextResponse.json({ message: `No se pueden leer los planes guardados: ${errorRaiz}` }, { status: 500 });
     const carpetas = await carpetasGrupoCentro(grupo, centro);
 
     if (!fecha) {

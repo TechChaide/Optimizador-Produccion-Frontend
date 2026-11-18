@@ -13,8 +13,11 @@ services:
     environment:
       - NEXT_PUBLIC_BASE_PATH=/Optimizador-Produccion
       - HOSTNAME=0.0.0.0
+      # Carpeta compartida de planes TXT (la leen/escriben las rutas /api/planes*, ver environments.prod.ts)
+      - RUTA_PLANES=/app/Optimizador-Produccion
     volumes:
       - "/fotomenu:/app/fotomenu"
+      - "/appdocs/Planificacion/Optimizador-Produccion:/app/Optimizador-Produccion"
     networks:
       - b2b_network
       - traefik-net

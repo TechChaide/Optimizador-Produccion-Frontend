@@ -28,7 +28,7 @@ function buildFilePath(grupo: string, centro: string, fechaObjetivo: string): st
   const mesNumero = Number(fechaObjetivo.slice(5, 7));
   const mes = NOMBRES_MES[mesNumero - 1] || fechaObjetivo.slice(5, 7);
   return path.join(
-    environment.ruta_planes,
+    process.env.RUTA_PLANES?.trim() || environment.ruta_planes,
     anio,
     mes,
     sanitizeSegment(grupo),
